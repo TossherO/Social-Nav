@@ -1,0 +1,24 @@
+# Local datasets/results are retained on disk, not source code.
+/data/
+/outputs/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.partial.mp4
+
+# Local API credentials; never commit this file.
+/configs/qianwen_api.local.json
+/configs/*.local.json
+**/*.local.json
+
+# Machine-specific environment notes; keep credentials out of this document.
+/ENVIRONMENT.local.md
+
+# The copied detector retains source, never training resources/build artifacts.
+/perception/detection_tracking/training/simpledet3d/data
+/perception/detection_tracking/training/simpledet3d/output/
+/perception/detection_tracking/training/simpledet3d/build/
+/perception/detection_tracking/training/simpledet3d/**/*.so
+/perception/detection_tracking/training/simpledet3d/*.egg-info/

@@ -1,0 +1,62 @@
+{
+  "dataset_roots": {
+    "jrdb": "data/datasets/jrdb",
+    "socialnav_sub_pilot": "data/datasets/socialnav_sub"
+  },
+  "model": {
+    "path": "/share/public_models/qwen/Qwen3.8-27B-FP8",
+    "served_name": "qwen3.8-27b-fp8",
+    "frozen": true,
+    "finetuning": false
+  },
+  "deployment": {
+    "backend": "sglang",
+    "mode": "remote_manual",
+    "python_executable": "python",
+    "host": "127.0.0.1",
+    "port": 30000,
+    "context_length": 12288,
+    "max_running_requests": 1,
+    "mem_fraction_static": 0.85,
+    "grammar_backend": "xgrammar",
+    "mtp_default_enabled": false,
+    "note": "Print-only baseline. Select installed-version/GPU-compatible kernels manually; native MTP is optional, not portable by default."
+  },
+  "inference": {
+    "period_s": 2,
+    "rate_hz": 0.5,
+    "deadline_s": 2,
+    "thinking": false,
+    "temperature": 0,
+    "max_tokens": 1024,
+    "max_in_flight": 1,
+    "automatic_retries": 0,
+    "response_constraint": "json-schema",
+    "prompt_profile": "object"
+  },
+  "benchmark": {
+    "mode": "serial",
+    "limit": 3,
+    "warmups": 0,
+    "timeout_s": 60
+  },
+  "development": {
+    "sequences": {
+      "clark": "clark-center-intersection-2019-02-28_0",
+      "memorial": "memorial-court-2019-03-16_0",
+      "gates": "gates-to-clark-2019-02-28_1"
+    },
+    "end_frames": [
+      75,
+      150,
+      225,
+      300,
+      375,
+      450,
+      525,
+      600
+    ],
+    "bundle": "data/datasets/jrdb_t1_dev",
+    "warning": "These are development windows with oracle geometry, NOT blind tests or reviewed REL gold."
+  }
+}

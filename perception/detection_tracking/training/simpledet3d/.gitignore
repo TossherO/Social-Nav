@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# CUDA / C++ build artifacts
+*.so
+*.o
+*.cu.o
+*.cpp.o
+*.ninja
+*.ninja_deps
+*.ninja_log
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project output
+output/
+logs/
+*.log
+
+# TensorBoard
+tensorboard/
+events.out.tfevents.*
+
+# Data (symlinked or local)
+data/
+*.pkl
+*.pth
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Environment
+.env
+.venv/
+venv/

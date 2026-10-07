@@ -1,0 +1,20 @@
+std_msgs/Header header
+string observation_id
+string sequence_id
+string session_id
+uint32 generation
+# valid / degraded / invalid. Empty tracks do NOT mean free space.
+string health
+string reason
+string detection_frame_id
+Detection[] detections
+TrackState[] tracks
+bool has_localization
+float64[16] world_from_lidar
+bool has_pose_age
+float64 pose_age_s
+uint64 dropped_busy
+string timestamp_source
+string input_fingerprint
+bool has_rgb
+time rgb_stamp

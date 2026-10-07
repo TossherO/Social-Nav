@@ -1,0 +1,121 @@
+_BASE_CONFIG_: voxelrcnn_coda_16line.yaml
+
+# Stage 1: CODA source supervision + Wheelchair sensor/center adaptation.
+CLASS_NAMES: ['Pedestrian']
+PRECISION: fp32
+
+DATA_CONFIG:
+    DATA_PATH: 'data/wheelchair_weak'
+    RAW_DATA_PATH: 'data/wheelchair_raw'
+    MAX_SWEEPS: 4
+    MAX_SWEEP_TIME_LAG: 0.35
+    SWEEP_SELECT_MODE: near
+    INTENSITY_NORMALIZATION: 255.0
+    ZERO_INTENSITY: false
+    ALLOW_EMPTY_GT: true
+    BALANCED_RESAMPLING: false
+
+    INFO_PATH:
+        train: [wheelchair_weak_infos_train_all.pkl]
+        test: [wheelchair_weak_infos_val_indoor_exhaustive.pkl]
+
+    WEAK_SUPERVISION:
+        ENABLED: true
+        CENTER_EVAL: true
+        CENTER_HIT_THRESHOLDS: [0.5, 1.0]
+        # 与当前 Wheelchair 部署/人工审计阈值对齐，避免低分候选让
+        # CenterHit 过早饱和而削弱 best checkpoint 的区分能力。
+        CENTER_SCORE_THRESH: 0.3
+        EXHAUSTIVE_BACKGROUND_WEIGHT: 0.25
+        BEST_METRIC: 'CenterF1@0.50m'
+        ROI_CENTER_SUPERVISION:
+            ENABLED: false
+
+    DATA_AUGMENTOR:
+        DISABLE_AUG_LIST: ['placeholder']
+        AUG_CONFIG_LIST:
+            - NAME: random_world_flip
+              ALONG_AXIS_LIST: ['x']
+            - NAME: random_world_rotation
+              WORLD_ROT_ANGLE: [-0.78539816, 0.78539816]
+            - NAME: random_world_scaling
+              WORLD_SCALE_RANGE: [0.95, 1.05]
+
+# Wheelchair 室内拥挤场景需要保留相邻行人的独立框。这里只覆盖模型最终
+# 评估/推理 NMS；Dense Head proposal NMS(0.7) 与 ROI TRAIN/TEST
+# NMS(0.8/0.7) 仍继承 CODA 基础配置，不受影响。
+MODEL:
+    ROI_HEAD:
+        TARGET_CONFIG:
+            CENTER_POS_DISTANCE: 0.5
+            CENTER_NEG_DISTANCE: 1.0
+    POST_PROCESSING:
+        SCORE_THRESH: 0.3
+        NMS_CONFIG:
+            NMS_THRESH: 0.2
+
+# The source branch uses the same spatial grid and four-frame layout as the
+# target branch, which is required by MixedDomainDataset.
+SOURCE_DATA_CONFIG:
+    DATA_PATH: 'data/coda_downsample'
+    RAW_DATA_PATH: 'data/coda_raw'
+    MAX_SWEEPS: 4
+    MAX_SWEEP_TIME_LAG: 0.35
+    SWEEP_SELECT_MODE: near
+    DATA_SPLIT:
+        train: train
+        test: val
+    INFO_PATH:
+        train: [coda_infos_train.pkl]
+        test: [coda_infos_val.pkl, coda_infos_test.pkl]
+    POINT_CLOUD_RANGE: [-4.8, -9.6, -1.5, 14.4, 9.6, 4.5]
+    BALANCED_RESAMPLING: false
+    DATA_AUGMENTOR:
+        DISABLE_AUG_LIST: ['placeholder']
+        AUG_CONFIG_LIST:
+            - NAME: random_world_flip
+              ALONG_AXIS_LIST: ['x']
+            - NAME: random_world_rotation
+              WORLD_ROT_ANGLE: [-0.78539816, 0.78539816]
+            - NAME: random_world_scaling
+              WORLD_SCALE_RANGE: [0.95, 1.05]
+    POINT_FEATURE_ENCODING:
+        encoding_type: absolute_coordinates_encoding
+        used_feature_list: ['x', 'y', 'z', 'intensity', 'timestamp']
+        src_feature_list: ['x', 'y', 'z', 'intensity', 'timestamp']
+    DATA_PROCESSOR:
+        - NAME: mask_points_and_boxes_outside_range
+          REMOVE_OUTSIDE_BOXES: true
+        - NAME: shuffle_points
+          SHUFFLE_ENABLED:
+              train: true
+              test: false
+        - NAME: transform_points_to_voxels
+          SKIP_RUNTIME: true
+          VOXEL_SIZE: [0.05, 0.05, 0.2]
+          MAX_POINTS_PER_VOXEL: 20
+          MAX_NUMBER_OF_VOXELS:
+              train: 60000
+              test: 80000
+
+MIXED_DOMAIN:
+    ENABLED: true
+    SOURCE_RATIO: 0.5
+    EPOCH_SIZE: 80000
+
+EMA_TEACHER:
+    ENABLED: false
+    DECAY: 0.999
+    SCORE_THRESH: 0.7
+    MATCH_DISTANCE: 0.5
+    CLS_WEIGHT: 0.5
+    BOX_WEIGHT: 0.3
+    # Keep false until augmentation/temporal agreement is added to unmatched
+    # Teacher detections.  Existing centers may still be upgraded.
+    ALLOW_UNMATCHED: false
+    UNMATCHED_SCORE_THRESH: 0.9
+
+OPTIMIZATION:
+    BATCH_SIZE_PER_GPU: 16
+    NUM_EPOCHS: 10
+    LR: 0.0003

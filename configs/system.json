@@ -1,0 +1,39 @@
+{
+  "name": "Social-Nav",
+  "runtime_status": "scaffold_not_integrated",
+  "modules": {
+    "perception": {
+      "detection_training": {"path": "perception/detection_tracking/training", "status": "source_available", "entry": "python -m perception.detection_tracking.training --check"},
+      "detection_tracking": {"path": "perception/detection_tracking/inference", "status": "offline_ready", "entry": "python -m perception.detection_tracking.inference --scene outdoor1/start_003 --limit 3 --dry-run", "config": "perception/detection_tracking/configs/inference.json"},
+      "ros_transport": {"path": "perception/detection_tracking/ros", "status": "source_available", "runtime_verified": false},
+      "mapping": {"path": "perception/mapping", "status": "not_implemented"},
+      "localization": {"path": "perception/localization", "status": "not_implemented"},
+      "sensors": {"path": "perception/sensors", "status": "not_implemented"}
+    },
+    "decision": {
+      "vlm": {"path": "decision/vlm", "status": "offline_ready", "config": "decision/vlm/configs/project.json", "entry": "python -m decision.vlm.benchmark_vlm --dry-run --limit 24"},
+      "agent": {"path": "decision/agent", "status": "planned"}
+    },
+    "navigation": {
+      "planning": {"path": "navigation/planning", "status": "not_implemented"},
+      "control": {"path": "navigation/control", "status": "not_implemented"},
+      "safety": {"path": "navigation/safety", "status": "not_implemented"}
+    }
+  },
+  "interfaces": {"path": "interfaces/contracts.py", "status": "not_integrated"},
+  "simpledet3d": {
+    "source_root": "/home/heyushen/code/SimpleDet3d",
+    "copied_root": "perception/detection_tracking/training/simpledet3d",
+    "snapshot_manifest": "perception/detection_tracking/training/source_snapshot.json",
+    "data_info_root_reference": "data/datasets",
+    "raw_coda_root_reference": "data/datasets/coda_raw",
+    "raw_wheelchair_root_reference": "data/datasets/wheelchair_raw",
+    "checkpoint": "configured_in_ignored_detection_tracking.local.json",
+    "environment": "existing_detector_environment_NOT_vlm_python312",
+    "resources_bound": true,
+    "binding_kind": "directory_symlinks_only_NOT_training_readiness",
+    "cuda_extensions_built": false
+  },
+  "private_config_policy": "Existing configs/*.local.json stay in place and are never copied or read by status checks.",
+  "integration_policy": "No automatic training, service deployment, agent loop or robot motion. ROS nodes start only through an explicit manual command and require an external localization source."
+}

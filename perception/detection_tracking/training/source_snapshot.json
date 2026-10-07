@@ -1,0 +1,516 @@
+{
+  "copied_at": "2026-10-07",
+  "source_root": "/home/heyushen/code/SimpleDet3d",
+  "destination": "perception/detection/training/simpledet3d",
+  "source_kind": "working_tree_snapshot_NOT_commit_identity",
+  "source_files_unmodified": true,
+  "files": {
+    ".gitignore": {
+      "sha256": "e09c61e16cb3b48ab76c14277d6adeb7bb46b8306972c5ac59736941ba6b798a",
+      "bytes": 440
+    },
+    "compile.sh": {
+      "sha256": "cd7e60a39b36bb517c30f4906f68e3c1052753d952e0ef8eac493eddcc059b63",
+      "bytes": 213
+    },
+    "configs/centerpoint_coda.yaml": {
+      "sha256": "146ff50f559b58860c8ef44d26b41e99d1c198b6554e98fa6e9eb16e63e563c5",
+      "bytes": 4527
+    },
+    "configs/centerpoint_wheelchair.yaml": {
+      "sha256": "9679c37a9fefb13d2470789ad9fa68450a81fafcd623d3f91491dca2f836da69",
+      "bytes": 4062
+    },
+    "configs/voxelrcnn_coda.yaml": {
+      "sha256": "767c97ff8ee2b2a642e066803fdaf3a57253b679529ea6635dfc6da789473563",
+      "bytes": 6868
+    },
+    "configs/voxelrcnn_coda_16line.yaml": {
+      "sha256": "4339151cca817acfb180be1d56c1d77299f332e755e44cbd0706e610590a42f3",
+      "bytes": 6914
+    },
+    "configs/voxelrcnn_wheelchair.yaml": {
+      "sha256": "e909bfc3ee7f257ff5f8a18f29918257dd9d3547aaf9ff5ba207cd5eed83f0cb",
+      "bytes": 6376
+    },
+    "configs/voxelrcnn_wheelchair_weak_stage1.yaml": {
+      "sha256": "0ca137604f5408bd28cbf081da645941b5b350767a5935aa8c7ffeda04aaabb0",
+      "bytes": 3937
+    },
+    "configs/voxelrcnn_wheelchair_weak_stage2.yaml": {
+      "sha256": "04f26cdf8538539a834eb1138b40344eb388d2fb78f5ab0bb22e71425ad59c36",
+      "bytes": 1249
+    },
+    "configs/voxelrcnn_wheelchair_weak_stage3.yaml": {
+      "sha256": "17a824c579954bde1eadce16db5f7c57c116d74a3d581dbf2a8d42bca4b8daea",
+      "bytes": 960
+    },
+    "docs/code_framework.md": {
+      "sha256": "2c41820fc1e9c678def138b09ee50f1df521e114458c2e1bfa67b83db5d2d376",
+      "bytes": 61550
+    },
+    "docs/usage_guide.md": {
+      "sha256": "6c204e0d6275cebb48bd11b39a020295fe29f51abd4d16ebc69a59952884c911",
+      "bytes": 32696
+    },
+    "docs/wheelchair_training_design.md": {
+      "sha256": "61143f5eea3ed7ab091ab6000d885ffaee8a8eb278b65b5fe3572d6bb98d0346",
+      "bytes": 41646
+    },
+    "requirements.txt": {
+      "sha256": "820574f8340a3c79eee689c545d8c943a0e28ef62c7dbcc7c3a3b5cae3a6e3f0",
+      "bytes": 78
+    },
+    "setup.py": {
+      "sha256": "e4c4224b458c46c87442bf02fe6bc8dc69ec9e950c09015f3e970a7acc3878a1",
+      "bytes": 2506
+    },
+    "simple_det3d/__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "simple_det3d/datasets/__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "simple_det3d/datasets/coda_dataset.py": {
+      "sha256": "1e3fa751b3c2c595cf610b0ce31908926f116fd49486ee2f621b45760973298f",
+      "bytes": 44493
+    },
+    "simple_det3d/datasets/data_augmentor.py": {
+      "sha256": "8a2d1e9f109c5df5f1b6a8d7c823d64ca3c38ec5c4b992b85f7076563e1ed168",
+      "bytes": 20475
+    },
+    "simple_det3d/datasets/data_processor.py": {
+      "sha256": "c11560d223b1c3879286238b07f93d7adee2cd1026851fd331c52f3285e19973",
+      "bytes": 10416
+    },
+    "simple_det3d/datasets/mixed_domain_dataset.py": {
+      "sha256": "8d5603a35b20ed4d043983f4333b4fb89ad68650d63026d053e16c32af354aa4",
+      "bytes": 8050
+    },
+    "simple_det3d/datasets/weak_label_utils.py": {
+      "sha256": "1397227210a5675e38cc04c5ce5bb7ff50e1afb8a4b52b8df664a07607c3a996",
+      "bytes": 8125
+    },
+    "simple_det3d/models/__init__.py": {
+      "sha256": "e9a84c22ae55061f731d13f08e831e72483ed1b758f798f8da260ac2602d9360",
+      "bytes": 937
+    },
+    "simple_det3d/models/backbones_2d.py": {
+      "sha256": "7e3a85bd0aac1a20673aa7d449f876f6cc4f140b81197e3d818497ba3b41ac5f",
+      "bytes": 5523
+    },
+    "simple_det3d/models/backbones_3d.py": {
+      "sha256": "caa59daba047b16fc3290ba212e9e8bf781806c83b7e898bcf7059744ca58a24",
+      "bytes": 6615
+    },
+    "simple_det3d/models/center_head.py": {
+      "sha256": "1ead9abc073211bb9551bddf7cfba60b88df38d8a49b5d045f5f153929175e36",
+      "bytes": 25103
+    },
+    "simple_det3d/models/centerpoint.py": {
+      "sha256": "bbc9d582676cab983cb82c3fccb7b05e0185684f4ebb2245a2b3da673f1c0c08",
+      "bytes": 9792
+    },
+    "simple_det3d/models/model_utils.py": {
+      "sha256": "5238f582837561a610b72371a3ac9440ae157aec203a9f9bbd9ff59ab755eb6d",
+      "bytes": 12677
+    },
+    "simple_det3d/models/vfe.py": {
+      "sha256": "971b22d7fb61c747ae48aeec8d10cdb115c10b387783a613052e87c042f74913",
+      "bytes": 12020
+    },
+    "simple_det3d/models/voxel_rcnn.py": {
+      "sha256": "63e9dd6a9fa227662aea66af48924439a0a185685ee7d43adde699ff6df78bf6",
+      "bytes": 15339
+    },
+    "simple_det3d/models/voxel_rcnn_head.py": {
+      "sha256": "660b7f4c3027a39a0b63945a5ca9244e28e06f2a6098ef953d90107cbf17f07d",
+      "bytes": 35020
+    },
+    "simple_det3d/ops/__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "simple_det3d/ops/iou3d_nms/__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "simple_det3d/ops/iou3d_nms/iou3d_nms_utils.py": {
+      "sha256": "a1a0656ac5c15b55a5ea89616e6c598253989e5786e0f4644643539123c552e9",
+      "bytes": 6917
+    },
+    "simple_det3d/ops/iou3d_nms/src/iou3d_cpu.cpp": {
+      "sha256": "fbda2e4e6c2508e0f59132d680c13c66528387b2b022c660257116359fa8b13e",
+      "bytes": 9068
+    },
+    "simple_det3d/ops/iou3d_nms/src/iou3d_cpu.h": {
+      "sha256": "82d65c0d3c22e30345fa13bfc6af74b0ee0f7c27834db1391b9dc885724e457d",
+      "bytes": 367
+    },
+    "simple_det3d/ops/iou3d_nms/src/iou3d_nms.cpp": {
+      "sha256": "f657ce7a01118fa453185fd7551c1e2f6b9e8c1dfd49170d7b2ffbbe5b0b46eb",
+      "bytes": 8134
+    },
+    "simple_det3d/ops/iou3d_nms/src/iou3d_nms.h": {
+      "sha256": "d5a96c67224fe83de9af5c7c43ecbe707d873dba86468cb715c4669fc821bdb6",
+      "bytes": 698
+    },
+    "simple_det3d/ops/iou3d_nms/src/iou3d_nms_api.cpp": {
+      "sha256": "94711bd241e5602d31ebad6cbd39ac7e917680c3079f64e8f150cbb2a09185b3",
+      "bytes": 855
+    },
+    "simple_det3d/ops/iou3d_nms/src/iou3d_nms_kernel.cu": {
+      "sha256": "8f4370c412736c44eb34d728c636fcb38977c6b2e44864f02ddbfbf3e965e8b3",
+      "bytes": 18405
+    },
+    "simple_det3d/ops/pointnet2/__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_batch/__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_batch/pointnet2_utils.py": {
+      "sha256": "9d197cc9a76d79f0eef874723ebeddfd84bf9f5746c7f6ca6733ee794f2481f4",
+      "bytes": 10406
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_batch/src/ball_query.cpp": {
+      "sha256": "6d024274392c4fb96d7c4abb5506af127c80dbe93c43a18d96cc20118bc7bb90",
+      "bytes": 1209
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_batch/src/ball_query_gpu.cu": {
+      "sha256": "c8f4b27abd9ea23489764e441e5141ce18b4f572baf7ed900614fc6a2d56ed11",
+      "bytes": 2178
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_batch/src/ball_query_gpu.h": {
+      "sha256": "d5f2d88e599d6c947e4b876323f8ad356509bfdaa78852af9f247d59738df43c",
+      "bytes": 455
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_batch/src/cuda_utils.h": {
+      "sha256": "7ace0019cea06178a57b275d3b1086b26cd5d0c83d646e8b8ae70c530e9e7bca",
+      "bytes": 353
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_batch/src/group_points.cpp": {
+      "sha256": "1ada50c2d95bb69e482cdae3b0c176b3face34291a5e3b7defd539a0131820a0",
+      "bytes": 1152
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_batch/src/group_points_gpu.cu": {
+      "sha256": "28c79c009da32c14e57d0e45345de92caffec7db31eefa853d971f148c4e2cbf",
+      "bytes": 3406
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_batch/src/group_points_gpu.h": {
+      "sha256": "e75f1a0eb6c18ed28b780daa3c6d82c5fccbf70e79d574f71bd469d5fa22eeaf",
+      "bytes": 794
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_batch/src/interpolate.cpp": {
+      "sha256": "d0799dd84ffbba8c38778d2f4f66114f15782db8ce69cc8da7f1f49944606c77",
+      "bytes": 1947
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_batch/src/interpolate_gpu.cu": {
+      "sha256": "4e16680f4fdc95de527cb5093c42306b6eb67ae31c1cbd30b321c6ae62bc56d2",
+      "bytes": 5405
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_batch/src/interpolate_gpu.h": {
+      "sha256": "1d6c66ff03d32e3e7bc844f2599bb41c26bb8e2b97ebff60061f2ddf67d9f806",
+      "bytes": 1111
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_batch/src/pointnet2_api.cpp": {
+      "sha256": "6e79c565d169ebfbdfebf870317c86a6061cd190496c9d4bfbda7e4b7f14ef2c",
+      "bytes": 1148
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_batch/src/sampling.cpp": {
+      "sha256": "d7709bfea060e1057044ade052847e84406940b65a6271e4824be505d8c5961a",
+      "bytes": 1475
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_batch/src/sampling_gpu.cu": {
+      "sha256": "bcfb8d2345f1826210c5d1308f36bae691c317d1e91f86e960abf29da3bffee9",
+      "bytes": 7893
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_batch/src/sampling_gpu.h": {
+      "sha256": "821c11ad5e855a3fbe9350a4a38b4d6f8c20176a98e3d087884a0204be2873f8",
+      "bytes": 980
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/pointnet2_utils.py": {
+      "sha256": "cb9de5cc1f6db0baac86c8b1cc3c02c3ab907af7a24e8f993868e01cead9d8f8",
+      "bytes": 18919
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/ball_query.cpp": {
+      "sha256": "0d82d992409a1375631b9e8e6d4f64b615fab187ad7502a69fac23eadf424916",
+      "bytes": 1517
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/ball_query_gpu.cu": {
+      "sha256": "c7fe0cccc944e59631640f2daa5be283b72fe5fc6def1525030de47d3fba8b76",
+      "bytes": 3066
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/ball_query_gpu.h": {
+      "sha256": "89b8977c40a607f9412e5e0ed5ea27ed3058ab423f9f5b75ae1fa8d50b1cdeed",
+      "bytes": 769
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/cuda_utils.h": {
+      "sha256": "a7e0abefec2bc34cb42e21fd2a47b122fc4b0c024547c647ea6ae36ebd7cf670",
+      "bytes": 162
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/group_points.cpp": {
+      "sha256": "a43a09400eaa5562754216425908093b690c6d3a263a6b5fd0b1e15153d5d34f",
+      "bytes": 2440
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/group_points_gpu.cu": {
+      "sha256": "c2ede6fb15ca86cba3d9338eff9eb00d5e4d38fc734437afb3ac484216e10b11",
+      "bytes": 5691
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/group_points_gpu.h": {
+      "sha256": "3c993cd12624bb574f2fa9b10c264990cd6dceabdd8c923b25f84a1e8b29610b",
+      "bytes": 1222
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/interpolate.cpp": {
+      "sha256": "57f2a25bbf55f30ee39b8575bf2ad076fed55c358528b665b8448b0b4672e884",
+      "bytes": 3870
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/interpolate_gpu.cu": {
+      "sha256": "4120eeafd682d657e5c3f5885753dffa49de9305baabe50466dc24e04bef44e2",
+      "bytes": 6466
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/interpolate_gpu.h": {
+      "sha256": "4b67350ea5b09e378cc0ef61f4cd84168dbcecc919586f00d1eb2b683e0130fb",
+      "bytes": 1192
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/pointnet2_api.cpp": {
+      "sha256": "2f759172c547705288790afec7bc0b00d952819447d410ffe3e85335f61516d3",
+      "bytes": 1771
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/sampling.cpp": {
+      "sha256": "6d34dbf08bab4740dcfc3f03805141dbb03c927598abc4f67fe61521cd4c1c4a",
+      "bytes": 1859
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/sampling_gpu.cu": {
+      "sha256": "26ed2a023b3c32ac63345e607aedd373b0772390431021ec9b6aec2e4c4a423a",
+      "bytes": 10229
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/sampling_gpu.h": {
+      "sha256": "d88ee05d10d09b1cbefb68300d781494bb6c14607f7fff5d7e41a73554d8713b",
+      "bytes": 769
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/vector_pool.cpp": {
+      "sha256": "d3f90afcaf0e944e4580c6059a9f879a10670f6dcd56d0c8a93a1897753b465d",
+      "bytes": 9175
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/vector_pool_gpu.cu": {
+      "sha256": "6e6edb047de860a67e9e465ad428d992efd83833828a76f292aa7e0b52cdbb74",
+      "bytes": 20132
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/vector_pool_gpu.h": {
+      "sha256": "07c442c5c280273e68d80d7db68855965e1e812b99ad6e40c5789f1d4c678e00",
+      "bytes": 3324
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/voxel_query.cpp": {
+      "sha256": "ec469cab305eb9ef1e696e86aee5d429319ae1bf0d979736bd2adc85b9ae4254",
+      "bytes": 1462
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/voxel_query_gpu.cu": {
+      "sha256": "ae6b0aa1d71513b5d6c5b3a48fce6fd0b94870901e1d18925567c0a2eaa85934",
+      "bytes": 4036
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/src/voxel_query_gpu.h": {
+      "sha256": "b91218e291eeb9351123517075922665ebd4d0632650f61647c6a0cab7840991",
+      "bytes": 700
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/voxel_pool_modules.py": {
+      "sha256": "d199176449c5790106e0e9d582b33c056e07251fff3422288e1edf19020a19c9",
+      "bytes": 5599
+    },
+    "simple_det3d/ops/pointnet2/pointnet2_stack/voxel_query_utils.py": {
+      "sha256": "1b0824d045614ed833c7b477a2c9ec5f34d66b8508a82a7b591bd246c89b870b",
+      "bytes": 4204
+    },
+    "simple_det3d/ops/roiaware_pool3d/__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "simple_det3d/ops/roiaware_pool3d/roiaware_pool3d_utils.py": {
+      "sha256": "1a616ff2b794030f765a413fae89c560bd9bef69603d3bb29cbfb2a158a4c80c",
+      "bytes": 4407
+    },
+    "simple_det3d/ops/roiaware_pool3d/src/roiaware_pool3d.cpp": {
+      "sha256": "878257ec685dc4c16b7edf2fdfe82309ca26288ab390cbf441a983db35248389",
+      "bytes": 7272
+    },
+    "simple_det3d/ops/roiaware_pool3d/src/roiaware_pool3d_kernel.cu": {
+      "sha256": "d34013f84a0094dd9ae814e0cf1e5bceb7d808bfcc1248a1832f334a96a1808e",
+      "bytes": 14858
+    },
+    "simple_det3d/train/__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "simple_det3d/train/ema_utils.py": {
+      "sha256": "b0c94aa50d042976ee81921045d5fb1343d4f4f0b4aece024816ee69924c995d",
+      "bytes": 14729
+    },
+    "simple_det3d/train/optimization/__init__.py": {
+      "sha256": "d00c138205e9bef5f05100b137cc8376f3f3757d3e83821288a25598b07e49fb",
+      "bytes": 2770
+    },
+    "simple_det3d/train/optimization/fastai_optim.py": {
+      "sha256": "8e20f0ad0a9ca1059890bdce48966697ee8a3127aadacf7730a4ade70f6f7896",
+      "bytes": 10535
+    },
+    "simple_det3d/train/optimization/learning_schedules_fastai.py": {
+      "sha256": "2e36173d80ee9f190a783c35b9c76f93d9913a8afe9a3611558e8e4598b38ce2",
+      "bytes": 6102
+    },
+    "simple_det3d/train/train_utils.py": {
+      "sha256": "dd298743695334f56789a6b90f774a73bbbc01aebeefb657b5b463ff096f51ef",
+      "bytes": 25331
+    },
+    "simple_det3d/utils/__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "simple_det3d/utils/box_coder_utils.py": {
+      "sha256": "279e224f8fe299a6e8998daec037b4a439e8ff335ccae16ab258255cfb77164f",
+      "bytes": 7601
+    },
+    "simple_det3d/utils/box_utils.py": {
+      "sha256": "dc066c2afb65a2e68ce6d838f1a6043cc1e9ebcd8ac0e27f0c16187ed5936bab",
+      "bytes": 4598
+    },
+    "simple_det3d/utils/common_utils.py": {
+      "sha256": "400160e2d108cce6e34d7f9a212261548c3163fb4d8ef1369b5466b00ee54b0a",
+      "bytes": 8415
+    },
+    "simple_det3d/utils/config.py": {
+      "sha256": "8cb41cedaf2c3272900be972a46515efc626257d080ce148a70b50ffcc01685e",
+      "bytes": 4062
+    },
+    "simple_det3d/utils/loss_utils.py": {
+      "sha256": "d9a2fa224bd673201683a31ee5a779beeff79ef87e97dd2324a3023b5f8936de",
+      "bytes": 22975
+    },
+    "simple_det3d/utils/precision_utils.py": {
+      "sha256": "2f85a71a0e006cb55df274f2fc32e248a7572fb01a163d8317631ef9dab66e8f",
+      "bytes": 3290
+    },
+    "simple_det3d/utils/spconv_utils.py": {
+      "sha256": "5744b909205a7f53ea84fac6dfa04605afb049a48dc10f43308a925291e47953",
+      "bytes": 2130
+    },
+    "tests/test_coda_downsample.py": {
+      "sha256": "2d7d97d0a54f4fd4561ad3a40173c85b01c0722cc08363f2eaa78cc3f9693599",
+      "bytes": 4931
+    },
+    "tests/test_comparison_video.py": {
+      "sha256": "82c1c16a7700174ccec8b44e36f18140cb45cabfa32f3fed21c1813ee8863581",
+      "bytes": 1171
+    },
+    "tests/test_dynamic_voxel_vfe.py": {
+      "sha256": "a1487d3a671cb5c1c06d1ebd8033c2d196b5cc66bde65382176c327c5c086b00",
+      "bytes": 2776
+    },
+    "tests/test_evaluation.py": {
+      "sha256": "bf007b85ee2c417175f257ff9ee65fc02b21d0f5b641f3d16d37bfce743de5b8",
+      "bytes": 2303
+    },
+    "tests/test_precision.py": {
+      "sha256": "282316a007064810ae7e3da3db1cfa3d590d6957649a52053ed015b4c7ea568d",
+      "bytes": 2247
+    },
+    "tests/test_prediction_comparison.py": {
+      "sha256": "b5137e1c9d33394497d10997d8e11a5d4203ae73442e7877ddeb27f86ba3818d",
+      "bytes": 1786
+    },
+    "tests/test_prediction_visualization.py": {
+      "sha256": "f0fb44760a193dc0fe46f673b60003b38682f123d71a1f78dec6bad86bf70378",
+      "bytes": 6194
+    },
+    "tests/test_temporal_sweeps.py": {
+      "sha256": "2076d0f6e42a5a24f1470b29c7d6133cf2c304d7edda0801d5a56c09dda26702",
+      "bytes": 5809
+    },
+    "tests/test_training_resume.py": {
+      "sha256": "60d35929133c09d17ce1d53f058b6cd4ba286fd4611cb821b48f271e6a59036b",
+      "bytes": 4813
+    },
+    "tests/test_weak_supervision.py": {
+      "sha256": "aaaaf47f9c1f58d325b4878fd1b811bfc95289432c3fcfa62d56750824bbf950",
+      "bytes": 26816
+    },
+    "tools/compare_wheelchair_predictions.py": {
+      "sha256": "74b6d9436e21d58411f027b7f7d3c3bd90ac023b99ec5d604c5f4801a4b1086f",
+      "bytes": 18600
+    },
+    "tools/create_wheelchair_comparison_video.py": {
+      "sha256": "c3c532e53ca0aae6f5f1832f00e1e48e08d5ce74bad77eb4b075225a0638d169",
+      "bytes": 14374
+    },
+    "tools/downsample_coda_lidar.py": {
+      "sha256": "f1207669a91241d4b59a994e5e45e18adba8dae513d85dd6803f42dbe88226de",
+      "bytes": 10660
+    },
+    "tools/generate_coda_info.py": {
+      "sha256": "0831927e30e4bf81e6233e897506db52b5559c1eebf5a5676253ad3015876e1f",
+      "bytes": 22018
+    },
+    "tools/generate_gt_database.py": {
+      "sha256": "3b273464b18ad45b6c290e521f598dd12ac2c4c62f67d42d88b577fd7d6b4e5d",
+      "bytes": 2527
+    },
+    "tools/generate_wheelchair_info.py": {
+      "sha256": "936a43cdfab8393f3ffca392855fa7596e014df0c36e6f90e7fe03818ff5f1eb",
+      "bytes": 10909
+    },
+    "tools/prepare_wheelchair_weak_data.py": {
+      "sha256": "fe905dfcfc4735d9e1cb7a0db8af188cd2914fe349be9ca816f4d966eef12567",
+      "bytes": 32526
+    },
+    "tools/test.py": {
+      "sha256": "e3f18238ce64e3635c3c1871935fea416a48326b2792412df9225bcd11cbf792",
+      "bytes": 12821
+    },
+    "tools/train.py": {
+      "sha256": "b16d499a28519d8bb54ab3fd760adfd2d0b3121597cb6dd914aede7b5de3ec43",
+      "bytes": 20980
+    },
+    "tools/visualize_wheelchair_predictions.py": {
+      "sha256": "c32064f40419b41a7a83d3190037ddaed214a5097c6673db7823a98774624bbe",
+      "bytes": 35514
+    },
+    "tools/visualize_wheelchair_weak_labels.py": {
+      "sha256": "1d8f0e029bafcc595da7c93edf150a9d32a3b7bb1454bb7e2f7cf80d56e14307",
+      "bytes": 9246
+    },
+    "train_8gpu.sh": {
+      "sha256": "9974f0a742d1d2168bac6cc489a6ae86b9dac1a134efd7788343d260c40fb354",
+      "bytes": 1289
+    },
+    "train_wheelchair_3stage.sh": {
+      "sha256": "9de1fca79dae8e7aab7b31c61f7375763e746712c37e3a87ea1533ecda01c9c8",
+      "bytes": 11481
+    }
+  },
+  "file_count": 122,
+  "total_bytes": 982403,
+  "excluded": [
+    "data",
+    "output",
+    "build",
+    ".git",
+    ".vscode",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "__pycache__",
+    "*.so",
+    "*.pth",
+    "*.pkl",
+    "credentials"
+  ],
+  "runtime_resources_copied": false,
+  "cuda_extensions_compiled": false,
+  "training_executed": false
+}

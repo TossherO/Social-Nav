@@ -1,0 +1,12 @@
+<launch>
+  <arg name="project_root" default="$(find social_nav_people)/../../.."/>
+  <arg name="config" default="$(arg project_root)/perception/detection_tracking/configs/inference.json"/>
+  <arg name="local_config" default="$(arg project_root)/configs/detection_tracking.local.json"/>
+  <arg name="localization_topic" default=""/>
+  <node pkg="social_nav_people" type="people_node" name="social_nav_people" output="screen">
+    <env name="SOCIAL_NAV_ROOT" value="$(arg project_root)"/>
+    <param name="config" value="$(arg config)"/>
+    <param name="local_config" value="$(arg local_config)"/>
+    <param name="localization_topic" value="$(arg localization_topic)"/>
+  </node>
+</launch>

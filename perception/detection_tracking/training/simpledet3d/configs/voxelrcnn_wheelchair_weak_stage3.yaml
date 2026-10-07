@@ -1,0 +1,33 @@
+_BASE_CONFIG_: voxelrcnn_wheelchair_weak_stage2.yaml
+
+# Optional Stage 3: short target-only indoor consolidation.  Partial regression
+# masks and disabled target ROI supervision protect dimensions/yaw/ROI from
+# direct weak-label gradients.
+MIXED_DOMAIN:
+    ENABLED: false
+
+# Stage 3 uses only completed indoor-center frames.  It updates Dense/ROI
+# classification while keeping every 3D geometry regression branch fixed.
+DATA_CONFIG:
+    WEAK_SUPERVISION:
+        EXHAUSTIVE_BACKGROUND_WEIGHT: 0.5
+        FORCE_CENTER_ONLY_REGRESSION: true
+        ROI_CENTER_SUPERVISION:
+            ENABLED: true
+
+EMA_TEACHER:
+    ENABLED: false
+
+MODEL_FREEZE:
+    MODULE_NAMES:
+        - dense_head.heads_list.0.center_z
+        - dense_head.heads_list.0.dim
+        - dense_head.heads_list.0.rot
+        - roi_head.reg_fc_layers
+        - roi_head.reg_pred_layer
+    TRAIN_MODE_MODULE_NAMES: []
+
+OPTIMIZATION:
+    BATCH_SIZE_PER_GPU: 16
+    NUM_EPOCHS: 5
+    LR: 0.0001

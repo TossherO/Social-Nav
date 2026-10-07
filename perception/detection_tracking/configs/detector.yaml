@@ -1,0 +1,19 @@
+# Deployment profile for the supplied single-frame Stage 3 best checkpoint.
+# The inherited training recipe is NOT the runtime input-frame specification.
+_BASE_CONFIG_: ../training/simpledet3d/configs/voxelrcnn_wheelchair_weak_stage3.yaml
+CLASS_NAMES: ['Pedestrian']
+PRECISION: fp32
+DATA_CONFIG:
+    MAX_SWEEPS: 1
+    INTENSITY_NORMALIZATION: 255.0
+    ZERO_INTENSITY: false
+    INFO_PATH:
+        train: []
+        test: []
+MODEL:
+    POST_PROCESSING:
+        SCORE_THRESH: 0.1
+        NMS_CONFIG:
+            NMS_THRESH: 0.2
+# 0.1 retains support candidates. Birth/output confirmation uses 0.3; this is
+# an explicit tracking adaptation, NOT the original 0.3 evaluation profile.

@@ -1,0 +1,46 @@
+_BASE_CONFIG_: voxelrcnn_wheelchair_weak_stage1.yaml
+
+# Stage 2: indoor-dominant EMA/pseudo-label training.  Online EMA conservatively
+# upgrades geometry only around existing center anchors; unmatched predictions
+# remain disabled until multi-view/temporal agreement is implemented.
+DATA_CONFIG:
+    INFO_PATH:
+        train: [wheelchair_weak_infos_train_indoor_exhaustive.pkl]
+        test: [wheelchair_weak_infos_val_indoor_exhaustive.pkl]
+    WEAK_SUPERVISION:
+        ROI_CENTER_SUPERVISION:
+            ENABLED: true
+
+MIXED_DOMAIN:
+    ENABLED: true
+    SOURCE_RATIO: 0.25
+    TARGET_PRIMARY_RATIO: 0.50
+    SECONDARY_TARGET:
+        ENABLED: true
+        RATIO: 0.25
+        INFO_PATH: [wheelchair_weak_infos_train_indoor_non_exhaustive.pkl]
+    EPOCH_SIZE: 80000
+
+EMA_TEACHER:
+    ENABLED: true
+    DECAY: 0.999
+    EVAL_WITH_TEACHER: true
+    SCORE_THRESH: 0.7
+    MATCH_DISTANCE: 0.5
+    CLS_WEIGHT: 0.5
+    BOX_WEIGHT: 0.3
+    ALLOW_UNMATCHED: false
+    MIN_HORIZONTAL_SIZE: 0.15
+    MAX_HORIZONTAL_SIZE: 1.5
+    MIN_HEIGHT: 0.6
+    MAX_HEIGHT: 2.4
+    NEAR_DISTANCE: 8.0
+    FAR_DISTANCE: 15.0
+    NEAR_MIN_POINTS: 5
+    MID_MIN_POINTS: 3
+    FAR_MIN_POINTS: 1
+
+OPTIMIZATION:
+    BATCH_SIZE_PER_GPU: 16
+    NUM_EPOCHS: 10
+    LR: 0.0003

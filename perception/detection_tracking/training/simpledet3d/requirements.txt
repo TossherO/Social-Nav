@@ -1,0 +1,9 @@
+numpy
+torch>=1.10
+spconv
+easydict
+pyyaml
+tqdm
+tensorboardX
+scikit-image
+numba

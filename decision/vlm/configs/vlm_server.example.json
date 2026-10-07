@@ -1,0 +1,6 @@
+{
+  "base_url": "http://127.0.0.1:30000/v1",
+  "api_key": "",
+  "model": "qwen3.8-27b-fp8",
+  "allow_insecure_http": false
+}
