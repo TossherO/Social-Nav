@@ -420,6 +420,11 @@ class VLMTests(unittest.TestCase):
             self.assertEqual(names, set(packed_manifest["files"]) | {"manifest.json", "server_config.json"})
             self.assertNotIn("api_key.json", names)
             self.assertNotIn("native_labels.json", names)
+            self.assertIn("README.md", names)
+            self.assertNotIn("README.txt", names)
+            self.assertNotIn("benchmark_guide.md", names)
+        self.assertEqual((out / 'README.md').read_bytes(),
+                         (api.HERE / 'configs/vlm_test_guide.md').read_bytes())
         with self.assertRaises(ValueError):
             pack.package(out, source)
 
@@ -431,6 +436,44 @@ class VLMTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             pack.package(out, source)
         self.assertFalse(out.exists())
+
+    def test_deployment_package_reuses_client_assets_and_contains_no_existing_credentials(self):
+        out = self.root / 'deployment'
+        result = pack.package(out, self.bundle, include_deployment=True)
+        manifest, _, cases = api.common.load_bundle(out)
+        self.assertTrue(result['deployment_guide_included'])
+        self.assertFalse(manifest['deployment']['remote_installation_or_gpu_inference_verified'])
+        self.assertEqual(manifest['deployment']['installation_mode'], 'current_environment')
+        self.assertTrue(manifest['deployment']['environment_will_be_modified_on_install'])
+        self.assertFalse(manifest['deployment']['base_environment_modified_during_packaging'])
+        self.assertFalse(manifest['deployment']['creates_virtual_environment'])
+        self.assertTrue(manifest['deployment']['offline_wheelhouse_install_supported'])
+        self.assertFalse(manifest['deployment']['wheelhouse_included'])
+        self.assertEqual(manifest['deployment']['runtime_packages']['cuda-tile'], '1.6.0rc5')
+        requirements = (out / 'requirements.server.txt').read_text()
+        self.assertIn('--extra-index-url https://pypi.nvidia.com', requirements)
+        self.assertIn('--extra-index-url https://download.pytorch.org/whl/cu130', requirements)
+        self.assertIn('cuda-tile==1.6.0rc5', requirements)
+        config = api.common.read_json(out / 'server_config.json')
+        self.assertEqual(config['api_key'], '')
+        self.assertEqual(config['base_url'], 'http://127.0.0.1:30000/v1')
+        self.assertFalse(config['allow_insecure_http'])
+        self.assertEqual(len(cases), 3)
+        self.assertEqual((out / 'benchmark.py').read_bytes(), (api.HERE / 'benchmark_vlm.py').read_bytes())
+        for name in ('deploy.py', 'README.md', 'benchmark_guide.md', 'installation_profile.json', 'deployment_defaults.json',
+                     'requirements.server.txt', 'compare_results.py'):
+            self.assertIn(name, manifest['files'])
+        self.assertNotIn('README.txt', manifest['files'])
+        self.assertEqual((out / 'README.md').read_bytes(), (api.HERE / 'deployment/README.md').read_bytes())
+        self.assertEqual((out / 'benchmark_guide.md').read_bytes(),
+                         (api.HERE / 'configs/vlm_test_guide.md').read_bytes())
+        from decision.vlm.deployment import deploy
+        deploy.verify_templates(out)
+        (out / 'server_config.json').write_text('INVALID_PRIVATE_CONFIG_MUST_NOT_BE_READ')
+        deploy.verify_templates(out)
+        (out / 'installation_profile.json').write_text('{}')
+        with self.assertRaisesRegex(ValueError, 'changed'):
+            deploy.verify_templates(out)
 
     def test_portable_defaults_tampering_and_missing_hash_rejected(self):
         out = self.root / "portable"

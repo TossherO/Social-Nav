@@ -1,25 +1,52 @@
-JRDB T1 remote SGLang test bundle (object)
+# JRDB T1 remote SGLang test bundle (object)
 
 The default source contains 24 development windows, 3 real images per task,
 geometry-only fields and a fixed Prompt. It is NOT semantic ground truth and
 does not measure detection, tracking, rendering or navigation safety.
 
-1. Use an existing Python environment with httpx and jsonschema. requirements.txt
+## Client setup
+
+1. Use an existing Python environment with httpx and jsonschema. `requirements.txt`
    is for a new isolated client environment only; do not upgrade project GPU libs.
-2. Edit server_config.json: base_url, optional api_key, exact model ID (or empty for
+2. Edit `server_config.json`: base_url, optional api_key, exact model ID (or empty for
    discovery), allow_insecure_http=false. URL ends in /v1, not /chat/completions.
    Prefer HTTPS or an SSH tunnel. Public HTTP requires explicit opt-in and exposes
    images/tokens. Never share the filled configuration or Key.
-3. Offline validation (zero network and no Key read):
-   python benchmark.py --dry-run --limit 24
-4. GET model list only (zero inference):
-   python benchmark.py --check --out results/check
-5. Three-scene smoke test, no retries:
-   python benchmark.py --out results/smoke
-6. Only when needed, one complete serial run:
-   python benchmark.py --limit 24 --out results/serial
-7. Simulate arrivals once every 2 seconds (0.5 Hz, NOT 2 Hz):
-   python benchmark.py --mode paced --rate-hz 0.5 --limit 24 --out results/paced_2s
+
+## Validation and inference
+
+Run these commands from the extracted bundle directory. Offline validation sends
+zero network requests and does not read the Key:
+
+```bash
+python benchmark.py --dry-run --limit 24
+```
+
+GET model list only (zero inference):
+
+```bash
+python benchmark.py --check --out results/check
+```
+
+Three-scene smoke test, no retries:
+
+```bash
+python benchmark.py --out results/smoke
+```
+
+Only when needed, one complete serial run:
+
+```bash
+python benchmark.py --limit 24 --out results/serial
+```
+
+Simulate arrivals once every 2 seconds (0.5 Hz, NOT 2 Hz):
+
+```bash
+python benchmark.py --mode paced --rate-hz 0.5 --limit 24 --out results/paced_2s
+```
+
+## Constraints and defaults
 
 Every output directory must be NEW. Single in-flight request; busy paced arrivals
 are dropped, not queued. JSON Schema is requested, then local Schema, PID, role,
@@ -39,6 +66,8 @@ Optional --warmups 1 sends one text-only fixed-prefix warm-up, not an image repl
 The first sample and cached_tokens do NOT prove cold cache or prefix-cache state.
 Server launch and hardware-specific tuning are manual.
 
-Results: model_check.json, settings.json, requests.jsonl, summary.json. Separate
+## Results and limitations
+
+Results: `model_check.json`, `settings.json`, `requests.jsonl`, `summary.json`. Separate
 format validity from semantic accuracy; TTFT is not full-response latency. The
 2-second period is a design target, not a demonstrated real-robot latency SLA.

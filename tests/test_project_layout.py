@@ -18,17 +18,30 @@ class ProjectLayoutTests(unittest.TestCase):
             '纯公开数据可行性验证方案.md', 'JRDB数据与测试实现.md', '项目框架.md'})
 
     def test_current_document_links_resolve(self):
-        for doc in [ROOT / 'README.md', *(ROOT / 'docs').glob('*.md')]:
+        module_docs = [ROOT / name / 'README.md'
+                       for name in ('perception', 'decision', 'navigation', 'interfaces')]
+        for doc in [ROOT / 'AGENTS.md', ROOT / 'README.md', *module_docs,
+                    *(ROOT / 'docs').glob('*.md')]:
             if doc.name == '旧版_基于VLM的长程社交导航.md':
                 continue  # Historical paths are intentionally preserved in the archive.
             for target in re.findall(r'\[[^\]]+\]\(([^)]+)\)', doc.read_text()):
                 if target.startswith(('https:', 'http:', 'mailto:', '#')):
                     continue
                 resolved = (doc.parent / target.split('#', 1)[0]).resolve()
+                if resolved == ROOT / 'ENVIRONMENT.local.md':
+                    continue  # Ignored machine-specific guide may not exist on another machine.
                 if resolved.is_relative_to(ROOT / 'outputs') or resolved.is_relative_to(ROOT / 'data'):
                     continue
                 with self.subTest(document=doc.name, target=target):
                     self.assertTrue(resolved.exists())
+
+    def test_module_readmes_and_portable_guide_use_markdown(self):
+        for name in ('perception', 'decision', 'navigation', 'interfaces'):
+            with self.subTest(module=name):
+                self.assertTrue((ROOT / name / 'README.md').is_file())
+                self.assertFalse((ROOT / name / 'README.txt').exists())
+        self.assertTrue((VLM_ROOT / 'configs/vlm_test_guide.md').is_file())
+        self.assertFalse((VLM_ROOT / 'configs/vlm_test_README.txt').exists())
 
     def test_current_defaults_frozen_fp8_and_two_second_period(self):
         config = load_config()

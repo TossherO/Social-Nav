@@ -4,7 +4,7 @@
 
 当前已纳入检测训练、共享检测跟踪推理核心、ROS 1接入源码和VLM公开数据验证流程，完整在线导航系统尚未实现。VLM主线为冻结 **Qwen3.8-27B-FP8**、远程手动SGLang部署、JSON Schema输出、每2秒调用一次（0.5Hz），不微调VLM。
 
-本仓库作为正式初始实现，文件名、项目配置、协议名和新生成产物不附加项目版本号。模型/依赖名称、标准API路径、数据来源提交及运行时状态编号保留；已有冻结样例、测试ZIP和历史归档不改写。
+本仓库作为正式初始实现，文件名、项目配置、协议名和新生成产物不附加项目版本号。模型/依赖名称、标准API路径、数据来源提交及运行时状态编号保留；已有冻结样例、用户结果和历史归档不改写。工具ZIP按用户要求更新或清理，不覆盖已填写的连接配置和用户结果。
 
 ## 项目结构
 
@@ -28,8 +28,11 @@
 - [项目框架](docs/项目框架.md)：目录职责、配置、命令、产物与复现方法。
 - [旧版：基于VLM的长程社交导航](docs/旧版_基于VLM的长程社交导航.md)：历史技术方案，不作为当前实施要求，历史命令不保证可执行。
 
+模块入口：[感知](perception/README.md) · [决策](decision/README.md) · [导航](navigation/README.md) · [共享接口](interfaces/README.md)。项目说明统一使用Markdown；配置、Prompt、依赖清单等纯文本文件保持其专用名称。
+
 检测训练体系的原详细文档保留于[检测源码文档目录](perception/detection_tracking/training/simpledet3d/docs)。
 检测跟踪的配置、离线推理、缓存回放、ROS 1与定位边界见[模块说明](perception/detection_tracking/README.md)。
+AutoDL原环境依赖替换、手动SGLang服务及同机/远程测试见[部署指南](decision/vlm/deployment/README.md)。安装显式确认后将远程容器原有Torch 2.12替换为2.13+cu130，不创建服务虚拟环境；不修改本机开发环境。可用`python -m decision.vlm.package_vlm_test --with-deployment --out outputs/t1/autodl_sglang_bundle`生成带现有24例输入的独立ZIP；打包不安装环境或调用模型。部署工具支持无GPU预下载完整wheel依赖及哈希锁文件，正式容器使用`install --wheelhouse`离线安装；wheel资源另存`outputs/t1/autodl_wheelhouse.zip`，不塞入轻量测试包。
 
 ## 配置与数据
 

@@ -1,0 +1,37 @@
+{
+  "python_minor": "3.12",
+  "base_image": "PyTorch 2.12 / Python 3.12 / CUDA 13.0",
+  "installation_mode": "current_environment",
+  "runtime_torch_cuda": "13.0",
+  "minimum_driver_major": 580,
+  "minimum_total_memory_mib": 45000,
+  "packages": {
+    "cuda-tile": "1.6.0rc5",
+    "torch": "2.13.0+cu130",
+    "torchvision": "0.28.0+cu130",
+    "torchaudio": "2.11.0+cu130",
+    "sglang": "0.5.19",
+    "sglang-kernel": "0.4.6.post1",
+    "flashinfer-python": "0.6.18",
+    "triton": "3.7.1",
+    "transformers": "5.12.1",
+    "xgrammar": "0.2.1",
+    "httpx": "0.28.1",
+    "jsonschema": "4.23.0"
+  },
+  "index_url": "https://pypi.org/simple",
+  "extra_index_urls": [
+    "https://download.pytorch.org/whl/cu130",
+    "https://pypi.nvidia.com"
+  ],
+  "evidence": {
+    "checked_at": "2026-10-07",
+    "sglang_dependencies": "https://pypi.org/pypi/sglang/0.5.19/json",
+    "torch_wheels": "https://download.pytorch.org/whl/cu130/torch/",
+    "cuda_tile_wheels": "https://pypi.nvidia.com/cuda-tile/",
+    "cuda_tile_index_checked_at": "2026-10-08",
+    "driver_compatibility": "https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html",
+    "remote_cuda13_installation_tested": false,
+    "note": "Key version constraints, not a full transitive lock. Explicit installation replaces PyTorch 2.12 with 2.13+cu130 in the invoking Python environment; no new venv or automatic rollback. CUDA12 H800 history is not CUDA13/4090 validation."
+  }
+}

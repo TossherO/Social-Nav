@@ -19,16 +19,17 @@ Social-Nav面向移动机器人/智能轮椅的长程社交导航，目标是贯
     - [当前整体方案](docs/当前整体方案.md)：研究目标、任务设计、系统分工与安全边界；研究路线或任务语义变更时阅读相关章节。
     - [项目框架](docs/项目框架.md)：目录职责、配置来源、命令、数据链接和产物复现；入口、路径、配置或架构变更时阅读。
 - 模块层：进入对应模块时先看模块说明，再按具体工作查阅专题。
-    - 感知：[感知域说明](perception/README.txt)，介绍训练副本、数据边界及在线感知状态。
+    - 感知：[感知域说明](perception/README.md)，介绍训练副本、数据边界及在线感知状态。
         - 改检测跟踪推理、数据回放或ROS 1接入：[检测跟踪模块说明](perception/detection_tracking/README.md)，包含部署配置、定位来源、消息语义与实际验证边界。
         - 改检测实现或理解调用链：[检测代码框架](perception/detection_tracking/training/simpledet3d/docs/code_framework.md)。
         - 准备环境、编译、训练或评估：[检测使用指南](perception/detection_tracking/training/simpledet3d/docs/usage_guide.md)。阅读安装示例不等于获得执行授权。
         - 改弱标签、损失或训练策略：[Wheelchair弱监督训练设计](perception/detection_tracking/training/simpledet3d/docs/wheelchair_training_design.md)。
-    - 决策：[决策域说明](decision/README.txt)，介绍局部决策实现、兼容入口和外层agent边界。
-        - 生成便携包或调用远程服务：[便携测试包说明](decision/vlm/configs/vlm_test_README.txt)。
+    - 决策：[决策域说明](decision/README.md)，介绍局部决策实现、兼容入口和外层agent边界。
+        - 自建AutoDL推理环境、手动起停SGLang或比较同机/远程延迟：[部署与测试指南](decision/vlm/deployment/README.md)，当前支持在远程容器原有Python环境中替换依赖；安装须明确确认环境修改，不能套用于本机开发环境，指南存在不代表当前环境已部署。
+        - 生成便携包或调用远程服务：[便携测试包说明](decision/vlm/configs/vlm_test_guide.md)。
         - 场景数据、输入渲染和已有评测：继续阅读下方数据与实验专题，不在本指南重复协议细节。
-    - 导航：[导航域说明](navigation/README.txt)，介绍规划、控制、安全的职责及接入边界。
-    - 跨模块接口：[共享接口说明](interfaces/README.txt)与[类型草案](interfaces/contracts.py)，涉及消息、时间、坐标系、身份和状态绑定时阅读。
+    - 导航：[导航域说明](navigation/README.md)，介绍规划、控制、安全的职责及接入边界。
+    - 跨模块接口：[共享接口说明](interfaces/README.md)与[类型草案](interfaces/contracts.py)，涉及消息、时间、坐标系、身份和状态绑定时阅读。
 - 数据与实验专题：设计样本、标注或验证流程时阅读。
     - [纯公开数据可行性验证方案](docs/纯公开数据可行性验证方案.md)：数据选择、来源划分、人工标注、指标与阶段验收。
     - [JRDB数据与测试实现](docs/JRDB数据与测试实现.md)：字段/单位/坐标、跨标签对齐、可视化、决策输入和既有测试限制；使用JRDB或分析相关实验时阅读。
