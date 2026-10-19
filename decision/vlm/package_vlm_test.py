@@ -14,6 +14,12 @@ from decision.vlm.project_config import load_config, project_path
 
 VLM_ROOT = Path(__file__).resolve().parent
 ROOT = VLM_ROOT.parents[1]
+DEPLOYMENT_GUIDE = ROOT / "docs/decision/VLM部署与调用.md"
+BUILD_GUIDE = ROOT / "docs/decision/SGLang服务部署方案.md"
+DEPLOYMENT_FILES = (
+    "start_server.sh", "runtime_env.sh", "compare_results.py",
+    "build/build_sglang.sh", "build/source-cu129.patch", "config/constraints-cu129.txt",
+)
 SOURCE = project_path(load_config()["development"]["bundle"])
 
 
@@ -52,25 +58,15 @@ def package(out, source=SOURCE, *, include_deployment=False):
     for original, name in ((VLM_ROOT / "benchmark_vlm.py", "benchmark.py"),
                           (VLM_ROOT / "vlm_api_common.py", "vlm_api_common.py"),
                           (VLM_ROOT / "benchmark_defaults.py", "benchmark_defaults.py"),
-                          (VLM_ROOT / "configs/vlm_test_guide.md",
-                           "benchmark_guide.md" if include_deployment else "README.md")):
+                          (VLM_ROOT / "configs/vlm_test_guide.md", "README.md")):
         shutil.copyfile(original, out / name)
     if include_deployment:
         deployment = VLM_ROOT / "deployment"
-        for name in ("deploy.py", "compare_results.py", "README.md", "installation_profile.json"):
+        for name in DEPLOYMENT_FILES:
+            (out / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(deployment / name, out / name)
-        common.save_json(out / "deployment_defaults.json", {
-            "deployment": public_config["deployment"], "served_name": public_config["model"]["served_name"]})
-        profile = common.read_json(deployment / "installation_profile.json")
-        index_options = [f"--index-url {profile['index_url']}",
-                         *(f"--extra-index-url {url}" for url in profile["extra_index_urls"]),
-                         "--only-binary=:all:"]
-        (out / "requirements.server.txt").write_text(
-            "# Remote SERVER environment only; replaces existing PyTorch/dependencies.\n"
-            "# Prefer deploy.py install for explicit confirmation and before/after records.\n" +
-            "\n".join([*index_options,
-                       *(f"{name}=={version}" for name, version in profile["packages"].items())]) + "\n",
-            encoding="utf-8")
+        shutil.copyfile(DEPLOYMENT_GUIDE, out / DEPLOYMENT_GUIDE.name)
+        shutil.copyfile(BUILD_GUIDE, out / BUILD_GUIDE.name)
     (out / "requirements.txt").write_text("httpx>=0.28.1,<0.29\njsonschema>=4.23,<5\n", encoding="utf-8")
     (out / ".gitignore").write_text("/server_config.json\n/results/\n/.venv/\n/.client-env/\n/__pycache__/\n", encoding="utf-8")
     common.save_json(out / "server_config.json", {
@@ -93,13 +89,13 @@ def package(out, source=SOURCE, *, include_deployment=False):
                         "no_online_detection_rendering_navigation_timing"]}
     if include_deployment:
         result["deployment"] = {
-            "base_image": profile["base_image"], "installation_mode": profile["installation_mode"],
-            "runtime_packages": profile["packages"], "creates_virtual_environment": False,
-            "environment_will_be_modified_on_install": True,
-            "base_environment_modified_during_packaging": False,
-            "offline_wheelhouse_install_supported": True, "wheelhouse_included": False,
-            "remote_installation_or_gpu_inference_verified": False,
-            "installation_profile_sha256": sha(out / "installation_profile.json")}
+            "installation_mode": "native_conda_source",
+            "launch_entrypoint": "start_server.sh",
+            "constraints_file": "config/constraints-cu129.txt",
+            "environment_modified_during_packaging": False,
+            "service_started_during_packaging": False,
+            "model_weights_included": False,
+            "third_party_sources_or_wheels_included": False}
     common.save_json(out / "manifest.json", result)
     with zipfile.ZipFile(archive, "x", compression=zipfile.ZIP_DEFLATED) as z:
         for name in [*sorted(files), "manifest.json", "server_config.json"]:
@@ -114,7 +110,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--source", type=Path, default=SOURCE)
-    parser.add_argument("--with-deployment", action="store_true", help="Include AutoDL current-environment install/launch guide and tools")
+    parser.add_argument("--with-deployment", action="store_true", help="Include native Conda/source-build service materials and current guides")
     args = parser.parse_args()
     print(json.dumps(package(args.out, args.source, include_deployment=args.with_deployment), ensure_ascii=False, indent=2))
 

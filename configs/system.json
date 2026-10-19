@@ -3,15 +3,93 @@
   "runtime_status": "scaffold_not_integrated",
   "modules": {
     "perception": {
-      "detection_training": {"path": "perception/detection_tracking/training", "status": "source_available", "entry": "python -m perception.detection_tracking.training --check"},
+      "detection_training": {"path": "perception/detection_tracking/training", "status": "source_available", "entry": "env DRY_RUN=1 bash perception/detection_tracking/training/simpledet3d/train_wheelchair_3stage.sh"},
+      "people_annotation": {"path": "perception/detection_tracking/annotation", "status": "offline_ready", "entry": "bash perception/scripts/annotate_people.sh --help", "documentation": "docs/perception/检测训练.md#rosbag人工中心复核与增量训练", "remote": {"service_entry": "bash perception/scripts/serve_annotations.sh --help", "client_entry": "python -B -m perception.detection_tracking.annotation open --help", "config": "configs/annotation_service.example.json", "verification_scope": "linux_http_qt_and_user_reported_windows_tailscale_annotation", "windows_verified": true, "tailscale_verified": true}},
       "detection_tracking": {"path": "perception/detection_tracking/inference", "status": "offline_ready", "entry": "python -m perception.detection_tracking.inference --scene outdoor1/start_003 --limit 3 --dry-run", "config": "perception/detection_tracking/configs/inference.json"},
-      "ros_transport": {"path": "perception/detection_tracking/ros", "status": "source_available", "runtime_verified": false},
-      "mapping": {"path": "perception/mapping", "status": "not_implemented"},
-      "localization": {"path": "perception/localization", "status": "not_implemented"},
-      "sensors": {"path": "perception/sensors", "status": "not_implemented"}
+      "ros_transport": {"path": "perception/detection_tracking/ros", "status": "offline_ready", "runtime_verified": true, "verification_scope": "bag_with_real_detector_and_localization", "visualization": "perception/visualization"},
+      "visualization": {"path": "perception/visualization", "config_dir": "perception/visualization/configs", "entry": "bash perception/scripts/view.sh --help", "status": "offline_ready", "hardware_verified": false},
+      "mapping_localization": {
+        "path": "perception/mapping_localization",
+        "status": "offline_ready",
+        "entry": "bash perception/scripts/run.sh --help",
+        "default_backends": {
+          "mapping": "roll_fast_lio",
+          "localization": "roll_fast_lio",
+          "odometry": "fast_lio"
+        },
+        "frontend_initialization": {
+          "backends": ["roll_fast_lio", "fast_lio"],
+          "config": "perception/mapping_localization/configs/fast_lio.yaml",
+          "strategy": "stationary_or_motion_alignment",
+          "verification_scope": "recorded_indoor_and_outdoor_bags",
+          "hardware_verified": false
+        },
+        "backends": {
+          "roll_fast_lio": {
+            "status": "offline_ready",
+            "initialization": ["rviz_selection", "explicit_pose", "known_map_start"],
+            "runtime_reinitialization": "rviz",
+            "verification_scope": "mapping_save_and_fresh_localization_replay"
+          },
+          "fast_lio": {
+            "status": "offline_ready",
+            "modes": [
+              "odometry"
+            ],
+            "inputs": [
+              "lidar",
+              "imu"
+            ],
+            "verification_scope": "full_indoor_and_outdoor_joint_bag_replay_and_existing_topic_lifecycle_failure_boundaries"
+          },
+          "pin_slam": {
+            "status": "offline_ready",
+            "verification_scope": "full_mapping_save_and_refined_fixed_map_replay_without_tracking_loss",
+            "modes": [
+              "mapping",
+              "localization"
+            ],
+            "inputs": [
+              "lidar"
+            ],
+            "initialization": "known_six_dof_pose"
+          }
+        },
+        "modes": [
+          "mapping",
+          "localization",
+          "odometry"
+        ],
+        "sources": [
+          "bag",
+          "live"
+        ],
+        "visualization": "optional_rviz_for_default_task_backends",
+        "result_viewer": {
+          "entry": "bash perception/scripts/view.sh --help",
+          "inputs": ["run_directory", "complete_map", "recorded_states", "comparison_trajectory"],
+          "operations": ["overview", "play", "pause", "seek", "rate"],
+          "read_only": true,
+          "isolated_master": true
+        },
+        "online_hardware_verified": false,
+        "localization_topic": "/localization/state",
+        "localization_message": "social_nav_localization/LocalizationState",
+        "verification_scope": "bag_mapping_fixed_map_localization_local_odometry_and_simulated_live_topics"
+      },
+      "sensors": {"path": "perception/sensors", "status": "source_available", "entry": "bash perception/scripts/start_sensors.sh --help", "drivers_built": true, "hardware_capture_verified": false}
     },
     "decision": {
-      "vlm": {"path": "decision/vlm", "status": "offline_ready", "config": "decision/vlm/configs/project.json", "entry": "python -m decision.vlm.benchmark_vlm --dry-run --limit 24"},
+      "vlm": {
+        "path": "decision/vlm", "status": "offline_ready", "config": "decision/vlm/configs/project.json",
+        "entry": "python -m decision.vlm.benchmark_vlm --dry-run --limit 3",
+        "annotation": {
+          "path": "decision/vlm/annotation", "status": "local_and_http_ready",
+          "entry": "python -m decision.vlm.annotation --help",
+          "verification_scope": "local_qt_real_bag_loopback_http_and_fault_tests",
+          "windows_verified": false, "t2_history_state_review": false
+        }
+      },
       "agent": {"path": "decision/agent", "status": "planned"}
     },
     "navigation": {
@@ -22,18 +100,17 @@
   },
   "interfaces": {"path": "interfaces/contracts.py", "status": "not_integrated"},
   "simpledet3d": {
-    "source_root": "/home/heyushen/code/SimpleDet3d",
+    "original_source_reference": "perception/detection_tracking/training/source_snapshot.json",
     "copied_root": "perception/detection_tracking/training/simpledet3d",
-    "snapshot_manifest": "perception/detection_tracking/training/source_snapshot.json",
     "data_info_root_reference": "data/datasets",
     "raw_coda_root_reference": "data/datasets/coda_raw",
     "raw_wheelchair_root_reference": "data/datasets/wheelchair_raw",
-    "checkpoint": "configured_in_ignored_detection_tracking.local.json",
-    "environment": "existing_detector_environment_NOT_vlm_python312",
+    "checkpoint": "configured_in_perception/detection_tracking/configs/inference.json",
+    "environment_reference": "ENVIRONMENT.local.md",
     "resources_bound": true,
-    "binding_kind": "directory_symlinks_only_NOT_training_readiness",
-    "cuda_extensions_built": false
+    "binding_kind": "dataset_and_model_resources_bound_NOT_full_training_acceptance",
+    "build_state_reference": "ENVIRONMENT.local.md"
   },
   "private_config_policy": "Existing configs/*.local.json stay in place and are never copied or read by status checks.",
-  "integration_policy": "No automatic training, service deployment, agent loop or robot motion. ROS nodes start only through an explicit manual command and require an external localization source."
+  "integration_policy": "No automatic training, service deployment, agent loop or robot motion. Perception tasks start through explicit manual commands; online tasks connect to existing sensors, and detection uses a selected localization backend."
 }

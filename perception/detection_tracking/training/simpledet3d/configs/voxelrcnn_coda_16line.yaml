@@ -5,8 +5,8 @@ DATA_CONFIG:
     DATA_PATH: 'data/coda_downsample'
     # 该配置仍要求此根目录下存在 3d_comp_downsample/os1。
     RAW_DATA_PATH: 'data/coda_raw'
-    # 总帧数：当前帧 + 最近 3 个历史帧（CODa OS1 为 10 Hz）
-    MAX_SWEEPS: 8
+    # 默认只加载当前帧，历史帧可显式启用。
+    MAX_SWEEPS: 1
     MAX_SWEEP_TIME_LAG: 0.75
     SWEEP_SELECT_MODE: near  # sweep 帧选取方式: random(随机) / near(就近取最近帧)
 
@@ -219,7 +219,7 @@ MODEL:
             NMS_POST_MAXSIZE: 500
 
 OPTIMIZATION:
-    BATCH_SIZE_PER_GPU: 16
+    BATCH_SIZE_PER_GPU: 8
     NUM_EPOCHS: 20
 
     OPTIMIZER: adam_onecycle

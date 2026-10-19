@@ -25,7 +25,7 @@ class PromptSchemaTests(unittest.TestCase):
         Draft202012Validator.check_schema(SCHEMA)
 
     def test_legacy_appendix_examples_remain_valid(self):
-        document = (ROOT / "docs/旧版_基于VLM的长程社交导航.md").read_text().split("## 附录 A：主接口与 Prompt 契约", 1)[1]
+        document = (ROOT / "docs/archive/旧版方案.md").read_text().split("## 附录 A：主接口与 Prompt 契约", 1)[1]
         examples = re.findall(r"```json\n(.*?)\n```", document, re.DOTALL)
         self.assertGreaterEqual(len(examples), 7)
         checker = Draft202012Validator(SCHEMA)
@@ -35,7 +35,7 @@ class PromptSchemaTests(unittest.TestCase):
 
     def test_current_document_response_examples(self):
         found = set()
-        names = ('当前整体方案.md', '纯公开数据可行性验证方案.md', 'JRDB数据与测试实现.md', '项目框架.md')
+        names = ('系统方案.md', 'experiments/数据与评测.md', 'experiments/JRDB参考.md', '开发指南.md')
         for name in names:
             document = (ROOT / 'docs' / name).read_text(encoding='utf-8')
             for example in re.findall(r'```json\n(.*?)\n```', document, re.DOTALL):

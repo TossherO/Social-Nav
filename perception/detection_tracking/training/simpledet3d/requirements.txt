@@ -1,5 +1,7 @@
-numpy
-torch>=1.10
+# Legacy broad dependency list; it does not select a compatible CUDA binary set.
+# For CUDA 13.0 use the repository-root requirements-cu130.txt and usage guide.
+numpy>=1.26,<2
+torch>=2.5
 spconv
 easydict
 pyyaml

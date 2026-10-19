@@ -1,0 +1,10 @@
+<launch>
+  <arg name="allow_serial_read" default="false"/>
+  <arg name="port" default="/dev/wheelchair_chassis"/>
+  <node pkg="wheelchair_sensors" type="chassis_feedback_node.py" name="chassis_feedback" output="screen" required="true">
+    <param name="allow_serial_read" value="$(arg allow_serial_read)"/>
+    <param name="port" value="$(arg port)"/>
+    <param name="baudrate" value="19200"/>
+    <param name="legacy_theta_in_z" value="true"/>
+  </node>
+</launch>

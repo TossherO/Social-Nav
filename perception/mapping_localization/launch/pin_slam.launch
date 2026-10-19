@@ -1,0 +1,19 @@
+<launch>
+  <arg name="project_root"/>
+  <arg name="python_executable"/>
+  <arg name="mode"/>
+  <arg name="map_dir"/>
+  <arg name="config" default="$(arg project_root)/perception/mapping_localization/configs/pin_slam.yaml"/>
+  <arg name="initial_pose" default="[0, 0, 0, 0, 0, 0]"/>
+  <arg name="input_source" default="live_lidar"/>
+  <arg name="use_sim_time" default="true"/>
+  <param name="use_sim_time" value="$(arg use_sim_time)"/>
+  <node pkg="social_nav_localization" type="pin_slam_node" name="pin_slam" output="screen" required="true" launch-prefix="$(arg python_executable)">
+    <env name="SOCIAL_NAV_ROOT" value="$(arg project_root)"/>
+    <param name="config" value="$(arg config)"/>
+    <param name="mode" value="$(arg mode)"/>
+    <param name="map_dir" value="$(arg map_dir)"/>
+    <param name="input_source" value="$(arg input_source)"/>
+    <rosparam param="initial_pose" subst_value="true">$(arg initial_pose)</rosparam>
+  </node>
+</launch>

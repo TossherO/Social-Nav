@@ -6,6 +6,7 @@ import torch
 import tqdm
 from collections import namedtuple
 from torch.nn.utils import clip_grad_norm_
+from simple_det3d.utils.common_utils import load_checkpoint
 
 from simple_det3d.utils.precision_utils import (
     autocast_context,
@@ -529,7 +530,7 @@ def load_best_metric_state(checkpoint_paths, expected_metric_name=None, logger=N
         seen_paths.add(checkpoint_path)
         existing_paths += 1
         try:
-            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+            checkpoint = load_checkpoint(checkpoint_path, map_location='cpu')
         except Exception as exc:
             if logger is not None:
                 logger.warning(

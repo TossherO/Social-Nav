@@ -1,0 +1,12 @@
+# Install in an independent CUDA-13 PyTorch environment, not the detector environment.
+# PyTorch comes from its official cu130 source; ordinary packages use a China mirror.
+numpy==1.26.4
+open3d==0.19.0
+# 4.2 has no cp312 wheel; use the API-compatible patch series, verify PGO at runtime.
+gtsam==4.2.2
+roma==1.5.0
+rich==12.5.1
+wandb==0.19.0
+pypose==0.6.8
+rospkg==1.5.1
+PyYAML>=6,<7

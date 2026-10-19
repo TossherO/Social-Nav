@@ -1,0 +1,31 @@
+<launch>
+  <arg name="serial"/>
+  <arg name="name" default="camera"/>
+  <arg name="fps" default="15"/>
+  <arg name="imu_method" default="copy"/>
+  <arg name="initial_reset" default="false"/>
+  <include file="$(find realsense2_camera)/launch/rs_camera.launch">
+    <arg name="serial_no" value="$(arg serial)"/>
+    <arg name="camera" value="$(arg name)"/>
+    <arg name="tf_prefix" value="$(arg name)"/>
+    <arg name="color_width" value="640"/>
+    <arg name="color_height" value="480"/>
+    <arg name="depth_width" value="640"/>
+    <arg name="depth_height" value="480"/>
+    <arg name="color_fps" value="$(arg fps)"/>
+    <arg name="depth_fps" value="$(arg fps)"/>
+    <arg name="enable_infra1" value="false"/>
+    <arg name="enable_infra2" value="false"/>
+    <arg name="enable_fisheye" value="false"/>
+    <arg name="enable_gyro" value="true"/>
+    <arg name="enable_accel" value="true"/>
+    <arg name="gyro_fps" value="200"/>
+    <arg name="accel_fps" value="63"/>
+    <arg name="unite_imu_method" value="$(arg imu_method)"/>
+    <arg name="align_depth" value="true"/>
+    <arg name="enable_sync" value="true"/>
+    <arg name="publish_tf" value="true"/>
+    <arg name="enable_pointcloud" value="false"/>
+    <arg name="initial_reset" value="$(arg initial_reset)"/>
+  </include>
+</launch>

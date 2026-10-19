@@ -1,0 +1,24 @@
+<launch>
+  <arg name="project_root" default="$(dirname)/../../../.."/>
+  <arg name="config" default="$(arg project_root)/perception/detection_tracking/configs/inference.json"/>
+  <arg name="local_config" default="$(arg project_root)/configs/detection_tracking.local.json"/>
+  <arg name="rviz" default="false"/>
+  <arg name="mode" default="people"/>
+  <arg name="sensor_only" default="false"/>
+  <arg name="sensor_frame" default="rslidar"/>
+  <arg name="pointcloud_topic" default=""/>
+  <arg name="localization_topic" default=""/>
+  <arg name="localization_source" default=""/>
+  <node pkg="social_nav_localization" type="scene_view" name="perception_scene" output="screen" required="true" launch-prefix="/usr/bin/python3">
+    <env name="SOCIAL_NAV_ROOT" value="$(arg project_root)"/>
+    <param name="config" value="$(arg config)"/>
+    <param name="local_config" value="$(arg local_config)"/>
+    <param name="mode" value="$(arg mode)"/>
+    <param name="rviz" value="$(arg rviz)"/>
+    <param name="sensor_only" value="$(arg sensor_only)"/>
+    <param name="sensor_frame" value="$(arg sensor_frame)"/>
+    <param name="pointcloud_topic" value="$(arg pointcloud_topic)"/>
+    <param name="localization_topic" value="$(arg localization_topic)"/>
+    <param name="localization_source" value="$(arg localization_source)"/>
+  </node>
+</launch>

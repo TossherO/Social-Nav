@@ -34,10 +34,8 @@ from simple_det3d.datasets.weak_label_utils import (  # noqa: E402
 
 
 DEFAULT_CFG = 'configs/voxelrcnn_wheelchair_weak_stage3.yaml'
-DEFAULT_CKPT = (
-    'output/voxelrcnn_wheelchair_weak_stage3/'
-    'wheelchair_exhaustive_center_10_12_5/'
-    'ckpt/best_model.pth'
+DEFAULT_CKPT = str(
+    PROJECT_ROOT.parents[3] / 'models/wheelchair_detector/checkpoints/detector_best.pth'
 )
 SELECTION_MODES = (
     'missed', 'matched', 'crowded', 'low_support',

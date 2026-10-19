@@ -1,19 +1,267 @@
-# Deployment profile for the supplied single-frame Stage 3 best checkpoint.
-# The inherited training recipe is NOT the runtime input-frame specification.
-_BASE_CONFIG_: ../training/simpledet3d/configs/voxelrcnn_wheelchair_weak_stage3.yaml
-CLASS_NAMES: ['Pedestrian']
+# Deployment profile for the supplied Stage 3 best checkpoint.
+# Model and point processing follow its logged single-frame training config.
+# Keep this independent of recipes for future training.
+# Candidate score 0.1 supports tracking; birth/confirmation remains 0.3.
+# The historical evaluation used final score 0.3 and NMS 0.2.
+CLASS_NAMES:
+- Pedestrian
 PRECISION: fp32
 DATA_CONFIG:
-    MAX_SWEEPS: 1
-    INTENSITY_NORMALIZATION: 255.0
-    ZERO_INTENSITY: false
-    INFO_PATH:
-        train: []
-        test: []
+  DATA_PATH: data/wheelchair_weak
+  MAX_SWEEPS: 1
+  POINT_CLOUD_RANGE:
+  - -4.8
+  - -9.6
+  - -1.5
+  - 14.4
+  - 9.6
+  - 4.5
+  POINT_FEATURE_ENCODING:
+    encoding_type: absolute_coordinates_encoding
+    used_feature_list:
+    - x
+    - y
+    - z
+    - intensity
+    - timestamp
+    src_feature_list:
+    - x
+    - y
+    - z
+    - intensity
+    - timestamp
+  DATA_PROCESSOR:
+  - NAME: mask_points_and_boxes_outside_range
+    REMOVE_OUTSIDE_BOXES: true
+  - NAME: shuffle_points
+    SHUFFLE_ENABLED:
+      train: true
+      test: false
+  - NAME: transform_points_to_voxels
+    SKIP_RUNTIME: true
+    VOXEL_SIZE:
+    - 0.05
+    - 0.05
+    - 0.2
+    MAX_POINTS_PER_VOXEL: 20
+    MAX_NUMBER_OF_VOXELS:
+      train: 60000
+      test: 80000
+  INTENSITY_NORMALIZATION: 255.0
+  ZERO_INTENSITY: false
+  INFO_PATH:
+    train: []
+    test: []
 MODEL:
+  NAME: VoxelRCNN
+  VFE:
+    NAME: DynamicVoxelVFE
+    WITH_DISTANCE: false
+    USE_ABSLOTE_XYZ: true
+    USE_NORM: true
+    NUM_FILTERS:
+    - 16
+    - 16
+    MAX_POINTS_PER_VOXEL: 20
+  BACKBONE_3D:
+    NAME: VoxelResBackBone8x
+  MAP_TO_BEV:
+    NAME: HeightCompression
+    NUM_BEV_FEATURES: 256
+  BACKBONE_2D:
+    NAME: BaseBEVBackbone
+    LAYER_NUMS:
+    - 5
+    - 5
+    LAYER_STRIDES:
+    - 1
+    - 2
+    NUM_FILTERS:
+    - 64
+    - 128
+    UPSAMPLE_STRIDES:
+    - 1
+    - 2
+    NUM_UPSAMPLE_FILTERS:
+    - 128
+    - 128
+  DENSE_HEAD:
+    NAME: CenterHead
+    CLASS_AGNOSTIC: false
+    CLASS_NAMES_EACH_HEAD:
+    - - Pedestrian
+    SHARED_CONV_CHANNEL: 128
+    USE_BIAS_BEFORE_NORM: true
+    NUM_HM_CONV: 2
+    SEPARATE_HEAD_CFG:
+      HEAD_ORDER:
+      - center
+      - center_z
+      - dim
+      - rot
+      HEAD_DICT:
+        center:
+          out_channels: 2
+          num_conv: 2
+        center_z:
+          out_channels: 1
+          num_conv: 2
+        dim:
+          out_channels: 3
+          num_conv: 2
+        rot:
+          out_channels: 2
+          num_conv: 2
+    TARGET_ASSIGNER_CONFIG:
+      FEATURE_MAP_STRIDE: 8
+      NUM_MAX_OBJS: 500
+      GAUSSIAN_OVERLAP: 0.1
+      MIN_RADIUS: 2
+    LOSS_CONFIG:
+      LOSS_WEIGHTS:
+        cls_weight: 1.0
+        loc_weight: 2.0
+        code_weights:
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
     POST_PROCESSING:
-        SCORE_THRESH: 0.1
-        NMS_CONFIG:
-            NMS_THRESH: 0.2
-# 0.1 retains support candidates. Birth/output confirmation uses 0.3; this is
-# an explicit tracking adaptation, NOT the original 0.3 evaluation profile.
+      SCORE_THRESH: 0.1
+      POST_CENTER_LIMIT_RANGE:
+      - -30.0
+      - -30.0
+      - -3.0
+      - 30.0
+      - 30.0
+      - 7.0
+      MAX_OBJ_PER_SAMPLE: 500
+      NMS_CONFIG:
+        NMS_TYPE: nms_gpu
+        NMS_THRESH: 0.7
+        NMS_PRE_MAXSIZE: 4096
+        NMS_POST_MAXSIZE: 500
+  ROI_HEAD:
+    NAME: VoxelRCNNHead
+    CLASS_AGNOSTIC: true
+    SHARED_FC:
+    - 256
+    - 256
+    CLS_FC:
+    - 256
+    - 256
+    REG_FC:
+    - 256
+    - 256
+    DP_RATIO: 0.3
+    NMS_CONFIG:
+      TRAIN:
+        NMS_TYPE: nms_gpu
+        MULTI_CLASSES_NMS: false
+        NMS_PRE_MAXSIZE: 9000
+        NMS_POST_MAXSIZE: 512
+        NMS_THRESH: 0.8
+      TEST:
+        NMS_TYPE: nms_gpu
+        MULTI_CLASSES_NMS: false
+        USE_FAST_NMS: true
+        SCORE_THRESH: 0.0
+        NMS_PRE_MAXSIZE: 2048
+        NMS_POST_MAXSIZE: 100
+        NMS_THRESH: 0.7
+    ROI_GRID_POOL:
+      FEATURES_SOURCE:
+      - x_conv3
+      - x_conv4
+      PRE_MLP: true
+      GRID_SIZE: 6
+      POOL_LAYERS:
+        x_conv3:
+          MLPS:
+          - - 32
+            - 32
+          - - 32
+            - 32
+          QUERY_RANGES:
+          - - 2
+            - 2
+            - 2
+          - - 4
+            - 4
+            - 4
+          POOL_RADIUS:
+          - 0.4
+          - 0.8
+          NSAMPLE:
+          - 16
+          - 16
+          POOL_METHOD: max_pool
+        x_conv4:
+          MLPS:
+          - - 32
+            - 32
+          - - 32
+            - 32
+          QUERY_RANGES:
+          - - 2
+            - 2
+            - 2
+          - - 4
+            - 4
+            - 4
+          POOL_RADIUS:
+          - 0.8
+          - 1.6
+          NSAMPLE:
+          - 16
+          - 16
+          POOL_METHOD: max_pool
+    TARGET_CONFIG:
+      BOX_CODER: ResidualCoder
+      ROI_PER_IMAGE: 128
+      FG_RATIO: 0.5
+      SAMPLE_ROI_BY_EACH_CLASS: true
+      CLS_SCORE_TYPE: roi_iou
+      CLS_FG_THRESH: 0.75
+      CLS_BG_THRESH: 0.25
+      CLS_BG_THRESH_LO: 0.1
+      HARD_BG_RATIO: 0.8
+      REG_FG_THRESH: 0.55
+      CENTER_POS_DISTANCE: 0.5
+      CENTER_NEG_DISTANCE: 1.0
+    LOSS_CONFIG:
+      CLS_LOSS: BinaryCrossEntropy
+      REG_LOSS: smooth-l1
+      CORNER_LOSS_REGULARIZATION: true
+      GRID_3D_IOU_LOSS: false
+      LOSS_WEIGHTS:
+        rcnn_cls_weight: 1.0
+        rcnn_reg_weight: 1.0
+        rcnn_corner_weight: 1.0
+        rcnn_iou3d_weight: 1.0
+        code_weights:
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
+  POST_PROCESSING:
+    RECALL_THRESH_LIST:
+    - 0.3
+    - 0.5
+    - 0.7
+    SCORE_THRESH: 0.1
+    OUTPUT_RAW_SCORE: false
+    EVAL_METRIC: kitti
+    NMS_CONFIG:
+      MULTI_CLASSES_NMS: false
+      NMS_TYPE: nms_gpu
+      NMS_THRESH: 0.2
+      NMS_PRE_MAXSIZE: 4096
+      NMS_POST_MAXSIZE: 500

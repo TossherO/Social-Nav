@@ -1,7 +1,7 @@
 {
   "detector": {
     "config": "perception/detection_tracking/configs/detector.yaml",
-    "checkpoint": null,
+    "checkpoint": "models/wheelchair_detector/checkpoints/detector_best.pth",
     "extension_root": null,
     "precision": "fp32"
   },
@@ -21,17 +21,24 @@
     "acceleration_noise_mps2": 2.0,
     "position_noise_m": 0.15
   },
+  "visualization": {
+    "history_s": 3.0,
+    "max_history_points": 32,
+    "stale_s": 0.5
+  },
   "dataset": {
     "root": "data/datasets/wheelchair_raw",
     "nominal_rate_hz": 10.0
   },
   "ros": {
-    "pointcloud_topic": "/points_raw",
-    "rgb_topic": "/camera/image_raw",
+    "pointcloud_topic": "/rslidar_points",
+    "rgb_topic": "/camera/color/image_raw",
     "raw_odometry_topic": "/odom",
-    "localization_topic": null,
-    "localization_message": "odometry",
-    "localization_child_frame": "lidar",
+    "localization_topic": "/localization/state",
+    "localization_message": "state",
+    "localization_source": "roll_fast_lio",
+    "localization_wait_s": 0.25,
+    "localization_child_frame": "rslidar",
     "localization_parent_frame": "odom",
     "localization_child_from_lidar": null,
     "max_pose_age_s": 0.05,

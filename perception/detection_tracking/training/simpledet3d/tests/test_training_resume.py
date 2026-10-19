@@ -1,10 +1,13 @@
 import tempfile
+import pickle
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 import torch
+import numpy as np
+from simple_det3d.utils.common_utils import load_checkpoint
 
 from simple_det3d.train.train_utils import (
     checkpoint_state,
@@ -17,6 +20,23 @@ METRIC_NAME = 'CenterHit@0.50m'
 
 
 class TrainingResumeTest(unittest.TestCase):
+    def test_restricted_checkpoint_accepts_legacy_numpy_float_scalars(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / 'legacy.pth'
+            torch.save({'lr': np.float64(0.0003), 'score': np.float32(0.75),
+                        'model_state': {'weight': torch.ones(2)}}, path)
+            loaded = load_checkpoint(path, map_location='cpu')
+        self.assertEqual(float(loaded['lr']), 0.0003)
+        self.assertEqual(float(loaded['score']), 0.75)
+        torch.testing.assert_close(loaded['model_state']['weight'], torch.ones(2))
+
+    def test_restricted_checkpoint_still_rejects_unlisted_objects(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / 'unlisted.pth'
+            torch.save({'unlisted': Path('asset')}, path)
+            with self.assertRaises(pickle.UnpicklingError):
+                load_checkpoint(path, map_location='cpu')
+
     def test_checkpoint_records_best_model_selection_state(self):
         state = checkpoint_state(
             model=torch.nn.Linear(2, 1),

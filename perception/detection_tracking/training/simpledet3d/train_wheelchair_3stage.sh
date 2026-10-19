@@ -13,14 +13,14 @@ usage() {
   DRY_RUN=1 ./train_wheelchair_3stage.sh
 
 常用环境变量:
-  CUDA_VISIBLE_DEVICES  默认 0,1,2,3,4,5,6,7
-  NPROC_PER_NODE        默认 8
-  BATCH_SIZE            默认 16（每张 GPU）
+  CUDA_VISIBLE_DEVICES  默认 0,1
+  NPROC_PER_NODE        默认 2
+  BATCH_SIZE            默认 8（每张 GPU）
   WORKERS               默认 2（每个训练进程）
   PRECISION             默认 fp32，可选 fp32/fp16/bf16
-  MAX_SWEEPS            默认留空并使用 YAML 配置；设为 1 时仅使用当前帧
-  RUN_TAG               默认 wheelchair_exhaustive_center
-  CODA_CKPT             阶段 1 的 CODA-16line 初始化权重
+  MAX_SWEEPS            默认 1，仅使用当前帧；可显式覆盖用于多帧实验
+  RUN_TAG               默认 wheelchair_exhaustive_center_single_frame
+  CODA_CKPT             默认项目 models 中的 CODA-16line 单帧初始化权重
   STAGE{1,2,3}_EPOCHS   默认 10/10/5
   STAGE{1,2,3}_EVAL_INTERVAL 默认 0/1/1
   CKPT_SAVE_INTERVAL    默认 1，必须整除三个阶段的 epoch 数
@@ -46,13 +46,13 @@ export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
 
 # 所有参数均可在命令前通过同名环境变量覆盖。
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
-NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
 PRECISION="${PRECISION:-fp32}"
-MAX_SWEEPS="${MAX_SWEEPS:-}"
+MAX_SWEEPS="${MAX_SWEEPS:-1}"
 WORKERS="${WORKERS:-2}"
-BATCH_SIZE="${BATCH_SIZE:-16}"
-RUN_TAG="${RUN_TAG:-wheelchair_exhaustive_center}"
+BATCH_SIZE="${BATCH_SIZE:-8}"
+RUN_TAG="${RUN_TAG:-wheelchair_exhaustive_center_single_frame}"
 
 STAGE1_EPOCHS="${STAGE1_EPOCHS:-10}"
 STAGE2_EPOCHS="${STAGE2_EPOCHS:-10}"
@@ -69,7 +69,7 @@ LOG_GPU_MEMORY="${LOG_GPU_MEMORY:-0}"
 SKIP_COMPLETED="${SKIP_COMPLETED:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 
-CODA_CKPT="${CODA_CKPT:-output/voxelrcnn_coda_16line/finetune_4frame_from_4frame/ckpt/checkpoint_epoch_20.pth}"
+CODA_CKPT="${CODA_CKPT:-../../../../models/wheelchair_detector/checkpoints/coda_initialization.pth}"
 if [[ "${CODA_CKPT}" != /* ]]; then
     CODA_CKPT="${PROJECT_DIR}/${CODA_CKPT}"
 fi
@@ -261,7 +261,7 @@ if (( ${#VISIBLE_GPU_IDS[@]} < NPROC_PER_NODE )); then
     exit 1
 fi
 
-require_file "${CODA_CKPT}" "CODA-16line 四帧预训练 checkpoint"
+require_file "${CODA_CKPT}" "与输入帧数匹配的 CODA-16line 初始化 checkpoint"
 require_file "${PROJECT_DIR}/${STAGE1_CFG}" "阶段 1 配置"
 require_file "${PROJECT_DIR}/${STAGE2_CFG}" "阶段 2 配置"
 require_file "${PROJECT_DIR}/${STAGE3_CFG}" "阶段 3 配置"

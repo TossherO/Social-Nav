@@ -1,1 +1,1 @@
-"""Independent SimpleDet3d source snapshot, not an online detector service."""
+"""SimpleDet3d training source; commands live in simpledet3d/."""

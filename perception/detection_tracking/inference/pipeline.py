@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import math
 import time
 import uuid
@@ -11,6 +10,7 @@ import numpy as np
 
 from .geometry import transform_boxes, validate_boxes, validate_transform
 from .tracker import SimpleTrack
+from perception.sensors.pointcloud import input_fingerprint
 
 
 @dataclass
@@ -31,11 +31,8 @@ class Frame:
     rgb_stamp_s: float | None = None
 
     def input_fingerprint(self):
-        points = np.ascontiguousarray(self.points, dtype='<f4')
-        digest = hashlib.sha256()
-        digest.update(f'{self.sequence_id}\n{self.observation_id}\n{self.stamp_s:.17g}\n{self.sensor_frame}\n{points.shape}\n'.encode())
-        digest.update(points.tobytes())
-        return digest.hexdigest()
+        return input_fingerprint(self.points, self.sequence_id, self.observation_id,
+                                 self.stamp_s, self.sensor_frame)
 
 
 class PerceptionPipeline:
@@ -74,7 +71,7 @@ class PerceptionPipeline:
         boxes = validate_boxes(self.detector.predict(frame))
         detector_done = time.perf_counter()
         localized = (frame.world_from_lidar is not None and frame.pose_health == 'valid'
-                     and frame.pose_source in ('dataset_pose', 'localization'))
+                     and frame.pose_source in ('dataset_pose', 'localization', 'stationary_assumption'))
         reason = None
         transform = validate_transform(frame.world_from_lidar) if localized else None
         if localized and frame.pose_stamp_s is not None:

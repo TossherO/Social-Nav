@@ -1,0 +1,47 @@
+use_sim_time: true
+feature_extract_enable: false
+point_filter_num: 4
+max_iteration: 3
+filter_size_surf: 0.4
+filter_size_map: 0.4
+cube_side_length: 600
+debugMode: false
+need_map_erected: false # make sure it is false for nclt loc test
+common:
+    # lid_topic:  "/points_raw"
+    lid_topic:  "/velodyne_points"
+    imu_topic:  "/imu_6"
+    # lid_topic:  "/points_raw"
+    # imu_topic:  "/imu_raw"
+    time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
+    
+preprocess:
+    lidar_type: 2                # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR, 
+    scan_line: 32
+    blind: 1 
+
+mapping:
+    acc_cov: 0.01608843085721201
+    gyr_cov: 0.0017892995284273933
+    b_acc_cov: 0.00035756256498712546
+    b_gyr_cov: 1.5882455476866487e-05
+    fov_degree:    180
+    det_range:     100.0
+    extrinsic_est_en:  false      # true: enable the online estimation of IMU-LiDAR extrinsic
+    # Lidar_T_wrt_IMU OR T that transforms lidar coor. to imu coor.
+    # both work???
+    # extrinsic_T: [ 0.17664, -0.10634, 0.24904]
+    # extrinsic_R: [ -0.012269, -0.99992, -0.0028972, 0.99983, -0.012309, 0.014084, -0.014119, -0.0027239, 0.9999]
+    extrinsic_R: [-0.012269, 0.99983, -0.014119, -0.99992, -0.012309, -0.0027239, -0.0028972, 0.014084, 0.9999]
+    extrinsic_T: [0.112, 0.176, -0.247]
+    runtime_pos_log_enable: true
+publish:
+    map_pub: false # too large
+    path_en:  true
+    scan_publish_en:  true       # false: close all the point cloud output
+    dense_publish_en: false       # false: low down the points number in a global-frame point clouds scan.
+    scan_bodyframe_pub_en: true  # true: output the point cloud scans in IMU-body-frame
+pcd_save:
+    pcd_save_en: false
+    interval: -1                 # how many LiDAR frames saved in each pcd file; 
+                                 # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.

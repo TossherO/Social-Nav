@@ -11,6 +11,19 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 
+def load_checkpoint(filename, map_location=None):
+    """Restricted checkpoint loading with legacy NumPy float metrics."""
+    # Older training checkpoints store LR/metrics as NumPy scalars. Permit
+    # only these known scalar constructors; keep arbitrary pickle code blocked.
+    with torch.serialization.safe_globals([
+        np.core.multiarray.scalar,
+        np.dtype,
+        type(np.dtype(np.float32)),
+        type(np.dtype(np.float64)),
+    ]):
+        return torch.load(filename, map_location=map_location, weights_only=True)
+
+
 def check_numpy_to_torch(x):
     if isinstance(x, np.ndarray):
         return torch.from_numpy(x).float(), True

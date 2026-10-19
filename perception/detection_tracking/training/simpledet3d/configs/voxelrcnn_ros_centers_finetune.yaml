@@ -1,0 +1,18 @@
+_BASE_CONFIG_: voxelrcnn_wheelchair_weak_stage3.yaml
+
+# Incremental center-only training from the deployed checkpoint (--pretrained_model).
+# Alias must point to a NEW reviewed export containing independent train/val groups.
+DATA_CONFIG:
+    DATA_PATH: data/wheelchair_ros_centers
+    RAW_DATA_PATH: data/wheelchair_ros_centers
+    INFO_PATH:
+        train: [rosbag_centers_train.pkl]
+        test: [rosbag_centers_val.pkl]
+    DATA_AUGMENTOR:
+        # ROI completeness is not valid outside its original rectangle. Only
+        # keep the inherited Y mirror (ALONG_AXIS_LIST: [x]), which preserves it.
+        DISABLE_AUG_LIST: [random_world_rotation, random_world_scaling, random_world_translation]
+
+OPTIMIZATION:
+    NUM_EPOCHS: 3
+    LR: 0.00005

@@ -1,0 +1,61 @@
+<launch>
+  <arg name="mode" default="mapping"/>
+  <arg name="map_dir" default=""/>
+  <arg name="run_dir"/>
+  <arg name="initial_pose" default="[0,0,0,0,0,0]"/>
+  <arg name="use_sim_time" default="false"/>
+  <arg name="rviz" default="false"/>
+  <arg name="visualize" default="$(arg rviz)"/>
+  <arg name="keep_details" default="false"/>
+  <arg name="loop_closure" default="true"/>
+  <arg name="start_frontend" default="true"/>
+  <arg name="wait_for_initial_pose" default="false"/>
+  <arg name="assume_stationary" default="false"/>
+  <arg name="lidar_imu_calibration" default="$(dirname)/../../sensors/calibration/lidar_imu.yaml"/>
+  <arg name="rviz_config" default="$(eval 'odometry.rviz' if arg('mode') == 'odometry' else 'roll.rviz')"/>
+  <rosparam command="load" file="$(dirname)/../configs/fast_lio.yaml"/>
+  <rosparam command="load" file="$(dirname)/../configs/roll.yaml"/>
+  <rosparam command="load" file="$(dirname)/../configs/$(arg mode).yaml"/>
+  <rosparam command="load" file="$(arg lidar_imu_calibration)"/>
+  <param name="stationary_imu/enabled" value="false"/>
+  <group if="$(arg assume_stationary)">
+    <rosparam command="load" file="$(dirname)/../configs/stationary_imu.yaml"/>
+    <node pkg="social_nav_localization" type="stationary_imu_node" name="stationary_imu_input" output="screen" required="true" launch-prefix="/usr/bin/python3">
+      <env name="SOCIAL_NAV_ROOT" value="$(dirname)/../../.."/>
+    </node>
+  </group>
+  <param name="use_sim_time" value="$(arg use_sim_time)"/>
+  <param name="roll/localizationMode" value="$(eval arg('mode') == 'localization')"/>
+  <param name="roll/waitForInitialPose" value="$(arg wait_for_initial_pose)"/>
+  <param name="roll/saveKeyframeMap" value="$(eval arg('mode') == 'mapping')"/>
+  <param name="roll/savePCD" value="$(eval arg('mode') == 'mapping')"/>
+  <param name="roll/saveKeyframeMapDirectory" value="$(arg map_dir)/keyframes"/>
+  <param name="roll/log_dir" value="$(arg run_dir)"/>
+  <param name="roll/writeDetails" value="$(arg keep_details)"/>
+  <param name="odometry/writeDetails" value="$(arg keep_details)"/>
+  <param name="log_dir" value="$(arg run_dir)"/>
+  <rosparam param="roll/initialGuess" subst_value="true">$(arg initial_pose)</rosparam>
+  <group if="$(eval arg('mode') == 'localization')">
+    <param name="roll/loopClosureEnableFlag" value="false"/>
+  </group>
+  <group if="$(eval arg('mode') == 'mapping')">
+    <param name="roll/loopClosureEnableFlag" value="$(arg loop_closure)"/>
+  </group>
+  <group if="$(eval arg('mode') == 'odometry')">
+    <param name="publish/scan_publish_en" value="$(arg visualize)"/>
+    <param name="odometry/visualize" value="$(arg visualize)"/>
+  </group>
+  <include if="$(arg start_frontend)" file="$(dirname)/frontend.launch">
+    <arg name="with_roll" value="$(eval arg('mode') != 'odometry')"/>
+  </include>
+  <group unless="$(eval arg('mode') == 'odometry')">
+    <node pkg="roll" type="roll_mapOptmization" name="roll_mapOptmization" output="screen" required="true"/>
+  </group>
+  <group if="$(arg rviz)">
+    <include file="$(dirname)/../../detection_tracking/ros/launch/visualization.launch">
+      <arg name="mode" value="localization"/>
+      <arg name="localization_source" value="$(eval ('fast_lio' if arg('mode') == 'odometry' else 'roll_fast_lio') + ('_stationary_assumption' if arg('assume_stationary') else ''))"/>
+    </include>
+    <node pkg="rviz" type="rviz" name="localization_rviz" args="-d $(dirname)/../../visualization/configs/$(arg rviz_config)"/>
+  </group>
+</launch>

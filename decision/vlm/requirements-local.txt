@@ -1,0 +1,13 @@
+# Install torch separately from the official cu130 index, then this file from a Chinese mirror.
+torch==2.13.0+cu130
+torchvision==0.28.0+cu130
+cuda-bindings==13.0.3
+nvidia-nvjitlink==13.0.88
+transformers==5.12.1
+tokenizers==0.22.2
+safetensors==0.8.0
+accelerate==1.15.0
+xgrammar==0.2.1
+Pillow==12.3.0
+numpy==1.26.4
+jsonschema==4.26.0

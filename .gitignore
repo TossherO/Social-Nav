@@ -1,5 +1,6 @@
-# Local datasets/results are retained on disk, not source code.
+# Local datasets/models/results are retained on disk, not source code.
 /data/
+/models/
 /outputs/
 __pycache__/
 *.py[cod]
@@ -8,13 +9,30 @@ __pycache__/
 .ruff_cache/
 *.partial.mp4
 
-# Local API credentials; never commit this file.
-/configs/qianwen_api.local.json
-/configs/*.local.json
+# Local Python environments.
+.venv/
+venv/
+
+# Local credentials and configuration; keep reusable examples tracked.
 **/*.local.json
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+/.aws/
 
 # Machine-specific environment notes; keep credentials out of this document.
 /ENVIRONMENT.local.md
+/docs/archive/*.local.md
+
+# Operating system and editor temporary files.
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
 
 # The copied detector retains source, never training resources/build artifacts.
 /perception/detection_tracking/training/simpledet3d/data

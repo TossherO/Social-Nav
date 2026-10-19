@@ -1,0 +1,21 @@
+# Fixed-map operation is read-only; no loop search, extension or save.
+odometry:
+  publish_state: false
+publish:
+  scan_publish_en: false
+  scan_bodyframe_pub_en: false
+  lidar_scan_en: true
+roll:
+  # 16-beam scans in the legacy maps have useful height constraints below 100.
+  # Retain them; still project out genuinely weak directions below this bound.
+  degeneracyEigenThreshold: 10.0
+  loopClosureEnableFlag: false
+  mapUpdateEnabled: false
+  temporaryMappingEnabled: false
+  surroundingKeyframeSearchRadius: 40.0
+  # Fixed-map geometry and indices remain useful across small pose changes.
+  # Only localization reuses the submap; mapping still follows new/optimized keyframes.
+  localizationSubmapUpdateDistance: 2.0
+  localizationAsyncSubmap: true
+  keyframeCacheMaxEntries: 1024
+  keyframeCacheMaxBytes: 268435456

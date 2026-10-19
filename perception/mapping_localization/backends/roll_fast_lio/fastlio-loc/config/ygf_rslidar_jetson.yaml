@@ -1,0 +1,53 @@
+use_sim_time: false
+feature_extract_enable: false
+point_filter_num: 3
+max_iteration: 3
+filter_size_surf: 0.4
+filter_size_map: 0.2
+cube_side_length: 600
+debugMode: false
+need_map_erected: true
+initialize_with_gt: false
+
+common:
+    lid_topic:  "/rslidar_points" # "/rslidar_points"
+    imu_topic:   "/camera/imu" #"/camera/imu"  #
+    # lid_topic:  "rslidar_new" # "/rslidar_points"
+    # imu_topic:   "/IMU_new" #"/camera/imu"  #
+    time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
+    
+preprocess:
+    # sth wrong with 5
+    lidar_type: 4                # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR, 4 for rslidar16, 5 for rslidar16p 
+    scan_line: 16
+    blind: 1.0
+
+mapping:
+    acc_cov: 0.1
+    gyr_cov: 0.1
+    b_acc_cov: 0.01
+    b_gyr_cov: 0.01
+    fov_degree:    180
+    det_range:     100.0
+    
+    extrinsic_est_en:  false      # true: enable the online estimation of IMU-LiDAR extrinsic
+    ## autoware
+    extrinsic_T: [0.019199, -0.1507, -0.085324]
+    extrinsic_R: [0.029859, -0.99764, -0.061885, -0.13204, 0.057433, -0.98958, 0.99079, 0.037719, -0.13002]
+    
+    # # lidar-imu-init
+    # extrinsic_R: [0.12096, -0.99264, -0.006311, -0.14567, -0.011461, -0.98927, 0.98191, 0.12058, -0.14598]
+    # extrinsic_T: [0.12118, -0.054721, -0.22075]
+    visualize_voxel_size: 0.4
+    load_pcd: false
+publish:
+    map_pub: true
+    path_en:  true
+    scan_publish_en:  true       # false: close all the point cloud output
+    dense_publish_en: true       # false: low down the points number in a global-frame point clouds scan.
+    scan_bodyframe_pub_en: true  # true: output the point cloud scans in IMU-body-frame
+
+pcd_save:
+    pcd_save_en: true
+    interval: -1                 # how many LiDAR frames saved in each pcd file; 
+                                 # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.

@@ -207,6 +207,18 @@ def distribution(values):
             "p95": values[math.ceil(.95 * len(values)) - 1], "max": values[-1]}
 
 
+def canonical_rel(raw):
+    """Comparison view only; keep the original response and ordered q/p roles."""
+    groups_out = []
+    for members, relation, ordered in groups(raw):
+        members = sorted(members) if not ordered else list(members)
+        if ordered and relation == "p":
+            members[2:] = sorted(members[2:])
+        groups_out.append({"m": members, "r": relation, "k": ordered})
+    groups_out.sort(key=lambda g: min(g["m"]))
+    return {"g": groups_out, "u": sorted(raw["u"])}
+
+
 def summary(records, planned, phase_wall, settings):
     submitted = [r for r in records if r["submitted"]]
     valid = [r for r in submitted if r["valid"]]

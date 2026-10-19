@@ -5,7 +5,7 @@ DATA_CONFIG:
     DATA_PATH: 'data/wheelchair'
     RAW_DATA_PATH: 'data/wheelchair_raw'
     # 总帧数：当前帧 + 最近 3 个历史帧（生成脚本按 10 Hz 估算）
-    MAX_SWEEPS: 4
+    MAX_SWEEPS: 1
     MAX_SWEEP_TIME_LAG: 0.35
     SWEEP_SELECT_MODE: near  # sweep 帧选取方式: random(随机) / near(就近取最近帧)
 

@@ -1,8 +1,7 @@
-"""Three-domain scaffold regressions; synthetic assets, no GPU or network."""
+"""System registration and cross-module behavior; synthetic assets, no GPU or network."""
 import contextlib
 from dataclasses import fields
 import hashlib
-import importlib
 import io
 import json
 import os
@@ -18,7 +17,7 @@ from decision.vlm import package_vlm_test as pack
 from decision.vlm.jrdb_t1_inputs import rel_schema
 from decision.vlm.project_config import ROOT, VLM_ROOT
 from interfaces import contracts
-from perception.detection_tracking.training import workspace
+from perception.mapping_localization.__main__ import finalize_artifacts
 from scripts import system_status
 
 
@@ -31,7 +30,8 @@ class SystemLayoutTests(unittest.TestCase):
         self.assertEqual({c['component'].split('.')[0] for c in report['components']},
                          {'perception', 'decision', 'navigation'})
         self.assertNotIn('perception.detection_tracking', report['pending_components'])
-        self.assertIn('perception.localization', report['pending_components'])
+        self.assertIn('perception.mapping_localization', {c['component'] for c in report['components']})
+        self.assertNotIn('perception.mapping_localization', report['pending_components'])
         self.assertIn('decision.agent', report['pending_components'])
         self.assertIn('navigation.safety', report['pending_components'])
 
@@ -75,7 +75,7 @@ class SystemLayoutTests(unittest.TestCase):
 
     def test_scaffold_packages_import_without_gpu_or_runtime(self):
         modules = ['perception', 'perception.detection_tracking.training', 'perception.detection_tracking.inference',
-                   'perception.detection_tracking.ros', 'perception.mapping', 'perception.localization',
+                   'perception.detection_tracking.ros', 'perception.mapping_localization',
                    'perception.sensors', 'decision', 'decision.agent', 'navigation',
                    'navigation.planning', 'navigation.control', 'navigation.safety', 'interfaces.contracts']
         code = ('import importlib, sys\n'
@@ -94,101 +94,30 @@ class SystemLayoutTests(unittest.TestCase):
         self.assertEqual(api.arguments(['--dry-run']).config, ROOT / 'configs/vlm_server.local.json')
         self.assertTrue((VLM_ROOT / 'configs/prompts/jrdb_t1_rel.txt').is_file())
 
-    def test_legacy_cli_wrappers_delegate_to_same_implementation(self):
-        names = ['benchmark_vlm', 'project_config', 'jrdb_visualize', 'jrdb_t1',
-                 'visualize_jrdb_t1_gt', 'visualize_jrdb_group_relations',
-                 'public_data_pilot', 'package_vlm_test']
-        for name in names:
-            with self.subTest(name=name):
-                wrapper = importlib.import_module('scripts.' + name)
-                implementation = importlib.import_module('decision.vlm.' + name)
-                self.assertIs(wrapper.main, implementation.main)
-                self.assertLess(len((ROOT / 'scripts' / (name + '.py')).read_text().splitlines()), 20)
-
-    def test_detector_snapshot_manifest_records_historical_source_only(self):
-        # The live training workspace may legitimately contain edits, data or
-        # compiled extensions. Historical equality is an explicit --check audit.
-        manifest = json.loads(workspace.MANIFEST_PATH.read_text())
-        self.assertNotIn('snapshot_version', manifest)
-        self.assertEqual(len(manifest['files']), 122)
-        self.assertEqual(sum(record['bytes'] for record in manifest['files'].values()), manifest['total_bytes'])
-        for name, record in manifest['files'].items():
-            with self.subTest(path=name):
-                self.assertFalse(Path(name).is_absolute() or '..' in Path(name).parts)
-                self.assertFalse({'data', 'output', 'build', '.git'} & set(Path(name).parts))
-                self.assertNotIn(Path(name).suffix, {'.so', '.pth'})
-                self.assertRegex(record['sha256'], r'^[0-9a-f]{64}$')
-
-    def snapshot_fixture(self, root):
-        root = Path(root)
-        (root / 'simpledet3d').mkdir()
-        source = root / 'simpledet3d/train.py'
-        source.write_text('print("fixture")\n')
-        manifest = {'files': {
-            'train.py': {'sha256': hashlib.sha256(source.read_bytes()).hexdigest()}}}
-        path = root / 'source_snapshot.json'
-        path.write_text(json.dumps(manifest))
-        return source, manifest, path
-
-    def test_snapshot_checker_detects_modified_file(self):
-        with tempfile.TemporaryDirectory() as folder:
-            source, _, _ = self.snapshot_fixture(folder)
-            source.write_text('changed')
-            report = workspace.inspect_snapshot(folder)
-        self.assertFalse(report['snapshot_matches'])
-        self.assertEqual(report['changed'], ['train.py'])
-
-    def test_snapshot_audit_allows_untracked_training_resources(self):
-        with tempfile.TemporaryDirectory() as folder:
-            self.snapshot_fixture(folder)
-            copied = Path(folder) / 'simpledet3d'
-            for name in ('data', 'output', 'build'):
-                (copied / name).mkdir()
-            (copied / 'build/extension.so').write_bytes(b'SYNTHETIC_NOT_LOADED')
-            (copied / 'output/checkpoint.pth').write_bytes(b'SYNTHETIC_NOT_LOADED')
-            report = workspace.inspect_snapshot(folder)
-        self.assertTrue(report['snapshot_matches'])
-        self.assertTrue(report['data_binding_present'])
-        for key in ('training_executed', 'training_readiness_verified', 'online_inference_checked',
-                    'cuda_environment_checked'):
-            self.assertFalse(report[key])
-
-    def test_snapshot_checker_detects_missing_file(self):
-        with tempfile.TemporaryDirectory() as folder:
-            source, _, _ = self.snapshot_fixture(folder)
-            source.unlink()
-            report = workspace.inspect_snapshot(folder)
-        self.assertFalse(report['snapshot_matches'])
-        self.assertEqual(report['missing'], ['train.py'])
-
-    def test_snapshot_checker_rejects_path_escape(self):
-        with tempfile.TemporaryDirectory() as folder:
-            _, manifest, path = self.snapshot_fixture(folder)
-            manifest['files']['../outside.py'] = {'sha256': '0' * 64}
-            path.write_text(json.dumps(manifest))
-            with self.assertRaisesRegex(ValueError, 'escapes'):
-                workspace.inspect_snapshot(folder)
-
-    def test_detector_entry_only_prints_explicit_dry_run_command(self):
-        with patch('subprocess.Popen') as process, contextlib.redirect_stdout(io.StringIO()) as output:
-            result = workspace.main(['--print-command', '--checkpoint', '/tmp/not_loaded.pth',
-                                     '--conda-env', 'detector_env', '--run-tag', 'new_run'])
-        process.assert_not_called()
-        self.assertEqual(result, 0)
-        self.assertIn('DRY_RUN=1', output.getvalue())
-        self.assertIn('RUN_TAG=new_run', output.getvalue())
-        self.assertIn('detector_env', output.getvalue())
-
-    def test_detector_command_requires_explicit_checkpoint(self):
-        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
-            workspace.main(['--print-command'])
-        self.assertEqual(error.exception.code, 2)
-
-    def test_detector_command_rejects_invalid_run_tag_or_environment(self):
-        with self.assertRaises(ValueError):
-            workspace.dry_run_command('/tmp/not_loaded.pth', run_tag='../old_output')
-        with self.assertRaises(ValueError):
-            workspace.dry_run_command('/tmp/not_loaded.pth', conda_env='env;run')
+    def test_replay_retention_preserves_maps_and_failure_diagnostics(self):
+        for success, keep_details in ((True, False), (True, True), (False, False)):
+            with self.subTest(success=success, keep_details=keep_details), tempfile.TemporaryDirectory() as folder:
+                output = Path(folder)
+                (output / 'map').mkdir()
+                map_file = output / 'map/GlobalMap.pcd'
+                map_file.write_bytes(b'SYNTHETIC_MAP_NOT_LOADED')
+                (output / 'localization.jsonl').write_text('{"health": "valid"}\n')
+                (output / 'people.jsonl').write_text('{"health": "valid", "tracks": []}\n')
+                (output / 'algorithm.log').write_text('Algorithm diagnostics\n')
+                (output / 'master.log').write_text('Master startup\n')
+                (output / 'notes.txt').write_text('Unrelated result\n')
+                settings = {'success': success, 'counts': {'localization': 1, 'valid': 1}}
+                finalize_artifacts(output, settings, keep_details=keep_details)
+                record = json.loads((output / 'run.json').read_text())
+                self.assertEqual(record['counts'], {'localization': 1, 'valid': 1})
+                self.assertEqual(map_file.read_bytes(), b'SYNTHETIC_MAP_NOT_LOADED')
+                self.assertIn('map/', record['retained_artifacts'])
+                self.assertIn('run.json', record['retained_artifacts'])
+                self.assertEqual((output / 'notes.txt').read_text(), 'Unrelated result\n')
+                self.assertTrue((output / 'localization.jsonl').exists())
+                self.assertTrue((output / 'people.jsonl').exists())
+                self.assertEqual((output / 'algorithm.log').exists(), keep_details or not success)
+                self.assertEqual((output / 'master.log').exists(), not success)
 
     def test_draft_contracts_do_not_define_motor_actions_or_change_wire_format(self):
         self.assertFalse(hasattr(contracts, 'CONTRACT_VERSION'))

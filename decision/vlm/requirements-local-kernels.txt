@@ -1,0 +1,7 @@
+# Optional GDN acceleration for the local CUDA environment.
+# Install ninja first, then this file with --no-build-isolation and
+# constraints from requirements-local.txt; see docs/decision/VLM部署与调用.md.
+fla-core[cuda]==0.5.2
+causal-conv1d==1.7.0
+einops==0.8.2
+ninja==1.13.2

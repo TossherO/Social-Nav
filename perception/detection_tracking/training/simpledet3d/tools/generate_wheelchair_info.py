@@ -100,6 +100,8 @@ def process_category(category_dir, category_name, output_dir, sweep_frame_len,
     """
     train_infos = []
     val_infos = []
+    category_dir = Path(category_dir).resolve()
+    data_root = category_dir.parent
 
     scene_dirs = sorted([d for d in category_dir.iterdir() if d.is_dir()])
     print(f"  {category_name}: {len(scene_dirs)} scenes")
@@ -186,10 +188,11 @@ def process_category(category_dir, category_name, output_dir, sweep_frame_len,
 
             # --- Token ---
             token = f'{category_name}_{scene_name}_{frame_idx:04d}'
+            lidar_path = bin_path.relative_to(data_root).as_posix()
 
             info = {
                 'token': token,
-                'lidar_path': str(bin_path.resolve()),
+                'lidar_path': lidar_path,
                 'gt_boxes': np.zeros((0, 7), dtype=np.float32),
                 'gt_names': np.array([], dtype=str),
                 'sweeps': sweeps_info,
@@ -201,7 +204,7 @@ def process_category(category_dir, category_name, output_dir, sweep_frame_len,
             # 将当前帧加入 sweep buffer
             sweep_buffer.append({
                 'frame_index': frame_idx,
-                'lidar_path': str(bin_path.resolve()),
+                'lidar_path': lidar_path,
                 'lidar2global': lidar2global,
                 'pose_valid': pose_valid,
                 'pose_usable': pose_usable,
@@ -255,8 +258,8 @@ def generate_wheelchair_infos(data_root, output_dir, sweep_frame_len=3,
     total_val_frames = len(all_val)
     total_frames = total_train_frames + total_val_frames
 
-    train_with_pose = sum(1 for d in all_train if not np.allclose(d['lidar2global'], np.eye(4)))
-    val_with_pose = sum(1 for d in all_val if not np.allclose(d['lidar2global'], np.eye(4)))
+    train_with_pose = sum(d['has_pose'] for d in all_train)
+    val_with_pose = sum(d['has_pose'] for d in all_val)
 
     print(f"\n{'='*60}")
     print(f"Total: {total_frames} frames ({total_train_frames} train / {total_val_frames} val)")

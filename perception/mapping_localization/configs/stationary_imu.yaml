@@ -1,0 +1,19 @@
+# Explicit stationary experiment only. The synthetic IMU shares the LiDAR axes.
+stationary_imu:
+  enabled: true
+  raw_topic: /rslidar_points
+  lidar_frame: rslidar
+  imu_frame: stationary_imu
+  rate_hz: 200.0
+  max_scan_s: 0.2
+  max_gap_s: 0.5
+  specific_force_m_s2: [0.0, 0.0, 9.81]
+common:
+  lid_topic: /stationary_assumption/lidar
+  imu_topic: /stationary_assumption/imu
+  time_sync_en: false
+  imu_time_offset: 0.0
+mapping:
+  extrinsic_est_en: false
+  extrinsic_T: [0.0, 0.0, 0.0]
+  extrinsic_R: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]

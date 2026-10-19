@@ -1,0 +1,8 @@
+<launch>
+  <!-- Parameters are loaded once by native.launch before this input stage starts. -->
+  <arg name="with_roll" default="true"/>
+  <node pkg="fast_lio" type="fastlio_mapping" name="laserMapping" output="screen" required="true"/>
+  <group if="$(arg with_roll)">
+    <node pkg="roll" type="roll_scanRegistration" name="roll_scanRegistration" output="screen" required="true"/>
+  </group>
+</launch>

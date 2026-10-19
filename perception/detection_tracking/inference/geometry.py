@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import numpy as np
-from scipy.spatial import ConvexHull
 
 
 def wrap_angle(angle):
@@ -113,6 +112,7 @@ def similarity(a, b, metric='giou'):
         return float(iou)
     if metric == 'giou':
         all_xy = np.r_[pa, pb]
+        from scipy.spatial import ConvexHull
         hull = ConvexHull(all_xy)
         height = max(a[2]+a[5]/2, b[2]+b[5]/2) - min(a[2]-a[5]/2, b[2]-b[5]/2)
         enclosure = hull.volume * height

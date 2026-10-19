@@ -1,0 +1,10 @@
+{
+  "server_id": "wheelchair-annotation",
+  "ros_python": "/usr/bin/python3",
+  "projects": {
+    "wheelchair": {
+      "path": "data/annotations/rosbag_people/wheelchair_20261016",
+      "read_only": true
+    }
+  }
+}

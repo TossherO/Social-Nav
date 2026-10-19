@@ -7,7 +7,7 @@ PRECISION: fp32
 DATA_CONFIG:
     DATA_PATH: 'data/wheelchair_weak'
     RAW_DATA_PATH: 'data/wheelchair_raw'
-    MAX_SWEEPS: 4
+    MAX_SWEEPS: 1
     MAX_SWEEP_TIME_LAG: 0.35
     SWEEP_SELECT_MODE: near
     INTENSITY_NORMALIZATION: 255.0
@@ -54,12 +54,12 @@ MODEL:
         NMS_CONFIG:
             NMS_THRESH: 0.2
 
-# The source branch uses the same spatial grid and four-frame layout as the
+# The source branch uses the same spatial grid and single-frame layout as the
 # target branch, which is required by MixedDomainDataset.
 SOURCE_DATA_CONFIG:
     DATA_PATH: 'data/coda_downsample'
     RAW_DATA_PATH: 'data/coda_raw'
-    MAX_SWEEPS: 4
+    MAX_SWEEPS: 1
     MAX_SWEEP_TIME_LAG: 0.35
     SWEEP_SELECT_MODE: near
     DATA_SPLIT:
@@ -116,6 +116,6 @@ EMA_TEACHER:
     UNMATCHED_SCORE_THRESH: 0.9
 
 OPTIMIZATION:
-    BATCH_SIZE_PER_GPU: 16
+    BATCH_SIZE_PER_GPU: 8
     NUM_EPOCHS: 10
     LR: 0.0003

@@ -4,25 +4,26 @@
     "socialnav_sub_pilot": "data/datasets/socialnav_sub"
   },
   "model": {
-    "path": "/share/public_models/qwen/Qwen3.8-27B-FP8",
+    "path": "models/Qwen3.8-27B-FP8",
     "served_name": "qwen3.8-27b-fp8",
     "frozen": true,
     "finetuning": false
   },
   "deployment": {
     "backend": "sglang",
-    "mode": "remote_manual",
-    "python_executable": "python",
+    "mode": "self_hosted_native_conda",
+    "entrypoint": "decision/vlm/deployment/start_server.sh",
     "host": "127.0.0.1",
-    "port": 30000,
-    "context_length": 12288,
-    "max_running_requests": 1,
-    "mem_fraction_static": 0.85,
-    "grammar_backend": "xgrammar",
-    "mtp_default_enabled": false,
-    "note": "Print-only baseline. Select installed-version/GPU-compatible kernels manually; native MTP is optional, not portable by default."
+    "port": 30000
+  },
+  "local_inference": {
+    "device_map": "balanced",
+    "max_memory_gib": 20,
+    "context_length": 8192,
+    "seed": 0
   },
   "inference": {
+    "offline_backend": "sglang",
     "period_s": 2,
     "rate_hz": 0.5,
     "deadline_s": 2,

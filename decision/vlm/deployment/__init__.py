@@ -1,1 +1,1 @@
-"""Explicit, isolated remote deployment tools; importing starts no services."""
+"""Native Conda service materials and read-only benchmark comparison."""

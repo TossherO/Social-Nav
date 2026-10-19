@@ -1,12 +1,28 @@
 <launch>
-  <arg name="project_root" default="$(find social_nav_people)/../../.."/>
+  <arg name="project_root" default="$(dirname)/../../../.."/>
   <arg name="config" default="$(arg project_root)/perception/detection_tracking/configs/inference.json"/>
   <arg name="local_config" default="$(arg project_root)/configs/detection_tracking.local.json"/>
   <arg name="localization_topic" default=""/>
-  <node pkg="social_nav_people" type="people_node" name="social_nav_people" output="screen">
+  <arg name="localization_source" default=""/>
+  <arg name="pointcloud_topic" default=""/>
+  <arg name="python_executable" default=""/>
+  <arg name="rviz" default="false"/>
+  <arg name="visualize" default="$(arg rviz)"/>
+  <node pkg="social_nav_people" type="people_node" name="social_nav_people" output="screen" launch-prefix="$(arg python_executable)" required="true">
     <env name="SOCIAL_NAV_ROOT" value="$(arg project_root)"/>
     <param name="config" value="$(arg config)"/>
     <param name="local_config" value="$(arg local_config)"/>
     <param name="localization_topic" value="$(arg localization_topic)"/>
+    <param name="localization_source" value="$(arg localization_source)"/>
+    <param name="pointcloud_topic" value="$(arg pointcloud_topic)"/>
   </node>
+  <include if="$(arg visualize)" file="$(dirname)/visualization.launch">
+    <arg name="project_root" value="$(arg project_root)"/>
+    <arg name="config" value="$(arg config)"/>
+    <arg name="local_config" value="$(arg local_config)"/>
+    <arg name="rviz" value="$(arg rviz)"/>
+    <arg name="localization_source" value="$(arg localization_source)"/>
+    <arg name="localization_topic" value="$(arg localization_topic)"/>
+    <arg name="pointcloud_topic" value="$(arg pointcloud_topic)"/>
+  </include>
 </launch>

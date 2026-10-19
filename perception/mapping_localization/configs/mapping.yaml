@@ -1,0 +1,10 @@
+# Task overrides; sensor geometry and noise remain in fast_lio.yaml / roll.yaml.
+odometry:
+  publish_state: false
+publish:
+  scan_publish_en: false
+  scan_bodyframe_pub_en: false
+  lidar_scan_en: true
+roll:
+  mapUpdateEnabled: false
+  temporaryMappingEnabled: false

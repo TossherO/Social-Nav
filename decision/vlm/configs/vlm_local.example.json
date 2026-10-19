@@ -1,0 +1,4 @@
+{
+  "model_path": "/absolute/path/to/Qwen3.8-27B-FP8",
+  "gpus": [0, 1, 2, 3]
+}

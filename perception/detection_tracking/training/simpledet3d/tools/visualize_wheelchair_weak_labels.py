@@ -133,7 +133,7 @@ def main():
             for ax in (overview_ax, local_ax):
                 ax.plot(corners[:, 0], corners[:, 1], color='limegreen', linewidth=1.3)
                 ax.text(box[0], box[1], f'{float(score):.2f}', fontsize=6,
-                        color='limegreen')
+                        color='limegreen', clip_on=True)
 
     if len(manual):
         for ax in (overview_ax, local_ax):

@@ -58,6 +58,26 @@ class DatasetLinkTests(unittest.TestCase):
             detector.symlink_to(target, target_is_directory=True)
             self.assertFalse(dataset_links.inspect_links(folder)['detector_data_alias_valid'])
 
+    def test_selected_datasets_do_not_require_deferred_resources(self):
+        with tempfile.TemporaryDirectory() as folder:
+            entries, _, _ = self.fixture(folder)
+            for name in ('jrdb', 'wheelchair_weak', 'wheelchair_annotations'):
+                (entries / name).unlink()
+            selected = ('coda_raw', 'wheelchair_raw')
+            report = dataset_links.inspect_links(folder, names=selected)
+            self.assertEqual(report['status'], 'ready')
+            self.assertEqual(report['checked_datasets'], list(selected))
+            self.assertIn('jrdb', report['unselected_datasets'])
+            self.assertEqual(dataset_links.inspect_links(folder)['status'], 'missing_or_invalid_links')
+            (entries / 'coda_raw').unlink()
+            self.assertEqual(dataset_links.inspect_links(folder, names=selected)['status'],
+                             'missing_or_invalid_links')
+
+    def test_empty_or_unknown_selection_cannot_report_ready(self):
+        for names in ((), ('unknown_dataset',)):
+            with self.subTest(names=names), self.assertRaises(ValueError):
+                dataset_links.inspect_links(names=names)
+
     def test_vlm_paths_use_the_repository_and_preserve_symlink_names(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

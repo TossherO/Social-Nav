@@ -1,0 +1,52 @@
+# Spatial/time calibration is loaded from sensors/calibration/lidar_imu.yaml.
+feature_extract_enable: false
+point_filter_num: 3
+max_iteration: 3
+filter_size_surf: 0.4
+filter_size_map: 0.2
+cube_side_length: 600
+debugMode: false
+need_map_erected: true
+initialize_with_gt: false
+initialization:
+  enabled: true
+  # Start checking at 1s; finish only after conditioning and stability gates pass.
+  min_duration: 1.0
+  max_duration: 6.0
+  min_scans: 10
+  # Linearized sensitivity to >=2cm geometric perturbations, not true covariance.
+  max_tilt_sensitivity: 0.01
+  stable_duration: 0.3
+  # /camera/imu specific force is in m/s^2; use calibrated unit conversion here.
+  acceleration_scale: 1.0
+  voxel: 0.3
+  max_residual: 0.06
+  max_acc_bias: 1.5
+common:
+  lid_topic: /rslidar_points
+  imu_topic: /camera/imu
+preprocess:
+  lidar_type: 4
+  scan_line: 16
+  blind: 1.0
+  stamp_at_scan_end: true
+mapping:
+  acc_cov: 0.1
+  gyr_cov: 0.1
+  b_acc_cov: 0.01
+  b_gyr_cov: 0.01
+  fov_degree: 180
+  det_range: 100.0
+  visualize_voxel_size: 0.4
+  load_pcd: false
+  runtime_pos_log_enable: false
+publish:
+  publish_tf: false
+  map_pub: false
+  path_en: false
+  scan_publish_en: true
+  dense_publish_en: true
+  scan_bodyframe_pub_en: true
+pcd_save:
+  pcd_save_en: false
+  interval: -1

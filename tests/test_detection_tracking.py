@@ -4,8 +4,10 @@ import json
 from pathlib import Path
 import struct
 import tempfile
+import threading
 from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -147,6 +149,19 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(result['detections']), 1)
         self.assertIsNone(result['world_from_lidar'])
 
+    def test_stationary_assumption_preserves_computed_pose_and_cannot_hide_pose_loss(self):
+        pipeline=self.pipeline()
+        pose=np.eye(4);pose[0,3]=1.5
+        result=pipeline.step(frame(pose=pose,source='stationary_assumption'))
+        self.assertEqual(result['pose_source'],'stationary_assumption')
+        self.assertEqual(result['health'],'valid')
+        np.testing.assert_allclose(result['world_from_lidar'],pose)
+        missing=frame(1.1,source='stationary_assumption');missing.world_from_lidar=None
+        lost=pipeline.step(missing)
+        self.assertEqual(lost['health'],'degraded')
+        self.assertEqual(lost['tracks'],[])
+        self.assertIsNone(lost['world_from_lidar'])
+
     def test_pose_loss_and_recovery_invalidate_identity_lifecycle(self):
         pipeline = self.pipeline()
         before = pipeline.step(frame())
@@ -244,13 +259,31 @@ class DatasetTests(unittest.TestCase):
             self.assertEqual(observation.pose_health, 'invalid')
 
     def test_local_config_merge_is_explicit_and_unknown_fields_fail(self):
+        original = copy.deepcopy(CONFIG)
         merged = merge(CONFIG, {'detector': {'checkpoint':'/tmp/selected.pth'}})
-        self.assertIsNone(CONFIG['detector']['checkpoint'])
+        self.assertEqual(CONFIG, original)
         self.assertEqual(merged['detector']['checkpoint'], '/tmp/selected.pth')
         with self.assertRaises(ValueError): merge(CONFIG, {'unknown':True})
 
 
 class RosTransportTests(unittest.TestCase):
+    def test_duplicate_or_late_cloud_does_not_publish_an_old_invalid_observation(self):
+        from perception.detection_tracking.ros.node import PeopleNode
+        node = PeopleNode.__new__(PeopleNode)
+        node.cfg, node.config = dict(CONFIG['ros']), CONFIG
+        node.pipeline = NS(last_stamp=1., session_id='test')
+        node.clock_domain, node.sequence_generation, node.rejected_out_of_order = 'ros_time', 0, 0
+        calls = iter((False, False, False, True))
+        stamps = iter((1., .9, .4))
+        node.rospy = NS(is_shutdown=lambda: next(calls), Time=NS(now=lambda:NS(to_sec=lambda:1.)),
+                        logwarn_throttle=lambda *args:None)
+        node.pending = NS(take=lambda:NS(header=NS(stamp=NS(to_sec=lambda:next(stamps)), frame_id='rslidar')))
+        published = []
+        node.publish = lambda *args:published.append(args)
+        node.run()
+        self.assertEqual(node.rejected_out_of_order, 3)
+        self.assertEqual(published, [])
+
     def cloud(self, bigendian=False):
         fields = [NS(name=n, offset=o, datatype=7, count=1) for n,o in [('intensity',0),('z',4),('x',8),('y',12)]]
         endian = '>' if bigendian else '<'
@@ -285,12 +318,85 @@ class RosTransportTests(unittest.TestCase):
         self.assertEqual(slot.dropped,1); self.assertEqual(slot.take(),2)
         slot.close(); slot.put(3); self.assertIsNone(slot.take(0))
 
+    def test_failed_localization_does_not_fall_back_to_an_older_valid_pose(self):
+        poses = PoseBuffer()
+        poses.add(LocalizedPose(1, 'odom', 'lidar', np.eye(4)))
+        poses.add(LocalizedPose(1.01, 'odom', 'lidar', None, health='invalid'))
+        record, matrix, age = poses.resolve_record(1.02, .1, 'odom', 'lidar', 'lidar')
+        self.assertEqual(record.health, 'invalid')
+        self.assertIsNone(matrix)
+        self.assertAlmostEqual(age, .01)
+
+    def test_localization_wait_is_bounded_and_accepts_delayed_same_observation(self):
+        poses = PoseBuffer()
+        poses.add(LocalizedPose(2, 'odom', 'lidar', np.eye(4)))
+        self.assertIsNone(poses.resolve_record(1, .1, 'odom', 'lidar', 'lidar', wait_s=.01)[1])
+        timer = threading.Timer(.02, lambda: poses.add(LocalizedPose(1, 'odom', 'lidar', np.eye(4))))
+        timer.start()
+        record, matrix, age = poses.resolve_record(1, .1, 'odom', 'lidar', 'lidar', wait_s=.2)
+        timer.join()
+        self.assertEqual(record.stamp_s, 1)
+        self.assertEqual(age, 0)
+        np.testing.assert_allclose(matrix, np.eye(4))
+
+    def test_localization_restart_and_generation_retire_old_poses(self):
+        poses = PoseBuffer()
+        poses.add(LocalizedPose(1, 'odom', 'lidar', np.eye(4), session_id='a'))
+        poses.add(LocalizedPose(2, 'odom', 'lidar', np.eye(4), session_id='a', generation=1))
+        poses.add(LocalizedPose(3, 'odom', 'lidar', np.eye(4), session_id='a', generation=0))
+        self.assertIsNone(poses.resolve(1, .1, 'odom', 'lidar', 'lidar')[0])
+        self.assertIsNone(poses.resolve(3, .1, 'odom', 'lidar', 'lidar')[0])
+        poses.add(LocalizedPose(4, 'odom', 'lidar', np.eye(4), session_id='b'))
+        poses.add(LocalizedPose(5, 'odom', 'lidar', np.eye(4), session_id='a', generation=2))
+        self.assertIsNone(poses.resolve(5, .1, 'odom', 'lidar', 'lidar')[0])
+
     def test_ros_package_xml_and_launch_are_well_formed(self):
         root = DEFAULT.parents[1]/'ros'
         package = ET.parse(root/'package.xml').getroot()
         self.assertEqual(package.findtext('name'), 'social_nav_people')
         ET.parse(root/'launch/people.launch')
         self.assertTrue((root/'scripts/people_node').stat().st_mode & 0o111)
+
+    def test_ros_localization_callback_binds_health_and_rejects_bad_current_pose(self):
+        from perception.detection_tracking.ros.node import PeopleNode
+        node = PeopleNode.__new__(PeopleNode)
+        node.cfg = dict(CONFIG['ros'], localization_message='state', localization_source='roll_fast_lio',
+                        localization_parent_frame='odom', localization_child_frame='rslidar')
+        node.poses = PoseBuffer()
+        node.rospy = NS(logwarn_throttle=lambda *args: None)
+        message = NS(header=NS(stamp=NS(to_sec=lambda: 1.0), frame_id='odom'),
+                     child_frame_id='rslidar', VALID=0, DEGRADED=1, INVALID=2, health=0,
+                     source='roll_fast_lio', session_id='backend', generation=0,
+                     pose=NS(position=NS(x=0, y=0, z=0), orientation=NS(x=0, y=0, z=0, w=1)))
+        node.pose_callback(message)
+        self.assertIsNotNone(node.poses.resolve(1, .05, 'odom', 'rslidar', 'rslidar')[0])
+        message.health = message.INVALID
+        message.pose.orientation.w = 0  # Failed estimates need not carry a meaningful quaternion.
+        node.pose_callback(message)
+        self.assertIsNone(node.poses.resolve(1, .05, 'odom', 'rslidar', 'rslidar')[0])
+        message.health, message.generation = message.VALID, 1
+        message.pose.orientation.w = 1
+        node.pose_callback(message)
+        message.pose.orientation.w = 0
+        node.pose_callback(message)
+        self.assertIsNone(node.poses.resolve(1, .05, 'odom', 'rslidar', 'rslidar')[0])
+
+    def test_local_odometry_is_consumed_without_a_map_pose_and_rejects_other_sources(self):
+        from perception.detection_tracking.ros.node import PeopleNode
+        node = PeopleNode.__new__(PeopleNode)
+        node.cfg = dict(CONFIG['ros'], localization_message='state', localization_source='fast_lio',
+                        localization_parent_frame='odom', localization_child_frame='rslidar')
+        node.poses = PoseBuffer()
+        node.rospy = NS(logwarn_throttle=lambda *args: None)
+        message = NS(header=NS(stamp=NS(to_sec=lambda: 1.0), frame_id='odom'),
+                     child_frame_id='rslidar', VALID=0, DEGRADED=1, INVALID=2, health=0, source='roll_fast_lio',
+                     session_id='local_session', generation=0, has_map_pose=False,
+                     pose=NS(position=NS(x=1, y=2, z=0), orientation=NS(x=0, y=0, z=0, w=1)))
+        node.pose_callback(message)
+        self.assertIsNone(node.poses.resolve(1, .05, 'odom', 'rslidar', 'rslidar')[0])
+        message.source = 'fast_lio'
+        node.pose_callback(message)
+        self.assertIsNotNone(node.poses.resolve(1, .05, 'odom', 'rslidar', 'rslidar')[0])
 
     def test_ros_publication_preserves_missing_velocity_and_observation_time(self):
         from perception.detection_tracking.ros.node import PeopleNode
@@ -316,8 +422,43 @@ class RosTransportTests(unittest.TestCase):
         self.assertEqual(message.header.frame_id, 'dataset_world')
         self.assertFalse(message.tracks[0].has_velocity)
         self.assertEqual(message.dropped_busy, 2)
+        recorded = json.loads(node.json_publisher.messages[0].data)
+        self.assertEqual(recorded['dropped_busy'], 2)
+        self.assertEqual(recorded['pose_age_s'], .01)
         self.assertEqual(message.tracks[0].last_observed_stamp, 1)
         self.assertEqual(node.last_result_health, 'valid')
+
+    def test_rgb_arriving_during_lidar_inference_is_bound_without_future_images(self):
+        from perception.detection_tracking.ros.node import PeopleNode
+        node = PeopleNode.__new__(PeopleNode)
+        node.cfg, node.config = dict(CONFIG['ros'], localization_topic=''), CONFIG
+        node.rgb, node.rgb_lock = [], threading.Lock()
+        node.poses, node.sequence_generation, node.localization_identity = PoseBuffer(), 0, None
+        node.clock_domain = 'ros_time'
+        old, eligible, future = NS(name='old'), NS(name='late_but_past'), NS(name='future')
+        node.rgb.append((.8, old))
+        class DuringInference:
+            def predict(self, input_frame):
+                self_input = input_frame.rgb_stamp_s
+                if self_input is not None:
+                    raise AssertionError('LiDAR prediction must not depend on RGB')
+                node.rgb.extend([(.95, eligible), (1.01, future)])
+                return np.array([box()])
+        node.pipeline = PerceptionPipeline(DuringInference(), CONFIG['tracking'])
+        calls = iter((False, True))
+        node.rospy = NS(is_shutdown=lambda: next(calls), Time=NS(now=lambda:NS(to_sec=lambda:1.05)),
+                        logerr_throttle=lambda *args:None)
+        node.pending = NS(take=lambda:NS(header=NS(stamp=NS(to_sec=lambda:1.0),frame_id='rslidar')))
+        published=[]
+        node.publish=lambda result, age, image: published.append((result,image))
+        with patch('perception.detection_tracking.ros.node.decode_pointcloud',
+                   return_value=np.array([[3,0,0,255]],dtype=np.float32)):
+            node.run()
+        self.assertEqual(len(published),1)
+        result,image=published[0]
+        self.assertEqual(result['rgb_stamp_s'],.95)
+        self.assertIs(image,eligible)
+        self.assertEqual(result['stamp_s'],1)
 
 
 if __name__ == '__main__':

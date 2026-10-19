@@ -5,8 +5,8 @@ Usage (single GPU):
     python tools/train.py --cfg_file configs/centerpoint_coda.yaml
 
 Usage (multi-GPU via torchrun):
-    torchrun --nproc_per_node=4 tools/train.py --cfg_file configs/voxelrcnn_coda.yaml
-    torchrun --nproc_per_node=4 tools/train.py --cfg_file configs/voxelrcnn_coda.yaml \
+    torchrun --nproc_per_node=2 tools/train.py --cfg_file configs/voxelrcnn_coda.yaml
+    torchrun --nproc_per_node=2 tools/train.py --cfg_file configs/voxelrcnn_coda.yaml \
         --batch_size 8 --eval_interval 5
 """
 import argparse
@@ -60,7 +60,7 @@ def parse_args():
     parser.add_argument('--cfg_file', type=str, required=True, help='Path to config file')
     parser.add_argument('--batch_size', type=int, default=None, help='Batch size per GPU')
     parser.add_argument('--epochs', type=int, default=None, help='Number of epochs')
-    parser.add_argument('--workers', type=int, default=4, help='Number of data loading workers')
+    parser.add_argument('--workers', type=int, default=2, help='Number of data loading workers')
     parser.add_argument('--extra_tag', type=str, default='default', help='Extra tag for output directory')
     parser.add_argument('--ckpt', type=str, default=None, help='Checkpoint to resume from')
     parser.add_argument('--pretrained_model', type=str, default=None, help='Pretrained model weights')
@@ -167,7 +167,9 @@ def main():
     # torchrun child first creates a context on the default logical GPU 0.
     torch.cuda.set_device(args.local_rank)
     if args.local_rank > 0 or 'RANK' in os.environ:
-        dist.init_process_group(backend='nccl')
+        dist.init_process_group(
+            backend='nccl', device_id=torch.device('cuda', args.local_rank),
+        )
     rank = dist.get_rank() if dist.is_initialized() else 0
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     validate_precision_support(args.precision, device=args.local_rank)
@@ -341,12 +343,12 @@ def main():
     resume_checkpoint_path = None
     if args.pretrained_model is not None:
         checkpoint_model.load_params_from_file(
-            filename=args.pretrained_model, to_cpu=False, logger=logger,
+            filename=args.pretrained_model, to_cpu=True, logger=logger,
         )
 
     if args.ckpt is not None:
         it, start_epoch = checkpoint_model.load_params_with_optimizer(
-            args.ckpt, to_cpu=False, optimizer=optimizer, scaler=scaler, logger=logger
+            args.ckpt, to_cpu=True, optimizer=optimizer, scaler=scaler, logger=logger
         )
         resume_checkpoint_path = args.ckpt
         last_epoch = start_epoch + 1
@@ -357,7 +359,7 @@ def main():
             while len(ckpt_list) > 0:
                 try:
                     it, start_epoch = checkpoint_model.load_params_with_optimizer(
-                        ckpt_list[-1], to_cpu=False, optimizer=optimizer,
+                        ckpt_list[-1], to_cpu=True, optimizer=optimizer,
                         scaler=scaler, logger=logger,
                     )
                     resume_checkpoint_path = ckpt_list[-1]
@@ -505,6 +507,7 @@ def main():
 
     if dist.is_initialized():
         dist.barrier()
+        dist.destroy_process_group()
 
     logger.info('**********************Done**********************')
 

@@ -1,93 +1,46 @@
 # Social-Nav
 
-感知 / 决策 / 导航系统骨架。更新：2026-10-07。
+Social-Nav 面向移动机器人与智能轮椅的长程社交导航，贯通感知、任务决策、路径规划、运动控制与独立安全监督。
 
-当前已纳入检测训练、共享检测跟踪推理核心、ROS 1接入源码和VLM公开数据验证流程，完整在线导航系统尚未实现。VLM主线为冻结 **Qwen3.8-27B-FP8**、远程手动SGLang部署、JSON Schema输出、每2秒调用一次（0.5Hz），不微调VLM。
+感知已提供传感器接入、建图与有图／无图定位、单帧检测跟踪、RViz与结果回看，以及本机／Windows远程行人中心标注和训练导出。默认建图／有图定位使用ROLL＋FAST-LIO，无图定位使用FAST-LIO；相机—雷达和雷达—IMU参数及适用边界见[实机感知](docs/perception/实机感知.md#标定与数据边界)。
 
-本仓库作为正式初始实现，文件名、项目配置、协议名和新生成产物不附加项目版本号。模型/依赖名称、标准API路径、数据来源提交及运行时状态编号保留；已有冻结样例、用户结果和历史归档不改写。工具ZIP按用户要求更新或清理，不覆盖已填写的连接配置和用户结果。
+VLM推理与离线调试优先使用自建远程SGLang服务，仅远程不可用或其GPU被占用时考虑本地备用方案。完整在线导航仍待接通，后续工作统一见[系统方案](docs/系统方案.md#83-待完成工作)，实际资源与检查记录见本机环境记录。
 
-## 项目结构
+| 代码目录 | 职责 |
+|---|---|
+| `perception/` | 传感器接入、检测训练与跟踪、建图定位 |
+| `decision/vlm/`、`decision/agent/` | 局部语义决策与外层任务编排；agent 尚未实现 |
+| `navigation/` | 规划、控制与本地安全监督，当前为占位 |
+| `interfaces/` | 共享类型与接口草案，尚未接通完整系统 |
 
-| 目录 | 职责与当前状态 |
-| --- | --- |
-| `perception/` | `detection_tracking/`统一检测训练与推理；离线核心已验证，ROS 1节点源码待真实环境验证。定位算法和建图仍未实现，原始里程计不作为可靠位姿。 |
-| `decision/vlm/` | 现有VLM流程的真实实现及公开配置，包括JRDB渲染、审核、输出校验和远程测速。 |
-| `decision/agent/` | 未来长程任务分解、模式切换、恢复与技能编排的预留位置。 |
-| `navigation/` | 路径规划、运动控制和安全模块，目前均为未实现占位。 |
-| `interfaces/` | 感知结果已有类型转换，其余跨域接入仍是草案，不能据此运行整机。 |
-
-旧的 `python -m scripts.<VLM入口>` 仍由薄包装转发；新代码使用 `decision.vlm` 导入路径。
+模块登记见 [configs/system.json](configs/system.json)，它不是整机启动器；目录或类型存在不表示能力已验收。
 
 ## 文档入口
 
-建议先阅读[项目框架](docs/项目框架.md)。`docs/`包含四份当前文档和一份明确标识的旧版方案：
+| 需要完成的工作 | 阅读入口 |
+|---|---|
+| 理解研究目标、系统分工与后续任务 | [系统方案](docs/系统方案.md) |
+| 准备环境、迁移资源、理解目录和配置 | [开发指南](docs/开发指南.md) |
+| 调整跨模块消息、坐标系、时间与失效语义 | [接口约定](docs/接口约定.md) |
+| 构建、采集／bag处理、标定、定位检测、回看及标注启动命令 | [ROS命令速查](docs/perception/ROS命令速查.md) |
+| 传感器、建图定位与检测跟踪的配置、运行机制及验证边界 | [实机感知](docs/perception/实机感知.md) |
+| 使用当前相机—雷达、雷达—IMU参数，或重新标定 | [标定与数据边界](docs/perception/实机感知.md#标定与数据边界) |
+| 检测模型与跟踪行为、数据集推理／缓存回放、输出语义 | [检测与跟踪](docs/perception/检测与跟踪.md) |
+| 准备检测数据、编译、训练或评估 | [检测训练](docs/perception/检测训练.md) |
+| 本机／远程标注行人中心、同步保存与导出微调数据 | [标注操作](docs/perception/检测训练.md#rosbag人工中心复核与增量训练)；安装启动见[标注命令](docs/perception/ROS命令速查.md#bag-行人中心标注) |
+| 修改弱标签、损失或三阶段训练策略 | [弱监督设计](docs/perception/弱监督设计.md) |
+| 默认远程VLM调用、服务启停、本地备用推理或便携包 | [VLM 部署与调用](docs/decision/VLM部署与调用.md) |
+| 从零构建原生Conda与SGLang源码服务，使用默认DSPARK配置 | [SGLang服务部署方案](docs/decision/SGLang服务部署方案.md) |
+| 设计数据划分、人工标注和实验指标 | [数据与评测](docs/experiments/数据与评测.md) |
+| 准备T1/T2数据、本机／Windows远程标注与标签导出 | [决策任务标注](docs/decision/决策任务标注.md)；[实现方案](docs/decision/T1与T2标注程序实现方案.md) |
+| 使用 JRDB 的字段、对齐、渲染与审核工具 | [JRDB 参考](docs/experiments/JRDB参考.md) |
 
-- [当前整体方案](docs/当前整体方案.md)：研究目标、三任务规约、系统设计与安全边界。
-- [纯公开数据可行性验证方案](docs/纯公开数据可行性验证方案.md)：不依赖实机采集的验证流程。
-- [JRDB数据与测试实现](docs/JRDB数据与测试实现.md)：数据和标注格式、当前实现及测试证据。
-- [项目框架](docs/项目框架.md)：目录职责、配置、命令、产物与复现方法。
-- [旧版：基于VLM的长程社交导航](docs/旧版_基于VLM的长程社交导航.md)：历史技术方案，不作为当前实施要求，历史命令不保证可执行。
+开发约束见 [AGENTS.md](AGENTS.md)。本机解释器、资源位置和已执行检查只维护在忽略的 [ENVIRONMENT.local.md](ENVIRONMENT.local.md)；新机器按实际条件创建。
 
-模块入口：[感知](perception/README.md) · [决策](decision/README.md) · [导航](navigation/README.md) · [共享接口](interfaces/README.md)。项目说明统一使用Markdown；配置、Prompt、依赖清单等纯文本文件保持其专用名称。
+## 文档维护
 
-检测训练体系的原详细文档保留于[检测源码文档目录](perception/detection_tracking/training/simpledet3d/docs)。
-检测跟踪的配置、离线推理、缓存回放、ROS 1与定位边界见[模块说明](perception/detection_tracking/README.md)。
-AutoDL原环境依赖替换、手动SGLang服务及同机/远程测试见[部署指南](decision/vlm/deployment/README.md)。安装显式确认后将远程容器原有Torch 2.12替换为2.13+cu130，不创建服务虚拟环境；不修改本机开发环境。可用`python -m decision.vlm.package_vlm_test --with-deployment --out outputs/t1/autodl_sglang_bundle`生成带现有24例输入的独立ZIP；打包不安装环境或调用模型。部署工具支持无GPU预下载完整wheel依赖及哈希锁文件，正式容器使用`install --wheelhouse`离线安装；wheel资源另存`outputs/t1/autodl_wheelhouse.zip`，不塞入轻量测试包。
+当前项目文档集中于 `docs/`，最多采用“领域／专题”两级组织。系统方案维护设计与待办，开发指南维护公共准备流程，专题手册维护各自操作与实现边界；配置值以代码和配置文件为准，不在多份文档复制默认参数表。
 
-## 配置与数据
+代码模块不另维护重复 README。第三方源码文档、资产来源说明和独立便携包模板保留在其所属目录。VLM 部署指南由打包脚本直接从 `docs/` 复制，继续只有一个维护源。
 
-- 系统级配置：[configs/system.json](configs/system.json)。
-- VLM配置：[decision/vlm/configs/project.json](decision/vlm/configs/project.json)。
-- 数据默认统一通过 `data/datasets/` 下的软链接访问；检测副本的 `data` 也指向该入口。仅调整链接目标即可重定位，不移动原始数据；SUB审计和冻结测速均有默认别名。具体映射见[项目框架](docs/项目框架.md#201-统一数据软链接)。
-- 测速默认值读取公共 `inference` / `benchmark` 配置块，CLI参数优先覆盖。新便携包导出经过哈希校验的默认值快照，已有ZIP不自动更新；`--deadline-s` 与HTTP超时独立。
-- 服务配置示例为[vlm_server.example.json](decision/vlm/configs/vlm_server.example.json)，使用时复制到 `configs/vlm_server.local.json` 并在本机填写。`configs/*.local.json` 为私有配置，不提交或分享。
-
-## 按需检查
-
-以下命令在仓库根目录、具备对应依赖的Python环境中运行；不要求每次修改全部执行。
-
-系统结构和数据链接检查不启动进程：
-
-```bash
-python -m scripts.system_status
-python -m scripts.dataset_links
-```
-
-VLM输入与配置变更时可执行离线检查，不发送模型请求：
-
-```bash
-python -m decision.vlm.benchmark_vlm --dry-run --limit 24
-```
-
-离线回归测试不调用模型、API或GPU。局部修改先运行相关测试，代码修改完成后再集中执行完整回归；仅修改文档时检查相关链接和示例即可。
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests
-```
-
-检测历史源码审计不读取数据或权重，也不是训练可运行性检查：
-
-```bash
-python -m perception.detection_tracking.training --check
-```
-
-只读核对三帧数据集点云及自带位姿（不加载模型）：
-
-```bash
-python -m perception.detection_tracking.inference --scene outdoor1/start_003 --limit 3 --dry-run
-```
-
-真实检测使用已配置的检测环境及GPU；机器权重/二进制位置保存在忽略的`configs/detection_tracking.local.json`，不读取API配置。不默认使用原始`/odom`；在线需另外接入定位算法输出。
-
-检测副本已做数据路径与无编号命名适配，上述历史审计会报告预期差异并返回非零退出码。原仓库和清单中的原始文件摘要不变；不要将其作为日常必须通过的门槛。
-
-## 历史记录与边界
-
-数据、原始JRDB、模型、Conda环境和既有便携ZIP保留原位。历史备份与验证记录位于 `outputs/archive/`：
-
-- `cleanup_20261005/`：早期清理归档。
-- `restructure_20261007/`：系统结构重构。
-- `maintenance_20261007/`：完整性维护。
-- `dataset_links_20261007/`：统一数据链接适配。
-
-早期重构与路径适配未执行模型调用。本轮检测跟踪实现另外执行了少量GPU离线验证，证据见模块说明；当前有ROS 1节点源码，但本机没有ROS运行环境，未验证catkin构建或真实消息接入，仍无底盘运行程序。
+历史资料：[旧版方案](docs/archive/旧版方案.md) · [实机感知整合记录](docs/archive/实机感知整合记录.md) · [AutoDL服务部署与调用](docs/archive/AutoDL服务部署与调用.md)。归档用于追溯，历史命令与环境不作为当前操作要求。

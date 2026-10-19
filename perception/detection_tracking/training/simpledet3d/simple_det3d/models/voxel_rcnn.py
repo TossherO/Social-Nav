@@ -4,6 +4,7 @@ import torch.nn as nn
 
 from ..ops.iou3d_nms import iou3d_nms_utils
 from ..utils.spconv_utils import find_all_spconv_keys
+from ..utils.common_utils import load_checkpoint
 from .vfe import DynamicVoxelVFE
 from .backbones_3d import VoxelResBackBone8x
 from .backbones_2d import BaseBEVBackbone, HeightCompression
@@ -289,10 +290,10 @@ class VoxelRCNN(nn.Module):
 
         logger.info('==> Loading parameters from checkpoint %s to %s' % (filename, 'CPU' if to_cpu else 'GPU'))
         loc_type = torch.device('cpu') if to_cpu else None
-        checkpoint = torch.load(filename, map_location=loc_type)
+        checkpoint = load_checkpoint(filename, map_location=loc_type)
         model_state_disk = checkpoint['model_state']
         if not pre_trained_path is None:
-            pretrain_checkpoint = torch.load(pre_trained_path, map_location=loc_type)
+            pretrain_checkpoint = load_checkpoint(pre_trained_path, map_location=loc_type)
             pretrain_model_state_disk = pretrain_checkpoint['model_state']
             model_state_disk.update(pretrain_model_state_disk)
 
@@ -315,7 +316,7 @@ class VoxelRCNN(nn.Module):
 
         logger.info('==> Loading parameters from checkpoint %s to %s' % (filename, 'CPU' if to_cpu else 'GPU'))
         loc_type = torch.device('cpu') if to_cpu else None
-        checkpoint = torch.load(filename, map_location=loc_type)
+        checkpoint = load_checkpoint(filename, map_location=loc_type)
         epoch = checkpoint.get('epoch', -1)
         it = checkpoint.get('it', 0.0)
 
@@ -331,7 +332,7 @@ class VoxelRCNN(nn.Module):
                 src_file, ext = filename[:-4], filename[-3:]
                 optimizer_filename = '%s_optim.%s' % (src_file, ext)
                 if os.path.exists(optimizer_filename):
-                    optimizer_ckpt = torch.load(optimizer_filename, map_location=loc_type)
+                    optimizer_ckpt = load_checkpoint(optimizer_filename, map_location=loc_type)
                     optimizer.load_state_dict(optimizer_ckpt['optimizer_state'])
 
         scaler_state = checkpoint.get('scaler_state')

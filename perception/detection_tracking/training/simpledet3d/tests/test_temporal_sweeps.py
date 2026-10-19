@@ -125,6 +125,36 @@ class TemporalSweepTest(unittest.TestCase):
             self.assertEqual([x['frame_id'] for x in train_infos[1]['sweeps']], [0])
             self.assertEqual(train_infos[2]['sweeps'], [])
 
+    def test_wheelchair_infos_relocate_current_and_history_with_the_raw_root(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            category_dir = root / 'original/indoor2'
+            points_dir = category_dir / 'scene_a/points'
+            poses_dir = category_dir / 'scene_a/poses'
+            points_dir.mkdir(parents=True)
+            poses_dir.mkdir()
+            for frame_id in (0, 1):
+                np.array([[2.0 + frame_id, 0.0, 0.0, 1.0]], dtype=np.float32).tofile(
+                    points_dir / f'{frame_id:04d}.bin')
+                (poses_dir / f'{frame_id:04d}.txt').write_text(
+                    f'pose{frame_id}: 0 0 0 0 0 0 1\n')
+            # A shared asset may itself be a link outside the raw root. Store
+            # its logical dataset path so relocation still uses RAW_DATA_PATH.
+            (points_dir / '0000.bin').rename(root / 'shared_history.bin')
+            (points_dir / '0000.bin').symlink_to(root / 'shared_history.bin')
+            infos, _ = process_category(category_dir, 'indoor2', root, 1, 0.2, set())
+            (root / 'original').rename(root / 'relocated')
+            dataset = CodaDataset.__new__(CodaDataset)
+            dataset.root_path = root
+            dataset.raw_data_path = root / 'relocated'
+            dataset.dataset_cfg = {'MAX_SWEEP_TIME_LAG': 0.2, 'SWEEP_SELECT_MODE': 'near'}
+            dataset.infos = infos
+            points = dataset.get_lidar_with_sweeps(1, max_sweeps=2)
+            np.testing.assert_allclose(points[:, 0], [3.0, 2.0])
+            np.testing.assert_allclose(points[:, 4], [0.0, 0.1])
+            self.assertTrue(infos[1]['has_pose'])  # A measured identity pose remains valid.
+            self.assertEqual(infos[1]['gt_boxes'].shape, (0, 7))
+
     def test_stationary_wheelchair_scene_uses_identity_sweep_without_pose(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

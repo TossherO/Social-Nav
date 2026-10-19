@@ -1,0 +1,44 @@
+# Flat keys are upstream Config attributes plus bounded motion and final fitting.
+# Unknown keys are rejected by the adapter.
+# Geometry-only, LiDAR-only; sensor frame is not a calibrated vehicle/gravity frame.
+device: cuda
+seed: 42
+deskew: true
+motion_prediction_max_gap_s: 0.5
+track_on: true
+color_on: false
+color_map_on: false
+color_channel: 0
+semantic_on: false
+min_range: 0.8
+max_range: 35.0
+min_z: -3.0
+max_z: 5.0
+vox_down_m: 0.15
+source_vox_down_m: 0.5
+voxel_size_m: 0.3
+# Decode each neighbour before aggregation, retaining the upstream SDF
+# disagreement mask for sparse LiDAR and loop-corrected maps.
+weighted_first: false
+# Fit the same global field that fixed-map localization will query. Uses only
+# observed mapping surfaces; no localization data or decoder/geometry updates.
+final_map_refine_iters: 5000
+final_map_refine_bs: 2048
+final_map_refine_offset_m: 0.08
+local_map_radius: 30.0
+buffer_size: 10000000
+pool_capacity: 2000000
+bs: 4096
+bs_new_sample: 2048
+iters: 12
+init_iter_ratio: 40
+freeze_after_frame: 40
+ba_freq_frame: 0
+dynamic_filter_on: true
+pgo_on: true
+global_loop_on: true
+local_map_context: false
+loop_with_feature: false
+o3d_vis_on: false
+wandb_vis_on: false
+silence: true

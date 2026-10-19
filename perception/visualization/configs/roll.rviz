@@ -1,0 +1,75 @@
+Panels:
+  - Class: rviz/Displays
+    Name: Displays
+  - Class: rviz/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Fixed Frame: map
+    Background Color: 35; 35; 35
+  Displays:
+    - Class: rviz/Grid
+      Name: Grid
+      Enabled: true
+      Plane Cell Count: 80
+      Cell Size: 1
+    - Class: rviz/PointCloud2
+      Name: Global map
+      Enabled: true
+      Topic: /roll/mapping/map_global
+      Queue Size: 1
+      Style: Points
+      Size (Pixels): 2
+      Color Transformer: AxisColor
+      Axis: Z
+    - Class: rviz/PointCloud2
+      Name: Current scan (observation-bound)
+      Enabled: true
+      Topic: /perception/visualization/scan
+      Queue Size: 2
+      Decay Time: 0
+      Style: Points
+      Size (Pixels): 3
+      Color Transformer: FlatColor
+      Color: 90; 210; 235
+    - Class: rviz/PointCloud2
+      Name: Local map
+      Enabled: false
+      Topic: /roll/mapping/map_local
+      Queue Size: 1
+      Style: Points
+      Size (Pixels): 2
+    - Class: rviz/Path
+      Name: Trajectory
+      Enabled: true
+      Topic: /roll/mapping/path_fusion
+      Color: 255; 110; 40
+    - Class: rviz/MarkerArray
+      Name: People detections and tracks
+      Enabled: true
+      Marker Topic: /perception/people/markers
+      Queue Size: 5
+    - Class: rviz/Image
+      Name: Matched RGB
+      Enabled: false
+      Image Topic: /perception/people/rgb
+      Queue Size: 1
+      Transport Hint: raw
+    - Class: rviz/TF
+      Name: TF
+      Enabled: false
+  Tools:
+    - Class: rviz/Interact
+    - Class: rviz/MoveCamera
+    - Class: rviz/SetInitialPose
+      Topic: /initialpose
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Distance: 60
+      Pitch: 1.25
+      Yaw: 0.8
+Window Geometry:
+  Width: 1280
+  Height: 850

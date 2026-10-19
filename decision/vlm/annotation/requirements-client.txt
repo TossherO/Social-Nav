@@ -1,0 +1,5 @@
+# Python 3.11 x64 on Windows; no ROS/Torch/CUDA.
+numpy>=1.26,<3
+PyQt5>=5.15.11,<5.16
+pillow>=11,<13
+httpx>=0.28,<0.29

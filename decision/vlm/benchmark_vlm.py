@@ -175,16 +175,8 @@ def execute(client, config, system, case, model, constraint, max_tokens, deadlin
             stage = "completion_metadata"
             if row["finish_reason"] != "stop":
                 raise ValueError("Response was truncated or did not finish normally")
-            canonical = {"g": [], "u": sorted(raw["u"])}
-            for members, relation, ordered in common.groups(raw):
-                members = sorted(members) if not ordered else list(members)
-                if ordered and relation == "p":
-                    members[2:] = sorted(members[2:])
-                canonical["g"].append([members, relation, ordered])
-            canonical["g"].sort(key=lambda g: min(g[0]))
-            rel = {"g": [{"m": m, "r": r, "k": k} for m, r, k in canonical["g"]], "u": canonical["u"]}
             timing["validation_s"] = time.perf_counter() - validation_started
-            row.update(valid=True, status="success", response=raw, canonical_rel=rel)
+            row.update(valid=True, status="success", response=raw, canonical_rel=common.canonical_rel(raw))
     except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError, AttributeError, ValidationError) as error:
         row.update(error_type=type(error).__name__, failure_stage=stage)
         if isinstance(error, ValidationError):

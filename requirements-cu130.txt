@@ -1,0 +1,32 @@
+# Linux x86_64 / Python 3.12 development profile.
+# Install torch from https://download.pytorch.org/whl/cu130 first.
+# Install torch-scatter==2.1.2 separately with --no-build-isolation after this file.
+# Build the repository's four CUDA extensions against CUDA Toolkit 13.0.
+torch==2.13.0+cu130
+# Keep bindings/JIT on the CUDA 13.0 series instead of following later minors.
+cuda-bindings==13.0.3
+nvidia-nvjitlink==13.0.88
+numpy==1.26.4
+scipy==1.15.3
+Pillow==11.3.0
+opencv-python-headless==4.11.0.86
+av==17.1.0
+PyYAML==6.0.3
+matplotlib==3.10.8
+httpx==0.28.1
+jsonschema==4.26.0
+easydict==1.13
+tqdm==4.67.1
+tensorboardX==2.6.4
+scikit-image==0.25.2
+numba==0.61.2
+pyquaternion==0.9.9
+# spconv is independent of the PyTorch binary; verify GPU forward/backward.
+# There is no published spconv-cu130 wheel for this profile.
+spconv-cu126==2.3.8
+cumm-cu126==0.7.11
+ninja==1.13.0
+packaging==26.0
+# Pure Python ROS 1 client helpers; source the system Noetic/message workspace separately.
+rospkg==1.6.0
+catkin-pkg==1.0.0

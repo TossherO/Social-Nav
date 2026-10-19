@@ -1,0 +1,61 @@
+# disable it when testing batch
+log_dir: /mnt/sdb/Datasets/LABdataset/rslidar_16/datasets/benchmark/test
+pcd_path: /mnt/sdb/Datasets/LABdataset/rslidar_16/datasets/benchmark/test/SurfMap.pcd
+
+initialize_with_gt: true
+gt_topic: rtk_odom
+array_imu_to_body: [ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+array_lidar_to_body: [ 1.6303, -1.3932, -0.087871, 0.0199, -0.19898, -0.09914]
+array_gps_to_body: [1.6158, -1.3353, -0.073099, 0.0199, -0.19898, -0.09914]
+
+body_centered: false # diff from nclt
+need_map_erected: true # true if it is true when building a map!
+
+use_sim_time: true
+feature_extract_enable: false
+point_filter_num: 4
+max_iteration: 3
+filter_size_surf: 0.4
+filter_size_map: 0.4
+cube_side_length: 600
+debugMode: false
+
+common:
+    lid_topic:  "/rslidar_points"
+    imu_topic:  "/camera/imu"
+    time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
+    
+preprocess:
+    lidar_type: 4                # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR, 4 for rslidar
+    scan_line: 16
+    blind: 1                     # blind是min_radius^2
+
+mapping:
+    acc_cov: 0.1
+    gyr_cov: 0.1
+    b_acc_cov: 0.0001
+    b_gyr_cov: 0.0001
+    # acc_cov: 0.01608843085721201
+    # gyr_cov: 0.0017892995284273933
+    # b_acc_cov: 0.00035756256498712546
+    # b_gyr_cov: 1.5882455476866487e-05 
+    fov_degree:    180
+    det_range:     100.0
+    extrinsic_est_en:  false      # true: enable the online estimation of IMU-LiDAR extrinsic
+    # CHECKED: Lidar_T_wrt_IMU OR T that transforms lidar coor. to imu coor.
+    # feats_undistort are in lidar frame, in publish_frame_body func, they are transformed into imu frame
+    extrinsic_T: [ 0.0199, -0.19898, -0.09914]
+    extrinsic_R: [ 0.17594, -0.98396, -0.02931, 
+                   -0.01550, 0.027, -0.99952, 
+                   0.98429, 0.17628, -0.0105]
+    runtime_pos_log_enable: true
+    load_pcd: true
+    
+
+publish:     
+    scan_publish_en: true       # 'false' will close all the point cloud output
+    dense_publish_en: false       # false will low down the points number in a global-frame point clouds scan.
+    scan_bodyframe_pub_en: true  # output the point cloud scans in IMU-body-frame
+    map_pub: false
+pcd_save:
+    pcd_save_en: false

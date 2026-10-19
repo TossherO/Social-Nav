@@ -1,0 +1,57 @@
+Preferences:
+  PromptSaveOnExit: false
+Panels:
+  - Class: rviz/Displays
+    Name: Displays
+  - Class: rviz/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Fixed Frame: map
+    Background Color: 35; 35; 35
+  Displays:
+    - Class: rviz/Grid
+      Name: Grid
+      Enabled: true
+      Plane Cell Count: 80
+      Cell Size: 1
+    - Class: rviz/PointCloud2
+      Name: Saved map
+      Enabled: true
+      Topic: /result_view/map
+      Queue Size: 1
+      Style: Points
+      Size (Pixels): 2
+      Color Transformer: AxisColor
+      Axis: Z
+    - Class: rviz/MarkerArray
+      Name: Recorded trajectory and pose
+      Enabled: true
+      Marker Topic: /result_view/markers
+    - Class: rviz/MarkerArray
+      Name: Recorded people detections and tracks
+      Enabled: true
+      Marker Topic: /result_view/people
+    - Class: rviz/PointCloud2
+      Name: Recorded observation scan
+      Enabled: true
+      Topic: /result_view/scan
+      Queue Size: 1
+      Decay Time: 0
+      Style: Points
+      Size (Pixels): 2
+      Color Transformer: FlatColor
+      Color: 70; 220; 250
+  Tools:
+    - Class: rviz/Interact
+    - Class: rviz/MoveCamera
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Distance: 60
+      Pitch: 1.25
+      Yaw: 0.8
+Window Geometry:
+  Width: 1280
+  Height: 850

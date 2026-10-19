@@ -6,6 +6,7 @@ import copy
 from pathlib import Path
 
 import torch
+from ..utils.common_utils import load_checkpoint
 
 
 def create_ema_teacher(student_model):
@@ -52,7 +53,7 @@ def load_ema_teacher_from_checkpoint(teacher, checkpoint_path, logger=None):
     """Restore an EMA state when resuming a stage-2/3 checkpoint."""
 
     checkpoint_path = Path(checkpoint_path)
-    checkpoint = torch.load(str(checkpoint_path), map_location='cpu')
+    checkpoint = load_checkpoint(str(checkpoint_path), map_location='cpu')
     ema_state = checkpoint.get('ema_model_state')
     if ema_state is None:
         if logger is not None:
