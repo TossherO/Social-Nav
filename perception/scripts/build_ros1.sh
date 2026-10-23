@@ -6,9 +6,10 @@ JOBS="${BUILD_JOBS:-2}"
 case "$PROFILE" in
   interfaces) PACKAGES='social_nav_localization;social_nav_people';;
   mapping) PACKAGES='social_nav_localization;social_nav_people;fast_lio;roll';;
+  environment) PACKAGES='social_nav_localization;social_nav_people;social_nav_environment;fast_lio;roll';;
   sensors) PACKAGES='wheelchair_sensors;rslidar_sdk;realsense2_camera;realsense2_description';;
   all) PACKAGES='';;
-  *) echo 'Usage: build_ros1.sh interfaces|mapping|sensors|all'; exit 2;;
+  *) echo 'Usage: build_ros1.sh interfaces|mapping|environment|sensors|all'; exit 2;;
 esac
 # An explicit system toolchain also avoids accidentally linking Conda libstdc++/Python.
 unset PYTHONPATH CMAKE_PREFIX_PATH LD_LIBRARY_PATH
@@ -16,6 +17,9 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export CC=/usr/bin/gcc CXX=/usr/bin/g++
 /usr/bin/python3 "$SOCIAL_NAV_PROJECT/perception/scripts/prepare_ros1_dependencies.py" --profile "$PROFILE"
 source "$SOCIAL_NAV_PROJECT/perception/scripts/ros1_env.sh"
+# Keep the ROS underlay available even after an interrupted CMake regeneration
+# has left the generated workspace setup with an incomplete prefix list.
+source /opt/ros/noetic/setup.bash --extend
 BUILD_ROOT="$SOCIAL_NAV_ROS_OUTPUT/build"
 if [[ "$PROFILE" == mapping || "$PROFILE" == all ]]; then
   cmake -S "$SOCIAL_NAV_ROS_OUTPUT/sources/gtsam-4.0.2" -B "$BUILD_ROOT/gtsam" \
@@ -42,4 +46,5 @@ catkin_make -j"$JOBS" -l"$JOBS" -DCMAKE_BUILD_TYPE=Release \
   -DGLOG_INCLUDE_DIR="$SOCIAL_NAV_ROS_OUTPUT/dependencies/roll/usr/include" \
   -DGLOG_LIBRARY="$SOCIAL_NAV_ROS_OUTPUT/dependencies/roll/usr/lib/x86_64-linux-gnu/libglog.so" \
   -Drealsense2_DIR="$SOCIAL_NAV_ROS_OUTPUT/dependencies/realsense/lib/cmake/realsense2" \
+  -Doctomap_DIR="$SOCIAL_NAV_ROS_OUTPUT/dependencies/octomap/usr/lib/x86_64-linux-gnu/octomap" \
   -DDISABLE_PCAP_PARSE=OFF

@@ -26,7 +26,8 @@ try:
 except ImportError:
     HTTP_READY = False
 
-from perception.detection_tracking.annotation.data import Store, blank_review, dumps, edit_review, input_fingerprint
+from perception.detection_tracking.annotation.data import Store, blank_review, dumps, edit_review, empty_review, input_fingerprint
+from perception.detection_tracking.annotation.export import plan_export
 from perception.detection_tracking.annotation.package_client import package_client, FILES
 
 
@@ -253,6 +254,25 @@ class RemoteAnnotationTests(unittest.TestCase):
         self.assertEqual(self.app.state.projects['test'].assets.calls, 3)
         self.assertEqual(points.tobytes(), POINTS.tobytes())
         np.testing.assert_array_equal(image, RGB)
+
+    def test_explicit_empty_syncs_and_remains_an_exported_negative_frame(self):
+        backend = self.backend()
+        frame = backend.read_frame('a/0')[0]
+        empty = empty_review(frame['review'], BOUNDS, frame['candidates'])
+        backend.save_review(frame['id'], empty, frame['review'])
+        backend.sync_once()
+        self.assertEqual(backend.cache.counts()['pending'], 0)
+        with closing(Store(self.project, read_only=True)) as store:
+            saved = store.frame('a/0')
+            self.assertEqual(saved['review'], empty)
+            self.assertEqual(saved['candidates'], BOXES)
+            self.assertEqual(store.frame('a/1')['review']['status'], 'unreviewed')
+        plan = plan_export(self.project)
+        self.assertEqual(len(plan['samples']), 1)
+        annotation = plan['samples'][0]['annotation']
+        self.assertEqual(annotation['centers'], [])
+        self.assertTrue(annotation['center_label_is_exhaustive'])
+        self.assertEqual(annotation['ignored_candidate_count'], 0)
 
     def test_corrupt_asset_recovery_keeps_durable_edits(self):
         backend = self.backend()

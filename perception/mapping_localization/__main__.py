@@ -178,6 +178,19 @@ def arguments(argv=None):
     parser.add_argument('--loop-closure', choices=('on', 'off'),
                         help='Mapping only: override the default enabled ROLL loop closure')
     parser.add_argument('--people-python', help='Explicit detector interpreter; enables people node')
+    parser.add_argument('--environment', action='store_true', help='Enable observed local geometry and shared scene queries')
+    parser.add_argument('--environment-config', help='Explicit environment geometry YAML')
+    parser.add_argument('--record-environment-scans', action='store_true',
+                        help='Mapping + environment: retain bounded deskewed scans for final ray fusion')
+    parser.add_argument('--visual-memory', action='store_true',
+                        help='Environment: index causal RGB observations in an independent worker')
+    parser.add_argument('--scene', action='store_true',
+                        help='Environment: join causal geometry/RGB/people/memory into one scene input')
+    parser.add_argument('--association-coverage', help='Explicit map-bound XY coverage YAML; mixed localization only')
+    parser.add_argument('--prior-map', help='Static environment package for the associated scene prior view')
+    parser.add_argument('--memory-camera-calibration', help='Explicit same-installation camera/LiDAR YAML for visual memory')
+    parser.add_argument('--allow-local-only', action='store_true',
+                        help='Explicit mixed route: retain valid frontend pose when prior association is unavailable')
     parser.add_argument('--keep-details', action='store_true',
                         help='Write and retain per-scan results, trajectories and diagnostics')
     args = parser.parse_args(argv)
@@ -195,6 +208,24 @@ def arguments(argv=None):
     if args.pose_file and (args.mode != 'localization' or args.source != 'bag' or args.backend != 'roll_fast_lio'):
         parser.error('--pose-file applies only to ROLL bag localization')
     pin = args.backend == 'pin_slam'
+    if args.environment and pin:
+        parser.error('Environment observation integration currently supports FAST-LIO/ROLL')
+    if args.record_environment_scans and (not args.environment or args.mode != 'mapping'):
+        parser.error('--record-environment-scans requires --environment and mapping')
+    if args.visual_memory and not args.environment:
+        parser.error('--visual-memory requires --environment')
+    if args.scene and not args.environment:
+        parser.error('--scene requires --environment')
+    if args.prior_map and (not args.scene or args.mode != 'localization'):
+        parser.error('--prior-map requires --scene and fixed-map localization')
+    if args.memory_camera_calibration and (not args.visual_memory or not project_path(args.memory_camera_calibration).is_file()):
+        parser.error('--memory-camera-calibration requires --visual-memory and an existing YAML')
+    if args.allow_local_only and (not args.environment or args.mode != 'localization'):
+        parser.error('--allow-local-only requires --environment and fixed-map localization')
+    if args.association_coverage and (not args.allow_local_only or not project_path(args.association_coverage).is_file()):
+        parser.error('--association-coverage requires --allow-local-only and an existing map-bound YAML')
+    if args.environment_config and (not args.environment or not project_path(args.environment_config).is_file()):
+        parser.error('--environment-config requires --environment and an existing YAML')
     if not pin:
         args.lidar_imu_calibration = args.lidar_imu_calibration or 'perception/sensors/calibration/lidar_imu.yaml'
     if args.lidar_imu_calibration:
@@ -269,7 +300,7 @@ def arguments(argv=None):
     return args
 
 
-def algorithm_command(args, output, map_path, use_sim_time):
+def algorithm_command(args, output, map_path, use_sim_time, *, coverage_path=None):
     """One launch contract shared by replay and live sessions."""
     pin = args.backend == 'pin_slam'
     command = ['roslaunch', str(ROOT / 'perception/mapping_localization/launch' /
@@ -295,10 +326,28 @@ def algorithm_command(args, output, map_path, use_sim_time):
             command += ['loop_closure:=' + str(args.loop_closure == 'on').lower()]
         if args.lidar_imu_calibration:
             command += ['lidar_imu_calibration:=' + str(project_path(args.lidar_imu_calibration))]
+        if args.environment:
+            command += ['environment:=true','allow_local_only:='+str(args.allow_local_only).lower()]
+            command += ['record_environment_scans:='+str(args.record_environment_scans).lower(),
+                        'visual_memory:='+str(args.visual_memory).lower(),
+                        'scene:='+str(args.scene).lower(),
+                        'scene_people:='+str(bool(args.people_python)).lower()]
+            if args.association_coverage:
+                command += ['association_coverage:='+str(coverage_path or project_path(args.association_coverage))]
+            if args.prior_map:
+                command += ['prior_map:='+str(project_path(args.prior_map))]
+            if args.visual_memory:
+                if args.bag:
+                    memory_bag = Path(args.bag).expanduser()
+                    command += ['memory_bag:='+str(memory_bag if memory_bag.is_absolute() else ROOT/memory_bag)]
+                if args.memory_camera_calibration:
+                    command += ['memory_camera_calibration:='+str(project_path(args.memory_camera_calibration))]
+            if args.environment_config:
+                command += ['environment_config:='+str(project_path(args.environment_config))]
     return command
 
 
-def replay_topics(args, parameters, people_transport=None):
+def replay_topics(args, parameters, people_transport=None, environment_config=None):
     """Replay actual configured inputs, including RGB only for joint perception."""
     common = parameters.get('common', {})
     raw = (parameters['stationary_imu']['raw_topic'] if args.assume_stationary else
@@ -308,6 +357,11 @@ def replay_topics(args, parameters, people_transport=None):
         topics.append(common.get('imu_topic', '/camera/imu'))
     if people_transport and people_transport.get('rgb_topic'):
         topics.append(people_transport['rgb_topic'])
+    if getattr(args,'visual_memory',False) or getattr(args,'scene',False):
+        memory = environment_config['memory']
+        topics.append(memory['rgb_topic'])
+        if getattr(args,'visual_memory',False):
+            topics.append(memory['camera_info_topic'])
     return list(dict.fromkeys(topics))
 
 
@@ -318,6 +372,10 @@ def main():
     map_path = (project_path(args.map) if args.map else output / 'map') if args.mode != 'odometry' else None
     from perception.detection_tracking.inference.config import load_config
     display_transport = load_config()['ros']
+    environment_config = None
+    if args.environment:
+        from perception.environment.layers import load_config as load_environment_config
+        environment_config = load_environment_config(project_path(args.environment_config) if args.environment_config else None)
     people_topic = display_transport['output_topic']
     bag_topics = None
     if bag is not None:
@@ -328,11 +386,15 @@ def main():
                 raise ValueError('Bag offset is outside this recording')
             if args.assume_stationary and any(v.msg_type == 'sensor_msgs/Imu' for v in bag_topics.values()):
                 raise ValueError('Bag already contains IMU; do not silently replace recorded inertial measurements')
+            if (args.visual_memory or args.scene) and environment_config['memory']['rgb_topic'] not in bag_topics:
+                raise ValueError('Scene/visual memory requires the configured RGB topic in the bag')
     output.mkdir(parents=True)
     (output / 'logs').mkdir()
     settings = dict(vars(args), bag=str(bag) if bag else None, map=str(map_path) if map_path else None,
                     out=str(output), scope='online_topics' if live else 'offline_replay',
                     geometry_accuracy_verified=False, success=False)
+    if environment_config is not None:
+        settings['environment_configuration'] = environment_config
     expected_source = localization_source(args.backend, args.assume_stationary)
     settings['localization_source'] = expected_source
     settings['inertial_input'] = 'synthetic_stationary_assumption' if args.assume_stationary else (
@@ -342,6 +404,18 @@ def main():
                             'map_fingerprint': None}
     if args.mode == 'localization':
         settings['playback']['map_fingerprint'] = map_fingerprint(map_path)
+    if args.prior_map:
+        from perception.environment.prior import PriorMap
+        prior = PriorMap(project_path(args.prior_map),expected_map=settings['playback']['map_fingerprint'])
+        settings['prior_package'] = dict(snapshot_id=prior.manifest['snapshot_id'],
+            layers_sha256=prior.manifest['layers_sha256'],asset_fingerprint=prior.asset)
+    if args.association_coverage:
+        import hashlib
+        from perception.mapping_localization.coverage import PriorCoverage
+        digest = hashlib.sha256(json.dumps(settings['playback']['map_fingerprint'],sort_keys=True).encode()).hexdigest()
+        coverage = PriorCoverage.load(project_path(args.association_coverage),asset_fingerprint=digest)
+        settings['association_coverage_record'] = coverage.record
+        settings['association_coverage_fingerprint'] = coverage.fingerprint
     record_path = output / 'run.json'
     record_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + '\n')
     counts = {'localization': 0, 'valid': 0, 'invalid': 0, 'people': 0, 'people_valid': 0,
@@ -354,6 +428,13 @@ def main():
     receipt = {'count': 0, 'stamp_ns': None}
     master = algorithm = frontend = people = playback = view = display = None
     with tempfile.TemporaryDirectory(prefix='social-nav-ros-replay-') as temporary:
+        frozen_coverage = None
+        if args.association_coverage:
+            import yaml
+            frozen_coverage = Path(temporary) / 'localization_coverage.yaml'
+            frozen_coverage.write_text(yaml.safe_dump(settings['association_coverage_record'], sort_keys=False))
+            settings['association_gate_configuration'] = yaml.safe_load(
+                (ROOT / 'perception/mapping_localization/configs/roll.yaml').read_text())['roll']['coverageGate']
         env = os.environ.copy()
         if not live:
             with socket.socket() as selector:
@@ -475,7 +556,8 @@ def main():
                 existing = rospy.get_published_topics()
                 if any(topic == '/localization/state' for topic, _ in existing):
                     raise RuntimeError('Another localization publisher is active; stop it before starting this session')
-            algorithm = launch(algorithm_command(args, output, map_path, use_sim_time), 'algorithm.log')
+            algorithm = launch(algorithm_command(args, output, map_path, use_sim_time,
+                                                 coverage_path=frozen_coverage), 'algorithm.log')
             rospy.wait_for_service('/pin_slam/status' if pin else
                                    '/fast_lio/status' if args.mode == 'odometry' else '/roll/save_map',
                                    timeout=90 if pin else 30)
@@ -495,9 +577,15 @@ def main():
                         rospy.get_param('/common/lid_topic', '/rslidar_points'),
                     localization_topic='/localization/state', localization_source=expected_source)
                 settings['display_transport'] = display_transport
-                view_config = 'odometry.rviz' if args.mode == 'odometry' else 'roll.rviz'
+                local_view = args.mode == 'odometry' or (args.environment and args.initialization != 'rviz')
+                view_config = 'odometry.rviz' if local_view else 'roll.rviz'
                 view_path = ROOT / 'perception/visualization/configs' / view_config
                 configuration = configure_rviz(yaml.safe_load(view_path.read_text()), display_transport)
+                if args.environment:
+                    from perception.visualization.environment import add_environment_display
+                    add_environment_display(configuration,environment_config['output_topic'],
+                        prior_topic=environment_config['scene']['output_topic']+'/prior/occupancy' if args.prior_map else None,
+                        target_frame=environment_config['sensor_frame'])
                 if args.initialization == 'rviz':
                     import numpy as np
                     positions = np.loadtxt(map_path / 'keyframes/poses.txt', ndmin=2)[:, 1:4]
@@ -536,6 +624,16 @@ def main():
                     if frontend.poll() is not None or time.monotonic() >= deadline:
                         raise RuntimeError('Localization frontend did not become ready after selection')
                     time.sleep(.1)
+                if args.environment:
+                    # Initial picking uses the prior map view. Once accepted, the
+                    # running scene stays in continuous odom through unmapped roads.
+                    stop(view,first_signal=signal.SIGTERM)
+                    configuration = configure_rviz(yaml.safe_load((ROOT/'perception/visualization/configs/odometry.rviz').read_text()),display_transport)
+                    add_environment_display(configuration,environment_config['output_topic'],
+                        prior_topic=environment_config['scene']['output_topic']+'/prior/occupancy' if args.prior_map else None,
+                        target_frame=environment_config['sensor_frame'])
+                    view_path.write_text(yaml.safe_dump(configuration))
+                    view = launch(['rosrun','rviz','rviz','-d',str(view_path),'__name:=localization_rviz'],'rviz.log')
             if pin:
                 from std_srvs.srv import Trigger
                 pin_status = rospy.ServiceProxy('/pin_slam/status', Trigger)
@@ -566,6 +664,16 @@ def main():
                     keys.append('stationary_imu')
                 settings['algorithm_parameters'] = {key: rospy.get_param('/'+key) for key in keys
                                                      if rospy.has_param('/'+key)}
+            if args.environment:
+                from std_srvs.srv import Trigger
+                rospy.wait_for_service(environment_config['output_topic']+'/status',timeout=30)
+                environment_status = rospy.ServiceProxy(environment_config['output_topic']+'/status',Trigger)
+            if args.visual_memory:
+                rospy.wait_for_service(environment_config['output_topic']+'/memory/status', timeout=30)
+                memory_status = rospy.ServiceProxy(environment_config['output_topic']+'/memory/status', Trigger)
+            if args.scene:
+                rospy.wait_for_service(environment_config['scene']['output_topic']+'/status',timeout=30)
+                scene_status = rospy.ServiceProxy(environment_config['scene']['output_topic']+'/status',Trigger)
             if args.assume_stationary:
                 from std_srvs.srv import Trigger
                 rospy.wait_for_service('/stationary_imu/status', timeout=15)
@@ -594,8 +702,11 @@ def main():
 
                 def on_people(message):
                     result = json.loads(message.data)
+                    if args.keep_details:
+                        result['received_wall_ns'] = time.time_ns()
+                        result['observation_age_ms'] = (rospy.Time.now().to_sec()-result['stamp_s'])*1000
                     if people_file:
-                        people_file.write(message.data + '\n')
+                        people_file.write(json.dumps(result, allow_nan=False) + '\n')
                     with condition:
                         counts['people'] += 1
                         counts['people_valid' if result['health'] == 'valid' else 'people_degraded'] += 1
@@ -627,10 +738,12 @@ def main():
                 if args.duration is not None:
                     command += ['--duration', str(args.duration)]
                 topics = replay_topics(args, settings.get('algorithm_parameters', {}),
-                                       settings.get('people_transport'))
+                                       settings.get('people_transport'), environment_config)
                 settings['replayed_topics'] = topics
                 required = [t for t in topics if t != '/tf_static' and
                             t != settings.get('people_transport', {}).get('rgb_topic')]
+                if args.visual_memory:
+                    required = [t for t in required if t != environment_config['memory']['camera_info_topic']]
                 if any(topic not in bag_topics for topic in required):
                     raise ValueError('Bag is missing required input topics: ' + str(required))
                 command += [str(bag), '--topics'] + topics
@@ -724,6 +837,48 @@ def main():
                 raise RuntimeError('No accepted registration; inspect algorithm diagnostics')
             if args.people_python and counts['people_valid'] == 0:
                 raise RuntimeError('No localized detector output was received')
+            if args.environment:
+                deadline = time.monotonic()+15
+                while True:
+                    response = environment_status()
+                    settings['environment'] = json.loads(response.message)
+                    if not response.success:
+                        raise RuntimeError('Environment geometry failed: '+response.message)
+                    if not settings['environment']['busy'] and not settings['environment']['pending']:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError('Environment observation queue did not drain')
+                    time.sleep(.1)
+                if not settings['environment']['counts']['processed']:
+                    raise RuntimeError('No observation-bound environment geometry was generated')
+            if args.visual_memory:
+                deadline = time.monotonic()+15
+                while True:
+                    response = memory_status()
+                    settings['visual_memory_statistics'] = json.loads(response.message)
+                    if not response.success:
+                        raise RuntimeError('Visual memory failed: '+response.message)
+                    if not settings['visual_memory_statistics']['busy'] and not settings['visual_memory_statistics']['pending']:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError('Visual memory did not drain')
+                    time.sleep(.1)
+                if not settings['visual_memory_statistics']['counts']['selected']:
+                    raise RuntimeError('No valid RGB observation was indexed')
+            if args.scene:
+                deadline = time.monotonic()+15
+                while True:
+                    response = scene_status()
+                    settings['scene_statistics'] = json.loads(response.message)
+                    if not response.success:
+                        raise RuntimeError('Scene assembly failed: '+response.message)
+                    if not settings['scene_statistics']['busy'] and not settings['scene_statistics']['pending']:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError('Scene queue did not drain')
+                    time.sleep(.1)
+                if not settings['scene_statistics']['counts']['published']:
+                    raise RuntimeError('No observation-bound scene was assembled')
             if args.mode == 'mapping' and not (map_path / 'COMPLETE').is_file():
                 if pin:
                     response = rospy.ServiceProxy('/pin_slam/save_map', Trigger)()
@@ -774,6 +929,16 @@ def main():
                 except (OSError, ValueError) as error:
                     settings['success'] = False
                     settings['error'] = 'Cannot bind playback map: ' + str(error)
+            if args.record_environment_scans and settings.get('success'):
+                try:
+                    from perception.environment.scans import sealed_scan_summary
+                    scans = output/'environment/scans.sqlite'
+                    sealed_scan_summary(scans)
+                    settings['environment_scans_fingerprint'] = file_fingerprint(scans)
+                except (OSError, ValueError) as error:
+                    settings.update(success=False, error='Invalid scan journal: '+str(error))
+            if args.visual_memory and settings.get('success'):
+                settings['memory_index_fingerprint'] = file_fingerprint(output/'environment/observations.sqlite')
             finalize_artifacts(output, settings, keep_details=args.keep_details)
     print(json.dumps({'success': settings['success'], 'counts': counts, 'out': str(output)},
                      ensure_ascii=False), flush=True)

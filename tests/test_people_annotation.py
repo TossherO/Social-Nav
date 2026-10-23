@@ -10,7 +10,7 @@ from unittest.mock import patch
 import numpy as np
 
 from perception.detection_tracking.annotation.data import (FrameLoader, Store, annotation_step,
-    blank_review, complete_review, dumps, edit_review, input_fingerprint, pending_candidate_ids,
+    blank_review, complete_review, dumps, edit_review, empty_review, input_fingerprint, pending_candidate_ids,
     resolve_sequence, validate_review)
 from perception.detection_tracking.annotation.export import center_info, check_splits
 from perception.detection_tracking.annotation.backend import LocalBackend
@@ -126,6 +126,28 @@ class PeopleAnnotationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_review(review, BOUNDS)
 
+    def test_explicit_empty_rejects_hidden_candidates_and_exports_bound_background(self):
+        original = self.reviewed()
+        original['note'] = 'checked full point-cloud range'
+        original['decisions']['0'] = 'uncertain'
+        empty = empty_review(original, BOUNDS, BOXES)
+        self.assertEqual(empty['status'], 'complete')
+        self.assertEqual(empty['centers'], [])
+        self.assertEqual(empty['decisions'], {'0': 'rejected', '1': 'rejected'})
+        self.assertEqual(empty['note'], original['note'])
+        self.assertEqual(len(original['centers']), 2)
+        self.store.save_review('source/0', empty)
+        frame = self.store.frame('source/0')
+        self.assertEqual(frame['candidates'], BOXES)
+        info = center_info(frame, BOUNDS)
+        self.assertTrue(info['center_label_is_exhaustive'])
+        self.assertEqual(info['gt_boxes'].shape, (0, 7))
+        self.assertEqual(empty_review(blank_review(), BOUNDS, [])['status'], 'complete')
+        with self.store.connection:
+            self.store.connection.execute('UPDATE frames SET fingerprint=NULL WHERE id=?', ('source/0',))
+        with self.assertRaisesRegex(ValueError, '有效扫描'):
+            self.store.save_review('source/0', empty)
+
     def test_direct_confirmation_enrolls_untouched_frame_without_mutating_draft(self):
         review = blank_review()
         review['decisions'] = {'0': 'pending', '1': 'pending'}
@@ -144,12 +166,15 @@ class PeopleAnnotationTests(unittest.TestCase):
     def test_enrollment_skip_edit_and_noop_preserve_membership_rules(self):
         ordinary = blank_review()
         pending = edit_review(ordinary, 'select', BOUNDS)
-        self.assertEqual(pending['status'], 'draft')
+        self.assertEqual(pending['status'], 'unreviewed')
+        self.assertEqual(edit_review(ordinary, 'pending', BOUNDS)['status'], 'unreviewed')
+        noted = edit_review(ordinary, 'note', BOUNDS, note='only a note')
+        self.assertEqual(noted['status'], 'unreviewed')
         self.assertEqual(ordinary['status'], 'unreviewed')
         skipped = edit_review(ordinary, 'skip', BOUNDS)
         self.assertEqual(skipped['status'], 'skipped')
         self.assertEqual(edit_review(skipped, 'select', BOUNDS)['status'], 'skipped')
-        self.assertEqual(edit_review(skipped, 'note', BOUNDS, note='review again')['status'], 'draft')
+        self.assertEqual(edit_review(skipped, 'note', BOUNDS, note='review again')['status'], 'skipped')
         done = complete_review(dict(status='unreviewed', decisions={'0':'pending'}, centers=[], note=''), BOUNDS, BOXES, .1)
         ident = done['centers'][0]['id']
         self.assertEqual(edit_review(done, 'move', BOUNDS, center=ident, xy=[3., 1.])['status'], 'complete')
@@ -201,27 +226,27 @@ class PeopleAnnotationTests(unittest.TestCase):
         rows = [dict(record_ns=i*100000000, status='unreviewed') for i in range(121)]
         for state in ('draft', 'complete', 'skipped'):
             rows[100]['status'] = state
-            self.assertEqual(annotation_step(rows, 95, 1., 1), (100, False))
-            self.assertEqual(annotation_step(rows, 100, 1., 1), (110, True))
+            self.assertEqual(annotation_step(rows, 95, 1., 1), 100)
+            self.assertEqual(annotation_step(rows, 100, 1., 1), 110)
             rows[105]['status'] = state
-            self.assertEqual(annotation_step(rows, 100, 1., 1), (105, False))
+            self.assertEqual(annotation_step(rows, 100, 1., 1), 105)
             rows[105]['status'] = 'unreviewed'
 
     def test_annotation_step_does_not_enroll_ordinary_browsing(self):
         rows = [dict(record_ns=i*100000000, status='unreviewed') for i in range(121)]
-        self.assertEqual(annotation_step(rows, 95, 1., 1), (105, False))
+        self.assertEqual(annotation_step(rows, 95, 1., 1), 105)
         self.assertTrue(all(row['status']=='unreviewed' for row in rows))
         rows[100]['status'] = 'complete'
-        self.assertEqual(annotation_step(rows, 100, .5, 1), (105, True))
-        self.assertEqual(annotation_step(rows, 100, 1., -1), (90, True))
+        self.assertEqual(annotation_step(rows, 100, .5, 1), 105)
+        self.assertEqual(annotation_step(rows, 100, 1., -1), 90)
         rows[95]['status'] = 'skipped'
-        self.assertEqual(annotation_step(rows, 100, 1., -1), (95, False))
+        self.assertEqual(annotation_step(rows, 100, 1., -1), 95)
 
     def test_annotation_step_handles_boundaries_sparse_scans_and_equal_times(self):
         rows = [dict(record_ns=t, status='unreviewed') for t in (0, 0, 100000000, 300000000)]
         rows[0]['status'] = 'draft'
-        self.assertEqual(annotation_step(rows, 0, .01, 1), (1, True))
-        self.assertEqual(annotation_step(rows, 0, 1., 1), (3, True))
+        self.assertEqual(annotation_step(rows, 0, .01, 1), 1)
+        self.assertEqual(annotation_step(rows, 0, 1., 1), 3)
         self.assertIsNone(annotation_step(rows, 3, 1., 1))
         self.assertIsNone(annotation_step(rows, 0, 1., -1))
 
@@ -239,6 +264,20 @@ class PeopleAnnotationTests(unittest.TestCase):
         review['status'] = 'complete'
         with self.assertRaises(ValueError):
             validate_review(review, BOUNDS)
+
+    def test_removing_last_manual_operation_returns_to_ordinary(self):
+        review = dict(blank_review(), decisions={'0': 'pending', '1': 'pending'})
+        added = edit_review(review, 'add', BOUNDS, xy=[.1, .2])
+        self.assertEqual(added['status'], 'draft')
+        deleted = edit_review(added, 'delete', BOUNDS, center=added['centers'][0]['id'])
+        self.assertEqual(deleted, review)
+        for decision in ('accepted', 'rejected'):
+            handled = edit_review(review, 'decision', BOUNDS, BOXES, candidate='0', decision=decision)
+            self.assertEqual(handled['status'], 'draft')
+            cleared = edit_review(handled, 'decision', BOUNDS, BOXES, candidate='0', decision='pending')
+            self.assertEqual(cleared, review)
+        empty_complete = dict(blank_review(), status='complete')
+        self.assertEqual(edit_review(empty_complete, 'pending', BOUNDS)['status'], 'unreviewed')
 
     def test_repeated_accept_preserves_moved_center_without_duplication(self):
         review = blank_review()

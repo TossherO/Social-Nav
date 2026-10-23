@@ -117,6 +117,8 @@ ros::Publisher pubPath;
 ros::Publisher pubPathGPS;
 ros::Publisher pubLocalState, pubLocalPath;
 bool local_state_en = false, local_visualize = false, lidar_scan_pub_en = true;
+bool frontend_state_en = false, local_state_tf = true;
+std::string local_state_topic = "/localization/state";
 int local_min_points = 20, local_path_limit = 2000;
 int local_max_pending_scans = 32, local_max_pending_imu = 20000;
 double local_min_ratio = 0.1, local_max_error = 0.2, local_max_range = 50.0;
@@ -737,7 +739,7 @@ void set_posestamp(T & out)
 
 bool publish_localization_state(const std::string& pending = "")
 {
-    if (!local_state_en) return true;
+    if (!local_state_en && !frontend_state_en) return true;
     social_nav_localization::LocalizationState message;
     message.header.stamp = ros::Time().fromSec(lidar_end_time);
     message.header.frame_id = "odom";
@@ -770,7 +772,9 @@ bool publish_localization_state(const std::string& pending = "")
     message.status = valid ? "ODOMETRY" : (initializing ? "INITIALIZING" : "LOST");
     message.reason = reason;
     pubLocalState.publish(message);
-    if (!valid) return false; // IMU prediction alone never becomes accepted localization or TF.
+    // Diagnostic publication does not change the legacy ROLL frontend update policy.
+    if (!valid) return !local_state_en;
+    if (!local_state_tf) return true;
     static tf::TransformBroadcaster broadcaster;
     tf::Transform transform;
     tf::poseMsgToTF(message.pose, transform);
@@ -1502,6 +1506,9 @@ int main(int argc, char** argv)
     nh.param<bool>("publish/map_pub",map_pub, false);
     nh.param<bool>("publish/lidar_scan_en", lidar_scan_pub_en, scan_pub_en && scan_body_pub_en);
     nh.param<bool>("odometry/publish_state", local_state_en, false);
+    nh.param<bool>("frontend/publish_state", frontend_state_en, false);
+    nh.param<bool>("odometry/publish_state_tf", local_state_tf, true);
+    nh.param<std::string>("odometry/state_topic", local_state_topic, "/localization/state");
     nh.param<bool>("odometry/visualize", local_visualize, false);
     nh.param<int>("odometry/min_effective_points", local_min_points, 20);
     nh.param<double>("odometry/min_inlier_ratio", local_min_ratio, 0.1);
@@ -1692,9 +1699,9 @@ int main(int argc, char** argv)
             ("/path", 8);
     pubPathGPS    = nh.advertise<nav_msgs::Path>("/gnss", 10000);
     ros::ServiceServer local_status;
-    if (local_state_en) {
+    if (local_state_en || frontend_state_en) {
         local_session = "fast_lio_" + std::to_string(ros::WallTime::now().toNSec());
-        pubLocalState = nh.advertise<social_nav_localization::LocalizationState>("/localization/state", 8);
+        pubLocalState = nh.advertise<social_nav_localization::LocalizationState>(local_state_topic, 8);
         pubLocalPath = nh.advertise<nav_msgs::Path>("/localization/path", 1);
         local_status = nh.advertiseService<std_srvs::Trigger::Request, std_srvs::Trigger::Response>(
             "/fast_lio/status", +[](std_srvs::Trigger::Request&, std_srvs::Trigger::Response& response) {

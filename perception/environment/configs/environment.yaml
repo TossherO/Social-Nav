@@ -1,0 +1,78 @@
+resolution: 0.15
+window_m: 18.0
+max_height_m: 1.8
+min_obstacle_height_m: 0.12
+voxel_ttl_s: 8.0
+max_range_m: 20.0
+max_rays: 2500
+max_voxels: 900000
+update_hz: 5.0
+# Deskewed endpoints do not contain moving ray origins. Ray updates require
+# a bounded single-origin approximation, using the measured relative motion.
+max_scan_translation_m: 0.03
+max_origin_interpolation_gap_s: 0.2
+ground_min_below_sensor_m: 0.2
+ground_max_below_sensor_m: 2.2
+ground_fit_radius_m: 6.0
+ground_tolerance_m: 0.07
+ground_min_points: 30
+ground_min_ratio: 0.2
+ground_max_slope_rad: 0.26
+ground_support_radius_m: 0.45
+# Fraction of the collision-height voxel column with actual free evidence.
+# 1.0 is conservative: sparse coverage stays UNKNOWN, even with a visible floor.
+free_vertical_coverage: 1.0
+occupied_probability: 0.65
+free_probability: 0.35
+pointcloud_topic: /cloud_registered_lidar
+pointcloud_frame: lidar
+sensor_frame: rslidar
+localization_topic: /localization/state
+pose_wait_s: 0.4
+output_topic: /perception/environment
+snapshot_cache_size: 12
+association_max_age_s: 0.4
+association_confirm_matches: 2
+# Offline final-map projection. Endpoint maps alone never provide free rays.
+static:
+  max_points: 4000000
+  max_cells: 2000000
+  ground_pose_spacing_m: 3.0
+  max_ground_poses: 256
+  max_voxels: 3000000
+scan_recording:
+  max_records: 12000
+  max_bytes: 1073741824
+memory:
+  rgb_topic: /camera/color/image_raw
+  camera_info_topic: /camera/color/camera_info
+  max_pose_age_s: 0.15
+  keyframe_time_tolerance_s: 0.01
+  displacement_m: 1.0
+  rotation_rad: 0.35
+  max_interval_s: 5.0
+  max_observations: 2000
+  max_image_bytes: 536870912
+  queue_size: 4
+  pose_history_size: 256
+  source_search_s: 2.0
+consumer:
+  max_geometry_age_s: 0.5
+  max_rgb_age_s: 0.3
+  history_age_s: 30.0
+  history_limit: 8
+  tool_crop_cells: 4096
+scene:
+  output_topic: /perception/scene
+  people_topic: /perception/people/json
+  max_rgb_age_s: 0.3
+  max_people_age_s: 0.3
+  max_people_pose_age_s: 0.1
+  max_association_age_s: 0.4
+  history_age_s: 30.0
+  history_limit: 8
+  join_wait_s: 0.4
+  queue_size: 4
+  cache_size: 8
+  prior_radius_m: 15.0
+  prior_max_cells: 50000

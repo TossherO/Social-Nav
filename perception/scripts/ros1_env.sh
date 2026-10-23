@@ -11,6 +11,9 @@ social_nav_source_setup /opt/ros/noetic/setup.bash
 SOCIAL_NAV_ROS_OUTPUT="$SOCIAL_NAV_PROJECT/outputs/perception"
 export CMAKE_PREFIX_PATH="$SOCIAL_NAV_ROS_OUTPUT/dependencies/gtsam:$SOCIAL_NAV_ROS_OUTPUT/dependencies/roll/usr:$SOCIAL_NAV_ROS_OUTPUT/dependencies/realsense:${CMAKE_PREFIX_PATH:-}"
 export LD_LIBRARY_PATH="$SOCIAL_NAV_ROS_OUTPUT/dependencies/gtsam/lib:$SOCIAL_NAV_ROS_OUTPUT/dependencies/roll/usr/lib/x86_64-linux-gnu:$SOCIAL_NAV_ROS_OUTPUT/dependencies/realsense/lib:${LD_LIBRARY_PATH:-}"
+if [[ -d "$SOCIAL_NAV_ROS_OUTPUT/dependencies/octomap/usr" ]]; then
+  export LD_LIBRARY_PATH="$SOCIAL_NAV_ROS_OUTPUT/dependencies/octomap/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+fi
 if [[ -f "$SOCIAL_NAV_ROS_OUTPUT/ros1_ws/devel/setup.bash" ]]; then
   social_nav_source_setup "$SOCIAL_NAV_ROS_OUTPUT/ros1_ws/devel/setup.bash"
 fi

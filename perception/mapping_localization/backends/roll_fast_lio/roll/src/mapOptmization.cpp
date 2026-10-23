@@ -8,6 +8,7 @@
 #include "globalOpt.h"
 #include "MapStorage.h"
 #include "FixedMapSubmap.h"
+#include "LocalizationGate.h"
 #include <std_msgs/String.h>
 #include <std_srvs/Trigger.h>
 #include <social_nav_localization/LocalizationState.h>
@@ -256,6 +257,8 @@ public:
     double lastInlierRatio = 0;
     double lastRegistrationError = -1;
     bool matchingValid = false;
+    LocalizationGate localizationGate;
+    Eigen::Affine3f gatePrediction = Eigen::Affine3f::Identity();
     ros::Publisher pubTrackingStatus;
     ros::Publisher pubInitialPoseAccepted;
     bool waitForInitialPose = false, initialPoseReceived = false;
@@ -385,6 +388,46 @@ public:
         nh.param<bool>("roll/publishLocalizationTF", publishLocalizationTF, true);
         nh.param<bool>("roll/writeDetails", writeDetails, false);
         nh.param<bool>("roll/waitForInitialPose", waitForInitialPose, false);
+        nh.param<bool>("roll/coverageGateEnabled", localizationGate.enabled, false);
+        localizationGate.enabled = localizationGate.enabled && localizationMode;
+        if (localizationGate.enabled) {
+            XmlRpc::XmlRpcValue polygons;
+            std::string coverageFrame;
+            nh.param<std::string>("roll/localization_coverage/frame_id", coverageFrame, "");
+            if (coverageFrame != mapFrame || !nh.getParam("roll/localization_coverage/regions_xy", polygons) ||
+                    polygons.getType() != XmlRpc::XmlRpcValue::TypeArray || polygons.size() == 0)
+                throw std::runtime_error("Missing map-frame localization coverage polygons");
+            auto number = [](XmlRpc::XmlRpcValue& value) -> double {
+                if (value.getType() == XmlRpc::XmlRpcValue::TypeInt) return static_cast<int>(value);
+                if (value.getType() == XmlRpc::XmlRpcValue::TypeDouble) return static_cast<double>(value);
+                throw std::runtime_error("Non-numeric coverage coordinate");
+            };
+            for (int i = 0; i < polygons.size(); ++i) {
+                auto& poly = polygons[i];
+                if (poly.getType() != XmlRpc::XmlRpcValue::TypeArray || poly.size() < 3)
+                    throw std::runtime_error("Invalid coverage polygon");
+                std::vector<Eigen::Vector2f> vertices;
+                for (int j = 0; j < poly.size(); ++j) {
+                    if (poly[j].getType() != XmlRpc::XmlRpcValue::TypeArray || poly[j].size() != 2)
+                        throw std::runtime_error("Invalid coverage vertex");
+                    Eigen::Vector2f vertex(number(poly[j][0]), number(poly[j][1]));
+                    if (!vertex.allFinite()) throw std::runtime_error("Nonfinite coverage vertex");
+                    vertices.push_back(vertex);
+                }
+                localizationGate.regions.push_back(vertices);
+            }
+            nh.param("roll/coverageGate/reentryMargin", localizationGate.reentryMargin, .5);
+            nh.param("roll/coverageGate/minInlier", localizationGate.minInlier, .55);
+            nh.param("roll/coverageGate/maxResidual", localizationGate.maxResidual, .10);
+            nh.param("roll/coverageGate/maxStep", localizationGate.maxStep, .75);
+            nh.param("roll/coverageGate/maxAngle", localizationGate.maxAngle, .15);
+            nh.param("roll/coverageGate/maxGravity", localizationGate.maxGravity, .0872665);
+            nh.param("roll/coverageGate/consistencyDistance", localizationGate.consistencyDistance, .25);
+            nh.param("roll/coverageGate/consistencyAngle", localizationGate.consistencyAngle, .035);
+            nh.param("roll/coverageGate/confirmationMatches", localizationGate.confirmationMatches, 5);
+            if (temporaryMappingEnabled || mapUpdateEnabled)
+                throw std::runtime_error("Coverage gating requires an immutable prior map");
+        }
         nh.param<bool>("initialization/enabled", frontendInitialization, false);
         subFrontendReference = nh.subscribe<geometry_msgs::PoseStamped>("/fast_lio/initial_lidar_pose", 1,
             [this](const geometry_msgs::PoseStamped::ConstPtr& msg) {
@@ -418,7 +461,8 @@ public:
             metricsFile.open(log_dir + "/timings.csv");
             metricsFile << "stamp,processing_ms,corners,surfaces,inlier_ratio,registration_error,valid,"
                            "submap_ms,matching_ms,local_keyframes,map_points,submap_builds,cache_misses,"
-                           "stamp_ns,queue_wait_ms,map_lock_ms,decode_ms,publish_ms,submap_build_ms\n";
+                           "stamp_ns,queue_wait_ms,map_lock_ms,decode_ms,publish_ms,submap_build_ms,"
+                           "gate_reason,predicted_x,predicted_y,predicted_z\n";
             trajectoryFile.open(log_dir + "/trajectory.tum");
             trajectoryFile << std::setprecision(12);
         }
@@ -782,9 +826,13 @@ public:
                 double submapMs = 0, matchingMs = 0;
 
                 matchingValid = false;
+                lastInlierRatio = 0;
+                lastRegistrationError = -1;
                 updateInitialGuess(); // preserve original local initialization and tracking
+                gatePrediction = affine_imu_to_map;
+                const bool insideCoverage = localizationGate.begin(gatePrediction);
 
-                if (tryReloc == true || relocSuccess == true)
+                if (insideCoverage && (tryReloc == true || relocSuccess == true))
                 {
                     
                     TicToc extract;
@@ -878,7 +926,9 @@ public:
                             << lidarCloudCornerFromMapDSNum + lidarCloudSurfFromMapDSNum << ','
                             << submapBuilds << ',' << cacheMisses << ',' << timeLidarInfoStamp.toNSec() << ','
                             << queueMs << ',' << lockMs << ',' << decodeMs << ',' << publishMs << ','
-                            << lastSubmapBuildMs << '\n';
+                            << lastSubmapBuildMs << ',' << localizationGate.reason << ','
+                            << gatePrediction.translation().x() << ',' << gatePrediction.translation().y() << ','
+                            << gatePrediction.translation().z() << '\n';
                 {
                     std::lock_guard<std::mutex> queueLock(queueMutex);
                     ++processedFrames;
@@ -1831,6 +1881,7 @@ public:
             printTrans("The reloc pose given by rviz: ",transformTobeMapped);
             poseGuessFromRvizAvailable = false;
             ++localizationGeneration;
+            localizationGate.reset();
             initialPoseReceived = true;
             relocSuccess = false;
             tryReloc = true;
@@ -2178,7 +2229,10 @@ public:
     {
         // no clouds nearby
         if (cloudKeyPoses3D->empty() || lidarCloudCornerFromMapDS->empty() || lidarCloudSurfFromMapDS->empty())
+        {
+            localizationGate.missing();
             return;
+        }
         
         // cout<<"corner, surf points: "<<lidarCloudCornerLastDSNum<<" "<<lidarCloudSurfLastDSNum<<endl;
         if (lidarCloudCornerLastDSNum > edgeFeatureMinValidNum && lidarCloudSurfLastDSNum > surfFeatureMinValidNum)
@@ -2204,7 +2258,8 @@ public:
             }
             lastInlierRatio = LM.inlier_ratio2;
             lastRegistrationError = LM.regiError;
-            matchingValid = std::isfinite(lastRegistrationError) && lastInlierRatio >= 0.3;
+            matchingValid = localizationGate.accept(gatePrediction, LM.affine_out, affine_imu_to_odom,
+                                                     lastInlierRatio, lastRegistrationError);
             
             // for relocalization in loc mode: only needed when used in actual world
             if (matchingValid && tryReloc == true)
@@ -2274,6 +2329,7 @@ public:
         } 
         else 
         {
+            localizationGate.missing();
             ROS_WARN("Not enough features! Only %d edge and %d planar features available.", lidarCloudCornerLastDSNum, lidarCloudSurfLastDSNum);
         }
     }
@@ -2692,7 +2748,8 @@ public:
         const bool valid = matchingValid && std::isfinite(lastRegistrationError) && lastRegistrationError >= 0;
         state.health = valid ? state.VALID : state.INVALID;
         state.status = localizationMode ? (valid ? "TRACKING" : "LOST") : (valid ? "MAPPING" : "INITIALIZING");
-        state.reason = valid ? "" : "map_registration_unavailable_or_failed";
+        state.reason = valid ? "" : (localizationGate.reason.empty() ?
+            "map_registration_unavailable_or_failed" : localizationGate.reason);
         state.source = stationaryImuAssumption ? "roll_fast_lio_stationary_assumption" : "roll_fast_lio";
         state.session_id = localizationSession;
         state.generation = localizationGeneration;

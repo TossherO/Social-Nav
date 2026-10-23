@@ -258,7 +258,7 @@ references/<case>.native.json只保存前视native成员及来源hash，标记NO
 
 使用默认别名的新case还保存`dataset_root_ref=jrdb`，重建时从当前仓库配置找到JRDB链接，不再依赖生成机器的物理数据目录；root字段仍保留当时路径作审计。所有源文件hash与几何签名继续检查，更换链接目标为不同数据会失败。显式外部root生成的输入和缺少逻辑引用的旧case仍按旧绝对路径读取，不自动猜测或改写历史manifest。
 
-portable打包仅复制system_prompt、每case model_input与三张图片及最小客户端，不复制源人物ID、native、模板和已有私有配置。新包另携带经哈希校验的公共测速默认值快照；其配置优先级见[客户端配置](../decision/VLM部署与调用.md#仓库客户端)。故可以不带JRDB源进行远程测速，但不能只凭便携包重建源审核图。
+portable打包仅复制system_prompt、每case model_input与三张图片及最小客户端，不复制源人物ID、native、模板和已有私有配置。新包另携带经哈希校验的公共测速默认值快照；其配置优先级见[客户端配置](../decision/VLM部署与调用.md#仓库远程客户端)。故可以不带JRDB源进行远程测速，但不能只凭便携包重建源审核图。
 
 ## 6. 当前代码与人工审核
 
@@ -341,9 +341,9 @@ BEV x向上、y向左、单位米，R为机器人参考；FOV线和点云只是�
 
 ## 7. 历史远程结果参考
 
-历史AutoDL应用的原始结果保留为[远程results1.zip](../../outputs/decision/sglang_jrdb_comparison/historical_autodl/results1.zip)和[服务器内results2.zip](../../outputs/decision/sglang_jrdb_comparison/historical_autodl/results2.zip)。应用来源由用户确认为[AutoDL应用279](https://www.autodl.art/app/market/279?search=qwen3.8)，但其权重与完整运行配置未独立验证；公开页面也不证明历史实例的实际启动参数。
+历史AutoDL和双4090／本机推理结果已合并到[单份实验归档](../../data/benchmarks/sglang_jrdb_comparison.zip)。解压后根目录为`sglang_jrdb_comparison/`，其中`historical_autodl/results1.zip`、`results2.zip`保留用户提供的两份原始包。应用来源由用户确认为[AutoDL应用279](https://www.autodl.art/app/market/279?search=qwen3.8)，但其权重与完整运行配置未独立验证；公开页面也不证明历史实例的实际启动参数。
 
-历史串行与paced结果、当前双4090的MTP／DSPARK对照、请求绑定及计时限制统一由[耗时汇总](../../outputs/decision/sglang_jrdb_comparison/report.md)维护，本参考不重复成绩表。
+历史串行与paced结果、双4090的MTP／DSPARK对照、请求绑定及计时限制统一保存在归档内的`report.md`及原始JSON记录中，本参考不重复成绩表。查阅时解压到临时目录，不恢复为当前输出目录。
 历史包按2秒离线重算的完成数不等于0.5Hz实测，旧1Hz到达、不同协议和硬件的结果也不能直接解释为当前配置的收益。
 历史与当前请求摘要不匹配时只作参考，不修改摘要或输入来强行配对；旧服务、本地／远程差值不能进一步当作纯RTT或GPU耗时。
 

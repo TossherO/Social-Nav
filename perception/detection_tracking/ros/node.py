@@ -153,6 +153,7 @@ class PeopleNode:
                           clock_domain=self.clock_domain, world_frame=self.cfg['localization_parent_frame'])
             image = None
             pose_age = None
+            record = None
             try:
                 if not np.isfinite(stamp) or not sensor_frame:
                     raise ValueError('Invalid cloud timestamp/frame')
@@ -202,6 +203,8 @@ class PeopleNode:
             except Exception as error:
                 result = self.pipeline.failure(frame, f'{type(error).__name__}: {error}')
                 rospy.logerr_throttle(2, result['reason'])
+            result['localization_binding'] = (dict(session_id=record.session_id,generation=record.generation,
+                frame_id=record.parent_frame,source=record.source) if record is not None else None)
             self.publish(result, pose_age, image)
 
     def publish(self, result, pose_age, image):

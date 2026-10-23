@@ -1,5 +1,6 @@
 import tempfile
 import pickle
+import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,11 +8,13 @@ from unittest import mock
 
 import torch
 import numpy as np
+from easydict import EasyDict
 from simple_det3d.utils.common_utils import load_checkpoint
 
 from simple_det3d.train.train_utils import (
     checkpoint_state,
     load_best_metric_state,
+    select_training_checkpoints,
     train_model,
 )
 
@@ -20,6 +23,101 @@ METRIC_NAME = 'CenterHit@0.50m'
 
 
 class TrainingResumeTest(unittest.TestCase):
+    def _task_config(self, project_root, sweeps):
+        return EasyDict(
+            ROOT_DIR=project_root / 'perception/detection_tracking/training/simpledet3d',
+            CLASS_NAMES=['Pedestrian'], MODEL={'NAME': 'VoxelRCNN'},
+            DATA_CONFIG={'MAX_SWEEPS': sweeps}, TASK_SCENE={'ENABLED': True},
+        )
+
+    def test_task_initializer_matches_configured_frames_without_cuda(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for sweeps in (1, 2, 3, 4):
+                path = root / f'models/wheelchair_detector/{sweeps}frame/checkpoints/detector_best.pth'
+                path.parent.mkdir(parents=True)
+                path.touch()
+            for sweeps in (0, 1, 2, 3, 4):
+                cfg = self._task_config(root, sweeps)
+                resumes, pretrained = select_training_checkpoints(cfg, root / 'new/ckpt')
+                self.assertEqual(resumes, [])
+                self.assertEqual(Path(pretrained), root / f'models/wheelchair_detector/{max(1, sweeps)}frame/checkpoints/detector_best.pth')
+            with self.assertRaisesRegex(FileNotFoundError, '5frame'):
+                select_training_checkpoints(self._task_config(root, 5), root / 'new/ckpt')
+
+    def test_explicit_initializer_overrides_automatic_choice(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            custom = root / 'custom.pth'
+            custom.touch()
+            cfg = self._task_config(root, 5)
+            self.assertEqual(select_training_checkpoints(cfg, root / 'ckpt', pretrained_model=custom),
+                             ([], str(custom)))
+            with self.assertRaisesRegex(FileNotFoundError, 'missing.pth'):
+                select_training_checkpoints(cfg, root / 'ckpt', pretrained_model=root / 'missing.pth')
+
+    def test_resume_precedes_initialization_even_when_initializer_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ckpt_dir = root / 'ckpt'
+            ckpt_dir.mkdir()
+            older, newer, explicit = [ckpt_dir / name for name in
+                                     ('checkpoint_epoch_1.pth', 'checkpoint_epoch_2.pth', 'selected.pth')]
+            for index, path in enumerate((older, newer, explicit)):
+                path.touch()
+                os.utime(path, (100 + index, 100 + index))
+            cfg = self._task_config(root, 5)
+            self.assertEqual(select_training_checkpoints(cfg, ckpt_dir, pretrained_model=root / 'missing.pth'),
+                             ([str(newer), str(older)], None))
+            self.assertEqual(select_training_checkpoints(cfg, ckpt_dir, ckpt=explicit,
+                                                         pretrained_model=root / 'missing.pth'),
+                             ([str(explicit)], None))
+            with self.assertRaisesRegex(FileNotFoundError, 'Resume checkpoint'):
+                select_training_checkpoints(cfg, ckpt_dir, ckpt=root / 'missing.pth')
+
+    def test_automatic_initialization_scope_and_dataset_overrides(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cfg = self._task_config(root, 3)
+            cfg.TASK_SCENE.ENABLED = False
+            self.assertEqual(select_training_checkpoints(cfg, root / 'ckpt'), ([], None))
+            cfg.TASK_SCENE.ENABLED = True
+            cfg.MODEL.NAME = 'CenterPoint'
+            with self.assertRaisesRegex(ValueError, 'VoxelRCNN'):
+                select_training_checkpoints(cfg, root / 'ckpt')
+            cfg.MODEL.NAME = 'VoxelRCNN'
+            cfg.TASK_SCENE.TRAIN_DATASETS = [EasyDict(CONFIG={'MAX_SWEEPS': 1})]
+            with self.assertRaisesRegex(ValueError, 'share MAX_SWEEPS'):
+                select_training_checkpoints(cfg, root / 'ckpt')
+
+    def test_sampler_epoch_is_set_before_iterator_creation_after_resume(self):
+        for merged in (False, True):
+            with self.subTest(merge_all_iters=merged):
+                sampler = SimpleNamespace(epoch=0)
+                sampler.set_epoch = lambda epoch: setattr(sampler, 'epoch', epoch)
+                class Loader:
+                    dataset = SimpleNamespace(merge_all_iters_to_one_epoch=mock.Mock())
+                    def __init__(self):
+                        self.created_epochs = []
+                    def __len__(self):
+                        return 6
+                    def __iter__(self):
+                        self.created_epochs.append(sampler.epoch)
+                        return iter([(sampler.epoch, i) for i in range(6)])
+                loader = Loader()
+                def consume_epoch(*args, **kwargs):
+                    batches = [next(kwargs['dataloader_iter']) for _ in range(kwargs['total_it_each_epoch'])]
+                    if not merged:
+                        self.assertTrue(all(epoch == kwargs['cur_epoch'] for epoch, _ in batches))
+                    return kwargs['accumulated_iter'] + len(batches)
+                with mock.patch('simple_det3d.train.train_utils.train_one_epoch', side_effect=consume_epoch):
+                    train_model(model=None, optimizer=None, train_loader=loader, model_func=None,
+                                lr_scheduler=None, optim_cfg=SimpleNamespace(WARMUP_EPOCH=0),
+                                start_epoch=1, total_epochs=3, start_iter=0, rank=1, tb_log=None,
+                                ckpt_save_dir=Path('/unused'), train_sampler=sampler, scaler=mock.Mock(),
+                                merge_all_iters_to_one_epoch=merged)
+                self.assertEqual(loader.created_epochs, [1] if merged else [1, 2])
+
     def test_restricted_checkpoint_accepts_legacy_numpy_float_scalars(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / 'legacy.pth'

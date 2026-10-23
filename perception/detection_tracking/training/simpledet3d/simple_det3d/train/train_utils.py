@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import tqdm
 from collections import namedtuple
+from pathlib import Path
 from torch.nn.utils import clip_grad_norm_
 from simple_det3d.utils.common_utils import load_checkpoint
 
@@ -18,6 +19,51 @@ from simple_det3d.train.ema_utils import (
     keep_frozen_modules_eval,
     update_ema_teacher,
 )
+
+
+def select_training_checkpoints(cfg, ckpt_dir, *, ckpt=None, pretrained_model=None):
+    """Choose resume candidates first, otherwise a weights-only initialization.
+
+    Only task-scene adaptation has an automatic initialization here. Other
+    recipes keep their explicit initialization or training-from-scratch behavior.
+    This selection does not load weights or require CUDA.
+    """
+    if ckpt is not None:
+        path = Path(ckpt).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f'Resume checkpoint does not exist: {path}')
+        return [str(path)], None
+
+    candidates = sorted(Path(ckpt_dir).glob('checkpoint_epoch_*.pth'),
+                        key=lambda path: path.stat().st_mtime, reverse=True)
+    if candidates:
+        return [str(path) for path in candidates], None
+
+    if pretrained_model is not None:
+        path = Path(pretrained_model).expanduser()
+    elif cfg.get('TASK_SCENE', {}).get('ENABLED', False):
+        if cfg.MODEL.NAME != 'VoxelRCNN' or cfg.CLASS_NAMES != ['Pedestrian']:
+            raise ValueError('Automatic Wheelchair initialization requires VoxelRCNN/Pedestrian; '
+                             'select --pretrained_model explicitly for another model')
+        sweeps = cfg.DATA_CONFIG.get('MAX_SWEEPS', 1)
+        if type(sweeps) is not int or sweeps < 0:
+            raise ValueError('MAX_SWEEPS must be a non-negative integer')
+        sweeps = max(1, sweeps)
+        task = cfg.TASK_SCENE
+        for spec in list(task.get('TRAIN_DATASETS', [])) + list(task.get('VALIDATION_DATASETS', [])):
+            override = spec.get('CONFIG', {}).get('MAX_SWEEPS', sweeps)
+            if max(1, override) != sweeps:
+                raise ValueError('Automatic initialization requires task datasets to share MAX_SWEEPS; '
+                                 'remove the per-dataset override or select --pretrained_model explicitly')
+        project_root = Path(cfg.ROOT_DIR).resolve().parents[3]
+        path = project_root / 'models' / 'wheelchair_detector' / f'{sweeps}frame' / 'checkpoints' / 'detector_best.pth'
+    else:
+        return [], None
+
+    if not path.is_file():
+        raise FileNotFoundError(f'Initialization checkpoint does not exist: {path}; '
+                                'provide matching weights or set --pretrained_model explicitly')
+    return [], str(path)
 
 
 def eval_epoch(model, test_loader, cfg, logger, cur_epoch, tb_log=None,
@@ -80,9 +126,11 @@ def eval_epoch(model, test_loader, cfg, logger, cur_epoch, tb_log=None,
         for key, val in result_dict.items():
             if isinstance(val, dict):
                 for sub_key, sub_val in val.items():
-                    tb_log.add_scalar(f'eval/{key}_{sub_key}', sub_val, accumulated_iter)
+                    if np.isscalar(sub_val) and np.isfinite(sub_val):
+                        tb_log.add_scalar(f'eval/{key}_{sub_key}', sub_val, accumulated_iter)
             else:
-                tb_log.add_scalar(f'eval/{key}', val, accumulated_iter)
+                if np.isscalar(val) and np.isfinite(val):
+                    tb_log.add_scalar(f'eval/{key}', val, accumulated_iter)
 
     # Build a clean flat dict
     eval_result = {}
@@ -231,9 +279,11 @@ def train_one_epoch(model, optimizer, train_loader, model_func, lr_scheduler, ac
         with autocast_context(precision):
             loss, tb_dict, disp_dict = model_func(model, batch)
 
+        if not torch.isfinite(loss).all():
+            raise FloatingPointError('Non-finite training loss at iteration %d' % accumulated_iter)
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        clip_grad_norm_(model.parameters(), optim_cfg.GRAD_NORM_CLIP)
+        clip_grad_norm_(model.parameters(), optim_cfg.GRAD_NORM_CLIP, error_if_nonfinite=True)
         scaler.step(optimizer)
         scaler.update()
         if ema_teacher is not None:
@@ -347,10 +397,14 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
             train_loader.dataset.merge_all_iters_to_one_epoch(merge=True, epochs=total_epochs)
             total_it_each_epoch = len(train_loader) // max(total_epochs, 1)
 
-        dataloader_iter = iter(train_loader)
+        dataloader_iter = None
         for cur_epoch in tbar:
             if train_sampler is not None:
                 train_sampler.set_epoch(cur_epoch)
+            # Worker prefetch starts at iterator creation. Set the sampler epoch
+            # first, including on the first epoch after restoring a checkpoint.
+            if dataloader_iter is None or not merge_all_iters_to_one_epoch:
+                dataloader_iter = iter(train_loader)
 
             if lr_warmup_scheduler is not None and cur_epoch < optim_cfg.WARMUP_EPOCH:
                 cur_scheduler = lr_warmup_scheduler

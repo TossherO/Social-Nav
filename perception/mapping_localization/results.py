@@ -241,7 +241,7 @@ def load_result(path, *, phase=None, backend=None, map_override=None):
     return Result(path, rows, metadata, map_dir, notices, kind)
 
 
-def read_pcd(path, limit=250000):
+def read_pcd(path, limit=250000, *, strict=False):
     """Project ASCII/binary PCD; mmap binary input and cap display before copying."""
     with Path(path).open('rb') as stream:
         header = {}
@@ -266,6 +266,8 @@ def read_pcd(path, limit=250000):
         n = int(header['POINTS'][0])
         if n <= 0 or limit < 1 or len(set(names)) != len(names):
             raise ValueError('Invalid/empty PCD or display budget')
+        if strict and n > limit:
+            raise ValueError('PCD exceeds the processing budget; refusing to discard obstacle endpoints')
         for axis in ('x', 'y', 'z'):
             if counts[names.index(axis)] != 1:
                 raise ValueError('PCD coordinates must be scalar')

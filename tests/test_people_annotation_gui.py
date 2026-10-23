@@ -19,6 +19,7 @@ except ImportError:
 
 from perception.detection_tracking.annotation.backend import LocalBackend
 from perception.detection_tracking.annotation.data import Store, blank_review, dumps, edit_review
+from perception.detection_tracking.annotation.appearance import ANNOTATION_COLORS
 
 
 BOUNDS = [-4.8, -9.6, -1.5, 14.4, 9.6, 4.5]
@@ -176,6 +177,103 @@ class PeopleAnnotationGuiTests(unittest.TestCase):
         self.assertTrue(self.backend.calls)
         self.assertTrue(all(ident != threading.get_ident() for _, ident in self.backend.calls))
         self.assertFalse(self.warnings)
+
+    def test_navigation_does_not_enroll_and_last_edit_removal_is_saved(self):
+        window = self.window
+        window.select(('candidate', '0'))
+        QtTest.QTest.keyClick(window.canvas, QtCore.Qt.Key_Q)
+        self.wait_for(self.idle)
+        self.assertEqual(window.review['status'], 'draft')
+        window.navigate(1, True)
+        self.wait_for(lambda: window.frame['id'] == 'a/2' and self.idle())
+        self.assertEqual(window.review['status'], 'unreviewed')
+        self.assertEqual(self.stored('a/2')['review']['status'], 'unreviewed')
+        window.change('add', xy=[.2,.3])
+        self.wait_for(self.idle)
+        center=window.review['centers'][0]['id']
+        window.change('delete', center=center)
+        self.wait_for(self.idle)
+        self.assertEqual(self.stored('a/2')['review']['status'], 'unreviewed')
+        window.rejected.setChecked(True)
+        window.select(('candidate','0'))
+        QtTest.QTest.keyClick(window.canvas, QtCore.Qt.Key_R)
+        self.wait_for(self.idle)
+        self.assertEqual(window.review['status'], 'draft')
+        QtTest.QTest.keyClick(window.canvas, QtCore.Qt.Key_C)
+        self.wait_for(self.idle)
+        self.assertEqual(self.stored('a/2')['review']['status'], 'unreviewed')
+
+    def test_empty_shortcut_saves_without_navigation_and_supports_undo(self):
+        window = self.window
+        window.change('add', xy=[.2, .3])
+        window.select(('candidate', '0'))
+        window.accept()
+        window.mark_status('complete')
+        self.wait_for(self.idle)
+        original = self.stored('a/0')['review']
+        self.assertEqual(window.timeline.by_id['a/0']['display_status'], 'complete')
+        self.assertIn(ANNOTATION_COLORS['complete'], window.caption.styleSheet())
+        window.score.setValue(.99)  # All proposals are hidden, but explicitly rejected.
+        window.canvas.setFocus()
+        QtTest.QTest.keyClick(window.canvas, QtCore.Qt.Key_4)
+        self.wait_for(self.idle)
+        empty = self.stored('a/0')['review']
+        self.assertEqual(window.frame['id'], 'a/0')
+        self.assertEqual(empty['status'], 'complete')
+        self.assertEqual(empty['centers'], [])
+        self.assertEqual(empty['decisions'], {'0': 'rejected'})
+        self.assertIn('已标（无人）', window.caption.text())
+        self.assertEqual(window.timeline.by_id['a/0']['display_status'], 'complete_empty')
+        self.assertIn(ANNOTATION_COLORS['complete_empty'], window.caption.styleSheet())
+        self.assertTrue(window.empty_button.styleSheet())
+        self.assertFalse(window.complete_button.styleSheet())
+        self.assertIn('4：标记无人', window.shortcut_help)
+        window.undo()
+        self.wait_for(self.idle)
+        self.assertEqual(self.stored('a/0')['review'], original)
+        self.assertEqual(window.timeline.by_id['a/0']['display_status'], 'complete')
+        self.assertIn(ANNOTATION_COLORS['complete'], window.caption.styleSheet())
+        window.empty_button.click()
+        self.wait_for(self.idle)
+        self.assertEqual(self.stored('a/0')['review'], empty)
+        window.refresh(self.backend.snapshot())
+        self.wait_for(self.idle)
+        self.assertEqual(window.timeline.by_id['a/0']['display_status'], 'complete_empty')
+        window.change('add', xy=[.4, .4])
+        self.wait_for(self.idle)
+        self.assertEqual(self.stored('a/0')['review']['status'], 'draft')
+        self.assertEqual(window.timeline.by_id['a/0']['display_status'], 'draft')
+        before = self.stored('a/0')['review']
+        window.note.setFocus()
+        QtTest.QTest.keyClick(window.note, QtCore.Qt.Key_4)
+        self.assertEqual(window.review, before)
+        with patch.object(window, 'editable', return_value=False):
+            window.mark_status('empty')
+        self.assertEqual(window.review, before)
+        self.assertFalse(self.warnings)
+
+    def test_timeline_paints_distinct_completion_colors_and_preserves_seeking(self):
+        from perception.detection_tracking.annotation.timeline import BagTimeline, LANES
+        timeline = BagTimeline()
+        self.addCleanup(timeline.close)
+        rows = [dict(id='person', ordinal=0, record_ns=0, status='complete', display_status='complete'),
+                dict(id='middle', ordinal=1, record_ns=1000000000, status='unreviewed'),
+                dict(id='empty', ordinal=2, record_ns=2000000000, status='complete', display_status='complete_empty')]
+        timeline.set_frames(rows)
+        timeline.resize(550, 110)
+        timeline.show()
+        self.app.processEvents()
+        image = timeline.grab().toImage()
+        for ident, color in [('person', 'complete'), ('empty', 'complete_empty')]:
+            row = timeline.by_id[ident]
+            point = QtCore.QPoint(round(timeline.x_at(row['record_ns'])), LANES['complete'])
+            self.assertEqual(image.pixelColor(point).name(), ANNOTATION_COLORS[color])
+            self.assertEqual(timeline.frame_at(point)['id'], ident)
+        received = []
+        timeline.seek.connect(received.append)
+        QtTest.QTest.mouseClick(timeline, QtCore.Qt.LeftButton, pos=point)
+        self.assertEqual(received, ['empty'])
+        self.assertIn('已标（无人）', timeline.toolTip())
 
     def test_save_failure_retains_draft_retry_and_conflict_requires_explicit_reload(self):
         window = self.window

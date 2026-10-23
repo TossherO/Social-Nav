@@ -12,7 +12,6 @@ Usage (multi-GPU via torchrun):
 import argparse
 import copy
 import datetime
-import glob
 import os
 import sys
 from pathlib import Path
@@ -28,6 +27,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from simple_det3d.utils.config import load_config, log_config_to_file
 from simple_det3d.utils.common_utils import create_logger, set_random_seed, get_dist_info
 from simple_det3d.datasets.coda_dataset import CodaDataset
+from simple_det3d.datasets.task_scene_dataset import (
+    build_task_scene_dataset, check_train_validation, make_task_sampler,
+    data_snapshot, save_data_snapshot, check_resume_inputs,
+)
 from simple_det3d.datasets.mixed_domain_dataset import (
     MixedDomainDataset,
     MultiDomainDataset,
@@ -43,6 +46,7 @@ from simple_det3d.train.ema_utils import (
 from simple_det3d.train.train_utils import (
     load_best_metric_state,
     model_fn_decorator,
+    select_training_checkpoints,
     train_model,
 )
 from simple_det3d.utils.precision_utils import (
@@ -63,7 +67,9 @@ def parse_args():
     parser.add_argument('--workers', type=int, default=2, help='Number of data loading workers')
     parser.add_argument('--extra_tag', type=str, default='default', help='Extra tag for output directory')
     parser.add_argument('--ckpt', type=str, default=None, help='Checkpoint to resume from')
-    parser.add_argument('--pretrained_model', type=str, default=None, help='Pretrained model weights')
+    parser.add_argument('--pretrained_model', type=str, default=None,
+                        help='Initialization weights; task-scene default selects the historical '
+                             'Stage 3 best by MAX_SWEEPS. Resume checkpoints take precedence.')
     parser.add_argument('--fix_random_seed', action='store_true', default=False)
     parser.add_argument('--ckpt_save_interval', type=int, default=1, help='Save checkpoint every N epochs')
     parser.add_argument('--max_ckpt_save_num', type=int, default=30, help='Max number of saved checkpoints')
@@ -77,8 +83,10 @@ def parse_args():
                         help='Runtime precision (default: cfg.PRECISION or fp32)')
     parser.add_argument('--use_amp', action='store_true',
                         help='Deprecated alias for --precision fp16')
-    parser.add_argument('--eval_interval', type=int, default=0,
-                        help='Evaluate on val set every N epochs (0 = disable)')
+    parser.add_argument('--eval_interval', type=int, default=None,
+                        help='Evaluate every N epochs (default: task adaptation 1, other training 0)')
+    parser.add_argument('--epoch_samples', type=int, default=None,
+                        help='Override task epoch size before DDP alignment; cyclic mode adjusts fractional replay only')
     parser.add_argument('--root_path', type=str, default=None,
                         help='Override info/GT-database root path')
     parser.add_argument('--raw_data_path', type=str, default=None,
@@ -89,6 +97,9 @@ def parse_args():
     )
     parser.add_argument('--local_rank', type=int, default=None,
                         help='Local rank for distributed training (set by torchrun)')
+    parser.add_argument('--dry_run', '--dry-run', action='store_true',
+                        help='Print effective configuration and checkpoint selection; '
+                             'do not initialize CUDA, load data/models, or create outputs')
 
     args = parser.parse_args()
 
@@ -98,6 +109,15 @@ def parse_args():
 
     # Load config
     cfg = load_config(args.cfg_file)
+    task_enabled = cfg.get('TASK_SCENE', {}).get('ENABLED', False)
+    if task_enabled and (args.root_path is not None or args.raw_data_path is not None):
+        parser.error('Task-scene data roots must be set in each TASK_SCENE dataset CONFIG')
+    if args.epoch_samples is not None:
+        if not task_enabled or args.epoch_samples < 1:
+            parser.error('--epoch_samples requires task-scene training and a positive value')
+        cfg.TASK_SCENE.EPOCH_SAMPLES = args.epoch_samples
+    if args.eval_interval is None:
+        args.eval_interval = 1 if task_enabled else 0
 
     if args.root_path is not None:
         cfg.DATA_CONFIG.DATA_PATH = args.root_path
@@ -106,9 +126,9 @@ def parse_args():
     if args.max_sweeps is not None:
         if args.max_sweeps < 0:
             parser.error('--max_sweeps must be non-negative')
-        cfg.DATA_CONFIG.MAX_SWEEPS = args.max_sweeps
+        cfg.DATA_CONFIG.MAX_SWEEPS = max(1, args.max_sweeps)
         if 'SOURCE_DATA_CONFIG' in cfg:
-            cfg.SOURCE_DATA_CONFIG.MAX_SWEEPS = args.max_sweeps
+            cfg.SOURCE_DATA_CONFIG.MAX_SWEEPS = cfg.DATA_CONFIG.MAX_SWEEPS
 
     args.precision = resolve_precision(
         cli_precision=args.precision,
@@ -159,6 +179,24 @@ def build_dataloader(dataset_cfg, class_names, batch_size, training, workers=4,
 
 def main():
     args, cfg = parse_args()
+    output_dir = Path('./output') / cfg.TAG / args.extra_tag
+    ckpt_dir = output_dir / 'ckpt'
+    # Resolve the effective frame count and missing assets before touching CUDA
+    # or building datasets. Existing runs do not need their old initializer.
+    resume_candidates, args.pretrained_model = select_training_checkpoints(
+        cfg, ckpt_dir, ckpt=args.ckpt, pretrained_model=args.pretrained_model,
+    )
+    if args.dry_run:
+        print('输入帧数 MAX_SWEEPS:', max(1, cfg.DATA_CONFIG.get('MAX_SWEEPS', 1)))
+        print('训练轮数:', args.epochs if args.epochs is not None else cfg.OPTIMIZATION.NUM_EPOCHS)
+        print('每卡 batch:', args.batch_size if args.batch_size is not None else cfg.OPTIMIZATION.BATCH_SIZE_PER_GPU)
+        if resume_candidates:
+            print('恢复断点（按优先级）:', ', '.join(resume_candidates))
+        else:
+            print('初始化权重:', args.pretrained_model or '从头训练')
+        print('输出目录:', output_dir)
+        print('[DRY-RUN] 配置与权重路径解析完成；未读取训练样本、初始化CUDA或创建输出。')
+        return
 
     # ------------------------------------------------------------------
     #  Distributed training initialisation
@@ -185,8 +223,6 @@ def main():
     # ------------------------------------------------------------------
     #  Output directory & logging (rank 0 only)
     # ------------------------------------------------------------------
-    output_dir = Path('./output') / cfg.TAG / args.extra_tag
-    ckpt_dir = output_dir / 'ckpt'
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -218,7 +254,8 @@ def main():
     # Training data: optionally mix a fully supervised source dataset with the
     # weakly supervised target dataset.  Both datasets must share geometry and
     # point-feature definitions.
-    target_train_set = CodaDataset(
+    task_enabled = cfg.get('TASK_SCENE', {}).get('ENABLED', False)
+    target_train_set = build_task_scene_dataset(cfg, training=True, logger=logger) if task_enabled else CodaDataset(
         dataset_cfg=cfg.DATA_CONFIG,
         class_names=cfg.CLASS_NAMES,
         training=True,
@@ -283,7 +320,25 @@ def main():
         train_set = target_train_set
 
     train_sampler = None
-    if dist.is_initialized():
+    task_validation = None
+    if task_enabled:
+        train_sampler = make_task_sampler(train_set, cfg, world_size, rank)
+        task_validation = build_task_scene_dataset(cfg, training=False, logger=logger)
+        check_train_validation(train_set, task_validation)
+        if rank == 0:
+            snapshot = data_snapshot(train_set, task_validation, train_sampler, cfg)
+            if args.ckpt:
+                check_resume_inputs(args.ckpt, snapshot)
+            save_data_snapshot(output_dir / 'training_data.json', snapshot)
+            for item in train_set.summary:
+                logger.info('Weighted samples %s: n=%d, weight=%.3f, expected share=%.4f',
+                            item['name'], item['samples'], item['per_frame_weight'], item['expected_fraction'])
+            logger.info('Epoch draws: requested=%d, actual=%d; validation role=%s',
+                        train_sampler.requested_size, train_sampler.total_size, snapshot['validation_role'])
+            if 'strategy' in snapshot['sampling']:
+                logger.info('Sampling strategy: %s; coverage pools: %s',
+                            snapshot['sampling']['strategy'], snapshot['sampling']['pools'])
+    elif dist.is_initialized():
         train_sampler = DistributedSampler(
             train_set, num_replicas=world_size, rank=rank, shuffle=True,
         )
@@ -341,32 +396,27 @@ def main():
     start_epoch = it = 0
     last_epoch = -1
     resume_checkpoint_path = None
-    if args.pretrained_model is not None:
+    for index, candidate in enumerate(resume_candidates):
+        try:
+            it, start_epoch = checkpoint_model.load_params_with_optimizer(
+                candidate, to_cpu=True, optimizer=optimizer, scaler=scaler, logger=logger,
+            )
+            resume_checkpoint_path = candidate
+            last_epoch = start_epoch + 1
+            break
+        except Exception:
+            # Keep the existing newest-to-oldest resume order, but never turn
+            # a failed resume into an unnoticed fresh training run.
+            if index == len(resume_candidates) - 1:
+                raise
+            logger.warning('Could not restore %s; trying the previous checkpoint',
+                           candidate, exc_info=True)
+    if not resume_candidates and args.pretrained_model is not None:
+        logger.info('Initialization checkpoint for MAX_SWEEPS=%s: %s',
+                    cfg.DATA_CONFIG.get('MAX_SWEEPS', 1), args.pretrained_model)
         checkpoint_model.load_params_from_file(
             filename=args.pretrained_model, to_cpu=True, logger=logger,
         )
-
-    if args.ckpt is not None:
-        it, start_epoch = checkpoint_model.load_params_with_optimizer(
-            args.ckpt, to_cpu=True, optimizer=optimizer, scaler=scaler, logger=logger
-        )
-        resume_checkpoint_path = args.ckpt
-        last_epoch = start_epoch + 1
-    else:
-        ckpt_list = glob.glob(str(ckpt_dir / 'checkpoint_epoch_*.pth'))
-        if len(ckpt_list) > 0:
-            ckpt_list.sort(key=os.path.getmtime)
-            while len(ckpt_list) > 0:
-                try:
-                    it, start_epoch = checkpoint_model.load_params_with_optimizer(
-                        ckpt_list[-1], to_cpu=True, optimizer=optimizer,
-                        scaler=scaler, logger=logger,
-                    )
-                    resume_checkpoint_path = ckpt_list[-1]
-                    last_epoch = start_epoch + 1
-                    break
-                except Exception:
-                    ckpt_list = ckpt_list[:-1]
 
     weak_cfg = cfg.DATA_CONFIG.get('WEAK_SUPERVISION', {})
     best_metric_name = weak_cfg.get('BEST_METRIC', None)
@@ -427,6 +477,7 @@ def main():
             workers=args.workers,
             root_path=root_path,
             logger=logger,
+            dataset=task_validation,
         )
         logger.info('Mid-training evaluation enabled: every %d epoch(s)' % args.eval_interval)
 
@@ -486,6 +537,7 @@ def main():
                 workers=args.workers,
                 root_path=root_path,
                 logger=logger,
+                dataset=task_validation,
             )
 
         # Try best_model first, fall back to current model state

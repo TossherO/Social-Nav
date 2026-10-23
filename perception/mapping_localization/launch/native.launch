@@ -11,6 +11,17 @@
   <arg name="start_frontend" default="true"/>
   <arg name="wait_for_initial_pose" default="false"/>
   <arg name="assume_stationary" default="false"/>
+  <arg name="environment" default="false"/>
+  <arg name="record_environment_scans" default="false"/>
+  <arg name="visual_memory" default="false"/>
+  <arg name="scene" default="false"/>
+  <arg name="scene_people" default="false"/>
+  <arg name="prior_map" default=""/>
+  <arg name="association_coverage" default=""/>
+  <arg name="memory_bag" default=""/>
+  <arg name="memory_camera_calibration" default=""/>
+  <arg name="allow_local_only" default="false"/>
+  <arg name="environment_config" default="$(dirname)/../../environment/configs/environment.yaml"/>
   <arg name="lidar_imu_calibration" default="$(dirname)/../../sensors/calibration/lidar_imu.yaml"/>
   <arg name="rviz_config" default="$(eval 'odometry.rviz' if arg('mode') == 'odometry' else 'roll.rviz')"/>
   <rosparam command="load" file="$(dirname)/../configs/fast_lio.yaml"/>
@@ -44,6 +55,51 @@
   <group if="$(eval arg('mode') == 'odometry')">
     <param name="publish/scan_publish_en" value="$(arg visualize)"/>
     <param name="odometry/visualize" value="$(arg visualize)"/>
+  </group>
+  <!-- Explicit roles also reset parameters left by a previous live task. -->
+  <param name="odometry/publish_state" value="$(eval arg('mode') == 'odometry')"/>
+  <param name="frontend/publish_state" value="$(arg environment)"/>
+  <param name="odometry/state_topic" value="$(eval '/localization/frontend_state' if arg('environment') else '/localization/state')"/>
+  <param name="odometry/publish_state_tf" value="$(eval not arg('environment'))"/>
+  <param name="roll/localizationStateTopic" value="$(eval '/localization/map_state' if arg('environment') else '/localization/state')"/>
+  <param name="roll/publishLocalizationTF" value="$(eval not arg('environment'))"/>
+  <param name="roll/coverageGateEnabled" value="$(eval bool(arg('association_coverage')))"/>
+  <group if="$(eval bool(arg('association_coverage')))">
+    <rosparam command="load" file="$(arg association_coverage)" ns="roll/localization_coverage"/>
+  </group>
+  <group if="$(arg environment)">
+    <param name="publish/lidar_scan_en" value="true"/>
+    <node pkg="social_nav_localization" type="localization_context" name="localization_context" output="screen" required="true">
+      <env name="SOCIAL_NAV_ROOT" value="$(dirname)/../../.."/>
+      <param name="mode" value="$(arg mode)"/>
+      <param name="map_dir" value="$(arg map_dir)"/>
+      <param name="allow_local_only" value="$(arg allow_local_only)"/>
+      <param name="config" value="$(arg environment_config)"/>
+      <param name="coverage" type="str" value="$(arg association_coverage)"/>
+      <param name="event_log" type="str" value="$(eval arg('run_dir') + '/context_events.jsonl' if arg('keep_details') else '')"/>
+    </node>
+    <node pkg="social_nav_environment" type="environment_node" name="environment" output="screen" required="true">
+      <env name="SOCIAL_NAV_ROOT" value="$(dirname)/../../.."/>
+      <param name="config" value="$(arg environment_config)"/>
+      <param name="output" value="$(arg run_dir)/environment"/>
+      <param name="record_scans" value="$(arg record_environment_scans)"/>
+    </node>
+    <node if="$(arg visual_memory)" pkg="social_nav_environment" type="visual_memory" name="visual_memory" output="screen" required="true">
+      <env name="SOCIAL_NAV_ROOT" value="$(dirname)/../../.."/>
+      <param name="config" value="$(arg environment_config)"/>
+      <param name="output" value="$(arg run_dir)/environment"/>
+      <param name="bag" type="str" value="$(arg memory_bag)"/>
+      <param name="camera_calibration" type="str" value="$(arg memory_camera_calibration)"/>
+    </node>
+    <node if="$(arg scene)" pkg="social_nav_environment" type="perception_scene" name="perception_scene" output="screen" required="true">
+      <env name="SOCIAL_NAV_ROOT" value="$(dirname)/../../.."/>
+      <param name="config" value="$(arg environment_config)"/>
+      <param name="output" value="$(arg run_dir)/scene"/>
+      <param name="people_enabled" value="$(arg scene_people)"/>
+      <param name="prior_map" type="str" value="$(arg prior_map)"/>
+      <param name="map_dir" type="str" value="$(arg map_dir)"/>
+      <param name="memory_dir" type="str" value="$(eval arg('run_dir') + '/environment' if arg('visual_memory') else '')"/>
+    </node>
   </group>
   <include if="$(arg start_frontend)" file="$(dirname)/frontend.launch">
     <arg name="with_roll" value="$(eval arg('mode') != 'odometry')"/>

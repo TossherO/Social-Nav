@@ -1,0 +1,6 @@
+# Read-only operations: get_snapshot, crop_map, query_geometry.
+# snapshot_id is required; never silently read a different/latest snapshot.
+string request_json
+---
+bool success
+string response_json

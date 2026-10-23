@@ -1,4 +1,4 @@
-"""Display colors shared by BEV and 3D; never changes the source point cloud."""
+"""Shared frame-status and point-cloud display colors; source data stays unchanged."""
 import numpy as np
 
 
@@ -7,6 +7,12 @@ BACKGROUND = '#1c2732'
 HEIGHT_COLORS = ('#68a9ed', '#69d3e5', '#b4e6ef', '#bca9ee', '#e7cdf5')
 HEIGHT_RGB = np.array([[int(color[i:i + 2], 16) / 255. for i in (1, 3, 5)]
                        for color in HEIGHT_COLORS])
+ANNOTATION_COLORS = dict(draft='#ffd166', skipped='#8b98a5', complete='#38df9c', complete_empty='#b69cff')
+
+
+def review_display_status(review):
+    """Empty completion is a display subtype, never a separate stored state."""
+    return 'complete_empty' if review['status'] == 'complete' and not review['centers'] else review['status']
 
 
 def height_colors(z, low, high):

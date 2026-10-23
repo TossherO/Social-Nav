@@ -19,8 +19,8 @@ usage() {
   WORKERS               默认 2（每个训练进程）
   PRECISION             默认 fp32，可选 fp32/fp16/bf16
   MAX_SWEEPS            默认 1，仅使用当前帧；可显式覆盖用于多帧实验
-  RUN_TAG               默认 wheelchair_exhaustive_center_single_frame
-  CODA_CKPT             默认项目 models 中的 CODA-16line 单帧初始化权重
+  RUN_TAG               默认按输入帧数区分；单帧保留原实验名
+  CODA_CKPT             默认按 MAX_SWEEPS 选择对应帧数的 CODA-16line 初始化权重
   STAGE{1,2,3}_EPOCHS   默认 10/10/5
   STAGE{1,2,3}_EVAL_INTERVAL 默认 0/1/1
   CKPT_SAVE_INTERVAL    默认 1，必须整除三个阶段的 epoch 数
@@ -50,9 +50,21 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
 PRECISION="${PRECISION:-fp32}"
 MAX_SWEEPS="${MAX_SWEEPS:-1}"
+if [[ ! "${MAX_SWEEPS}" =~ ^[0-9]+$ ]]; then
+    echo "[ERROR] MAX_SWEEPS 必须是非负整数，当前值: ${MAX_SWEEPS}" >&2
+    exit 2
+fi
+MAX_SWEEPS="$((10#${MAX_SWEEPS}))"
+if (( MAX_SWEEPS < 1 )); then
+    MAX_SWEEPS=1
+fi
 WORKERS="${WORKERS:-2}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
-RUN_TAG="${RUN_TAG:-wheelchair_exhaustive_center_single_frame}"
+if [[ "${MAX_SWEEPS}" == "1" ]]; then
+    RUN_TAG="${RUN_TAG:-wheelchair_exhaustive_center_single_frame}"
+else
+    RUN_TAG="${RUN_TAG:-wheelchair_exhaustive_center_${MAX_SWEEPS}frame}"
+fi
 
 STAGE1_EPOCHS="${STAGE1_EPOCHS:-10}"
 STAGE2_EPOCHS="${STAGE2_EPOCHS:-10}"
@@ -69,7 +81,7 @@ LOG_GPU_MEMORY="${LOG_GPU_MEMORY:-0}"
 SKIP_COMPLETED="${SKIP_COMPLETED:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 
-CODA_CKPT="${CODA_CKPT:-../../../../models/wheelchair_detector/checkpoints/coda_initialization.pth}"
+CODA_CKPT="${CODA_CKPT:-../../../../models/wheelchair_detector/${MAX_SWEEPS}frame/checkpoints/coda_initialization.pth}"
 if [[ "${CODA_CKPT}" != /* ]]; then
     CODA_CKPT="${PROJECT_DIR}/${CODA_CKPT}"
 fi
@@ -147,6 +159,17 @@ print_command() {
     printf '\n'
 }
 
+has_resume_checkpoint() {
+    local final_checkpoint=$1
+    local candidate
+    for candidate in "$(dirname -- "${final_checkpoint}")"/checkpoint_epoch_*.pth; do
+        if [[ -s "${candidate}" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 run_stage() {
     local stage_name=$1
     local cfg_file=$2
@@ -163,7 +186,7 @@ run_stage() {
         return 0
     fi
 
-    if [[ "${DRY_RUN}" == "0" ]]; then
+    if [[ "${DRY_RUN}" == "0" ]] && ! has_resume_checkpoint "${final_checkpoint}"; then
         require_file "${pretrained_model}" "${stage_name}初始化 checkpoint"
     fi
 
@@ -261,7 +284,9 @@ if (( ${#VISIBLE_GPU_IDS[@]} < NPROC_PER_NODE )); then
     exit 1
 fi
 
-require_file "${CODA_CKPT}" "与输入帧数匹配的 CODA-16line 初始化 checkpoint"
+if ! has_resume_checkpoint "${STAGE1_FINAL}"; then
+    require_file "${CODA_CKPT}" "与输入帧数匹配的 CODA-16line 初始化 checkpoint"
+fi
 require_file "${PROJECT_DIR}/${STAGE1_CFG}" "阶段 1 配置"
 require_file "${PROJECT_DIR}/${STAGE2_CFG}" "阶段 2 配置"
 require_file "${PROJECT_DIR}/${STAGE3_CFG}" "阶段 3 配置"

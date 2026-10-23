@@ -1,13 +1,15 @@
 _BASE_CONFIG_: voxelrcnn_wheelchair_weak_stage2.yaml
 
-# Optional Stage 3: short target-only indoor consolidation.  Partial regression
+# Stage 3: short target-only task-scene adaptation. Partial regression
 # masks and disabled target ROI supervision protect dimensions/yaw/ROI from
 # direct weak-label gradients.
 MIXED_DOMAIN:
     ENABLED: false
 
-# Stage 3 uses only completed indoor-center frames.  It updates Dense/ROI
-# classification while keeping every 3D geometry regression branch fixed.
+# This historical data selection uses completed indoor-center frames; the
+# ros_centers_finetune config adds current task annotations and weighted replay.
+# XY/shared features and classification remain trainable; z/size/yaw/ROI box
+# regression stay fixed.
 DATA_CONFIG:
     WEAK_SUPERVISION:
         EXHAUSTIVE_BACKGROUND_WEIGHT: 0.5

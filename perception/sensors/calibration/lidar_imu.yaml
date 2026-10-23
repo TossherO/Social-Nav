@@ -1,15 +1,28 @@
-# p_IMU = R_IL p_LiDAR + t_IL, meters; IMU header is shifted by the offset below.
+# Fixed-mount D435i: historical joint spatial calibration, current-session clock refit.
+# p_IMU = R_IL p_LiDAR + t_IL, meters; corrected IMU time = header + offset.
 common:
   time_sync_en: false
-  imu_time_offset: -0.047209077276971344
+  imu_time_offset: -0.04480758383899385
 mapping:
   extrinsic_est_en: false
-  extrinsic_R: [0.07588037104930918, -0.997091372919975, -0.007138861112139877, -0.10180098262808676, -0.0006247416833654973, -0.9948045886674353, 0.9919066131573956, 0.07621288438570158, -0.10155228716398541]
-  extrinsic_T: [0.031142678830429635, -0.09245276848089334, -0.12200289691287164]
+  extrinsic_R: [0.034422752833998656, -0.9994010775138369, 0.0035440586213223795, -0.1017201488821126, -0.007031286452225755, -0.9947882047562827, 0.9942173230228543, 0.033882846323895016, -0.10190126263330139]
+  extrinsic_T: [0.017050145601790967, -0.1402067782050747, -0.0022317593563983065]
 calibration:
+  status: validated_fixed_mount_spatial_and_session_clock_refit
+  current_mounting_revalidated: true
+  mounting_scope: after_entire_D435i_refixed_2026_10_19
+  time_offset_validity: continuous_driver_20261020_revalidate_after_sensor_restart
   lidar_frame: rslidar
   imu_frame: camera_imu_optical_frame
-  source_record: docs/archive/实机感知整合记录.md#标定与建图定位收敛及结果整理2026-10-18
-  method: camera_chained_prior_with_planar_rotation_and_time_refinement
+  source_record: outputs/perception/calibration/lidar_imu_combined/report.md
+  source_artifact: outputs/perception/calibration/lidar_imu_combined/models.json
+  spatial_source_record: outputs/perception/calibration/lidar_imu_joint/optimized.json
+  camera_prior: perception/sensors/calibration/front_camera_lidar.yaml
+  method: historical_joint_spatial_with_training_only_grouped_time_refit
+  comparison_model: camera_joint
+  timing_policy: retimed
+  deployment_clock_group: continuous_driver_20261020
   translation_policy: retain_camera_chained_prior
-  validation_scope: temporal_holdout_and_offline_replay
+  weak_rotation_policy: retain_camera_prior_about_main_turn_axis
+  independent_full_6dof_calibration: false
+  validation_scope: two_development_holdouts_gyro_and_complete_FAST_LIO_replays

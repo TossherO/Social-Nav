@@ -1,17 +1,54 @@
 _BASE_CONFIG_: voxelrcnn_wheelchair_weak_stage3.yaml
 
-# Incremental center-only training from the deployed checkpoint (--pretrained_model).
-# Alias must point to a NEW reviewed export containing independent train/val groups.
+# Incremental center-only training; tools/train.py selects the historical Stage 3
+# best checkpoint by effective MAX_SWEEPS unless --pretrained_model overrides it.
+# New capture groups are assigned explicitly by a generated input config.
+# Draft frames use positive-only supervision; unverified detections stay ignored.
 DATA_CONFIG:
     DATA_PATH: data/wheelchair_ros_centers
     RAW_DATA_PATH: data/wheelchair_ros_centers
     INFO_PATH:
-        train: [rosbag_centers_train.pkl]
-        test: [rosbag_centers_val.pkl]
+        train: [annotations.json]
+        test: [annotations.json]
+    WEAK_SUPERVISION:
+        DISTANCE_EVAL:
+            ENABLED: true
+            # Horizontal radius from the LiDAR origin; last bin has no upper edge.
+            EDGES_M: [0, 3, 6, 10]
+            WEIGHTS: [1.0, 0.5, 0.25, 0.1]
     DATA_AUGMENTOR:
         # ROI completeness is not valid outside its original rectangle. Only
         # keep the inherited Y mirror (ALONG_AXIS_LIST: [x]), which preserves it.
         DISABLE_AUG_LIST: [random_world_rotation, random_world_scaling, random_world_translation]
+
+TASK_SCENE:
+    ENABLED: true
+    SEED: 666
+    SAMPLER: cyclic_coverage
+    # null = ceil(sum of weights), aligned to DDP; weight-1 frames stay fully covered.
+    # An explicit budget changes fractional-weight replay, never repeats within an epoch.
+    EPOCH_SAMPLES: null
+    VALIDATION_ROLE: legacy_weak_regression
+    TRAIN_DATASETS:
+        - NAME: task
+          WEIGHT: 1.0
+          CONFIG: {}
+        - NAME: legacy
+          WEIGHT: 0.2
+          CONFIG:
+              DATA_PATH: data/wheelchair_weak
+              RAW_DATA_PATH: data/wheelchair_raw
+              INFO_PATH:
+                  train: [wheelchair_weak_infos_train_indoor_exhaustive.pkl]
+    VALIDATION_DATASETS:
+        - NAME: legacy_weak
+          CONFIG:
+              DATA_PATH: data/wheelchair_weak
+              RAW_DATA_PATH: data/wheelchair_raw
+              INFO_PATH:
+                  test: [wheelchair_weak_infos_val_indoor_exhaustive.pkl]
+
+# Inherit the original Stage 3 freeze list; VFE and the 3D backbone stay trainable.
 
 OPTIMIZATION:
     NUM_EPOCHS: 3

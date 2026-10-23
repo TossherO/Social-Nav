@@ -169,3 +169,14 @@ python -m decision.vlm.deployment.compare_results \
 含部署材料包可使用 `python compare_results.py`。比较器要求请求／输入指纹绑定一致，不仅凭case名配对，也不改摘要绕过差异。远程与同机差值包含客户端、链路、服务、缓存和轮次波动，不是纯RTT或GPU时间。API的缓存值为0也不证明没有缓存，需结合服务设置及已有日志。
 
 默认JRDB输入是带oracle几何与PID的冻结开发窗口，没有人工语义金标准；输入生成、标签和审核边界见仓库 `docs/experiments/JRDB参考.md`。三图短测通过不能代替长期运行、满上下文、语义准确率或实机感知—渲染—决策链路验证。T2／T3输入、在线状态接收和外层agent仍待实现。已有耗时报告由 `ENVIRONMENT.local.md` 定位，不在本手册重复维护成绩表。
+
+## 环境上下文与只读工具
+
+感知环境的运行和来源边界由[建图与定位](../perception/技术实现-环境地图与场景表示.md#静态环境与视觉记忆)维护。决策侧有两个独立数据适配入口，均不发起模型请求或控制底盘：
+
+| 入口 | 用途与约束 |
+|---|---|
+| [environment_inputs.py](../../decision/vlm/environment_inputs.py)的`prepare_scene_context`／`render_environment_context` | 直接消费[统一场景](../perception/技术实现-环境地图与场景表示.md#统一场景输入)，绑定RGB、几何、人物、记忆和可选先验关联。RGB＋BEV中人物使用P编号，保留轨迹身份与观察／预测状态，历史位置使用H编号；不投影未经同安装标定绑定的RGB框。基础`prepare_environment_context`仍可用于仅几何／RGB输入。 |
+| [environment_tools.py](../../decision/agent/environment_tools.py)的`query_scene`／`query_environment` | 前者查询同一场景的元数据、RGB和几何，后者查询已有环境包的地点、观察及地图。请求绑定身份／指纹，保持未知语义和响应预算；没有导航目标执行或agent主循环。 |
+
+统一场景视图使用`environment_scene_context`并保留原场景指纹，基础视图仍为`environment_context`；不自动替换既有REL三帧输入、Prompt或Schema，也不复用原协议人工标签。正式模型任务接入与语义评价仍待完成。渲染命令见[场景速查](../perception/感知操作速查.md#统一场景与混合模式)，复用已有NumPy／OpenCV及Pillow／Matplotlib，不增加普通HTTP客户端的依赖或启动模型服务。

@@ -58,6 +58,18 @@ class NativeDrainTests(unittest.TestCase):
 
 
 class TaskArgumentsTests(unittest.TestCase):
+    def test_environment_and_mixed_route_are_explicit_native_options(self):
+        args=self.parse('localization',extra=['--environment','--allow-local-only','--scene'])
+        command=algorithm_command(args,self.root/'new_run',self.map,True)
+        self.assertIn('environment:=true',command)
+        self.assertIn('allow_local_only:=true',command)
+        self.assertIn('scene:=true',command)
+        self.assertIn('scene_people:=false',command)
+        self.rejected('localization',extra=['--allow-local-only'])
+        self.rejected('localization',extra=['--scene'])
+        self.rejected('localization',extra=['--association-coverage','missing.yaml'])
+        self.rejected('odometry',extra=['--environment','--allow-local-only'])
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -83,6 +95,13 @@ class TaskArgumentsTests(unittest.TestCase):
             self.parse(mode, source, extra)
         self.assertEqual(error.exception.code, 2)
         self.assertFalse((self.root / 'new_run').exists())
+
+    def test_prior_scene_requires_explicit_scene_and_fixed_map_and_forwards_package(self):
+        self.rejected('mapping',extra=['--environment','--scene','--prior-map',str(self.map)])
+        self.rejected('localization',extra=['--environment','--prior-map',str(self.map)])
+        args = self.parse('localization',extra=['--environment','--scene','--prior-map',str(self.map)])
+        command = algorithm_command(args,self.root/'new_run',self.map,True)
+        self.assertIn('prior_map:='+str(self.map),command)
 
     def test_six_combinations_select_pipeline_without_creating_outputs(self):
         for source in ('bag', 'live'):

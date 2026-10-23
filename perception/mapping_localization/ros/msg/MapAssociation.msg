@@ -1,0 +1,19 @@
+# Observation time is header.stamp; measurement_stamp is the actual map match.
+std_msgs/Header header
+string session_id
+uint64 generation
+string map_id
+string asset_fingerprint
+string map_frame
+string association_session
+uint64 association_generation
+uint64 map_revision
+bool valid
+bool has_measurement_stamp
+time measurement_stamp
+float64 age_s
+geometry_msgs/Transform map_from_local
+string status
+string reason
+string coverage_status
+string coverage_fingerprint

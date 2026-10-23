@@ -28,7 +28,7 @@ def parameter_yaml(record, artifact):
             'mapping:\n  extrinsic_est_en: false\n  extrinsic_R: ' + rotation + '\n  extrinsic_T: ' + translation + '\n'
             'calibration:\n  lidar_frame: ' + record['lidar_frame'] + '\n  imu_frame: ' + record['imu_frame'] + '\n'
             '  source_artifact: ' + json.dumps(str(artifact)) + '\n'
-            '  method: camera_chained_prior_with_planar_rotation_and_time_refinement\n'
+            '  method: ' + record.get('method', 'camera_chained_prior_with_planar_rotation_and_time_refinement') + '\n'
             '  translation_policy: ' + policy + '\n  validation_scope: candidate_pending_replay\n')
 
 
@@ -115,21 +115,17 @@ def skew(vector):
     return result
 
 
-def fit(args):
-    from scipy.optimize import least_squares
-    from scipy.signal import butter, sosfiltfilt, savgol_filter
-    from scipy.spatial.transform import Rotation, Slerp
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
+def motion_features(imu_path, pose_path):
+    """Build offline fitting features from a bound, independent LiDAR reference."""
+    from scipy.signal import butter, sosfiltfilt
+    from scipy.spatial.transform import Rotation
 
-    prior = json.loads(args.prior.read_text()); initial = np.asarray(prior['T_imu_lidar'])
-    r0, t0 = initial[:3, :3], initial[:3, 3]
-    raw = np.load(args.imu, allow_pickle=False)
-    poses = np.genfromtxt(args.poses, delimiter=',', names=True)
-    binding = json.loads(args.poses.with_suffix('.json').read_text())
+    raw = np.load(imu_path, allow_pickle=False)
+    poses = np.genfromtxt(pose_path, delimiter=',', names=True)
+    binding = json.loads(Path(pose_path).with_suffix('.json').read_text())
     origin = binding['record_start_s']
-    if (len(raw) != binding['input_messages']['imu']
+    if (raw.ndim != 2 or raw.shape[1] != 8 or len(raw) < 1000
+            or len(raw) != binding['input_messages']['imu']
             or abs(raw[0, 0] - origin) > .3
             or abs(raw[-1, 0] - origin - binding['duration_s']) > .3):
         raise ValueError('IMU observations do not match the pure-LiDAR source bag')
@@ -155,6 +151,24 @@ def fit(args):
     filtered = sosfiltfilt(butter(4, 3., fs=1000., output='sos'), signals, axis=0)
     omega = np.column_stack([np.interp(time, mid, angular[:, k]) for k in range(3)])
     omega = sosfiltfilt(butter(4, 3., fs=100., output='sos'), omega, axis=0)
+    return dict(raw=raw, poses=poses, binding=binding, origin=origin, tp=tp,
+                rotations=rotations, time=time, imu_grid=imu_grid, filtered=filtered, omega=omega)
+
+
+def fit(args):
+    from scipy.optimize import least_squares
+    from scipy.signal import butter, sosfiltfilt, savgol_filter
+    from scipy.spatial.transform import Rotation, Slerp
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    prior = json.loads(args.prior.read_text()); initial = np.asarray(prior['T_imu_lidar'])
+    r0, t0 = initial[:3, :3], initial[:3, 3]
+    features = motion_features(args.imu, args.poses)
+    raw, poses, binding = (features[k] for k in ('raw', 'poses', 'binding'))
+    tp, rotations, time, imu_grid, filtered, omega = (
+        features[k] for k in ('tp', 'rotations', 'time', 'imu_grid', 'filtered', 'omega'))
     train = time < args.validation_start - 2.; validation = time >= args.validation_start
     if train.sum() < 500 or validation.sum() < 500:
         raise ValueError('Insufficient training/held-out coverage')
@@ -327,7 +341,18 @@ def main():
     p.add_argument('--imu', type=Path, required=True); p.add_argument('--output', type=Path, required=True)
     p.add_argument('--validation-start', type=float, default=50.)
     p.add_argument('--baseline-run', type=Path, help='Optional prior native run metadata for a fair gyro diagnostic')
-    args = parser.parse_args(); globals()[args.stage](args)
+    p = sub.add_parser('fit-joint', help='Shared planar rotation, grouped clock offsets; translation held to camera prior')
+    p.add_argument('--prior', type=Path, required=True)
+    p.add_argument('--sources', type=Path, required=True, help='JSON train/validation source bindings and clock groups')
+    p.add_argument('--imu-dir', type=Path, required=True, help='Temporary extracted <id>.npy files')
+    p.add_argument('--baseline', type=Path, required=True, help='Frozen current calibration YAML for comparison')
+    p.add_argument('--output', type=Path, required=True)
+    args = parser.parse_args()
+    if args.stage == 'fit-joint':
+        from .lidar_imu_joint import fit_joint
+        fit_joint(args)
+    else:
+        globals()[args.stage](args)
 
 
 if __name__ == '__main__':

@@ -1,7 +1,7 @@
 {
   "detector": {
     "config": "perception/detection_tracking/configs/detector.yaml",
-    "checkpoint": "models/wheelchair_detector/checkpoints/detector_best.pth",
+    "checkpoint": "models/wheelchair_detector/1frame/checkpoints/detector_best.pth",
     "extension_root": null,
     "precision": "fp32"
   },

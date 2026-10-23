@@ -3,11 +3,24 @@
   "runtime_status": "scaffold_not_integrated",
   "modules": {
     "perception": {
-      "detection_training": {"path": "perception/detection_tracking/training", "status": "source_available", "entry": "env DRY_RUN=1 bash perception/detection_tracking/training/simpledet3d/train_wheelchair_3stage.sh"},
-      "people_annotation": {"path": "perception/detection_tracking/annotation", "status": "offline_ready", "entry": "bash perception/scripts/annotate_people.sh --help", "documentation": "docs/perception/检测训练.md#rosbag人工中心复核与增量训练", "remote": {"service_entry": "bash perception/scripts/serve_annotations.sh --help", "client_entry": "python -B -m perception.detection_tracking.annotation open --help", "config": "configs/annotation_service.example.json", "verification_scope": "linux_http_qt_and_user_reported_windows_tailscale_annotation", "windows_verified": true, "tailscale_verified": true}},
+      "detection_training": {"path": "perception/detection_tracking/training", "status": "source_available", "entry": "env DRY_RUN=1 bash perception/detection_tracking/training/simpledet3d/train_wheelchair_3stage.sh", "task_scene": {"entry": "python perception/detection_tracking/training/simpledet3d/tools/task_scene.py --help", "config": "perception/detection_tracking/training/simpledet3d/configs/voxelrcnn_ros_centers_finetune.yaml", "status": "offline_ready", "verification_scope": "weighted_annotation_replay_and_bounded_two_gpu_training", "effectiveness_validated": false}},
+      "people_annotation": {"path": "perception/detection_tracking/annotation", "status": "offline_ready", "entry": "bash perception/scripts/annotate_people.sh --help", "documentation": "docs/perception/技术实现-检测训练.md#rosbag人工中心复核与增量训练", "remote": {"service_entry": "bash perception/scripts/serve_annotations.sh --help", "client_entry": "python -B -m perception.detection_tracking.annotation open --help", "config": "configs/annotation_service.example.json", "verification_scope": "linux_http_qt_and_user_reported_windows_tailscale_annotation", "windows_verified": true, "tailscale_verified": true}},
       "detection_tracking": {"path": "perception/detection_tracking/inference", "status": "offline_ready", "entry": "python -m perception.detection_tracking.inference --scene outdoor1/start_003 --limit 3 --dry-run", "config": "perception/detection_tracking/configs/inference.json"},
       "ros_transport": {"path": "perception/detection_tracking/ros", "status": "offline_ready", "runtime_verified": true, "verification_scope": "bag_with_real_detector_and_localization", "visualization": "perception/visualization"},
       "visualization": {"path": "perception/visualization", "config_dir": "perception/visualization/configs", "entry": "bash perception/scripts/view.sh --help", "status": "offline_ready", "hardware_verified": false},
+      "environment": {
+        "path": "perception/environment",
+        "status": "offline_ready",
+        "entry": "python -m perception.environment --help",
+        "config": "perception/environment/configs/environment.yaml",
+        "opt_in": "--environment",
+        "capabilities": ["local_rolling_geometry", "observation_bound_queries", "optional_prior_association", "rviz_and_snapshot_overview", "static_endpoint_geometry_export", "offline_visual_place_memory", "map_server_format_export", "recorded_deskewed_ray_fusion", "causal_visual_memory", "neutral_vlm_context", "read_only_agent_queries", "unified_causal_scene", "coverage_mask_interface_experiment", "trusted_region_backend_gating", "association_bound_static_prior_views"],
+        "verification_scope": "complete_recorded_bag_geometry_people_memory_scene_queries_and_static_map_export",
+        "hardware_verified": false,
+        "hybrid_route_verification": {"recorded_development_route": true, "independent_accuracy": false, "live_hardware": false},
+        "static_prior_verification": {"saved_scene_render_and_queries": true, "ros_message_display_logic": true, "complete_ros_replay": false, "live_hardware": false},
+        "pending": ["independent_hybrid_route_acceptance", "model_protocol_integration", "static_prior_ros_integration_acceptance", "live_static_package_export", "extended_route_and_live_stability", "navigation_integration"]
+      },
       "mapping_localization": {
         "path": "perception/mapping_localization",
         "status": "offline_ready",
@@ -29,7 +42,8 @@
             "status": "offline_ready",
             "initialization": ["rviz_selection", "explicit_pose", "known_map_start"],
             "runtime_reinitialization": "rviz",
-            "verification_scope": "mapping_save_and_fresh_localization_replay"
+            "coverage_entry": "bash perception/scripts/pick_coverage.sh --help",
+            "verification_scope": "mapping_save_localization_and_bounded_full_bag_development_replay"
           },
           "fast_lio": {
             "status": "offline_ready",

@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>social_nav_environment</name>
+  <version>0.0.0</version>
+  <description>Observed local geometry and queries, independent of navigation control.</description>
+  <maintainer email="maintainer@example.invalid">Social-Nav maintainers</maintainer>
+  <license>TODO: follow repository licensing policy</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <build_depend>message_generation</build_depend>
+  <exec_depend>message_runtime</exec_depend>
+  <depend>social_nav_localization</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
+</package>

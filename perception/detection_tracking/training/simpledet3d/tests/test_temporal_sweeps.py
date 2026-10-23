@@ -67,6 +67,32 @@ class TemporalSweepTest(unittest.TestCase):
             np.testing.assert_allclose(points[:, 0], [2.0, 3.0])
             np.testing.assert_allclose(points[:, 4], [0.0, 0.1])
 
+    def test_motion_prepared_history_transforms_and_missing_pose_falls_back_to_current(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            np.array([[2., 0., 0., 255.]], dtype=np.float32).tofile(root / 'current.bin')
+            np.array([[3., 0., 0., 128.]], dtype=np.float32).tofile(root / 'history.bin')
+            transform = np.array([[0., -1., 0., 2.], [1., 0., 0., 1.],
+                                  [0., 0., 1., 0.], [0., 0., 0., 1.]])
+            dataset = CodaDataset.__new__(CodaDataset)
+            dataset.root_path = dataset.raw_data_path = root
+            dataset.dataset_cfg = {'MAX_SWEEP_TIME_LAG': .35, 'SWEEP_SELECT_MODE': 'near',
+                                   'INTENSITY_NORMALIZATION': 255.}
+            dataset.infos = [dict(lidar_path='current.bin', raw_history=[{}], has_pose=True,
+                                  motion_compensation_prepared=True,
+                                  sweeps=[dict(lidar_path='history.bin', time_lag=.1,
+                                               transform_matrix=transform)]),
+                             dict(lidar_path='current.bin', raw_history=[{}], has_pose=False,
+                                  motion_compensation_prepared=True, sweeps=[])]
+            points = dataset.get_lidar_with_sweeps(0, max_sweeps=2)
+            np.testing.assert_allclose(points[:, :3], [[2., 0., 0.], [2., 4., 0.]])
+            np.testing.assert_allclose(points[:, 3:], [[1., 0.], [128. / 255., .1]])
+            fallback = dataset.get_lidar_with_sweeps(1, max_sweeps=2)
+            np.testing.assert_allclose(fallback, [[2., 0., 0., 1., 0.]])
+            dataset.infos[1]['motion_compensation_prepared'] = False
+            with self.assertRaisesRegex(ValueError, '缺少运动补偿位姿'):
+                dataset.get_lidar_with_sweeps(1, max_sweeps=2)
+
     def test_coda_generator_uses_consecutive_frames_and_time_limit(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

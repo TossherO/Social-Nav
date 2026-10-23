@@ -38,7 +38,7 @@ def main():
     from std_msgs.msg import String
     from visualization_msgs.msg import MarkerArray
     from social_nav_localization.msg import LocalizationState
-    rospy.init_node('perception_scene')
+    rospy.init_node('perception_visualization')
     config = load_config(rospy.get_param('~config', None), rospy.get_param('~local_config', None))
     transport, cfg = config['ros'], config['visualization']
     for key in ('pointcloud_topic', 'localization_source', 'localization_topic'):

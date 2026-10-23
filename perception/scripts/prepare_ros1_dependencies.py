@@ -32,11 +32,11 @@ def unpack(archive, destination, expected=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--profile', choices=('interfaces', 'mapping', 'sensors', 'all'), default='all')
+    parser.add_argument('--profile', choices=('interfaces', 'mapping', 'environment', 'sensors', 'all'), default='all')
     args = parser.parse_args()
     if ROOT not in OUTPUT.resolve().parents:
         raise ValueError('Build output must resolve inside the project before writing dependencies')
-    mapping = args.profile in ('mapping', 'all')
+    mapping = args.profile in ('mapping', 'environment', 'all')
     record = json.loads((CACHE / 'roll_dependencies.json').read_text()) if mapping else None
     prefix = OUTPUT / 'dependencies/roll'
     if mapping and not (prefix / '.prepared').exists():
@@ -50,6 +50,20 @@ def main():
         ceres.write_text(ceres.read_text().replace('/usr/lib/x86_64-linux-gnu/libglog.so',
             str(prefix / 'usr/lib/x86_64-linux-gnu/libglog.so')))
         (prefix / '.prepared').write_text('Retained focal dependencies, extracted locally.\n')
+    if args.profile in ('environment','all'):
+        environment_record = CACHE/'environment_dependencies.json'
+        system_octomap = Path('/usr/include/octomap/OcTree.h').is_file()
+        if not environment_record.is_file() and not system_octomap:
+            raise RuntimeError('Retain Ubuntu liboctomap-dev/liboctomap1.9 debs and their source record '
+                               'under data/cache/perception before building environment')
+        octomap = OUTPUT/'dependencies/octomap'
+        if environment_record.is_file() and not (octomap/'.prepared').exists():
+            for package in json.loads(environment_record.read_text())['packages']:
+                deb = CACHE/'environment_debs'/package['file']
+                if hashlib.sha256(deb.read_bytes()).hexdigest() != package['sha256']:
+                    raise ValueError('OctoMap dependency differs: '+deb.name)
+                subprocess.run(['dpkg-deb','-x',str(deb),str(octomap)],check=True)
+            (octomap/'.prepared').write_text('Ubuntu OctoMap libraries extracted privately.\n')
     sources = OUTPUT / 'sources'
     if mapping and not (sources / 'gtsam-4.0.2/CMakeLists.txt').exists():
         unpack(CACHE / 'gtsam-4.0.2.tar.gz', sources, record['gtsam']['sha256'])
@@ -60,6 +74,7 @@ def main():
     packages = {
         'social_nav_localization': 'perception/mapping_localization/ros',
         'social_nav_people': 'perception/detection_tracking/ros',
+        'social_nav_environment': 'perception/environment/ros',
         'roll': 'perception/mapping_localization/backends/roll_fast_lio/roll',
         'fast_lio': 'perception/mapping_localization/backends/roll_fast_lio/fastlio-loc',
         'rslidar_sdk': 'perception/sensors/drivers/rslidar_sdk',

@@ -16,11 +16,11 @@ from matplotlib.colors import LinearSegmentedColormap
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 from .data import (ANNOTATION_STATES, FRAME_STATUS_NAMES, annotation_step,
-                   complete_review, edit_review,
+                   complete_review, edit_review, empty_review,
                    pending_candidate_ids, resolve_sequence)
 from .backend import LocalBackend
 from .cloud_view import CloudView
-from .appearance import BACKGROUND, HEIGHT_COLORS, height_colors
+from .appearance import BACKGROUND, HEIGHT_COLORS, height_colors, ANNOTATION_COLORS, review_display_status
 from .timeline import BagTimeline
 
 
@@ -535,6 +535,7 @@ class Window(QtWidgets.QMainWindow):
         operations = QtWidgets.QGridLayout()
         buttons = [('确认候选 [Q]', self.accept), ('删除／拒绝 [R]', self.delete),
                    ('补漏点 [E]', self.add_mode), ('确认可见候选 [B]', self.accept_remaining),
+                   ('恢复未核验 [C]', self.reset_candidate),
                    ('撤销 [Ctrl+Z]', self.undo), ('重做 [Ctrl+Y]', self.redo)]
         for index, (label, action) in enumerate(buttons):
             button = QtWidgets.QPushButton(label)
@@ -580,20 +581,27 @@ class Window(QtWidgets.QMainWindow):
             self.conflict_button.hide()
             side_layout.addLayout(remote_actions)
         help_row = QtWidgets.QHBoxLayout()
-        help_row.addWidget(QtWidgets.QLabel('修改自动保存 · 仅已标帧导出'), 1)
+        help_row.addWidget(QtWidgets.QLabel('修改自动保存 · 默认导出待标和已标帧'), 1)
         self.button(help_row, '快捷键 [F1]', self.show_shortcuts)
         controls.addLayout(help_row)
         states = QtWidgets.QHBoxLayout()
         states.addWidget(QtWidgets.QLabel('标记为'))
         self.state_buttons = {}
-        self.state_buttons['draft'] = self.button(states, '待标 [1]', lambda: self.mark_status('draft'))
-        self.state_buttons['draft'].setToolTip('保留当前内容，立即切换为待标；不跳帧。')
+        self.state_buttons['draft'] = self.button(states, '待标／普通 [1]', lambda: self.mark_status('draft'))
+        self.state_buttons['draft'].setToolTip('撤销跳过／已标状态；有人工核验或BEV点则为待标，否则退回普通帧。')
         self.state_buttons['skipped'] = self.button(states, '跳过 [2]', lambda: self.mark_status('skipped'))
         self.state_buttons['skipped'].setToolTip('保留当前内容，标记为跳过，不用于训练；不跳帧。')
         self.complete_button = self.button(states, '已标 [3]', lambda: self.mark_status('complete'))
         self.state_buttons['complete'] = self.complete_button
         self.complete_button.setToolTip('直接接受当前阈值内的待复核候选并保存为已标；空中心表示无人。请先补齐漏检，隐藏待复核项须先处理。不弹确认、不跳帧。')
         side_layout.addLayout(states)
+        self.empty_button = QtWidgets.QPushButton('标记无人／空标注 [4]')
+        self.empty_button.clicked.connect(lambda: self.mark_status('empty'))
+        self.empty_button.setToolTip(
+            '明确确认检测范围内整帧无人：拒绝范围内全部候选（含隐藏低分项），清除已确认中心及人工补点，'
+            '保存为已标（无人）。不弹确认、不跳帧，可用Ctrl+Z撤销。显示筛选不缩小确认范围。')
+        self.edit_controls.append(self.empty_button)
+        side_layout.addWidget(self.empty_button)
         hint = QtWidgets.QLabel('状态不跳帧 · W / S 切换标注帧')
         hint.setStyleSheet('color: #526678; font-size: 12px;')
         side_layout.addWidget(hint)
@@ -607,7 +615,7 @@ class Window(QtWidgets.QMainWindow):
         self.button(navigation, '下一原始帧 [D]', lambda: self.navigate(1, False))
         for direction, label in [(-1, '上一标注帧 [W]'), (1, '下一标注帧 [S]')]:
             self.button(navigation, label, lambda checked=False, step=direction: self.navigate(step, True)).setToolTip(
-                '优先复用方向内一个步长范围内最近的标注帧（含已标／跳过）；否则按步长浏览。仅从标注帧出发时自动补建待标帧。')
+                '优先复用方向内一个步长范围内最近的标注帧（含已标／跳过）；否则按步长浏览，不改变任何帧的状态。')
         self.interval = QtWidgets.QDoubleSpinBox()
         self.interval.setRange(.01, 3600)
         self.interval.setValue(self.args.sample_interval or 1.)
@@ -636,9 +644,10 @@ class Window(QtWidgets.QMainWindow):
         self.axes.callbacks.connect('xlim_changed', lambda _: self.invalidate_background())
         self.axes.callbacks.connect('ylim_changed', lambda _: self.invalidate_background())
         actions = [
-            ('1', lambda: self.mark_status('draft'), '标记为待标'),
+            ('1', lambda: self.mark_status('draft'), '撤销完成标记：待标／普通'),
             ('2', lambda: self.mark_status('skipped'), '标记为跳过'),
             ('3', lambda: self.mark_status('complete'), '标记为已标'),
+            ('4', lambda: self.mark_status('empty'), '标记无人／空标注，拒绝全部候选并清空中心'),
             ('W', lambda: self.navigate(-1, True), '上一标注帧'),
             ('S', lambda: self.navigate(1, True), '下一标注帧'),
             ('A', lambda: self.navigate(-1, False), '上一原始帧'),
@@ -649,6 +658,7 @@ class Window(QtWidgets.QMainWindow):
             ('PgDown', lambda: self.change_sequence(1), '下一子包'),
             ('E', self.add_mode, '补漏点'), ('Escape', self.cancel_selection, '取消补点／拖动／选择'),
             ('R', self.delete, '拒绝候选／删除中心'), ('Q', self.accept, '确认选中候选'),
+            ('C', self.reset_candidate, '恢复选中候选为未核验'),
             ('B', self.accept_remaining, '确认可见待复核候选'),
             ('Ctrl+Z', self.undo, '撤销'), ('Ctrl+Y', self.redo, '重做'),
             ('H', self.rejected.toggle, '显示／隐藏已拒绝候选'),
@@ -710,7 +720,9 @@ class Window(QtWidgets.QMainWindow):
         for row in sorted(snapshot['rows'], key=lambda r: r['ordinal']):
             ident = row['source_id']
             beginning = self.beginnings.setdefault(ident, row['record_ns'])
-            row['status'] = json.loads(row['review'])['status']
+            review = json.loads(row['review'])
+            row['status'] = review['status']
+            row['display_status'] = review_display_status(review)
             self.all_rows_by_source[ident].append(row)
             self.row_by_id[row['id']] = row
             self.progress[ident]['total'] += 1
@@ -750,6 +762,7 @@ class Window(QtWidgets.QMainWindow):
     def sync_status(self, frame):
         row = self.row_by_id[frame['id']]
         old, new = row['status'], frame['review']['status']
+        row['display_status'] = review_display_status(frame['review'])
         if old != new:
             counts = self.progress[frame['source_id']]
             counts[old] -= 1
@@ -758,7 +771,7 @@ class Window(QtWidgets.QMainWindow):
             index = self.sequence.findData(frame['source_id'])
             if index >= 0:
                 self.sequence.setItemText(index, self.sequence_label(frame['source_id']))
-        self.timeline.set_status(frame['id'], new)
+        self.timeline.set_review(frame['id'], frame['review'])
 
     def save_interval(self):
         if self.source_id is not None:
@@ -804,15 +817,15 @@ class Window(QtWidgets.QMainWindow):
             self.sequence.blockSignals(False)
             self.sequence_changed(index)
 
-    def load(self, index, enroll=False):
+    def load(self, index):
         if not self.rows or self.closing:
             return
         index = max(0, min(index, len(self.rows) - 1))
         row = self.rows[index]
         if self.loading:
-            self.requested_frame = row['id'], enroll
+            self.requested_frame = row['id']
             return
-        if not self.after_saved(lambda: self.load(index, enroll)):
+        if not self.after_saved(lambda: self.load(index)):
             return
         self.loading = True
         self.note.setEnabled(False)
@@ -824,7 +837,7 @@ class Window(QtWidgets.QMainWindow):
         self.message('读取扫描：' + row['id'])
 
         def work(progress):
-            return (enroll,) + self.backend.read_frame(row['id'])
+            return self.backend.read_frame(row['id'])
 
         task = self.job(work, self.loaded)
         task.error.connect(lambda _: self.load_failed())
@@ -833,8 +846,9 @@ class Window(QtWidgets.QMainWindow):
         self.frame, self.review, self.points = None, None, None
         self.image, self.image_ns, self.selection = None, None, None
         self.xy_binding = None
-        for button in self.state_buttons.values():
+        for button in list(self.state_buttons.values()) + [self.empty_button]:
             button.setStyleSheet('')
+        self.caption.setStyleSheet('')
         self.cloud_caption.setText('三维点云 · 正在读取')
         self.grid_caption.setText('')
         self.timeline.set_current(None)
@@ -867,19 +881,18 @@ class Window(QtWidgets.QMainWindow):
     def load_requested(self):
         requested, self.requested_frame = self.requested_frame, None
         if requested is not None:
-            ident, enroll = requested
+            ident = requested
             index = next((i for i, row in enumerate(self.rows) if row['id'] == ident), None)
             if index is not None:
-                self.load(index, enroll)
+                self.load(index)
 
     def loaded(self, payload):
-        enroll, frame, points, image, image_ns, image_notice = payload
+        frame, points, image, image_ns, image_notice = payload
         self.loading = False
         if self.requested_frame is not None:
-            if self.requested_frame[0] != frame['id']:
+            if self.requested_frame != frame['id']:
                 self.load_requested()
                 return
-            enroll = self.requested_frame[1]
         self.requested_frame = None
         if frame['source_id'] != self.source_id:
             return  # A previous sequence's read must never replace the selected sequence.
@@ -910,8 +923,6 @@ class Window(QtWidgets.QMainWindow):
         self.note.setEnabled(True)
         self.note.setReadOnly(not self.editable())
         self.seek.setValue((frame['record_ns'] - self.beginnings[frame['source_id']]) / 1e9)
-        if enroll and self.review['status'] == 'unreviewed' and self.editable():
-            self.change('select')
         self.render()
         notice = '已读取预计算候选；编辑自动保存。建议框不是真值。' if frame['candidates'] is not None else '此帧无预计算候选，仅可手工标注；可先用 predict 补齐检测。'
         if self.remote and self.backend.read_only:
@@ -930,7 +941,7 @@ class Window(QtWidgets.QMainWindow):
             targets.append(self.rows[self.index + 1]['id'])
         planned = annotation_step(self.rows, self.index, self.interval.value(), 1)
         if planned is not None:
-            ident = self.rows[planned[0]]['id']
+            ident = self.rows[planned]['id']
             if ident not in targets:
                 targets.append(ident)
         if not targets:
@@ -976,9 +987,9 @@ class Window(QtWidgets.QMainWindow):
             target = annotation_step(self.rows, self.index, self.interval.value(), direction)
         else:
             index = self.index + direction
-            target = (index, False) if 0 <= index < len(self.rows) else None
+            target = index if 0 <= index < len(self.rows) else None
         if target is not None:
-            self.load(*target)
+            self.load(target)
             return
         self.message('已到当前子包队列边界；可用上方选择器或上一包／下一包切换序列')
 
@@ -1155,14 +1166,22 @@ class Window(QtWidgets.QMainWindow):
         progress = self.progress[self.frame['source_id']]
         pending = sum(v in ('pending', 'uncertain') for v in self.review['decisions'].values())
         seconds = (self.frame['record_ns'] - self.beginnings[self.frame['source_id']]) / 1e9
+        state_name = FRAME_STATUS_NAMES[self.review['status']]
+        display_status = review_display_status(self.review)
+        if display_status == 'complete_empty':
+            state_name += '（无人）'
+        color = ANNOTATION_COLORS.get(display_status, '#8b98a5')
+        self.caption.setStyleSheet('border-left: 4px solid %s; padding-left: 6px;' % color)
         self.caption.setText('%s · %.2f s · 帧 %d / %d · %s · 人工中心 %d · 待复核 %d' %
             (Path(source['path']).name, seconds, self.frame['ordinal'], progress['total'],
-             FRAME_STATUS_NAMES[self.review['status']], len(self.review['centers']), pending))
+             state_name, len(self.review['centers']), pending))
         self.caption.setToolTip('点云 stamp=%d ns · 坐标系 %s\n本包标注帧：待标 %d / 跳过 %d / 已标 %d' %
             (self.frame['stamp_ns'], self.frame['sensor_frame'], progress['draft'], progress['skipped'], progress['complete']))
-        for status, button in self.state_buttons.items():
-            button.setStyleSheet('border: 2px solid #517ca3; background: #e1ecf5; border-radius: 3px; padding: 4px;'
-                                if status == self.review['status'] else '')
+        for status, button in list(self.state_buttons.items()) + [('complete_empty', self.empty_button)]:
+            shade = QtGui.QColor(ANNOTATION_COLORS[status])
+            button.setStyleSheet('border: 2px solid %s; background: %s; border-radius: 3px; padding: 4px;' %
+                                (shade.darker(150).name(), shade.lighter(170).name())
+                                if status == display_status else '')
         self.render_aux()
 
     def selected_xy(self):
@@ -1364,6 +1383,19 @@ class Window(QtWidgets.QMainWindow):
                 self.change('delete', center=ident)
                 self.selection = None
 
+    def reset_candidate(self):
+        if not self.selection or self.frame is None:
+            return
+        kind, ident = self.selection
+        if kind == 'center':
+            center = next((c for c in self.review['centers'] if c['id'] == ident), None)
+            ident = center['candidate'] if center is not None else None
+        if ident is None:
+            self.message('人工补点请用R删除；C用于撤销候选的核验决定')
+            return
+        self.change('decision', candidate=ident, decision='pending')
+        self.select(('candidate', ident))
+
     def add_mode(self):
         if not self.editable():
             return
@@ -1415,6 +1447,8 @@ class Window(QtWidgets.QMainWindow):
         try:
             if status == 'complete':
                 review = complete_review(self.review, self.bounds, self.candidates(), self.score.value())
+            elif status == 'empty':
+                review = empty_review(self.review, self.bounds, self.candidates())
             elif status in ('draft', 'skipped'):
                 operation = 'pending' if status == 'draft' else 'skip'
                 review = edit_review(self.review, operation, self.bounds)
@@ -1423,6 +1457,9 @@ class Window(QtWidgets.QMainWindow):
         except ValueError as error:
             self.message(str(error))
             return
+        if status == 'empty':
+            self.selection = None
+            self.adding, self.dragging, self.drag_position = False, False, None
         self.apply(review)
 
     def clear_sequence_marks(self):

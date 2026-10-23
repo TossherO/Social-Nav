@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from simple_det3d.utils.config import load_config, log_config_to_file
 from simple_det3d.utils.common_utils import create_logger, AverageMeter
 from simple_det3d.datasets.coda_dataset import CodaDataset
+from simple_det3d.datasets.task_scene_dataset import build_task_scene_dataset
 from simple_det3d.models import build_model, load_data_to_gpu
 from simple_det3d.utils.precision_utils import (
     autocast_context,
@@ -51,6 +52,7 @@ def parse_args():
                         help='Override info/GT-database root path')
     parser.add_argument('--raw_data_path', type=str, default=None,
                         help='Override raw point-cloud dataset root path')
+    parser.add_argument('--max_sweeps', type=int, default=None, help='Match the checkpoint temporal input; default from config')
 
     args = parser.parse_args()
 
@@ -58,11 +60,17 @@ def parse_args():
     cfg.TAG = Path(args.cfg_file).stem
     cfg.LOCAL_RANK = 0
     cfg.ROOT_DIR = Path(__file__).resolve().parent.parent
+    if cfg.get('TASK_SCENE', {}).get('ENABLED') and (args.root_path is not None or args.raw_data_path is not None):
+        parser.error('Task-scene data roots must be set in each TASK_SCENE dataset CONFIG')
 
     if args.root_path is not None:
         cfg.DATA_CONFIG.DATA_PATH = args.root_path
     if args.raw_data_path is not None:
         cfg.DATA_CONFIG.RAW_DATA_PATH = args.raw_data_path
+    if args.max_sweeps is not None:
+        if args.max_sweeps < 0:
+            parser.error('--max_sweeps must be non-negative')
+        cfg.DATA_CONFIG.MAX_SWEEPS = max(1, args.max_sweeps)
 
     args.precision = resolve_precision(
         cli_precision=args.precision,
@@ -79,7 +87,9 @@ def eval_one_epoch(model, dataloader, cfg, args, logger, result_dir=None):
         result_dir.mkdir(parents=True, exist_ok=True)
 
     metric = {'gt_num': 0}
-    for cur_thresh in cfg.MODEL.POST_PROCESSING.RECALL_THRESH_LIST:
+    center_only = cfg.DATA_CONFIG.get('WEAK_SUPERVISION', {}).get('CENTER_EVAL', False) if hasattr(cfg, 'DATA_CONFIG') else False
+    recall_thresholds = [] if center_only else cfg.MODEL.POST_PROCESSING.RECALL_THRESH_LIST
+    for cur_thresh in recall_thresholds:
         metric['recall_roi_%s' % str(cur_thresh)] = 0
         metric['recall_rcnn_%s' % str(cur_thresh)] = 0
 
@@ -104,16 +114,17 @@ def eval_one_epoch(model, dataloader, cfg, args, logger, result_dir=None):
             disp_dict = {}
 
             # Update recall stats
-            for cur_thresh in cfg.MODEL.POST_PROCESSING.RECALL_THRESH_LIST:
+            for cur_thresh in recall_thresholds:
                 metric['recall_roi_%s' % str(cur_thresh)] += ret_dict.get('roi_%s' % str(cur_thresh), 0)
                 metric['recall_rcnn_%s' % str(cur_thresh)] += ret_dict.get('rcnn_%s' % str(cur_thresh), 0)
             metric['gt_num'] += ret_dict.get('gt', 0)
 
-            min_thresh = cfg.MODEL.POST_PROCESSING.RECALL_THRESH_LIST[0]
-            disp_dict['recall_%s' % str(min_thresh)] = \
-                '(%d, %d) / %d' % (metric['recall_roi_%s' % str(min_thresh)],
-                                   metric['recall_rcnn_%s' % str(min_thresh)],
-                                   metric['gt_num'])
+            if recall_thresholds:
+                min_thresh = recall_thresholds[0]
+                disp_dict['recall_%s' % str(min_thresh)] = \
+                    '(%d, %d) / %d' % (metric['recall_roi_%s' % str(min_thresh)],
+                                       metric['recall_rcnn_%s' % str(min_thresh)],
+                                       metric['gt_num'])
 
             annos = dataloader.dataset.generate_prediction_dicts(
                 batch_dict, pred_dicts, class_names,
@@ -130,7 +141,7 @@ def eval_one_epoch(model, dataloader, cfg, args, logger, result_dir=None):
     # Compute recall
     gt_num_cnt = metric['gt_num']
     ret_dict = {}
-    for cur_thresh in cfg.MODEL.POST_PROCESSING.RECALL_THRESH_LIST:
+    for cur_thresh in recall_thresholds:
         cur_roi_recall = metric['recall_roi_%s' % str(cur_thresh)] / max(gt_num_cnt, 1)
         cur_rcnn_recall = metric['recall_rcnn_%s' % str(cur_thresh)] / max(gt_num_cnt, 1)
         logger.info('recall_roi_%s: %f' % (cur_thresh, cur_roi_recall))
@@ -307,7 +318,7 @@ def main():
     if not root_path.is_absolute():
         root_path = cfg.ROOT_DIR / root_path
 
-    test_set = CodaDataset(
+    test_set = build_task_scene_dataset(cfg, training=False, logger=logger) if cfg.get('TASK_SCENE', {}).get('ENABLED') else CodaDataset(
         dataset_cfg=cfg.DATA_CONFIG,
         class_names=cfg.CLASS_NAMES,
         training=False,

@@ -2,9 +2,10 @@
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from .data import ANNOTATION_STATES, FRAME_STATUS_NAMES
+from .appearance import ANNOTATION_COLORS, review_display_status
 
 
-STATE_COLORS = dict(draft='#ffd166', skipped='#8b98a5', complete='#38df9c')
+STATE_COLORS = ANNOTATION_COLORS
 LANES = dict(draft=24, skipped=43, complete=62)
 
 
@@ -34,9 +35,10 @@ class BagTimeline(QtWidgets.QWidget):
         self.current = ident if ident in self.by_id else None
         self.update()
 
-    def set_status(self, ident, status):
+    def set_review(self, ident, review):
         if ident in self.by_id:
-            self.by_id[ident]['status'] = status
+            self.by_id[ident]['status'] = review['status']
+            self.by_id[ident]['display_status'] = review_display_status(review)
             self.update()
 
     def x_at(self, stamp):
@@ -59,22 +61,25 @@ class BagTimeline(QtWidgets.QWidget):
         painter.fillRect(self.rect(), QtGui.QColor('#172029'))
         painter.setPen(QtGui.QColor('#c6d4de'))
         painter.drawText(8, 12, 'ROS包')
+        for x, state, label in [(72, 'complete', '已标有人'), (160, 'complete_empty', '已标无人')]:
+            painter.setPen(QtGui.QColor(STATE_COLORS[state]))
+            painter.drawText(x, 12, label)
         for state, y in LANES.items():
             painter.setPen(QtGui.QColor(STATE_COLORS[state]))
             painter.drawText(8, y + 4, FRAME_STATUS_NAMES[state])
             painter.setPen(QtGui.QPen(QtGui.QColor('#34434e'), 1))
             painter.drawLine(QtCore.QPointF(61, y), QtCore.QPointF(self.width() - 22, y))
             # Dim the range excluded by --start/--duration, keeping every bag marker visible.
-            painter.setPen(QtGui.QPen(QtGui.QColor(STATE_COLORS[state]), 2))
-            lines = [QtCore.QLineF(self.x_at(row['record_ns']), y - 5, self.x_at(row['record_ns']), y + 5)
-                     for row in self.rows if row['status'] == state and row['id'] in self.allowed]
-            if lines:
-                painter.drawLines(lines)
-            painter.setPen(QtGui.QPen(QtGui.QColor(STATE_COLORS[state]).darker(240), 2))
-            lines = [QtCore.QLineF(self.x_at(row['record_ns']), y - 3, self.x_at(row['record_ns']), y + 3)
-                     for row in self.rows if row['status'] == state and row['id'] not in self.allowed]
-            if lines:
-                painter.drawLines(lines)
+            kinds = ('complete', 'complete_empty') if state == 'complete' else (state,)
+            for kind in kinds:
+                for allowed, size in [(True, 5), (False, 3)]:
+                    color = QtGui.QColor(STATE_COLORS[kind])
+                    painter.setPen(QtGui.QPen(color if allowed else color.darker(240), 2))
+                    lines = [QtCore.QLineF(self.x_at(row['record_ns']), y - size, self.x_at(row['record_ns']), y + size)
+                             for row in self.rows if row.get('display_status', row['status']) == kind
+                             and (row['id'] in self.allowed) == allowed]
+                    if lines:
+                        painter.drawLines(lines)
         painter.setPen(QtGui.QColor('#c6d4de'))
         for fraction in (0., .25, .5, .75, 1.):
             stamp = self.begin + round(fraction * (self.end - self.begin))
@@ -99,8 +104,10 @@ class BagTimeline(QtWidgets.QWidget):
         row = self.frame_at(event.pos())
         if row is None:
             return
+        name = ('已标（无人）' if row.get('display_status') == 'complete_empty'
+                else FRAME_STATUS_NAMES[row['status']])
         text = '%.3f s · 原始帧 %d · %s' % ((row['record_ns'] - self.begin) / 1e9,
-                row['ordinal'], FRAME_STATUS_NAMES[row['status']])
+                row['ordinal'], name)
         if row['id'] not in self.allowed:
             text += ' · 不在当前 --start/--duration 范围内'
         self.setToolTip(text)

@@ -1,15 +1,16 @@
 # Current camera/LiDAR calibration; sensors.launch does not load this record.
 # Historical application constants and development records are archived.
-status: accepted_for_project_projection
-# Accepted by the user for this project's projection accuracy requirements.
+status: validated_on_fixed_mount_holdout
+# Held-out projection review; no manually paired geometric ground truth.
 current_mounting_revalidated: true
-accuracy_acceptance: user_accepted_for_project_requirements
+accuracy_acceptance: heldout_projection_review_without_geometric_ground_truth
+mounting_scope: after_entire_D435i_refixed_2026_10_19
 front_camera:
   device_binding: configs/perception.local.json:sensors.serial_front
   namespace: camera
   image_topic: /camera/color/image_raw
   optical_frame: camera_color_optical_frame
-  assignment_basis: recorded_CameraInfo_and_confirmed_same_hardware_mounting
+  assignment_basis: new_fixed_mount_bags_and_corresponding_CameraInfo
 lidar:
   topic: /rslidar_points
   frame: rslidar
@@ -19,9 +20,9 @@ lidar_to_camera_optical:
   convention: column_vector_p_target_equals_T_times_p_source
   translation_unit: meter
   matrix:
-    - [0.07478010142763125, -0.9970452704398471, -0.017568868034259444, 0.04955184997435903]
-    - [-0.15610255853194438, 0.00569666702257865, -0.9877244247281803, -0.09808486780630725]
-    - [0.9849060501643059, 0.07660467791437997, -0.15521532035008678, -0.13361814283469903]
+    - [0.034817661622102536, -0.9993935151449336, 0.0005764767317173458, 0.03487444640013709]
+    - [-0.14988151326778815, -0.005791991618261383, -0.9886870004271584, -0.1457527445945997]
+    - [0.9880907156833966, 0.03433736622613098, -0.1499922760042196, -0.013882944685095839]
     - [0.0, 0.0, 0.0, 1.0]
 camera_optical_to_lidar:
   source_frame: camera_color_optical_frame
@@ -30,13 +31,14 @@ camera_optical_to_lidar:
   convention: column_vector_p_target_equals_T_times_p_source
   translation_unit: meter
   matrix:
-    - [0.07478010142763125, -0.15610255853194438, 0.9849060501643059, 0.11258452610477203]
-    - [-0.9970452704398471, 0.00569666702257865, 0.07660467791437997, 0.060199969285695445]
-    - [-0.017568868034259444, -0.9877244247281803, -0.15521532035008678, -0.11674983256014297]
+    - [0.034817661622102536, -0.14988151326778815, 0.9880907156833966, -0.009342279847100801]
+    - [-0.9993935151449336, -0.005791991618261383, 0.03433736622613098, 0.03448580065748532]
+    - [0.0005764767317173458, -0.9886870004271584, -0.1499922760042196, -0.1462062826350999]
     - [0.0, 0.0, 0.0, 1.0]
 vehicle_mounting_transform:
   status: not_confirmed
   note: camera_lidar_relative_calibration_does_not_define_base_link
+# Historical sources of the earliest initial matrix, not of the fitted result.
 sources:
   original_image: nav_gpu_backup:latest
   original_path: /home/ros_packages/perception_test/scripts/infer2.py
@@ -48,6 +50,10 @@ sources:
   report_in_source_archive: hys/sensor_migration/artifacts/extrinsics-recovery-validation.json
 calibration_source:
   method: direct_visual_lidar_calibration_NID_BFGS
-  source_record: docs/archive/实机感知整合记录.md#标定与建图定位收敛及结果整理2026-10-18
-  scope: user_accepted_joint_calibration_for_project_projection_requirements
+  source_record: outputs/perception/calibration/camera_lidar_fixed_mount/report.md
+  dataset: data/datasets/wheelchair_calibration/lidar_camera
+  training_bags: [01.bag, 02.bag, 03.bag]
+  validation_bags: [val.bag]
+  initial: earliest_historical_application_extrinsic
+  scope: joint_training_fit_and_heldout_projection_review_for_fixed_mount_only
   intrinsics: corresponding_CameraInfo

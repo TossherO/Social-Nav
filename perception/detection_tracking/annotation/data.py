@@ -97,11 +97,7 @@ def pending_candidate_ids(review, candidates, min_score=0.):
 
 
 def annotation_step(rows, current, interval_s, direction):
-    """Reuse a marked frame inside the step, otherwise seek a real scan near its end.
-
-    Browsing an ordinary frame does not enroll either it or its destination.
-    The returned enrollment request is committed only after successful foreground I/O.
-    """
+    """Find a marked frame within the step, otherwise browse a real scan."""
     if direction not in (-1, 1) or not math.isfinite(interval_s) or interval_s <= 0:
         raise ValueError('采样步长须为正有限数，方向须为前或后')
     if not 0 <= current < len(rows):
@@ -116,11 +112,10 @@ def annotation_step(rows, current, interval_s, direction):
               0 <= direction * (rows[i]['record_ns'] - origin['record_ns']) <= step_ns]
     if nearby:
         index = min(nearby, key=lambda i: (abs(rows[i]['record_ns'] - origin['record_ns']), abs(i - current)))
-        return index, False
+        return index
     target_ns = origin['record_ns'] + direction * step_ns
     index = min(indices, key=lambda i: (abs(rows[i]['record_ns'] - target_ns), abs(i - current)))
-    enroll = origin['status'] in ANNOTATION_STATES and rows[index]['status'] == 'unreviewed'
-    return index, enroll
+    return index
 
 
 def resolve_sequence(sources, name):
@@ -138,13 +133,16 @@ def in_scope(xy, bounds):
             and bounds[0] <= xy[0] <= bounds[3] and bounds[1] <= xy[1] <= bounds[4])
 
 
+def has_human_processing(review):
+    return bool(review['centers']) or any(d in ('accepted', 'rejected', 'uncertain') for d in review['decisions'].values())
+
+
 def edit_review(review, operation, bounds, candidates=(), **values):
     """Pure edit; one candidate produces at most one human center. No proximity merging."""
     result = copy.deepcopy(review)
-    result['status'] = 'draft'
     if operation == 'decision':
         ident, decision = values['candidate'], values['decision']
-        if decision not in ('accepted', 'rejected', 'uncertain'):
+        if decision not in ('pending', 'accepted', 'rejected', 'uncertain'):
             raise ValueError('未知候选状态')
         box = candidates[int(ident)]
         existing = [c for c in result['centers'] if c.get('candidate') == ident]
@@ -172,15 +170,16 @@ def edit_review(review, operation, bounds, candidates=(), **values):
     elif operation == 'skip':
         result['status'] = 'skipped'
     elif operation == 'select':
-        # Reusing an annotation frame must preserve its reviewed/skipped state.
-        result['status'] = 'draft' if review['status'] == 'unreviewed' else review['status']
+        pass  # Browsing is never annotation work.
     elif operation == 'pending':
-        result['status'] = 'draft'  # An explicit state change, even if geometry did not change.
+        result['status'] = 'draft' if has_human_processing(result) else 'unreviewed'
     else:
         raise ValueError('未知编辑操作')
+    if operation not in ('select', 'pending', 'skip', 'note'):
+        if all(result[key] == review[key] for key in ('decisions', 'centers')):
+            return copy.deepcopy(review)
+        result['status'] = 'draft' if has_human_processing(result) else 'unreviewed'
     validate_review(result, bounds)
-    if operation not in ('select', 'pending', 'skip') and all(result[key] == review[key] for key in ('decisions', 'centers', 'note')):
-        return copy.deepcopy(review)
     return result
 
 
@@ -193,6 +192,17 @@ def complete_review(review, bounds, candidates, min_score):
     result = copy.deepcopy(review)
     for ident in visible:
         result = edit_review(result, 'decision', bounds, candidates, candidate=ident, decision='accepted')
+    result['status'] = 'complete'
+    validate_review(result, bounds)
+    return result
+
+
+def empty_review(review, bounds, candidates):
+    """Explicitly confirm no people in scope, including hidden model proposals."""
+    result = copy.deepcopy(review)
+    result['centers'] = []
+    result['decisions'] = {str(i): 'rejected' for i, box in enumerate(candidates)
+                           if in_scope(box[:2], bounds)}
     result['status'] = 'complete'
     validate_review(result, bounds)
     return result

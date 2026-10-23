@@ -40,7 +40,14 @@ class _DummyLoader:
 
 
 class _DummyModel:
+    training = True
+
     def eval(self):
+        self.training = False
+        return self
+
+    def train(self, mode=True):
+        self.training = mode
         return self
 
     def __call__(self, batch_dict):
@@ -80,6 +87,22 @@ class EvaluationArgumentCompatibilityTest(unittest.TestCase):
 
             self.assertEqual(result['dummy_metric'], 1.0)
             self.assertTrue((result_dir / 'result.pkl').is_file())
+
+
+class UndefinedMetricTests(unittest.TestCase):
+    def test_undefined_rates_are_preserved_but_not_written_to_tensorboard(self):
+        from simple_det3d.train.train_utils import eval_epoch
+        tb_log = mock.Mock()
+        model = _DummyModel()
+        with mock.patch('simple_det3d.models.load_data_to_gpu'), \
+                mock.patch('simple_det3d.train.train_utils.tqdm.tqdm', return_value=_DummyProgress()), \
+                mock.patch.object(_DummyDataset, 'evaluation', return_value=(
+                    'undefined empty-set rate', {'Finite': 1., 'Undefined': float('nan'), 'Zero': 0.})):
+            result = eval_epoch(model, _DummyLoader(), SimpleNamespace(), mock.Mock(), 1, tb_log=tb_log)
+        self.assertTrue(np.isnan(result['Undefined']))
+        self.assertEqual(tb_log.add_scalar.call_count, 2)
+        self.assertTrue(all(np.isfinite(call.args[1]) for call in tb_log.add_scalar.call_args_list))
+        self.assertTrue(model.training)
 
 
 if __name__ == '__main__':

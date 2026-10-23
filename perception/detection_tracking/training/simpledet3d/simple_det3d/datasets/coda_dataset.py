@@ -19,6 +19,8 @@ from ..ops.iou3d_nms import iou3d_nms_utils
 from ..ops.roiaware_pool3d import roiaware_pool3d_utils
 from .data_augmentor import DataAugmentor
 from .data_processor import DataProcessor, PointFeatureEncoder
+from .rosbag_centers import load_rosbag_centers
+from .distance_evaluation import DistanceCenterMetrics
 
 
 def _dataset_path(value):
@@ -94,7 +96,7 @@ class CodaDataset(torch_data.Dataset):
     # ------------------------------------------------------------------
 
     def include_coda_data(self, mode):
-        """Load pkl info files listed in dataset_cfg.INFO_PATH[mode]."""
+        """Load existing trusted pkl infos or portable rosbag center JSON."""
         self.logger.info('Loading dataset info files for mode: %s', mode)
         coda_infos = []
 
@@ -102,6 +104,14 @@ class CodaDataset(torch_data.Dataset):
             info_path = self.root_path / info_path
             if not info_path.exists():
                 self.logger.warning('Info file not found: %s', info_path)
+                continue
+            if info_path.suffix == '.json':
+                coda_infos.extend(load_rosbag_centers(
+                    info_path, self.dataset_cfg.DATA_SPLIT[mode],
+                    max_sweeps=self.dataset_cfg.get('MAX_SWEEPS', 1),
+                    point_cloud_range=self.point_cloud_range,
+                    group_assignments=self.dataset_cfg.get('ROS_GROUP_ASSIGNMENTS'),
+                    complete_only=self.dataset_cfg.get('ROS_COMPLETE_ONLY', False)))
                 continue
             with open(info_path, 'rb') as f:
                 infos = pickle.load(f)
@@ -273,6 +283,9 @@ class CodaDataset(torch_data.Dataset):
     def get_lidar_with_sweeps(self, index, max_sweeps=1):
         """Load main lidar and merge with sweep frames."""
         info = self.infos[index]
+        if (max_sweeps > 1 and 'raw_history' in info and not info.get('has_pose', False)
+                and not info.get('motion_compensation_prepared', False)):
+            raise ValueError('原始历史点云缺少运动补偿位姿，不能直接拼接训练')
         lidar_path = self._resolve_lidar_path(info['lidar_path'])
         points = np.fromfile(str(lidar_path), dtype=np.float32, count=-1).reshape([-1, 4])
         points = points[np.all(np.isfinite(points), axis=1)]
@@ -726,6 +739,10 @@ class CodaDataset(torch_data.Dataset):
             'CENTER_HIT_THRESHOLDS', [0.5, 1.0]
         )]
         score_thresh = float(weak_cfg.get('CENTER_SCORE_THRESH', 0.1))
+        distance_config = weak_cfg.get('DISTANCE_EVAL', {})
+        distance_metrics = (DistanceCenterMetrics(distance_config, thresholds[0])
+                            if distance_config.get('ENABLED', False) else None)
+        distance_seen = set()
         gt_by_frame = {}
         exhaustive_frames = set()
         total_manual_centers = 0
@@ -769,6 +786,8 @@ class CodaDataset(torch_data.Dataset):
         total_gt = sum(len(centers) for centers in gt_by_frame.values())
         total_predictions = 0
         matched_distances = []
+        empty_frames = {f for f in exhaustive_frames if not len(gt_by_frame[f])}
+        empty_false_positives = empty_false_positive_frames = 0
 
         for anno in det_annos:
             frame_id = str(anno['frame_id'])
@@ -784,9 +803,21 @@ class CodaDataset(torch_data.Dataset):
                 raise ValueError('boxes_lidar must have shape (N, >=2)')
             pred_mask = (names == 'Pedestrian') & (scores >= score_thresh)
             pred_xy = boxes[pred_mask, :2]
+            in_range = (np.isfinite(pred_xy).all(axis=1) &
+                        (pred_xy >= self.point_cloud_range[:2]).all(axis=1) &
+                        (pred_xy <= self.point_cloud_range[3:5]).all(axis=1))
+            pred_xy = pred_xy[in_range]
             total_predictions += len(pred_xy)
+            if frame_id in empty_frames:
+                empty_false_positives += len(pred_xy)
+                empty_false_positive_frames += bool(len(pred_xy))
             for threshold in thresholds:
                 matches = self._greedy_center_matches(pred_xy, gt_xy, threshold)
+                if distance_metrics is not None and threshold == thresholds[0]:
+                    distance_metrics.add_frame(gt_xy, pred_xy, matches,
+                                              complete=frame_id in exhaustive_frames,
+                                              empty=frame_id in empty_frames)
+                    distance_seen.add(frame_id)
                 hits[threshold] += len(matches)
                 if frame_id in exhaustive_frames:
                     exhaustive_hits[threshold] += len(matches)
@@ -795,7 +826,7 @@ class CodaDataset(torch_data.Dataset):
                     matched_distances.extend(match[0] for match in matches)
 
         result_dict = {
-            f'CenterHit@{threshold:.2f}m': hits[threshold] / max(total_gt, 1)
+            f'CenterHit@{threshold:.2f}m': hits[threshold] / total_gt if total_gt else float('nan')
             for threshold in thresholds
         }
         result_dict.update({
@@ -816,13 +847,14 @@ class CodaDataset(torch_data.Dataset):
                 tp = exhaustive_hits[threshold]
                 num_pred = exhaustive_predictions[threshold]
                 precision = tp / max(num_pred, 1)
-                recall = tp / max(exhaustive_gt, 1)
-                f1 = 2 * precision * recall / max(precision + recall, 1e-12)
+                recall = tp / exhaustive_gt if exhaustive_gt else float('nan')
+                f1 = 2 * precision * recall / max(precision + recall, 1e-12) if exhaustive_gt else float('nan')
                 result_dict.update({
                     f'CenterPrecision@{threshold:.2f}m': precision,
                     f'CenterRecall@{threshold:.2f}m': recall,
                     f'CenterF1@{threshold:.2f}m': f1,
                     f'CenterFalsePositiveCount@{threshold:.2f}m': int(num_pred - tp),
+                    f'CenterMissedCount@{threshold:.2f}m': int(exhaustive_gt - tp),
                 })
             primary_threshold = thresholds[0]
             primary_fp = result_dict[
@@ -831,6 +863,10 @@ class CodaDataset(torch_data.Dataset):
             result_dict.update({
                 'ExhaustiveCenterCount': int(exhaustive_gt),
                 'ExhaustiveFrameCount': int(len(exhaustive_frames)),
+                'EmptyFrameCount': len(empty_frames),
+                'EmptyFalsePositiveCount': empty_false_positives,
+                'EmptyFalsePositivesPerFrame': empty_false_positives / len(empty_frames) if empty_frames else float('nan'),
+                'EmptyFalsePositiveFrameRate': empty_false_positive_frames / len(empty_frames) if empty_frames else float('nan'),
                 'CenterFalsePositivesPerFrame': (
                     primary_fp / max(len(exhaustive_frames), 1)
                 ),
@@ -864,6 +900,18 @@ class CodaDataset(torch_data.Dataset):
                 f'  False positives/frame @{thresholds[0]:.2f}m: '
                 f'{result_dict["CenterFalsePositivesPerFrame"]:.4f}',
             ])
+        if empty_frames:
+            lines.append('  Empty frames / FP per frame / false-positive frame rate: '
+                         f'{len(empty_frames)} / {result_dict["EmptyFalsePositivesPerFrame"]:.4f} / '
+                         f'{result_dict["EmptyFalsePositiveFrameRate"]:.4f}')
+        if distance_metrics is not None:
+            for frame_id in gt_by_frame.keys() - distance_seen:
+                distance_metrics.add_frame(gt_by_frame[frame_id], [], [],
+                                          complete=frame_id in exhaustive_frames,
+                                          empty=frame_id in empty_frames)
+            distance_result, distance_lines = distance_metrics.result()
+            result_dict.update(distance_result)
+            lines.extend(distance_lines)
         return '\n'.join(lines), result_dict
 
     # ------------------------------------------------------------------

@@ -122,3 +122,14 @@ roll:
   keyframeCacheMaxEntries: 256
   keyframeCacheMaxBytes: 134217728
   gravityAlignedMap: true
+  # Active only with --association-coverage. Distances in metres, angles in radians.
+  coverageGate:
+    reentryMargin: 0.5
+    minInlier: 0.55
+    maxResidual: 0.10
+    maxStep: 0.75
+    maxAngle: 0.15
+    maxGravity: 0.0872665
+    consistencyDistance: 0.25
+    consistencyAngle: 0.035
+    confirmationMatches: 5

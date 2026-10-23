@@ -2,7 +2,7 @@
 
 本文保留此前云端容器／CUDA 13部署方案，仅供追溯。旧原环境安装器及其profile已从当前代码移除，既有便携包和用户结果保持原样；不要按本文操作当前自有服务器或开发环境。当前操作见 [VLM部署与调用](../decision/VLM部署与调用.md)与 [SGLang服务部署方案](../decision/SGLang服务部署方案.md)。
 
-在Ubuntu 20.04／glibc 2.31的双4090／550驱动设备，通过原生Conda与SGLang 0.5.19源码构建服务环境，按[SGLang服务部署方案](SGLang服务部署方案.md)执行。下面的安装器与服务包装适用于既有AutoDL／CUDA 13路线，不用于该新环境；客户端及便携包规则仍由本手册维护。
+在Ubuntu 20.04／glibc 2.31的双4090／550驱动设备，通过原生Conda与SGLang 0.5.19源码构建服务环境，按[SGLang服务部署方案](../decision/SGLang服务部署方案.md)执行。下面的安装器与服务包装适用于既有AutoDL／CUDA 13路线，不用于该新环境；客户端及便携包规则仍由本手册维护。
 
 适用基础镜像：**PyTorch 2.12＋Python 3.12＋CUDA 13.0**。目标服务为冻结的 `Qwen3.8-27B-FP8`，串行、非思考、JSON Schema、每两秒调用一次。普通 AutoDL 容器即可，不需要嵌套 Docker。
 

@@ -1,5 +1,39 @@
 #include <gtest/gtest.h>
 #include "FixedMapSubmap.h"
+#include "LocalizationGate.h"
+
+TEST(LocalizationGate, ExitFreezesCorrectionAndReentryNeedsFreshConsistentMatches) {
+    LocalizationGate gate;
+    gate.enabled = true; gate.confirmationMatches = 3;
+    gate.regions = {{{0,0},{10,0},{10,10},{0,10}}};
+    Eigen::Affine3f local = Eigen::Affine3f::Identity(), prediction = local;
+    prediction.translation() = Eigen::Vector3f(5,5,0);
+    for (int i=0; i<3; ++i) {
+        ASSERT_TRUE(gate.begin(prediction));
+        EXPECT_EQ(gate.accept(prediction,prediction,local,.9,.03),i==2);
+    }
+    prediction.translation().x() = -1;
+    EXPECT_FALSE(gate.begin(prediction));
+    EXPECT_EQ(gate.reason,"outside_prior_coverage");
+    prediction.translation().x() = .2;
+    EXPECT_FALSE(gate.begin(prediction)); // Return margin suppresses border chatter.
+    prediction.translation().x() = 1;
+    for (int i=0; i<3; ++i) {
+        ASSERT_TRUE(gate.begin(prediction));
+        EXPECT_EQ(gate.accept(prediction,prediction,local,.9,.03),i==2);
+    }
+    Eigen::Affine3f bad = prediction;
+    bad.translation().z() = 2;
+    gate.begin(prediction);
+    EXPECT_FALSE(gate.accept(prediction,bad,local,.95,.02)); // Plausible residual alone is insufficient.
+    EXPECT_EQ(gate.reason,"coverage_match_quality_rejected");
+    for (int i=0; i<3; ++i) {
+        gate.begin(prediction);
+        EXPECT_EQ(gate.accept(prediction,prediction,local,.9,.03),i==2);
+    }
+    gate.begin(prediction);
+    EXPECT_FALSE(gate.accept(prediction,prediction,local,NAN,.03));
+}
 
 struct TestPose {
     float x = 0, y = 0, z = 0, intensity = 0, roll = 0, pitch = 0, yaw = 0;
