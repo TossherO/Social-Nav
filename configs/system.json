@@ -18,8 +18,8 @@
         "verification_scope": "complete_recorded_bag_geometry_people_memory_scene_queries_and_static_map_export",
         "hardware_verified": false,
         "hybrid_route_verification": {"recorded_development_route": true, "independent_accuracy": false, "live_hardware": false},
-        "static_prior_verification": {"saved_scene_render_and_queries": true, "ros_message_display_logic": true, "complete_ros_replay": false, "live_hardware": false},
-        "pending": ["independent_hybrid_route_acceptance", "model_protocol_integration", "static_prior_ros_integration_acceptance", "live_static_package_export", "extended_route_and_live_stability", "navigation_integration"]
+        "static_prior_verification": {"saved_scene_render_and_queries": true, "ros_message_display_logic": true, "complete_ros_replay": true, "replay_scope": "geometry_rgb_prior_queries_and_software_rviz_without_people", "view_follow_saved_scene": true, "live_hardware": false},
+        "pending": ["independent_hybrid_route_acceptance", "model_protocol_integration", "live_static_package_export", "extended_route_and_live_stability", "navigation_integration"]
       },
       "mapping_localization": {
         "path": "perception/mapping_localization",
