@@ -31,6 +31,8 @@ def parser():
     p.add_argument('--linearization-backend',choices=['cpu','cuda'],help='Experimental CUDA observation reduction; CPU by default')
     p.add_argument('--map',dest='map_directory');p.add_argument('--pose',nargs=6,type=float);p.add_argument('--pose-file')
     p.add_argument('--start',type=float);p.add_argument('--lidar-imu-calibration');p.add_argument('--camera-calibration')
+    p.add_argument('--sensor-clock-group',help='Declared continuous sensor/driver clock session; never inferred from bag dates')
+    p.add_argument('--sensor-session',help='Bag-bound clock-session JSON; defaults to BAG.clock.json')
     p.add_argument('--output',required=True);p.add_argument('--gpu',help='Physical visible-device selection; otherwise preserve CUDA_VISIBLE_DEVICES');p.add_argument('--duration',type=float)
     p.add_argument('--rate',type=float,default=1.);p.add_argument('--static-map');p.add_argument('--goal',nargs='+',type=float)
     p.add_argument('--goal-frame',default='odom');p.add_argument('--coverage');p.add_argument('--record-views',action='store_true')
@@ -55,30 +57,8 @@ def main():
         raise ValueError('--record-decision-inputs explicitly enables VLM image preparation; remove --no-image')
     if args.gpu is not None:os.environ['CUDA_VISIBLE_DEVICES']=str(args.gpu)
     os.environ.setdefault('OMP_NUM_THREADS','2');os.environ.setdefault('OPENBLAS_NUM_THREADS','1')
-    import torch
-    if not torch.cuda.is_available():raise RuntimeError('Selected CUDA device unavailable; check device access before changing dependencies')
-    torch.cuda.set_device(0)
-    from perception.detection_tracking.inference.config import load_config as detection_config
-    from perception.detection_tracking.inference.detector import SimpleDet3dDetector
-    from perception.detection_tracking.inference.pipeline import PerceptionPipeline,Frame
-    from perception.environment.layers import LocalEnvironmentMap,load_config as environment_config
-    from perception.environment.occupancy import OccupancyTree
-    from perception.environment.scene import assemble_scene,people_observation
-    from perception.environment.storage import StaticEnvironmentMap
-    from perception.mapping_localization.context import pose_matrix
-    from perception.mapping_localization.results import file_fingerprint
-    from navigation.planning.inputs import load_config as planning_config
-    from navigation.planning.motion import load_motion_config
-    from navigation.planning.footprint import VehicleGeometry
-    from navigation.planning.reference import ReferenceRuntime
-    from navigation.control.device import DeviceDwaBatch
-    from navigation.control.shadow import DwaShadowController,load_config as shadow_config
-    from .reference import SharedReferenceWorker
-    from .safety import SafetyProcess,SafetyTelemetry
-    from .export import SceneExporter
-    from .command import CommandInbox
-    from .control import ControlLoop
-    from .config import algorithm_config,runtime_settings
+    from .config import algorithm_config,runtime_settings,DEFAULT_CALIBRATION
+    from perception.sensors.clock_session import check_time_calibration
     source=Path(args.source_run).resolve() if args.source_run else None
     run={} if source is None else json.loads((source/'run.json').read_text())
     args.start=(0. if args.live else float(run.get('start',0.) or 0.)) if args.start is None else args.start
@@ -108,6 +88,33 @@ def main():
     for key in ('control_period_s','scene_export_hz','sensor_input_timeout_s','startup_timeout_s','finalization_timeout_s'):
         if not np.isfinite(settings[key]) or settings[key]<=0:raise ValueError('Positive finite runtime setting required: '+key)
     if not .01<=settings['control_period_s']<=.2:raise ValueError('Control period must stay in [0.01,0.2] seconds')
+    calibration_source=Path(args.lidar_imu_calibration) if args.lidar_imu_calibration else source/'run.json' if source else DEFAULT_CALIBRATION
+    timing=check_time_calibration(config,bag=bag,group=args.sensor_clock_group,session_file=args.sensor_session,
+        previous=run.get('imu_time_calibration'),source_file=calibration_source)
+    # Reject a known clock-session mismatch before touching CUDA or model weights.
+    import torch
+    if not torch.cuda.is_available():raise RuntimeError('Selected CUDA device unavailable; check device access before changing dependencies')
+    torch.cuda.set_device(0)
+    from perception.detection_tracking.inference.config import load_config as detection_config
+    from perception.detection_tracking.inference.detector import SimpleDet3dDetector
+    from perception.detection_tracking.inference.pipeline import PerceptionPipeline,Frame
+    from perception.environment.layers import LocalEnvironmentMap,load_config as environment_config
+    from perception.environment.occupancy import OccupancyTree
+    from perception.environment.scene import assemble_scene,people_observation
+    from perception.environment.storage import StaticEnvironmentMap
+    from perception.mapping_localization.context import pose_matrix
+    from perception.mapping_localization.results import file_fingerprint
+    from navigation.planning.inputs import load_config as planning_config
+    from navigation.planning.motion import load_motion_config
+    from navigation.planning.footprint import VehicleGeometry
+    from navigation.planning.reference import ReferenceRuntime
+    from navigation.control.device import DeviceDwaBatch
+    from navigation.control.shadow import DwaShadowController,load_config as shadow_config
+    from .reference import SharedReferenceWorker
+    from .safety import SafetyProcess,SafetyTelemetry
+    from .export import SceneExporter
+    from .command import CommandInbox
+    from .control import ControlLoop
     clock_domain='runtime_live' if args.live else 'runtime_bag'
     output=Path(args.output).resolve();output.mkdir(parents=True,exist_ok=False)
     metrics=Metrics(trace_path=output/'timing.jsonl' if args.trace_timing else None);startup=time.perf_counter();device=torch.device('cuda:0')
@@ -394,7 +401,7 @@ def main():
         if safety_telemetry is not None:counts['safety']=safety_telemetry.count
         counts['source_scans']=counts['scans'] if scan_inbox is None else scan_inbox.received
         for stream in streams.values():stream.close()
-        report=dict(success=failure is None,error=failure,counts=counts,metrics=metrics.summary(),source_metrics=source_metrics,
+        report=dict(success=failure is None,error=failure,counts=counts,metrics=metrics.summary(),source_metrics=source_metrics,imu_time_calibration=timing,
             source_bag=None if bag is None else str(bag),configuration_source=str(source/'run.json') if source else 'current_module_configs',mode=mode,rate=args.rate,
             internal_ros_transport=False,native_localization=True,gpu_device=str(torch.cuda.get_device_name(0)),
             scope='nonexecuting_shadow; bag motion is observed input, never navigation execution feedback',
@@ -406,7 +413,7 @@ def main():
         report['route_replay']=None if route_replay is None else route_replay.summary()
         report['termination']='user_stop' if stop_requested else 'source_end'
         (output/'summary.json').write_text(json.dumps(report,allow_nan=False,indent=2)+'\n')
-        manifest=dict(success=failure is None,source='live' if args.live else 'bag',clock_domain=clock_domain,backend='native_roll_fast_lio',mode=mode,bag=None if bag is None else str(bag),
+        manifest=dict(success=failure is None,source='live' if args.live else 'bag',clock_domain=clock_domain,backend='native_roll_fast_lio',mode=mode,bag=None if bag is None else str(bag),imu_time_calibration=timing,
             algorithm_parameters=config,localization_source='fast_lio' if mode=='odometry' else 'roll_fast_lio',
             map=str(output/'map') if mode=='mapping' else str(Path(config['roll']['saveKeyframeMapDirectory']).parent) if mode=='localization' else None,
             playback=dict(records='localization.jsonl',bag_fingerprint=None if bag is None else file_fingerprint(bag),start_offset_s=args.start),

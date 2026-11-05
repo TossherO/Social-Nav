@@ -62,6 +62,15 @@ class ShadowTests(unittest.TestCase):
         self.safety.command('goal',dict(self.req,goal_revision=1))
         self.assertEqual(self.safety.tick(10.,mono=0.)['reason'],'active_goal_mismatch')
 
+    def test_cancel_newer_revision_covers_an_older_active_goal_after_lost_ack(self):
+        revision=self.req['goal_revision']+1
+        self.safety.command('cancel',dict(task_id='different-task',goal_revision=revision))
+        self.assertEqual(self.safety.tick(10.,mono=0.)['state'],'allowed')
+        self.safety.command('cancel',dict(task_id=self.req['task_id'],goal_revision=revision))
+        self.assertEqual(self.safety.tick(10.,mono=.01)['reason'],'no_active_goal')
+        for old in (self.req['goal_revision'],revision):
+            with self.assertRaises(ValueError):self.safety.command('goal',dict(self.req,goal_revision=old))
+
     def test_new_grid_is_independently_joined_and_checked_without_waiting_for_planner(self):
         self.safety.tick(10.,mono=0.)
         repeated=copy.deepcopy(self.scene.geometry);repeated.layers['occupancy'][20,22]=100

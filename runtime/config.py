@@ -6,6 +6,7 @@ from pathlib import Path
 import yaml
 
 ROOT=Path(__file__).resolve().parents[1]
+DEFAULT_CALIBRATION=ROOT/'perception/sensors/calibration/lidar_imu.yaml'
 
 
 def runtime_settings(path):
@@ -48,8 +49,12 @@ def algorithm_config(*,mode,source_run=None,map_directory=None,pose=None,pose_fi
         for name in ('fast_lio','roll',mode):
             parameters=defaults[name] if name in defaults else yaml.safe_load((ROOT/'perception/mapping_localization/configs'/(name+'.yaml')).read_text())
             config=_overlay(config,parameters)
-        config=_overlay(config,yaml.safe_load(Path(calibration or ROOT/'perception/sensors/calibration/lidar_imu.yaml').read_text()))
-    if source_run is not None and calibration is not None:config=_overlay(config,yaml.safe_load(Path(calibration).read_text()))
+        config=_overlay(config,yaml.safe_load(Path(calibration or DEFAULT_CALIBRATION).read_text()))
+    if source_run is not None and calibration is not None:
+        override=yaml.safe_load(Path(calibration).read_text())
+        config=_overlay(config,override)
+        # A new calibration must not inherit the old validation/scope declaration.
+        config['calibration']=copy.deepcopy(override.get('calibration') or {})
     if mode=='odometry' and source_run is not None:config=_overlay(config,yaml.safe_load((ROOT/'perception/mapping_localization/configs/odometry.yaml').read_text()))
     config.setdefault('odometry',{})['publish_state']=mode=='odometry'
     roll=config.setdefault('roll',{});roll['localizationMode']=mode=='localization'

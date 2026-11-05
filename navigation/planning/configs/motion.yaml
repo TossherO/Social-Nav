@@ -4,7 +4,8 @@ model: differential
 parameters_assumed: true
 collision_backend: cpu
 collision_library: outputs/navigation/build/libsocial_nav_collision_cuda.so
-min_turning_radius_m: 1.12
+# User-selected wheel_nav:v1 TEB radius; still an assumed hardware limit.
+min_turning_radius_m: 1.05
 performance_reference: configs/wheelchair_motion_reference.json
 performance_profile: teb
 # Reverse capability confirmed by the user; numeric speed/braking limits remain assumed.

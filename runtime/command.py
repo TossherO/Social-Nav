@@ -89,12 +89,23 @@ class CommandInbox:
         if self.temporary is not None:self.temporary.cleanup()
 
 
+def send_request(path,kind,value,*,timeout=2.):
+    """Submit one intent; the reply acknowledges receipt, never execution."""
+    value=validate(kind,value)
+    if not 0<timeout<=10:raise ValueError('Command timeout must be in (0,10] seconds')
+    sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);sock.settimeout(timeout)
+    wire=Connection(sock)
+    try:
+        sock.connect(str(Path(path).resolve()))
+        wire.send(dict(kind=kind,value=value))
+        return wire.recv()
+    finally:wire.close()
+
+
 def main():
     p=argparse.ArgumentParser();p.add_argument('--socket',required=True);p.add_argument('--request',required=True);args=p.parse_args()
-    request=json.loads(Path(args.request).read_text());value=validate(request['kind'],request['value'])
-    sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);sock.connect(str(Path(args.socket).resolve()));wire=Connection(sock)
-    try:wire.send(dict(kind=request['kind'],value=value));print(json.dumps(wire.recv(),ensure_ascii=False))
-    finally:wire.close()
+    request=json.loads(Path(args.request).read_text())
+    print(json.dumps(send_request(args.socket,request['kind'],request['value']),ensure_ascii=False))
 
 
 if __name__=='__main__':main()

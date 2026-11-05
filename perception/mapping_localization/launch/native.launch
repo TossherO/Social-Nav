@@ -26,6 +26,9 @@
   <rosparam command="load" file="$(dirname)/../configs/fast_lio.yaml"/>
   <rosparam command="load" file="$(dirname)/../configs/roll.yaml"/>
   <rosparam command="load" file="$(dirname)/../configs/$(arg mode).yaml"/>
+  <!-- Match the direct reader's zero default rather than reuse a prior master's offset. -->
+  <param name="common/imu_time_offset" value="0.0"/>
+  <param name="common/time_sync_en" value="false"/>
   <rosparam command="load" file="$(arg lidar_imu_calibration)"/>
   <!-- CUDA numerics belong to the direct runtime; this diagnostic stays CPU. -->
   <param name="matching_backend" value="cpu"/>

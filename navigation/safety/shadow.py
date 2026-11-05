@@ -133,7 +133,8 @@ class ShadowSafety:
                 if not isinstance(value,dict) or not isinstance(value.get('task_id'),str) or type(value.get('goal_revision')) is not int or value['goal_revision']<0:
                     raise ValueError('invalid_shadow_cancel')
                 self.cancelled[value['task_id']]=max(value['goal_revision'],self.cancelled.get(value['task_id'],-1))
-                if self.active_goal is not None and all(value[k]==self.active_goal[k] for k in ('task_id','goal_revision')):self.active_goal=None
+                if (self.active_goal is not None and value['task_id']==self.active_goal['task_id'] and
+                        value['goal_revision']>=self.active_goal['goal_revision']):self.active_goal=None
             elif kind=='override':
                 if set(value)!={'manual_override','emergency_stop'} or any(type(v) is not bool for v in value.values()):raise ValueError('invalid_shadow_override')
                 self.manual,self.emergency=value['manual_override'],value['emergency_stop']

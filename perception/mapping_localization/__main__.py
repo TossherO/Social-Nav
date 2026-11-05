@@ -221,6 +221,8 @@ def arguments(argv=None):
     parser.add_argument('--backend-python', help='PIN worker interpreter in its independent environment')
     parser.add_argument('--backend-config', help='Explicit PIN YAML; default is the project sensor configuration')
     parser.add_argument('--lidar-imu-calibration', help='Explicit spatial/time calibration YAML for FAST-LIO/ROLL')
+    parser.add_argument('--sensor-clock-group', help='Declared continuous sensor/driver clock session')
+    parser.add_argument('--sensor-session', help='Bag-bound sensor clock-session JSON; defaults to BAG.clock.json')
     parser.add_argument('--step-replay', action='store_true',
                         help='PIN only: publish every raw scan and wait for its bound result; ignores playback rate')
     parser.add_argument('--bag', help='Input recording; required only for --source bag')
@@ -338,6 +340,18 @@ def arguments(argv=None):
         parser.error('Bag does not exist')
     if (not any(base in output.parents for base in ((ROOT / 'outputs').resolve(), Path('/tmp'))) or output.exists()):
         parser.error('Output must be a NEW directory beneath project outputs/ or /tmp/')
+    timing = None
+    if pin or args.assume_stationary:
+        if args.sensor_clock_group is not None or args.sensor_session is not None:
+            parser.error('Sensor clock-session options require real IMU input and FAST-LIO/ROLL')
+    else:
+        import yaml
+        from perception.sensors.clock_session import check_time_calibration
+        timing_path = project_path(args.lidar_imu_calibration)
+        timing = check_time_calibration(yaml.safe_load(timing_path.read_text()), bag=bag,
+            group=args.sensor_clock_group, session_file=project_path(args.sensor_session) if args.sensor_session else None,
+            source_file=timing_path)
+    args.imu_time_calibration = timing
     map_path = project_path(args.map) if args.map else output / 'map'
     if not args.decision_project and args.decision_root_group:
         parser.error('--decision-root-group requires --decision-project')
