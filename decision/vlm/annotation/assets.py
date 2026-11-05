@@ -41,26 +41,19 @@ class LazyAssets:
                 raise TimeoutError('按需读取bag超时；未使用旧帧替代')
             block = os.read(fd, min(1024*1024, size-len(result)))
             if not block:
-                raise ValueError('ROS读取进程已退出，请检查原bag与系统ROS解释器')
+                raise ValueError('数据读取进程已退出，请检查工程、原bag与解释器')
             result.extend(block)
         return bytes(result)
 
-    def read(self, ident):
+    def read(self, ident, display=False, association=False, rgb_only=False):
         with self.lock:
-            if ident in self.cache:
-                self.cache.move_to_end(ident)
-                return self.cache[ident]
-            if self.process is None or self.process.poll() is not None:
-                self.close()
-                self._start()
+            key=(ident,bool(display),bool(association),bool(rgb_only))
+            if key in self.cache:
+                self.cache.move_to_end(key)
+                return self.cache[key]
             try:
-                self.process.stdin.write((json.dumps({'frame_id': ident})+'\n').encode())
-                self.process.stdin.flush()
-                deadline = time.monotonic()+30
-                size, = struct.unpack('!I', self._read(4, deadline))
-                if not 0 < size <= 32*1024*1024:
-                    raise ValueError('按需帧长度无效')
-                payload = self._read(size, deadline)
+                payload = self.exchange({'frame_id':ident,'display':bool(display),
+                                         'association':bool(association),'rgb_only':bool(rgb_only)})
                 if payload[:1] == b'E':
                     raise ValueError(json.loads(payload[1:])['detail'])
                 with zipfile.ZipFile(io.BytesIO(payload)) as bundle:
@@ -68,11 +61,30 @@ class LazyAssets:
                         raise ValueError('按需帧解包大小超限')
                     result = dict(metadata=json.loads(bundle.read('frame.json')),
                                   cloud=bundle.read('cloud.npy'), rgb=bundle.read('rgb.png') if 'rgb.png' in bundle.namelist() else None,
+                                  cloud3d=bundle.read('cloud3d.npy') if 'cloud3d.npy' in bundle.namelist() else bundle.read('cloud.npy'),
+                                  model_scan=bundle.read('model_scan.npy') if 'model_scan.npy' in bundle.namelist() else None,
                                   preview=bundle.read('preview.jpg') if 'preview.jpg' in bundle.namelist() else None)
-                self.cache[ident] = result
+                self.cache[key] = result
                 if len(self.cache) > 48:
                     self.cache.popitem(last=False)
                 return result
+            except Exception:
+                self.close()
+                raise
+
+    def exchange(self, request):
+        with self.lock:
+            if self.process is None or self.process.poll() is not None:
+                self.close()
+                self._start()
+            try:
+                self.process.stdin.write((json.dumps(request,ensure_ascii=False)+'\n').encode())
+                self.process.stdin.flush()
+                deadline=time.monotonic()+30
+                size,=struct.unpack('!I',self._read(4,deadline))
+                if not 0<size<=32*1024*1024:
+                    raise ValueError('按需帧长度无效')
+                return self._read(size,deadline)
             except Exception:
                 self.close()
                 raise

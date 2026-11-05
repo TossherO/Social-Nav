@@ -1,12 +1,16 @@
-# SGLang服务部署方案：原生Conda、源码构建与DSPARK
+# SGLang 服务部署方案：原生 Conda、源码构建与 DSPARK
 
-最终方案面向自有Ubuntu 20.04／glibc 2.31服务器：独立Python 3.12 Conda环境、CUDA 12.9工具链与官方cu129 PyTorch、固定SGLang 0.5.19源码构建、双卡张量并行、Qwen FP8目标模型与公开DSPARK草稿。系统驱动和glibc保持原值；SGLang官方wheel的glibc门槛由本机构建处理。当前实现已通过项目冻结三图输入的服务器本机调用、开发机经SSH调用及短时0.5Hz测试，实际机器信息、成绩与服务状态由 `ENVIRONMENT.local.md` 定位。
+本文用于在自有 Ubuntu 20.04、glibc 2.31 服务器上，从零部署局部 VLM 服务。方案使用独立 Python 3.12 Conda 环境、CUDA 12.9 工具链、官方 cu129 PyTorch，以及固定的 SGLang 0.5.19 源码。推理时用两张 GPU 做张量并行，加载 Qwen FP8 目标模型和公开 DSPARK 草稿模型。
 
-本文只维护从零安装与最终构建材料。该远程服务是项目VLM推理与离线调试的首选，资源选择与本地备用条件见 [VLM部署与调用](VLM部署与调用.md)；已有服务器直接按该手册启停和测试，不重复安装。具体服务参数以部署脚本为准，依赖约束以 `config/constraints-cu129.txt` 为准；它是关键版本约束，不是全部传递依赖的永久锁文件。
+源码构建用于适应当前系统的 glibc，系统驱动和 glibc 保持原值。既有实现已用项目冻结三图输入完成服务器本机调用、开发机经 SSH 调用和短时 0.5 Hz 测试。实际机器、结果和服务状态由 [ENVIRONMENT.local.md](../../ENVIRONMENT.local.md)定位，不能据这些测试认定满上下文或更高并发已经验收。
+
+这项部署只服务局部 T1、T2、T3，外层 Agent 使用独立托管 API。已有服务器不必重装，启停和访问直接看[VLM 部署与调用](VLM部署与调用.md)。本文只维护从零安装和最终构建材料。
+
+服务参数由部署脚本维护，依赖版本以 `config/constraints-cu129.txt`为准。该文件约束关键版本，并不是所有传递依赖的永久锁文件。
 
 ## 1. 准备目录与部署材料
 
-安装命令全部在目标服务器的Bash终端执行。先确认Linux x86_64、glibc、现有驱动、两张所选卡的空闲资源及部署盘空间：
+下面的安装命令都在目标服务器的 Bash 终端执行。先确认机器为 Linux x86_64，检查 glibc、现有驱动、所选两张 GPU 的空闲资源，以及部署盘和临时目录的空间：
 
 ```bash
 getconf GNU_LIBC_VERSION
@@ -14,7 +18,9 @@ nvidia-smi
 df -h "$HOME" /tmp
 ```
 
-当前方案针对已验证的CUDA 12驱动路线；新设备仍须核对真实兼容性，不按镜像名称判断。[CUDA兼容规则](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)。缺少基础工具时才安装系统包，不重装系统CUDA或驱动：
+当前方案沿用已经验证的 CUDA 12 驱动路线。新设备仍需按真实驱动核对 [CUDA 兼容规则](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)，不能根据镜像名称判断兼容性。
+
+缺少基础工具时才安装以下系统包，不需要为本方案重装系统 CUDA 或驱动：
 
 ```bash
 sudo apt-get update
@@ -22,10 +28,10 @@ sudo apt-get install -y --no-install-recommends \
   curl ca-certificates git build-essential libnuma1 libibverbs1 ffmpeg tmux
 ```
 
-先在开发机生成含部署材料的便携包并传至服务器，方法见VLM手册。在其解压根目录设置 `SGLANG_MATERIALS="$PWD"`；若服务器已有本仓库，改指向 `decision/vlm/deployment/`，两者提供相同实现。首次创建的服务目录必须尚不存在：
+将仓库的 `decision/vlm/deployment/`完整复制到服务器，或使用服务器已有仓库。`SGLANG_MATERIALS`指向部署材料目录，`SGLANG_ROOT`是将要创建的服务目录；服务目录必须尚不存在：
 
 ```bash
-export SGLANG_MATERIALS="$PWD"
+export SGLANG_MATERIALS=/path/to/Social-Nav/decision/vlm/deployment
 export SGLANG_ROOT="$HOME/sglang-service"
 mkdir "$SGLANG_ROOT"
 mkdir -p "$SGLANG_ROOT/build" "$SGLANG_ROOT/config" \
@@ -36,11 +42,13 @@ cp "$SGLANG_MATERIALS/build/build_sglang.sh" \
 cp "$SGLANG_MATERIALS/config/constraints-cu129.txt" "$SGLANG_ROOT/config/"
 ```
 
-模型、环境、源码和缓存直接放各自唯一目录，不复制已有大资产。服务根目录只维护技术实现和环境／测试记录两份本机MD；实际测试结果集中在开发仓库，服务器保留冻结输入与客户端即可。
+完成后，服务目录中应有启动和环境脚本、构建材料、版本约束文件，以及模型、日志和缓存目录。模型、环境和源码各保留一个正式位置，已有大资产直接复用。
+
+服务根目录只保留两份本机说明，分别介绍技术实现和环境测试记录。正式测试结果集中在开发仓库，服务器保留复现所需的冻结输入和客户端即可。
 
 ## 2. 新建独立Conda环境
 
-使用已有Miniconda管理器；没有时才安装。下例将管理器放在服务目录之外，临时安装器用完即删，不修改全局Shell配置：
+已有 Miniconda 管理器时直接使用；仅在没有管理器时安装。下例把管理器放在服务目录之外，安装器用完删除，也不修改全局 Shell 配置：
 
 ```bash
 export SGLANG_CONDA_ROOT="$HOME/miniconda3"
@@ -51,7 +59,7 @@ bash /tmp/Miniconda3-sglang.sh -b -p "$SGLANG_CONDA_ROOT"
 rm /tmp/Miniconda3-sglang.sh
 ```
 
-从管理器创建新的专用环境，不替换项目开发或ROS环境：
+接着创建专用环境。这个环境不替换项目开发环境或系统 ROS 环境：
 
 ```bash
 source "$SGLANG_CONDA_ROOT/etc/profile.d/conda.sh"
@@ -74,11 +82,13 @@ python -m pip install --upgrade pip setuptools wheel packaging build \
   'setuptools-rust>=1.11' 'setuptools-scm>=8'
 ```
 
-`runtime_env.sh` 固定环境内编译器、ptxas、运行库与缓存路径，并隔离其他Python路径。Conda sysroot仅供编译，不替换系统glibc；CUDA stubs不进入运行库搜索路径。非默认Conda路径在每次调用构建／启动脚本前设置 `SGLANG_CONDA_ROOT` 和 `SGLANG_CONDA_ENV`，不把其他机器的路径写死在源码里。
+`runtime_env.sh`设置环境内编译器、ptxas、运行库和缓存路径，并隔离其他 Python 路径。Conda sysroot 只用于编译，不替换系统 glibc；CUDA stubs 也不加入运行库搜索路径。
+
+如果管理器或环境不在默认位置，每次调用构建或启动脚本前，都要设置 `SGLANG_CONDA_ROOT`和 `SGLANG_CONDA_ENV`，不要把某台机器的路径写入源码。
 
 ## 3. 安装cu129依赖
 
-所有运行依赖安装都引用同一约束文件。PyTorch使用官方cu129源；普通Python包优先清华，专属CUDA wheel使用发行方源：
+下面所有运行依赖使用同一约束文件。PyTorch 从官方 cu129 源安装，普通 Python 包优先清华镜像，专属 CUDA wheel 使用发行方源：
 
 ```bash
 export SGLANG_CONSTRAINTS="$SGLANG_ROOT/config/constraints-cu129.txt"
@@ -100,11 +110,13 @@ python -m pip install --only-binary=:all: \
   'sgl-deep-ep==0.1.2+cu129'
 ```
 
-内核的 `cp310-abi3` wheel可用于Python 3.12，不要求使用Python 3.10。安装某个原生包不表示启用了它的专用算子；本方案运行后端仍由最终启动脚本选择，不启用CUDA 13或Hopper专用路径。
+其中内核的 `cp310-abi3`wheel 可以用于 Python 3.12，不要求切换到 Python 3.10。安装了某个原生包，不代表启动时一定使用它的专用算子；实际后端仍由最终启动脚本决定。本方案不启用 CUDA 13 或 Hopper 专用路径。
 
 ## 4. 固定源码、适配依赖并构建
 
-SGLang官方Python 3.12 Linux wheel要求glibc至少2.34，当前系统为2.31，因此直接构建固定源码，不改wheel标签。[发行文件](https://pypi.org/project/sglang/0.5.19/#files)。获取完整仓库，保持Rust workspace与Cargo锁文件：
+SGLang 0.5.19 的官方 Python 3.12 Linux wheel 要求 glibc 至少为 2.34，而目标系统是 2.31。因此，本方案从固定源码构建本机 wheel，不修改已有 wheel 的平台标签。[发行文件](https://pypi.org/project/sglang/0.5.19/#files)保留了对应来源。
+
+获取完整仓库，以保留 Rust workspace 和 Cargo 锁文件：
 
 ```bash
 export SGLANG_SRC="$SGLANG_ROOT/build/sglang"
@@ -114,9 +126,9 @@ test "$(git -C "$SGLANG_SRC" rev-parse HEAD)" = 0bcd822377da7b5718e674eaf9c870d3
 git -C "$SGLANG_SRC" apply "$SGLANG_ROOT/build/source-cu129.patch"
 ```
 
-补丁只适配四项依赖：cuda-python改为CUDA 12范围、FlashInfer和Humming使用cu12选项、CUTLASS取消cu13额外选项；算法源码不改。已应用补丁的源码不要再次执行上述安装步骤，也不对他人的源码副本打补丁。依赖声明与约束共同防止解析回CUDA 13路线。
+补丁只调整四项依赖选择：把 cuda-python 限制在 CUDA 12 范围，FlashInfer 和 Humming 改用 cu12 选项，CUTLASS 去掉 cu13 额外选项。算法源码不变，源码声明和约束文件共同防止依赖解析回 CUDA 13。
 
-使用独立Rust工具链与RsProxy依赖镜像：
+已经应用补丁的源码不要重复执行上述步骤，也不要给他人的源码副本打补丁。随后使用独立 Rust 工具链和 RsProxy 依赖镜像构建：
 
 ```bash
 export CARGO_HOME="$SGLANG_ROOT/build/cargo"
@@ -143,11 +155,13 @@ python -m pip install --only-binary=:all: \
 python -m pip check
 ```
 
-构建入口使用当前cu129 Torch、Conda编译器和protoc，关闭Python构建隔离，构建全部四个Rust扩展；输出与唯一构建日志分别位于 `build/wheelhouse/` 和 `logs/build.log`。该脚本只构建，不安装或启动服务。失败时看首个实际错误，按需降低 `CARGO_BUILD_JOBS` 并复用缓存，不跳过扩展、另装CPU LibTorch或重建整套环境。
+构建脚本使用当前 cu129 Torch、Conda 编译器和 protoc，关闭 Python 构建隔离，并构建全部四个 Rust 扩展。wheel 写入 `build/wheelhouse/`，构建日志写入 `logs/build.log`。脚本只构建，不安装或启动服务；后面的 pip 命令负责安装和检查依赖。
+
+构建失败时，先查看日志中的首个实际错误。必要时降低 `CARGO_BUILD_JOBS`并复用缓存，不跳过扩展、不另装 CPU LibTorch，也不因一个构建错误重建整套环境。
 
 ## 5. 准备固定目标与草稿模型
 
-已有可信模型直接复用，可分别设置 `SGLANG_MODEL_DIR` 与 `SGLANG_DRAFT_MODEL_DIR`。新机器通过hf-mirror取得以下固定revision的公开资产，不下载或执行模型仓库Python代码：
+已有可信模型时直接复用，分别用 `SGLANG_MODEL_DIR`和 `SGLANG_DRAFT_MODEL_DIR`指定路径。新机器可以通过 hf-mirror 下载下面固定 revision 的公开资产。下载列表不包含模型仓库 Python 代码，也不执行远程模型代码：
 
 ```bash
 export HF_ENDPOINT=https://hf-mirror.com
@@ -175,11 +189,15 @@ for repo, revision, name, files in models:
 PY
 ```
 
-模型身份与必要配置按来源绑定，不因文件夹名称修改配置架构。目标保持发布的FP8权重与完整Tokenizer、聊天模板和视觉处理器；DSPARK使用原BF16 Safetensors，由当前SGLang原生 `DSparkDraftModel` 加载。下载／迁移时保留来源和已有资产摘要，不反复哈希整套目标权重；目录可达不证明模型可以运行。[公开草稿](https://huggingface.co/RadixArk/Qwen3.8-27B-DSpark)。
+目标模型保留发布的 FP8 权重，以及完整 Tokenizer、聊天模板和视觉处理器。DSPARK 草稿使用原 BF16 Safetensors，由 SGLang 原生 `DSparkDraftModel`加载，来源见[公开草稿模型](https://huggingface.co/RadixArk/Qwen3.8-27B-DSpark)。
+
+模型身份由来源和必要配置确认，不能因为文件夹改名就修改配置架构。下载或迁移时保留来源记录和已有摘要，不反复哈希整套目标权重；目录可访问也不代表模型已经能够运行。
 
 ## 6. 启动最终DSPARK配置
 
-确认所选两卡空闲，按实际条件设置 `SGLANG_GPUS`；默认值与全部服务参数只由启动脚本维护。模型路径不同时设置上述两个模型变量。然后按VLM手册进入tmux启动：
+先确认所选两张 GPU 空闲，再按机器实际情况设置 `SGLANG_GPUS`。默认 GPU 选择和完整服务参数都由启动脚本维护；模型路径与默认位置不同时，再设置前述两个模型变量。
+
+进入服务目录，在 tmux 会话中启动：
 
 ```bash
 cd "$SGLANG_ROOT"
@@ -189,21 +207,25 @@ set -o pipefail
 bash start_server.sh 2>&1 | tee logs/server.log
 ```
 
-默认使用双卡DSPARK、静态验证和独立草稿FlashInfer；目标注意力／线性注意力／FP8 GEMM使用Triton，视觉使用SDPA，采样使用PyTorch。保留float32 GDN状态、原KV精度与解码CUDA图，关闭已出现显存不足的预填充图捕获。驱动库搜索路径只用于JIT链接，不将stubs加载为真实驱动。服务监听回环地址，模型别名与JSON Schema接口保持一致。
+默认配置使用双卡 DSPARK，采用静态验证，草稿模型使用独立 FlashInfer 后端。目标模型的注意力、线性注意力和 FP8 GEMM 使用 Triton，视觉部分使用 SDPA，采样使用 PyTorch。
 
-等待就绪后，用便携客户端的三个代表场景确认真实多图与完整JSON响应，初始化与计时分开记录；已有有效测试无需因文档调整重跑。远程访问、停止和完整对比均见VLM手册；纯文本检查不能代替视觉路径。上下文包含图像、文本和输出预算，声明容量不代表已验证满容量或额外并发。
+配置保留 float32 GDN 状态、原 KV 精度和解码 CUDA 图，关闭此前出现显存不足的预填充图捕获。驱动库搜索路径只用于 JIT 链接，不把 stubs 当作真实驱动加载。服务监听回环地址，模型别名和 JSON Schema 接口与客户端保持一致。
+
+等待服务就绪后，按 VLM 手册选少量已有冻结任务输入，检查真实多图请求和完整 Schema 响应。初始化与正式计时分开记录，纯文本检查不能代替视觉路径。已有有效结果不需要因文档改写重跑；声明的上下文容量也不代表满容量和额外并发已经验证。远程访问和停止方法见[VLM 手册](VLM部署与调用.md#远程服务启停与访问默认)。
 
 ## 7. 维护与排错
 
-| 现象 | 处理 |
+| 现象 | 先检查什么 |
 |---|---|
-| glibc／wheel不兼容 | 确认使用本地SGLang wheel，定位具体其他依赖；不改平台标签或系统glibc |
-| 解析到CUDA 13或错误Torch | 确认四项源码补丁和cu129约束同时生效，不跳过依赖检查 |
-| Rust／C++／protoc失败 | 查看首个构建错误，检查固定源码、独立工具链、Conda编译器与protoc，复用有效缓存 |
-| JIT找不到 `-lcuda` | 确认系统驱动库及启动脚本的编译链接路径，stubs不加入运行库路径 |
-| 显存不足／图捕获失败 | 确认两卡空闲及最终DSPARK配置，尤其预填充图关闭；不恢复失败候选或照搬48GB单卡参数 |
-| 双卡通信／PTX失败 | 针对实际算子与拓扑诊断；自定义AllReduce标志未禁用不证明其已生效，不盲换驱动或Torch |
-| JSON／视觉失败 | 保留原始错误和响应，区分输入、Schema、算子与显存，不修复回答或自动重试 |
-| 端口连接拒绝 | 确认服务实际就绪及SSH隧道，服务已停止时先按需手动启动 |
+| glibc 或 wheel 不兼容 | 确认正在使用本机构建的 SGLang wheel，再定位具体不兼容依赖。不改平台标签或系统 glibc。 |
+| 解析到 CUDA 13 或错误 Torch | 确认四项源码补丁和 cu129 约束同时生效，不跳过依赖检查。 |
+| Rust、C++ 或 protoc 构建失败 | 从首个错误检查固定源码、独立工具链、Conda 编译器和 protoc，保留有效缓存。 |
+| JIT 找不到 `-lcuda` | 检查系统驱动库及启动脚本的编译链接路径。stubs 不加入运行库路径。 |
+| 显存不足或图捕获失败 | 检查两卡空闲情况及最终 DSPARK 配置，特别是预填充图捕获是否关闭。不恢复失败候选，也不照搬 48 GB 单卡参数。 |
+| 双卡通信或 PTX 失败 | 针对实际算子和拓扑诊断。自定义 AllReduce 标志没有禁用，并不证明该功能已生效；不要盲换驱动或 Torch。 |
+| JSON 或视觉推理失败 | 保留原始错误和响应，区分输入、Schema、算子和显存问题，不修复模型回答或自动重试。 |
+| 端口连接被拒绝 | 检查服务是否就绪，以及 SSH 隧道是否建立。服务已停止时按需手动启动。 |
 
-本机记录维护实际环境、源码／模型来源及已执行检查；完整依赖直接查询现有Conda／pip元数据，不再导出多份快照。只保留必要源码、补丁、wheel、运行／构建入口和有效缓存；临时脚本、安装器及重复测试结果清理，汇总和复现必需原始结果集中到同一实验目录。服务与编译检查按实际变更执行，不将全套检查作为每次启动或文档修改的前置步骤。
+本机记录维护实际环境、源码和模型来源，以及真正执行的检查。完整依赖可直接查询现有 Conda 和 pip 元数据，不重复导出多份快照。
+
+目录中保留必要源码、补丁、wheel、运行和构建入口，以及仍有效的缓存。安装器、一次性脚本和重复测试结果可以清理；汇总与复现必需的原始结果集中保存。服务和编译检查按实际变更执行，不把全套检查作为每次启动或文档修改的前置。

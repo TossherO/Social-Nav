@@ -7,14 +7,25 @@ from .data import BagReader, Store, index_source, decode_cloud
 from .worker import DetectorClient
 
 
-def predict_project(project, python, gpu, progress=print):
+def predict_project(project, python, gpu, progress=print, pose_results=None, max_pose_age_s=.02):
     store, detector, reader = Store(project), None, None
     summary = dict(complete=False, sources=[], processed=0, reused=0, failed_frame=None)
     started = time.monotonic()
     try:
         for source in store.sources():
             index_source(project, source['id'], progress)
+        max_sweeps = store.meta('effective')['DATA_CONFIG'].get('MAX_SWEEPS', 1)
+        providers = {}
+        if max_sweeps > 1:
+            if pose_results is None:
+                raise ValueError('多帧候选预计算需要--pose-results；不能以未补偿历史或原始里程计替代')
+            from .poses import RecordedPoses
+            providers = {s['id']: RecordedPoses(pose_results, s, max_pose_age_s) for s in store.sources()}
         detector = DetectorClient(python, gpu, store.meta('settings'), store.meta('effective'))
+        metadata = dict(detector.metadata)
+        if providers:
+            metadata['pose_sources'] = {ident: provider.provenance for ident, provider in providers.items()}
+            summary['history_frames'] = dict(ready=0, partial=0, unavailable=0)
         if list(detector.metadata['point_cloud_range']) != list(store.bounds):
             raise ValueError('检测模型与标注范围不一致')
         store.set_meta('offline_detection', summary)
@@ -37,14 +48,24 @@ def predict_project(project, python, gpu, progress=print):
                 points = decode_cloud(cloud)
                 bound = store.bind_points(frame, points)
                 frame['fingerprint'] = bound
+                pose = providers[source['id']].resolve(frame) if providers else None
                 if frame['candidates'] is not None:
-                    if frame['model'] != detector.metadata:
+                    recorded_model = dict(frame['model'])
+                    previous_context = recorded_model.pop('input_context', None)
+                    if recorded_model != metadata:
                         raise ValueError('已有候选使用不同模型；请使用新工程，不覆盖人工复核依据')
+                    if providers and detector.observe(frame, points, pose) != previous_context:
+                        raise ValueError('已有候选的历史点云或位姿绑定不一致')
                     key = 'reused'
                 else:
-                    boxes = detector.predict(frame, points)
-                    store.save_candidates(frame['id'], boxes, detector.metadata, bound)
+                    boxes = detector.predict(frame, points, pose) if providers else detector.predict(frame, points)
+                    model = dict(metadata)
+                    if providers:
+                        model['input_context'] = detector.last_input_context
+                    store.save_candidates(frame['id'], boxes, model, bound)
                     key = 'processed'
+                if providers:
+                    summary['history_frames'][detector.last_input_context['status']] += 1
                 summary[key] += 1
                 source_summary[key] += 1
                 stamp = frame['stamp_ns']

@@ -1,0 +1,29 @@
+# Scheduling/transport only. Model, map, motion and safety parameters stay owned
+# by their existing module configurations.
+input_python: /usr/bin/python3
+shared_scan_slots: 4
+shared_scan_slot_bytes: 8388608
+shared_safety_slots: 16
+shared_safety_slot_bytes: 1048576
+control_period_s: 0.1
+scene_export_hz: 1.0
+display:
+  scan_hz: 10.0
+  people_hz: 10.0
+  map_hz: 5.0
+  rgb_hz: 2.0
+  navigation_hz: 5.0
+  max_scan_points: 20000
+  height_mode: ground  # ground: follow supported terrain; plane: fixed XY diagnostic.
+  path_z_m: 0.03  # Offset above ground, or absolute Z in plane mode.
+  ground_plane_radius_m: 1.5  # Display-only floor-fit extension near the sensor blind spot.
+route_replay:
+  lookahead_m: 3.0
+  min_update_s: 2.0
+  goal_shift_m: 1.0
+sensor_input_timeout_s: 2.0
+startup_timeout_s: 60.0
+finalization_timeout_s: 60.0
+environment_library: outputs/runtime/build/environment/libsocial_nav_occupancy_cuda.so
+dwa_library: outputs/runtime/build/dwa/libsocial_nav_dwa_cuda.so
+collision_library: outputs/runtime/build/planning/libsocial_nav_collision_cuda.so

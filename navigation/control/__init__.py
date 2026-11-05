@@ -1,1 +1,1 @@
-"""Not implemented: trajectory tracking, smoothing and base command adapter."""
+"""Simulation and ROS shadow tracking; no real chassis command adapter."""

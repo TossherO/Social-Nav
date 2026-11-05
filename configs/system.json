@@ -1,6 +1,6 @@
 {
   "name": "Social-Nav",
-  "runtime_status": "scaffold_not_integrated",
+  "runtime_status": "partial_not_integrated",
   "modules": {
     "perception": {
       "detection_training": {"path": "perception/detection_tracking/training", "status": "source_available", "entry": "env DRY_RUN=1 bash perception/detection_tracking/training/simpledet3d/train_wheelchair_3stage.sh", "task_scene": {"entry": "python perception/detection_tracking/training/simpledet3d/tools/task_scene.py --help", "config": "perception/detection_tracking/training/simpledet3d/configs/voxelrcnn_ros_centers_finetune.yaml", "status": "offline_ready", "verification_scope": "weighted_annotation_replay_and_bounded_two_gpu_training", "effectiveness_validated": false}},
@@ -10,21 +10,27 @@
       "visualization": {"path": "perception/visualization", "config_dir": "perception/visualization/configs", "entry": "bash perception/scripts/view.sh --help", "status": "offline_ready", "hardware_verified": false},
       "environment": {
         "path": "perception/environment",
+        "map_types": ["static_environment_map", "local_environment_map"],
+        "view_types": ["static_prior_view"],
         "status": "offline_ready",
+        "occupancy_change_policy": {"historical_occupancy": "revisable_prior", "temporary_occupancy": "expires_without_promotion", "conditional_obstacles": "reference_cost_requires_current_local_check", "offline_replay_verified": true, "live_hardware_verified": false},
         "entry": "python -m perception.environment --help",
         "config": "perception/environment/configs/environment.yaml",
-        "opt_in": "--environment",
-        "capabilities": ["local_rolling_geometry", "observation_bound_queries", "optional_prior_association", "rviz_and_snapshot_overview", "static_endpoint_geometry_export", "offline_visual_place_memory", "map_server_format_export", "recorded_deskewed_ray_fusion", "causal_visual_memory", "neutral_vlm_context", "read_only_agent_queries", "unified_causal_scene", "coverage_mask_interface_experiment", "trusted_region_backend_gating", "association_bound_static_prior_views"],
-        "verification_scope": "complete_recorded_bag_geometry_people_memory_scene_queries_and_static_map_export",
+        "runtime_default": true,
+        "ros_diagnostic_opt_in": "--environment",
+        "capabilities": ["local_rolling_geometry", "cpu_cuda_local_evidence", "cuda_near_field_background", "cuda_exact_distance_and_frontier", "history_provenance_ros_roundtrip", "async_scan_archive", "live_static_package_export", "explicit_static_region_export", "static_free_ray_contradiction_review", "observation_bound_queries", "optional_prior_association", "rviz_and_snapshot_overview", "static_endpoint_geometry_export", "map_server_format_export", "recorded_deskewed_ray_fusion", "neutral_vlm_context", "read_only_agent_queries", "unified_causal_scene", "coverage_mask_interface_experiment", "trusted_region_backend_gating", "association_bound_static_prior_views"],
+        "verification_scope": "recorded_bag_and_simulated_live_topics_geometry_scene_queries_and_static_map_export",
         "hardware_verified": false,
         "hybrid_route_verification": {"recorded_development_route": true, "independent_accuracy": false, "live_hardware": false},
         "static_prior_verification": {"saved_scene_render_and_queries": true, "ros_message_display_logic": true, "complete_ros_replay": true, "replay_scope": "geometry_rgb_prior_queries_and_software_rviz_without_people", "view_follow_saved_scene": true, "live_hardware": false},
-        "pending": ["independent_hybrid_route_acceptance", "model_protocol_integration", "live_static_package_export", "extended_route_and_live_stability", "navigation_integration"]
+        "pending": ["independent_hybrid_route_acceptance", "online_model_result_acceptance", "extended_route_and_live_stability", "deployed_navigation_acceptance"]
       },
       "mapping_localization": {
         "path": "perception/mapping_localization",
+        "map_type": "localization_map",
         "status": "offline_ready",
         "entry": "bash perception/scripts/run.sh --help",
+        "ros_diagnostic_entry": "bash perception/scripts/run_ros_diagnostic.sh --help",
         "default_backends": {
           "mapping": "roll_fast_lio",
           "localization": "roll_fast_lio",
@@ -79,6 +85,22 @@
           "live"
         ],
         "visualization": "optional_rviz_for_default_task_backends",
+        "decision_preparation": {
+          "status": "offline_ready",
+          "option": "--decision-project",
+          "source": "bag",
+          "documentation": "docs/感知导航操作速查.md#一次完成推理与决策标注准备"
+        },
+        "joint_image_association": {
+          "status": "bag_and_live_ready",
+          "default_enabled": false,
+          "entry": "bash perception/scripts/run_ros_diagnostic.sh --help",
+          "role": "optional_vlm_image_input_or_diagnostic",
+          "enabled_with": "--image-association or --decision-project, with --people-python",
+          "disable_option": "--no-image-association",
+          "recording": "rgb_associations.jsonl",
+          "visualization": "bound_rgb_overlay"
+        },
         "result_viewer": {
           "entry": "bash perception/scripts/view.sh --help",
           "inputs": ["run_directory", "complete_map", "recorded_states", "comparison_trajectory"],
@@ -96,23 +118,63 @@
     "decision": {
       "vlm": {
         "path": "decision/vlm", "status": "offline_ready", "config": "decision/vlm/configs/project.json",
-        "entry": "python -m decision.vlm.benchmark_vlm --dry-run --limit 3",
+        "entry": "python -m decision.vlm.follow --help",
+        "runtime_adapter": {
+          "inputs": "decision/vlm/observations.py", "acceptance": "decision/vlm/navigation.py",
+          "recorder": "runtime/decision.py", "record_option": "--record-decision-inputs",
+          "image_preparation": "decision/vlm/image_inputs.py", "image_preparation_default": false,
+          "verification_scope": "bounded_real_saved_observation_rendering_and_cpu_interface_tests",
+          "automatic_model_dispatch": false, "hardware_verified": false,
+          "documentation": "docs/decision/VLM部署与调用.md#直接运行时的三帧输入与响应接纳"
+        },
+        "groups": {
+          "path": "decision/vlm/vlm_api_common.py", "status": "offline_input_prompt_ready",
+          "documentation": "docs/decision/VLM部署与调用.md#实机t1群组输入",
+          "online_integrated": false
+        },
         "annotation": {
           "path": "decision/vlm/annotation", "status": "local_and_http_ready",
           "entry": "python -m decision.vlm.annotation --help",
+          "rgb_input": "registered_project_default",
           "verification_scope": "local_qt_real_bag_loopback_http_and_fault_tests",
           "windows_verified": false, "t2_history_state_review": false
+        },
+        "follow": {
+          "path": "decision/vlm/follow.py", "status": "offline_diagnostic",
+          "entry": "python -B -m decision.vlm.follow --help",
+          "documentation": "docs/decision/VLM部署与调用.md#t2外观匹配与因果身份回放",
+          "verification_scope": "bounded_native_draft_multitarget_causal_replay_and_prompt_comparison",
+          "complete_five_state_verified": false, "online_integrated": false
+        },
+        "seating": {
+          "path": "decision/vlm/seating", "status": "offline_prototype",
+          "entry": "python -B -m decision.vlm.seating --help",
+          "documentation": "docs/decision/VLM部署与调用.md#t3目标选择与就座",
+          "verification_scope": "causal_table_prior_three_frame_remote_comparison_offline_view_goal_diagnostics_and_synthetic_phase_gating",
+          "automatic_table_geometry": false, "navigation_integrated": false,
+          "candidate_navigation_preflight": true, "execution_feedback_adapter": true,
+          "physical_completion_verified": false
         }
       },
-      "agent": {"path": "decision/agent", "status": "planned"}
+      "agent": {
+        "path": "decision/agent", "status": "simulation_and_causal_shadow_ready",
+        "entry": "python -B -m decision.agent --help",
+        "documentation": "docs/decision/Agent技术实现.md",
+        "implemented_helpers": "decision/agent/tools/environment.py",
+        "architecture": "single_vlm_tool_loop",
+        "capabilities": ["read_only_scene_queries", "read_only_environment_queries", "single_hosted_vlm_tool_decisions", "schema_checked_tool_arguments", "async_navigation_skill", "event_waiting", "task_bound_origin", "original_instruction_and_clarifications", "optional_observation_bound_tool_memory", "spatial_evidence_invalidation", "unconfirmed_transport_preserves_intent", "processed_shadow_cancellation_receipt", "feedback_simulation", "causal_saved_observation_shadow", "runtime_shadow_state_and_optional_rgb"],
+        "task_loop_implemented": true, "online_runtime_integrated": false, "runtime_shadow_integrated": true, "hardware_verified": false,
+        "verification_scope": "cpu_tool_protocol_lifecycle_and_async_checks_synthetic_tool_feedback_and_bounded_hosted_visual_tool_loop;runtime_shadow_inherits_prior_short_gpu_probe"
+      }
     },
     "navigation": {
-      "planning": {"path": "navigation/planning", "status": "not_implemented"},
-      "control": {"path": "navigation/control", "status": "not_implemented"},
-      "safety": {"path": "navigation/safety", "status": "not_implemented"}
+      "planning": {"path":"navigation/planning","status":"planning_only_ready","entry":"python -B -m navigation.planning --help","config":"navigation/planning/configs/planning.yaml","motion_config":"navigation/planning/configs/motion.yaml","runtime_config":"navigation/planning/configs/reference.yaml","clocked_replay":true,"ros_trajectory_integrated":true,"ros_scope":"raw_bag_full_perception_and_nonexecuting_shadow_with_faults_and_cpu_affinity_comparison","motion_reference":"configs/wheelchair_motion_reference.json","documentation":"docs/navigation/技术实现-路径规划.md#搜索与完整足迹","verification_scope":"single_native_hybrid_astar_reference_direct_dwa_timed_people_full_braking_and_synthetic_feedback","task_policy_adapter":"navigation/tasks.py","task_policy_scope":"offline_API_no_model_calls_or_agent_loop","executable":false,"local_trajectory_planning":false,"trajectory_scope":"dwa_prediction_only_no_second_tracker_no_real_chassis","hardware_verified":false,"gpu_acceleration":"batched_cuda_sweep_with_cpu_reference_target_device_pending","default_controller":"dwa"},
+      "control": {"path":"navigation/control","documentation":"docs/navigation/技术实现-局部控制与安全.md","status":"simulation_prototype","entry":"python -B -m navigation.simulation","config":"navigation/control/dwa.yaml","ros_shadow_integrated":true,"shadow_entry":"python -B -m navigation.planning online --geometry historical --shadow","shadow_config":"navigation/control/shadow.yaml","ros_control_integrated":false,"real_chassis_adapter":false,"executable":false,"goal_config":"navigation/control/config.yaml","default_controller":"dwa"},
+      "safety": {"path": "navigation/safety", "documentation": "docs/navigation/技术实现-局部控制与安全.md#独立安全与时间", "status": "simulation_prototype", "config": "navigation/safety/config.yaml", "independent_ros_shadow": true, "shadow_entry": "python -B -m navigation.safety.shadow --geometry historical", "hardware_verified": false, "executable": false}
     }
   },
-  "interfaces": {"path": "interfaces/contracts.py", "status": "not_integrated"},
+  "runtime": {"path":"runtime","entry":"python -B -m runtime --help","config":"configs/runtime.yaml","status":"implemented_bag_and_simulated_live_verified","internal_ros_topics":false,"native_localization":true,"device_map_and_dwa":true,"core_image_association":false,"optional_vlm_images":"decision/vlm/image_inputs.py","independent_cpu_safety":true,"hardware_verified":false,"executable":false,"documentation":"docs/感知导航总览.md"},
+  "interfaces": {"path": "interfaces/contracts.py", "status": "not_integrated", "runtime_records":"interfaces/runtime.py"},
   "simpledet3d": {
     "original_source_reference": "perception/detection_tracking/training/source_snapshot.json",
     "copied_root": "perception/detection_tracking/training/simpledet3d",
@@ -126,5 +188,5 @@
     "build_state_reference": "ENVIRONMENT.local.md"
   },
   "private_config_policy": "Existing configs/*.local.json stay in place and are never copied or read by status checks.",
-  "integration_policy": "No automatic training, service deployment, agent loop or robot motion. Perception tasks start through explicit manual commands; online tasks connect to existing sensors, and detection uses a selected localization backend."
+  "integration_policy": "No automatic training, service deployment or robot motion. Agent commands explicitly start planning, diagnostics or simulation only. Perception tasks start through explicit manual commands; online tasks connect to existing sensors, and detection uses a selected localization backend."
 }

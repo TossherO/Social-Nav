@@ -1,5 +1,6 @@
 """Independent, allowlisted T1/T2 API on loopback or Tailscale."""
 import ipaddress
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -63,6 +64,7 @@ def create_app(project, project_id='wheelchair-vlm', writable=False):
             source.pop('bag', None)
             source.pop('records', None)
             source.pop('reader', None)
+            source.pop('rgb_recording', None)
         return dict(result, writable=writable)
 
     @app.get('/projects/{ident}/sources/{source}/frames')
@@ -79,6 +81,26 @@ def create_app(project, project_id='wheelchair-vlm', writable=False):
     def window(ident: str, frame_id: str):
         check(ident)
         return store.window(frame_id)
+
+    @app.get('/projects/{ident}/context-frames')
+    def context_frames(ident: str, frame_id: str):
+        check(ident)
+        return store.context_frames(frame_id)
+
+    @app.post('/projects/{ident}/views')
+    def views(ident: str, body: dict):
+        check(ident)
+        ids, review = body.get('frame_ids'),body.get('review',False)
+        if not isinstance(ids,list) or not 1<=len(ids)<=12 or not all(isinstance(fid,str) for fid in ids) or type(review) is not bool:
+            raise ValueError('观察批次须为1–12个帧ID，review须为布尔值')
+        from .backend import build_views,pack_views
+        started=time.perf_counter()
+        rows=build_views(store,ids,review)
+        built=time.perf_counter()
+        payload=pack_views(rows)
+        packed=time.perf_counter()
+        return Response(payload,media_type='application/zip',headers={'Content-Encoding':'identity',
+            'Server-Timing':f'view;dur={(built-started)*1000:.1f},pack;dur={(packed-built)*1000:.1f}'})
 
     @app.get('/projects/{ident}/asset')
     def asset(ident: str, frame_id: str, kind: str):
@@ -113,6 +135,17 @@ def create_app(project, project_id='wheelchair-vlm', writable=False):
         check(ident)
         if not writable:
             raise Conflict('只读工程')
+        if body.get('action') is not None:
+            raise ValueError('事件删除请使用delete-event接口')
+        return store.commit(body)
+
+    @app.post('/projects/{ident}/delete-event')
+    def delete_event(ident: str, body: dict):
+        check(ident)
+        if not writable:
+            raise Conflict('只读工程')
+        if body.get('action') != 'delete':
+            raise ValueError('删除操作类型错误')
         return store.commit(body)
 
     return app

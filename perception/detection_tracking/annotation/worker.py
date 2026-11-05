@@ -24,7 +24,7 @@ def detector_environment(python, gpu):
 
 class DetectorClient:
     """Blocking offline client. One model and one temporary array, no ROS in the child."""
-    def __init__(self, python, gpu, settings, effective):
+    def __init__(self, python, gpu, settings, effective, tracking=None):
         from perception.detection_tracking.inference.config import ROOT
         self.temporary = tempfile.TemporaryDirectory(prefix='social_nav_detector_')
         self.process = subprocess.Popen([str(python), '-u', '-m', 'perception.detection_tracking.annotation.worker'],
@@ -32,7 +32,8 @@ class DetectorClient:
             stdout=subprocess.PIPE, text=True)
         try:
             response = self.request(dict(kind='init', config=settings['detector'],
-                effective_hash=hashlib.sha256(json.dumps(effective, sort_keys=True).encode()).hexdigest()))
+                effective_hash=hashlib.sha256(json.dumps(effective, sort_keys=True).encode()).hexdigest(),
+                tracking=tracking))
             self.metadata = response['metadata']
         except BaseException:
             self.close()
@@ -49,15 +50,30 @@ class DetectorClient:
             raise RuntimeError(response['message'])
         return response
 
-    def predict(self, frame, points):
+    def _frame_request(self, kind, frame, points, pose=None):
         path = Path(self.temporary.name) / 'input.npy'
         np.save(str(path), points, allow_pickle=False)
-        response = self.request(dict(kind='predict', id=frame['id'], source_id=frame['source_id'],
+        if pose is not None and (pose['source_id'] != frame['source_id'] or pose['query_stamp_ns'] != frame['stamp_ns']):
+            raise ValueError('检测位姿与原始扫描绑定不一致')
+        response = self.request(dict(kind=kind, id=frame['id'], source_id=frame['source_id'],
             stamp_s=frame['stamp_ns'] / 1e9, sensor_frame=frame['sensor_frame'],
-            fingerprint=frame['fingerprint'], points=str(path)))
+            fingerprint=frame['fingerprint'], points=str(path), pose=pose,
+            clock_domain=frame.get('clock_domain','dataset'), world_frame=frame.get('world_frame','dataset_world'),
+            timestamp_source=frame.get('timestamp_source','sensor')))
         if response['id'] != frame['id'] or response['fingerprint'] != frame['fingerprint']:
             raise ValueError('检测响应与原始扫描不匹配')
-        return response['boxes']
+        self.last_input_context = response['input_context']
+        return response
+
+    def predict(self, frame, points, pose=None):
+        return self._frame_request('predict', frame, points, pose)['boxes']
+
+    def observe(self, frame, points, pose):
+        """Warm history when resuming an already predicted prefix; no network forward."""
+        return self._frame_request('observe', frame, points, pose)['input_context']
+
+    def track(self, frame, points, pose):
+        return self._frame_request('track', frame, points, pose)['observation']
 
     def close(self):
         if self.process.poll() is None:
@@ -79,11 +95,11 @@ class DetectorClient:
 
 def main():
     from perception.detection_tracking.inference.detector import SimpleDet3dDetector
-    from perception.detection_tracking.inference.pipeline import Frame
+    from perception.detection_tracking.inference.pipeline import Frame, PerceptionPipeline
     from perception.detection_tracking.inference.config import project_path
     from .data import read_yaml
 
-    detector = None
+    detector, pipeline = None, None
     for line in sys.stdin:
         request = {}
         try:
@@ -97,18 +113,43 @@ def main():
                     if actual != request['effective_hash']:
                         raise ValueError('模型配置已变化；请明确选择配置并新建工程')
                     detector = SimpleDet3dDetector(request['config'])
+                    if request.get('tracking') is not None:
+                        pipeline = PerceptionPipeline(detector, request['tracking'])
                     result = dict(kind='ready', metadata=detector.metadata)
-                elif request['kind'] == 'predict':
+                elif request['kind'] in ('predict', 'observe', 'track'):
                     if detector is None:
                         raise ValueError('模型尚未就绪')
                     points = np.load(request['points'], allow_pickle=False)
                     frame = Frame(request['id'], request['source_id'], request['stamp_s'], points,
-                                  sensor_frame=request['sensor_frame'])
+                        sensor_frame=request['sensor_frame'], clock_domain=request.get('clock_domain','dataset'),
+                        world_frame=request.get('world_frame','dataset_world'),
+                        timestamp_source=request.get('timestamp_source','sensor'))
                     if frame.input_fingerprint() != request['fingerprint']:
                         raise ValueError('检测输入与请求指纹不一致')
-                    boxes = detector.predict(frame)
+                    pose = request.get('pose')
+                    if pose is not None:
+                        frame.world_frame = pose.get('frame_id') or 'dataset_world'
+                        frame.pose_identity = (pose['source_id'], pose.get('session_id'), pose.get('generation'))
+                        if pose['valid']:
+                            frame.world_from_lidar = np.asarray(pose['local_from_lidar'])
+                            frame.pose_source, frame.pose_health = 'localization', 'valid'
+                            frame.pose_stamp_s = pose['stamp_ns'] / 1e9
+                    observation = None
+                    if request['kind'] == 'track':
+                        if pipeline is None:
+                            raise ValueError('Tracking was not configured for this worker')
+                        observation = pipeline.step(frame)
+                        boxes = observation['detections']
+                    elif request['kind'] == 'predict':
+                        boxes = detector.predict(frame).tolist()
+                    else:
+                        detector.prepare_frame(frame)
+                        boxes = None
                     result = dict(kind='prediction', id=request['id'], fingerprint=request['fingerprint'],
-                                  boxes=boxes.tolist(), metadata=detector.metadata)
+                                  boxes=boxes, metadata=detector.metadata,
+                                  input_context=detector.last_input_context)
+                    if observation is not None:
+                        result['observation'] = observation
                 elif request['kind'] == 'quit':
                     return 0
                 else:

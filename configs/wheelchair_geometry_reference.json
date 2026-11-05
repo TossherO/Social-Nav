@@ -1,0 +1,229 @@
+{
+  "status": "historical_image_reference_current_platform_not_confirmed",
+  "source_image": {
+    "name": "navigation_zhao:latest",
+    "id": "sha256:a4058147a1c4d8358ede0e59a3ed3eb06bd3650c067329c9f295a40ad7fe6468"
+  },
+  "inspection": {
+    "network_disabled": true,
+    "root_filesystem_read_only": true,
+    "image_entrypoint_overridden": true,
+    "ros_or_chassis_started": false
+  },
+  "costmap": {
+    "source": "navigation/move_base/config/local_costmap_params.yaml:3,12",
+    "frame_id": "base_link",
+    "footprint_xy_m": [
+      [
+        -0.28,
+        -0.33
+      ],
+      [
+        0.82,
+        -0.33
+      ],
+      [
+        0.82,
+        0.33
+      ],
+      [
+        -0.28,
+        0.33
+      ]
+    ],
+    "x_bounds_m": [
+      -0.28,
+      0.82
+    ],
+    "y_bounds_m": [
+      -0.33,
+      0.33
+    ],
+    "length_m": 1.1,
+    "width_m": 0.66
+  },
+  "jetson_urdf": {
+    "source": "roll/launch/include/config/robot_jetson.urdf.xacro",
+    "joints": [
+      {
+        "name": "lidar_joint",
+        "parent": "lidar_footprint",
+        "child": "base_footprint",
+        "xyz": [
+          -0.67,
+          -0.33,
+          0.0
+        ],
+        "rpy": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "lidar_joint2",
+        "parent": "lidar_footprint",
+        "child": "rslidar",
+        "xyz": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rpy": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "base_link_joint",
+        "parent": "rslidar",
+        "child": "base_link",
+        "xyz": [
+          -0.67,
+          -0.33,
+          0.2
+        ],
+        "rpy": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "name": "laser_joint",
+        "parent": "base_link",
+        "child": "laser_link",
+        "xyz": [
+          0.67,
+          0.33,
+          -0.2
+        ],
+        "rpy": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    ],
+    "base_from_rslidar": {
+      "convention": "p_base=R*p_rslidar+t",
+      "translation_m": [
+        0.67,
+        0.33,
+        -0.2
+      ],
+      "rpy_rad": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    "loaded_by": [
+      "roll/launch/loc_jetson_sw.launch:18",
+      "roll/launch/include/module_robot_state_publisher.launch:5"
+    ]
+  },
+  "simulation_model": {
+    "source": "wheel_description/wheel_body/urdf/robot.urdf.xacro",
+    "properties": {
+      "base_len": 1.2,
+      "base_wide": 0.66,
+      "base_height": 0.2,
+      "wheel_radius": 0.2,
+      "wheel_thick": 0.1,
+      "front_lidar_x": 0.4,
+      "front_lidar_y": 0.3,
+      "front_lidar_z": 0.6,
+      "rear_lidar_x": -0.4,
+      "rear_lidar_y": 0.0,
+      "rear_lidar_z": 0.3
+    },
+    "loaded_by": "wheel_description/wheel_body/launch/wheel_sim.launch:24,26",
+    "note": "Simulation model; base_len=1.2 includes wheel extent; chassis visual/collision box is 0.8 x 0.46 x 0.2 m."
+  },
+  "derived_if_jetson_transform_and_costmap_share_current_vehicle": {
+    "convention": "X forward and Y left; conditional on the historical frames describing the same current mounting",
+    "lidar_to_front_edge_m": 0.15,
+    "lidar_to_rear_edge_m": 0.95,
+    "footprint_in_rslidar_xy_m": [
+      [
+        -0.95,
+        -0.66
+      ],
+      [
+        0.15,
+        -0.66
+      ],
+      [
+        0.15,
+        0.0
+      ],
+      [
+        -0.95,
+        0.0
+      ]
+    ],
+    "full_current_footrest_or_passenger_envelope_confirmed": false
+  },
+  "limitations": [
+    "Image configuration and launch references are not proof of physical current mounting or completed calibration.",
+    "Navigation footprint length 1.10 m and simulation model base_len 1.20 m are different models, not interchangeable measurements.",
+    "TEB actively uses a 0.80 m line model; its polygon model is commented out.",
+    "Jetson and simulation sensor offsets differ; do not mix them.",
+    "Jetson rslidar/base_footprint share Z=0 and base_link has +0.2 m, so Z=-0.2 is a coded frame relation, not measured LiDAR height above ground.",
+    "The backup Jetson file defines a different transform and is not the file loaded by the inspected Jetson launch."
+  ],
+  "sources": [
+    {
+      "image_path": "/home/wheel_nav/src/wheel_description/wheel_body/urdf/robot.urdf.xacro",
+      "sha256": "3eed7cabfdbfc0d194760890e4757dd8f1b56d0530f0bc1f5956ac3bf8777209",
+      "text": "<?xml version=\"1.0\"?>\n<robot xmlns:xacro=\"http://www.ros.org/wiki/xacro\" name=\"robot\">\n\n    <xacro:property name = \"base_len\" value = \"1.2\"/>\n    <xacro:property name = \"base_wide\" value = \"0.66\"/>\n    <xacro:property name = \"base_height\" value = \"0.2\"/>\n    <xacro:property name = \"wheel_radius\" value = \"0.2\"/>\n    <xacro:property name = \"wheel_thick\" value = \"0.1\"/>\n\n    <xacro:property name = \"front_lidar_x\" value = \"0.4\"/>\n    <xacro:property name = \"front_lidar_y\" value = \"0.3\"/>\n    <xacro:property name = \"front_lidar_z\" value = \"0.6\"/>\n\n    <xacro:property name = \"rear_lidar_x\" value = \"-0.4\"/>\n    <xacro:property name = \"rear_lidar_y\" value = \"0.0\"/>\n    <xacro:property name = \"rear_lidar_z\" value = \"0.3\"/>\n\n    <link name=\"body\">\n    </link>\n    <joint name=\"body_to_lidarfoot_joint\" type=\"fixed\">\n        <origin xyz=\"0 0 -${front_lidar_z}\" rpy=\"0 0 0\"/>\n        <parent link=\"body\"/>\n        <child link=\"lidar_footprint\"/>\n    </joint>\n    \n    <!--lidar footprint-->\n    <link name=\"lidar_footprint\">\n\n    </link>\n    <joint name=\"lidar_footprint_link_joint\" type=\"fixed\">\n        <origin xyz=\"-${front_lidar_x} -${front_lidar_y} 0\" rpy=\"0 0 0\"/>\n        <parent link=\"lidar_footprint\"/>\n        <child link=\"base_footprint\"/>\n    </joint>\n\n\n    <!--base link-->\n    <link name=\"base_footprint\">\n\n    </link>\n\n    <joint name=\"base_link_joint\" type=\"fixed\">\n        <origin xyz=\"0 0 ${wheel_radius}\" rpy=\"0 0 0\"/>\n        <parent link=\"base_footprint\"/>\n        <child link=\"base_link\"/>\n    </joint>\n\n    <link name=\"base_link\">\n        <visual>\n            <origin xyz=\"0 0 0\" rpy=\"0 0 0\"/>\n            <geometry><!--can use mesh inf-->\n                <box size=\"${base_len-wheel_radius*2} ${base_wide - wheel_thick*2} ${base_height}\"/>\n            </geometry>\n            <material name=\"\">\n                <color rgba=\"1 0.4 0 1\"/>\n            </material>\n        </visual>\n        <inertial>\n            <origin xyz=\"0 0 0\" rpy=\"0 0 0\"/>\n            <mass value=\"47.873\" />\n            <inertia\n                ixx=\"0.774276574699151\"\n                ixy=\"-1.03781944357671E-10\"\n                ixz=\"0.00763014265820928\"\n                iyy=\"1.64933255189991\"\n                iyz=\"1.09578155845563E-12\"\n                izz=\"2.1239326987473\" />\n        </inertial>\n        <collision>\n            <origin xyz=\"0 0 0\" rpy=\"0 0 0\"/>\n            <geometry>\n                <box size=\"${base_len-wheel_radius*2} ${base_wide-wheel_thick*2} ${base_height}\"/>\n            </geometry>\n        </collision>\n    </link>\n\n    <!--sensor support link-->\n\n    <!--lidar link-->\n    <!-- use for rslidar16 -->\n    <link name=\"lidar_link\">\n        <visual>\n            <origin xyz=\"0 0 0\" rpy=\"0 0 0\"/>\n            <geometry>\n                <cylinder length=\"0.1\" radius=\"0.05\"/>\n            </geometry>\n            <material name=\"\">\n                <color rgba=\"0 0 0 1\"/>\n            </material>\n        </visual>\n        <inertial>\n            <origin xyz=\"0 0 0\" rpy=\"0 0 0\"/>\n            <mass value=\"1e-5\" />\n            <inertia ixx=\"1e-6\" ixy=\"0\" ixz=\"0\" iyy=\"1e-6\" iyz=\"0\" izz=\"1e-6\" />\n        </inertial>\n        <collision>\n            <origin xyz=\"0 0 0\" rpy=\"0 0 0\"/>\n            <geometry>\n                <cylinder length=\"0.1\" radius=\"0.05\"/>\n            </geometry>\n        </collision>\n    </link>\n\n    <joint name=\"lidar_link_joint\" type=\"fixed\">\n        <origin xyz=\"${front_lidar_x} ${front_lidar_y} ${front_lidar_z}\" rpy=\"0 0 0\"/>\n        <parent link=\"base_link\"/>\n        <child link=\"lidar_link\"/>\n    </joint>\n\n    <!--camera link-->\n    <link name=\"camera_link\">\n        <visual>\n            <origin xyz=\"0 0 0\" rpy=\"0 0 0\"/>\n            <geometry><!--can use mesh inf-->\n                <box size=\"0.05 0.15 0.05\"/>\n            </geometry>\n            <material name=\"\">\n                <color rgba=\"0 0 0 1\"/>\n            </material>\n        </visual>\n        <inertial>\n            <origin xyz=\"0 0 0\" rpy=\"0 0 0\"/>\n            <mass value=\"1e-5\" />\n            <inertia ixx=\"1e-6\" ixy=\"0\" ixz=\"0\" iyy=\"1e-6\" iyz=\"0\" izz=\"1e-6\" />\n        </inertial>\n        <collision>\n            <origin xyz=\"0 0 0\" rpy=\"0 0 0\"/>\n            <geometry>\n                <box size=\"0.05 0.1 0.05\"/>\n            </geometry>\n        </collision>\n    </link>\n\n    <joint name=\"camera_link_joint\" type=\"fixed\">\n        <origin xyz=\"${front_lidar_x} ${front_lidar_y} ${front_lidar_z-0.08}\" rpy=\"0 0 0\"/> \n        <parent link=\"base_link\"/>\n        <child link=\"camera_link\"/>\n    </joint>\n\n    <!--define link-->\n    <xacro:macro name=\"robot_wheel\" params=\"prefix\">\n    <link name=\"${prefix}_link\">\n        <visual>\n            <origin xyz=\"0 0 0\" rpy=\"1.57 0 0\"/>\n            <geometry>\n                <cylinder length=\"${wheel_thick}\" radius=\"${wheel_radius}\"/>\n            </geometry>\n            <material name=\"\">\n            <!--black wheel-->\n                <color rgba=\"0 0 0 1\"/> \n            </material>\n        </visual>\n        <inertial>\n            <origin xyz=\"0 0 0\" rpy=\"0 0 0\"/>\n            <mass value=\"2.6578\" />\n            <inertia\n                ixx=\"0.00856502765719703\"\n                ixy=\"1.5074118157338E-19\"\n                ixz=\"-4.78150098725052E-19\"\n                iyy=\"0.013670640432096\"\n                iyz=\"-2.68136447099727E-19\"\n                izz=\"0.00856502765719703\" />\n        </inertial>\n        <collision>\n            <origin xyz=\"0 0 0\" rpy=\"1.57 0 0\"/>\n            <geometry>\n                <cylinder length=\"${wheel_thick}\" radius=\"${wheel_radius}\"/>\n            </geometry>\n        </collision>\n    </link>\n    </xacro:macro>\n\n    <xacro:robot_wheel prefix=\"front_left\"/>\n    <xacro:robot_wheel prefix=\"front_right\"/>\n    <xacro:robot_wheel prefix=\"rear_left\"/>\n    <xacro:robot_wheel prefix=\"rear_right\"/>\n\n    <!--define joint-->\n    <xacro:macro name=\"wheel_joint\" params=\"prefix origin wheel_type\">\n    <joint name=\"${prefix}_joint\" type=\"${wheel_type}\">\n        <origin xyz=\"${origin}\" rpy=\"0 0 0\"/>\n        <parent link=\"base_link\"/>\n        <child link=\"${prefix}_link\"/>\n        <axis xyz=\"0 1 0\"/>\n    </joint>\n    </xacro:macro>\n\n    <xacro:wheel_joint prefix=\"front_left\" origin=\"${base_len*0.5-wheel_radius} ${base_wide*0.5 -wheel_thick *0.5} 0\" wheel_type=\"fixed\"/>\n    <xacro:wheel_joint prefix=\"front_right\" origin=\"${base_len*0.5-wheel_radius} ${-(base_wide*0.5 - wheel_thick *0.5)} 0\" wheel_type=\"fixed\"/>\n    <xacro:wheel_joint prefix=\"rear_left\" origin=\"${-(base_len*0.5)+wheel_radius} ${base_wide*0.5 - wheel_thick *0.5} 0\" wheel_type=\"continuous\"/>\n    <xacro:wheel_joint prefix=\"rear_right\" origin=\"${-(base_len*0.5)+wheel_radius} ${-(base_wide*0.5 - wheel_thick *0.5)} 0\" wheel_type=\"continuous\"/>\n\n    <!--define actuator-->\n    <xacro:macro name=\"base_transmission\" params=\"prefix \">\n\n    <transmission name=\"${prefix}_trans\" type=\"SimpleTransmission\">\n        <type>transmission_interface/SimpleTransmission</type>\n        <actuator name=\"${prefix}_motor\">\n            <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>\n            <mechanicalReduction>1</mechanicalReduction>\n        </actuator>\n        <joint name=\"${prefix}_joint\">\n            <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>\n        </joint>\n    </transmission>\n\n    </xacro:macro>\n\n    <!--xacro:base_transmission prefix=\"front_left\"/-->\n    <!--xacro:base_transmission prefix=\"front_right\"/-->\n    <xacro:base_transmission prefix=\"rear_left\"/>\n    <xacro:base_transmission prefix=\"rear_right\"/>\n\n    <!--define driver-->\n    <gazebo>\n        <plugin name=\"gazebo_ros_control\" filename=\"libgazebo_ros_control.so\">\n        <robotNamespace>/</robotNamespace>\n        <controlPeriod>0.001</controlPeriod>\n        <legacyModeNS>false</legacyModeNS>\n        </plugin>\n    </gazebo>\n\n    <!--gazebo>\n        <plugin name=\"differential_drive_controller\" filename=\"libgazebo_ros_diff_drive.so\">\n            <alwaysOn>true</alwaysOn>\n            <updateRate>20</updateRate>\n            <legacyMode>false</legacyMode>\n            <rightJoint>rear_right_joint</rightJoint>\n            <leftJoint>rear_left_joint</leftJoint>\n            <wheelSeparation>${base_wide}+${wheel_radius}*2</wheelSeparation>\n            <wheelDiameter>${wheel_radius}*2</wheelDiameter>\n            <commandTopic>cmd_vel</commandTopic>\n            <odometryTopic>odom</odometryTopic>\n            <odometryFrame>odom</odometryFrame>\n            <robotBaseFrame>lidar_footprint</robotBaseFrame>\n            <publishTf>false</publishTf>\n            <publishWheelTF>false</publishWheelTF>\n            <publishWheelJointState>true</publishWheelJointState>\n            <publishOdomTF>true</publishOdomTF>\n            <wheelAcceleration>1.5</wheelAcceleration>\n            <wheelTorque>30</wheelTorque>\n            <odometrySource>world</odometrySource>\n            <rosDebugLevel>Debug</rosDebugLevel>\n        </plugin>\n    </gazebo-->\n\n    <!--define fric-->\n    <xacro:macro name=\"drive_wheel_friction\" params=\"prefix \">\n        <gazebo reference=\"${prefix}_link\">\n            <mu1 value=\"100.0\"/>\n            <mu2 value=\"100.0\"/>\n            <kp value=\"100000000.0\" />\n            <kd value=\"1.0\" />\n            <fdir1 value=\"1 0 0\"/>\n        </gazebo>\n    </xacro:macro>\n\n    <xacro:macro name=\"wheel_friction\" params=\"prefix \">\n        <gazebo reference=\"${prefix}_link\">\n            <mu1 value=\"0.005\"/>\n            <mu2 value=\"0.005\"/>\n            <kp value=\"100000000.0\" />\n            <kd value=\"1.0\" />\n            <fdir1 value=\"1 0 0\"/>\n        </gazebo>\n    </xacro:macro>\n\n    <xacro:wheel_friction prefix=\"front_left\"/>\n    <xacro:wheel_friction prefix=\"front_right\"/>\n    <xacro:drive_wheel_friction prefix=\"rear_left\"/>\n    <xacro:drive_wheel_friction prefix=\"rear_right\"/>\n\n    <!--define color use in gazebo-->\n    <xacro:macro name=\"gazebo_material\" params=\"ref color\">\n        <gazebo reference=\"${ref}\">\n            <material>Gazebo/${color}</material>\n        </gazebo>\n    </xacro:macro>\n\n    <xacro:gazebo_material ref=\"base_link\"         color=\"whilte\" />\n    <xacro:gazebo_material ref=\"front_left_link\"  color=\"Black\" />\n    <xacro:gazebo_material ref=\"front_right_link\"   color=\"Black\" />\n    <xacro:gazebo_material ref=\"rear_left_link\" color=\"Black\" />\n    <xacro:gazebo_material ref=\"rear_right_link\"  color=\"Black\" />\n\n    <!--load lidar-->\n    <!-- only use for rslidar16 -->\n    <xacro:include filename=\"$(find velodyne_description)/urdf/VLP-16.urdf.xacro\"/>\n    <xacro:VLP-16 parent=\"lidar_link\" topic=\"/velodyne_points\" organize_cloud=\"false\" collision_range=\"0.2\" min_range=\"0.2\" max_range=\"20.0\" noise=\"0.008\" min_angle=\"-${0.75*M_PI}\" max_angle=\"${0.75*M_PI}\" gpu=\"true\">\n        <origin rpy=\"0 0 0 \" xyz=\"0 0 0\"/>\n    </xacro:VLP-16>\n\n    <!--load realsense-->\n    <xacro:include filename=\"$(find realsense_ros_gazebo)/xacro/depthcam.xacro\"/>\n\n    <xacro:realsense_d435 sensor_name=\"realsense\" parent_link=\"camera_link\" rate=\"15\">\n        <origin rpy=\"0 0 0 \" xyz=\"0 0 0\"/>\n    </xacro:realsense_d435>\n\n    <!--imu for realsense-->\n    <gazebo reference=\"camera_link\">\n        <gravity>true</gravity>\n\n        <sensor name=\"imu_sensor\" type=\"imu\">\n            <always_on>true</always_on>\n            <update_rate>100</update_rate>\n            <visualize>true</visualize>\n            <topic>__default_topic__</topic>\n            <plugin filename=\"libgazebo_ros_imu_sensor.so\" name=\"imu_plugin\">\n\n                <bodyName>realsense_link</bodyName>\n                <frameName>realsense_depth_optical_frame</frameName>\n                <topicName>/realsense/imu</topicName>\n                <serviceName>imu_service</serviceName>\n\n                <updateRateHZ>100.0</updateRateHZ>\n                <!-- <gaussianNoise>0.0</gaussianNoise> -->\n                <xyzOffset>0 0 0</xyzOffset>     \n                <rpyOffset>0 0 0</rpyOffset>            \n   \n                <imu>\n                    <noise>\n                    <type>gaussian</type>\n                    <rate>\n                        <mean>0.0</mean>\n                        <stddev>2e-4</stddev>\n                        <bias_mean>0.0000075</bias_mean>\n                        <bias_stddev>0.0000008</bias_stddev>\n                    </rate>\n                    <accel>\n                        <mean>0.0</mean>\n                        <stddev>1.7e-2</stddev>\n                        <bias_mean>0.01</bias_mean>\n                        <bias_stddev>0.001</bias_stddev>\n                    </accel>\n                    <!-- <rate>\n                        <mean>0.0</mean>\n                        <stddev>0.1</stddev>\n                        <bias_mean>0.0</bias_mean>\n                        <bias_stddev>0.0</bias_stddev>\n                    </rate>\n                    <accel>\n                        <mean>0.0</mean>\n                        <stddev>0.1</stddev>\n                        <bias_mean>0.01</bias_mean>\n                        <bias_stddev>0.01</bias_stddev>\n                    </accel> -->\n                    </noise>\n                </imu>\n            </plugin>\n            <pose>0 0 0 0 0 0</pose>\n        </sensor>\n    </gazebo>\n\n\n</robot >\n"
+    },
+    {
+      "image_path": "/home/wheel_nav/src/wheel_description/wheel_body/launch/wheel_sim.launch",
+      "sha256": "f6f4d9cfd0cab43c4951188e82080a700d9b3d5aaf8ea6935703df3c4c561299",
+      "text": "<launch>\n  <!-- these are the arguments you can pass this launch file, for example paused:=true -->\n  <arg name=\"paused\" default=\"false\"/>\n  <arg name=\"use_sim_time\" default=\"true\"/>\n  <arg name=\"gui\" default=\"true\"/>\n  <arg name=\"headless\" default=\"false\"/>\n  <arg name=\"debug\" default=\"false\"/>\n\n  <!-- We resume the logic in empty_world.launch, changing only the name of the world to be launched -->\n  <include file=\"$(find gazebo_ros)/launch/empty_world.launch\"> \n    <arg name=\"world_name\" value=\"$(find wheel_body)/world/hospital_dynamic/hospital_dynamic.world\"/>\n    <arg name=\"debug\" value=\"$(arg debug)\" />\n    <arg name=\"gui\" value=\"$(arg gui)\" />\n    <arg name=\"paused\" value=\"$(arg paused)\"/>\n    <arg name=\"use_sim_time\" value=\"$(arg use_sim_time)\"/>\n    <arg name=\"headless\" value=\"$(arg headless)\"/>\n  </include>\n\n  <!--pub robot state and joint state-->\n  <node name=\"joint_state_publisher\" pkg=\"joint_state_publisher\" type=\"joint_state_publisher\"/>\n  <node name=\"robot_state_publisher\" pkg=\"robot_state_publisher\" type=\"robot_state_publisher\"/>\n\n  <!--model load-->\n  <param name=\"robot_description\" command=\"$(find xacro)/xacro --inorder '$(find wheel_body)/urdf/robot.urdf.xacro'\" />\n  <!-- <node pkg=\"gazebo_ros\" type=\"spawn_model\" name=\"spawn_robot\" args=\"-urdf -param /robot_description -model robot\"/> -->\n  <node pkg=\"gazebo_ros\" type=\"spawn_model\" name=\"spawn_robot\" args=\"-urdf -param /robot_description -model mobile_base\"/>\n  <!--controller load-->\n  <rosparam command=\"load\" file=\"$(find wheel_body)/config/base_control.yaml\" />\n  <node name=\"base_controller_spawner\" pkg=\"controller_manager\" type=\"spawner\" args=\"robot_base_joint_publisher robot_base_velocity_controller\"/>\n    \n  <!-- RViz -->\n  <node name=\"wheel_rviz\" pkg=\"rviz\" type=\"rviz\" args=\"-d $(find wheel_body)/rviz/wheel.rviz\" required=\"true\"/>\n\n</launch>\n"
+    },
+    {
+      "image_path": "/home/wheel_nav/src/roll/launch/include/config/robot_jetson.urdf.xacro",
+      "sha256": "001835b9287901ad9d35a3a0de6f8422e733d8d5a630190aba60bdc8465a582c",
+      "text": "<?xml version=\"1.0\"?>\n<robot name=\"lio\" xmlns:xacro=\"http://tixiaoshan.github.io/\">\n  <xacro:property name=\"PI\" value=\"3.1415926535897931\" />\n  \n  <!-- 2d and 3d lidar foot height: from ground: 0.2 m -->\n\n\n\n  \n\n  <link name=\"lidar_footprint\"></link>\n\n  <joint name=\"lidar_joint\" type=\"fixed\">\n    <parent link=\"lidar_footprint\"/>\n    <child link=\"base_footprint\" />\n    <origin xyz=\"-0.67 -0.33 0\" rpy=\"0 0 0\" /> \n  </joint>\n\n  <link name=\"base_footprint\"></link>\n\n  <joint name=\"lidar_joint2\" type=\"fixed\">\n    <parent link=\"lidar_footprint\"/>\n    <child link=\"rslidar\" />\n    <origin xyz=\"0 0 0\" rpy=\"0 0 0\" /> \n  </joint>\n  <link name=\"rslidar\"></link>\n\n  <link name=\"base_link\"></link>\n    <!-- velodyne height from baselink: 1.43m -->\n\n  <joint name=\"base_link_joint\" type=\"fixed\">\n    <parent link=\"rslidar\"/>\n    <!--<parent link=\"base_footprint\"/>-->\n    <child link=\"base_link\" />\n    <origin xyz=\"-0.67 -0.33 0.2\" rpy=\"0 0 0\" />\n  </joint>\n\n  <!--roughly measured: laser center 0.8 ahead: use literally hand_eye_calib-->\n  <link name=\"laser_link\"></link>\n  <joint name=\"laser_joint\" type=\"fixed\">\n    <parent link=\"base_link\"/>\n    <child link=\"laser_link\" />\n    <origin xyz=\"0.67 0.33 -0.2\" rpy=\"0 0 0\" /> \n  </joint>\n\n\n\n</robot>\n"
+    },
+    {
+      "image_path": "/home/wheel_nav/src/roll/launch/include/config/robot_jetson.urdf (backup).xacro",
+      "sha256": "3103bd5ab49d3542ede9d6eabc27fe2a3d49e286af13732b6f3154baef634c46",
+      "text": "<?xml version=\"1.0\"?>\n<robot name=\"lio\" xmlns:xacro=\"http://tixiaoshan.github.io/\">\n  <xacro:property name=\"PI\" value=\"3.1415926535897931\" />\n  \n  <!-- 2d and 3d lidar foot height: from ground: 0.2 m -->\n\n  <link name=\"lidar_footprint\"></link>\n\n  <link name=\"base_footprint\"></link>\n  <joint name=\"lidar_joint\" type=\"fixed\">\n    <parent link=\"lidar_footprint\"/>\n    <child link=\"base_footprint\" />\n    <origin xyz=\"-0.67 -0.325 0\" rpy=\"0 0 0\" /> \n  </joint>\n \n  <link name=\"rslidar\"></link>\n  <joint name=\"lidar_joint2\" type=\"fixed\">\n    <parent link=\"lidar_footprint\"/>\n    <child link=\"rslidar\" />\n    <origin xyz=\"0 0 0\" rpy=\"0 0 0\" /> \n  </joint>\n  <link name=\"base_link\"></link>\n    <!-- velodyne height from baselink: 1.43m -->\n  <joint name=\"base_link_joint\" type=\"fixed\">\n    <parent link=\"rslidar\"/>\n    <!--<parent link=\"base_footprint\"/>-->\n    <child link=\"base_link\" />\n    <origin xyz=\"0 0 0.2\" rpy=\"0 0 0\" />\n  </joint>\n\n  <!--roughly measured: laser center 0.8 ahead: use literally hand_eye_calib-->\n  <link name=\"laser_link\"></link>\n  <joint name=\"laser_joint\" type=\"fixed\">\n    <parent link=\"base_link\"/>\n    <child link=\"laser_link\" />\n    <origin xyz=\"0.80 0 0\" rpy=\"0 0 0\" /> \n  </joint>\n\n\n\n</robot>\n"
+    },
+    {
+      "image_path": "/home/wheel_nav/src/roll/launch/loc_jetson_sw.launch",
+      "sha256": "b8a5fb1c7d1c81a55d0c8a50b6bf9da6cf27bd013847a1b68ec8ade0ed40b914",
+      "text": "<launch>\n\n    <arg name=\"project\" default=\"roll\"/>\n    <param name=\"use_sim_time\" value=\"false\" /> \n    <!-- Parameters -->\n    <rosparam file=\"$(find roll)/config/params_jetson_sw_loc.yaml\" command=\"load\" />\n    <!--- LOAM -->\n    <node pkg=\"$(arg project)\" type=\"$(arg project)_scanRegistration\"     name=\"$(arg project)_scanRegistration\"      output=\"screen\"     required=\"true\"/>\n\n    <node pkg=\"$(arg project)\" \n        type=\"$(arg project)_mapOptmization\"      \n        name=\"$(arg project)_mapOptmization\"   \n        output=\"screen\"     \n        required=\"true\"/>\n       \n    <include file=\"$(find fast_lio)/launch/mapping_jetson.launch\" />\n\n    <param name=\"robot_description\" command=\"$(find xacro)/xacro $(find roll)/launch/include/config/robot_jetson.urdf.xacro --inorder\" />\n    <node name=\"robot_state_publisher\" pkg=\"robot_state_publisher\" type=\"robot_state_publisher\" respawn=\"true\"/>\n\n    <node pkg=\"tf\" type=\"static_transform_publisher\" name=\"map2odom\" args=\"0 0 0 0 0 0 /map /odom 100\" />\n\n        <!--- Run Rviz-->\n    <include file=\"$(find roll)/launch/include/module_rviz.launch\" />\n</launch>\n"
+    },
+    {
+      "image_path": "/home/wheel_nav/src/roll/launch/include/module_robot_state_publisher.launch",
+      "sha256": "09037e908a7ce8247397c410416ce22257bc77c1dc0fe1fe2464c8f35566640c",
+      "text": "<launch>\n\n\t<arg name=\"project\" default=\"roll\"/>\n\n    <param name=\"robot_description\" command=\"$(find xacro)/xacro $(find roll)/launch/include/config/robot_jetson.urdf.xacro --inorder\" />\n    <node name=\"robot_state_publisher\" pkg=\"robot_state_publisher\" type=\"robot_state_publisher\" respawn=\"true\"/>\n    \n  \n</launch>"
+    },
+    {
+      "image_path": "/home/wheel_nav/src/navigation/move_base/config/local_costmap_params.yaml",
+      "sha256": "14458960bcf1e3319377cd050e8252081f521ce3e752f1aab8a74d1e9efcefbf",
+      "text": "local_costmap:\n  global_frame: map #map\n  robot_base_frame: base_link\n  update_frequency: 4.0 \n  publish_frequency: 4.0\n  static_map: false # if using only static map\n  rolling_window: true\n  width: 7.0 #20.0\n  height: 7.0 #20.0\n  resolution: 0.1\n\n  footprint: [[-0.28,-0.33],[0.82,-0.33],[0.82,0.33],[-0.28,0.33]]\n\n  transform_tolerance: 1.0\n\n  map_type: costmap\n\n  obstacle_layer:\n    max_obstacle_height: 0.8\n    min_obstacle_height: 0.1\n    enabled: true\n    obstacle_range: 7.0 #25.0 # the range limit of 2d lasers\n    raytrace_range: 7.0 #25.0\n    track_unknown_space: false\n    combination_method: 1\n\n    observation_sources: laser_scan_sensor\n    laser_scan_sensor: {\n      data_type: LaserScan, \n      topic: /scan,\n      clearing: true, \n      observation_persistence: 0.0,\n      inf_is_valid: true\n      }\n# point_cloud2_sensor: {data_type: PointCloud2, topic: rslidar_points, max_obstacle_height: 2.8, min_obstacle_height: 0.2}\n\n  inflation_layer:\n    enabled:              true\n    cost_scaling_factor:  10.0  # exponential rate at which the obstacle cost drops off (default: 10)\n    inflation_radius:     0.1  # 0.1 #0.5 max. distance from an obstacle at which costs are incurred for planning paths.\n\n  static_layer:\n    enabled:              true\n    map_topic:            \"/map\"\n\n  plugins:\n   - {name: static_layer,        type: \"costmap_2d::StaticLayer\"}\n   - {name: obstacle_layer,      type: \"costmap_2d::ObstacleLayer\"}\n   - {name: inflation_layer,     type: \"costmap_2d::InflationLayer\"}\n\n\n"
+    },
+    {
+      "image_path": "/home/wheel_nav/src/navigation/move_base/config/teb_local_planner_params.yaml",
+      "sha256": "9712684e93df4e436829ac92d0abc20d8e9413b5fdff1f293240ce4099b12672",
+      "text": "TebLocalPlannerROS:\n\n#  odom_topic: /kloam/mapping/odometry_fusion_baselink\n# odom_topic: /roll/mapping/odometry_fusion_baselink \n odom_topic: /hdl_odom\n # Trajectory\n teb_autosize: True\n dt_ref: 0.4\n dt_hysteresis: 0.08\n global_plan_overwrite_orientation: True\n max_global_plan_lookahead_dist: 5.0\n global_plan_viapoint_sep: 0.7 # 0.95\n feasibility_check_no_poses: 5\n    \n # Robot         \n\n# max_vel_x: 1\n max_vel_x: 0.8\n max_vel_x_backwards: 0.2 #0.5\n max_vel_theta: 0.32 # 1.08\n# max_vel_theta: 1.08\n# acc_lim_x: 0.9\n acc_lim_x: 0.24 # 0.2\n# acc_lim_theta: 0.9\n acc_lim_theta: 0.24 # 0.2\n min_turning_radius: 1.12 # 1.05 # diff-drive robot (can turn on place!)\n\n footprint_model:\n   type: \"line\"\n   line_start: [0.0, 0]\n   line_end: [0.80, 0]#\n# footprint_model:\n#     type: \"polygon\"\n#     vertices: [[-0.28,-0.33],[0.82,-0.33],[0.82,0.33],[-0.28,0.33]]\n\n # GoalTolerance\n xy_goal_tolerance: 0.05\n# 0.1 last used\n yaw_goal_tolerance: 0.04\n# 0.05 last used\n free_goal_vel: False\n    \n # Obstacles\n min_obstacle_dist: 0.29 # 0.1 # 0.29 # important,changing it to 0.1 will frequently display \"trajectory not feasible\"\n include_costmap_obstacles: True\n costmap_obstacles_behind_robot_dist: 1.0\n obstacle_poses_affected: 30\n\n # Optimization\n no_inner_iterations: 5\n no_outer_iterations: 4\n optimization_activate: True\n optimization_verbose: False\n penalty_epsilon: 0.2\n weight_max_vel_x: 2\n weight_max_vel_theta: 1\n weight_acc_lim_x: 2 #5 #1\n weight_acc_lim_theta: 1.5 #5 #1\n weight_kinematics_nh: 1000\n weight_kinematics_forward_drive: 1\n weight_kinematics_turning_radius: 1\n weight_optimaltime: 3\n weight_obstacle: 50\n weight_dynamic_obstacle: 10 # not in use yet\n\n # Homotopy Class Planner\n enable_homotopy_class_planning: False\n enable_multithreading: True\n simple_exploration: False\n max_number_classes: 2\n selection_cost_hysteresis: 1.0\n selection_obst_cost_scale: 1.0\n selection_alternative_time_cost: False\n \n roadmap_graph_no_samples: 15\n roadmap_graph_area_width: 5\n h_signature_prescaler: 0.5\n h_signature_threshold: 0.1\n obstacle_keypoint_offset: 0.1\n obstacle_heading_threshold: 0.45\n visualize_hc_graph: False\n"
+    },
+    {
+      "image_path": "/home/wheel_nav/src/navigation/move_base/launch/move_base.launch",
+      "sha256": "3266f341eab2d10e11f35172bc523bc26154e31e0d8e7a5c59d2ab9788a5ba7b",
+      "text": "<launch>\n<!-- use with \"rosbag clock\"  -->\n<!-- tf tree should be published in localization algorithm -->\n\n<param name=\"use_sim_time\" value=\"true\"/> \n \n<!-- <include file=\"$(find sick_scan)/launch/two_sick_tim571.launch\"/> -->\n\n<!-- <include file=\"$(find obstacle_detector)/launch/merge.launch\"/> -->\n\n<!-- <include file=\"$(find kloam)/launch/realtime_loc_sw.launch\"/> -->\n\n <!-- Run the map server -->\n\n<!--<node name=\"map_server\" pkg=\"map_server\" type=\"map_server\" args=\"$(find move_base)/maps/white_map.yaml\" output=\"screen\"/>-->\n<node name=\"map_server\" pkg=\"map_server\" type=\"map_server\" args=\"$(find move_base)/maps/hospital.yaml\" output=\"screen\"/>\n\n<!--===============================================================================================================================================================================-->\n<!-- <node name=\"map_server\" pkg=\"map_server\" type=\"map_server\" args=\"$(find move_base)/maps/office.yaml\" output=\"screen\"/> -->\n   \n<node pkg=\"move_base\" type=\"move_base\" respawn=\"false\" name=\"move_base\" output=\"screen\">\n\n  <rosparam file=\"$(find move_base)/config/local_costmap_params.yaml\" command=\"load\" />\n  <rosparam file=\"$(find move_base)/config/global_costmap_params.yaml\" command=\"load\" />\n\n  <rosparam file=\"$(find move_base)/config/dwa_local_planner_params.yaml\" command=\"load\" />\n  <rosparam file=\"$(find move_base)/config/global_planner_params.yaml\" command=\"load\" />\n\n  <!--rosparam file=\"$(find move_base)/config/costmap_converter_params.yaml\" command=\"load\" /-->\n\n\n  <param name=\"base_global_planner\" value=\"global_planner/GlobalPlanner\" />\n  <param name=\"planner_frequency\" value=\"0.5\" />\n  <param name=\"planner_patience\" value=\"5.0\" />\n  <param name=\"base_local_planner\" value=\"dwa_local_planner/DWAPlannerROS\" />\n  <param name=\"controller_frequency\" value=\"20.0\" />\n  <param name=\"controller_patience\" value=\"50.0\" />\n  \n</node>\n\n<node name=\"move_base_rviz\" pkg=\"rviz\" type=\"rviz\" args=\"-d $(find move_base)/rviz/navi.rviz\" />\n\n\n</launch>\n"
+    },
+    {
+      "image_path": "/home/wheel_nav/src/navigation/move_base/launch/move_base_fang.launch",
+      "sha256": "877a4b26ca1ff60d3de294afead101c1f06251900990ab6a1c32524344ea1afe",
+      "text": "<launch>\n<!-- use with \"rosbag clock\"  -->\n<!-- tf tree should be published in localization algorithm -->\n\n<param name=\"use_sim_time\" value=\"true\"/> \n \n<!-- <include file=\"$(find sick_scan)/launch/two_sick_tim571.launch\"/> -->\n\n<!-- <include file=\"$(find obstacle_detector)/launch/merge.launch\"/> -->\n\n<!-- <include file=\"$(find kloam)/launch/realtime_loc_sw.launch\"/> -->\n\n <!-- Run the map server -->\n\n<!--<node name=\"map_server\" pkg=\"map_server\" type=\"map_server\" args=\"$(find move_base)/maps/white_map.yaml\" output=\"screen\"/>-->\n<node name=\"map_server\" pkg=\"map_server\" type=\"map_server\" args=\"$(find move_base)/maps/hospital.yaml\" output=\"screen\"/>\n\n<!--===============================================================================================================================================================================-->\n<!-- <node name=\"map_server\" pkg=\"map_server\" type=\"map_server\" args=\"$(find move_base)/maps/office.yaml\" output=\"screen\"/> -->\n   \n<node pkg=\"move_base\" type=\"move_base\" respawn=\"false\" name=\"move_base\" output=\"screen\">\n\n  <rosparam file=\"$(find move_base)/config/local_costmap_params.yaml\" command=\"load\" />\n  <rosparam file=\"$(find move_base)/config/global_costmap_params.yaml\" command=\"load\" />\n\n  <rosparam file=\"$(find move_base)/config/dwa_local_planner_params.yaml\" command=\"load\" />\n  <rosparam file=\"$(find move_base)/config/global_planner_params.yaml\" command=\"load\" />\n\n  <!--rosparam file=\"$(find move_base)/config/costmap_converter_params.yaml\" command=\"load\" /-->\n\n\n  <param name=\"base_global_planner\" value=\"global_planner/GlobalPlanner\" />\n  <param name=\"planner_frequency\" value=\"1\" />\n  <param name=\"planner_patience\" value=\"10.0\" />\n  <param name=\"base_local_planner\" value=\"dwa_local_planner/DWAPlannerROS\" />\n  <param name=\"controller_frequency\" value=\"8.0\" />\n  <param name=\"controller_patience\" value=\"50.0\" />\n  <remap from=\"cmd_vel\" to=\"/robot_base_velocity_controller/cmd_vel\" />\n</node>\n\n<node name=\"move_base_rviz\" pkg=\"rviz\" type=\"rviz\" args=\"-d $(find move_base)/rviz/navi.rviz\" />\n\n\n</launch>\n"
+    }
+  ]
+}

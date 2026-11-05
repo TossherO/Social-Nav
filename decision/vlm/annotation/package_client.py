@@ -5,7 +5,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[3]
 FILES = ('__init__.py', '__main__.py', 'rules.py', 'store.py', 'backend.py', 'remote.py', 'assets.py',
-         'app.py', 'views.py', 'requirements-client.txt')
+         'app.py', 'views.py', 'cloud_view.py', 'requirements-client.txt')
 
 
 def package_client(output):
@@ -13,7 +13,8 @@ def package_client(output):
     if output.exists():
         raise ValueError('客户端包已存在，请选择新文件')
     output.parent.mkdir(parents=True, exist_ok=True)
-    paths = [Path('decision/__init__.py'), Path('decision/vlm/__init__.py'), Path('decision/vlm/scene_inputs.py')]
+    paths = [Path('decision/__init__.py'), Path('decision/vlm/__init__.py'), Path('decision/vlm/scene_inputs.py'),
+             Path('decision/vlm/trajectory_inputs.py')]
     paths += [Path('decision/vlm/annotation') / name for name in FILES]
     paths.append(Path('docs/decision/决策任务标注.md'))
     with zipfile.ZipFile(output, 'x', compression=zipfile.ZIP_DEFLATED) as archive:

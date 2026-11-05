@@ -2,7 +2,7 @@
 #include "InertialAlignment.h"
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
-#include <sensor_msgs/Imu.h>
+#include "ImuSample.h"
 #include <deque>
 
 namespace social_nav_init {
@@ -24,7 +24,7 @@ public:
     AlignmentGate readiness;
     void setExtrinsic(const M3& r, const V3& t) { r_il_=r; t_il_=t; }
     bool process(const Cloud::Ptr& scan, double begin,
-                 const std::deque<sensor_msgs::Imu::ConstPtr>& messages, Cloud& deskewed);
+                 const std::deque<SocialNavImu::ConstPtr>& messages, Cloud& deskewed);
 private:
     M3 r_il_=M3::Identity(); V3 t_il_=V3::Zero();
     Eigen::Matrix4d pose_=Eigen::Matrix4d::Identity();

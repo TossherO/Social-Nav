@@ -1,8 +1,4 @@
 {
-  "dataset_roots": {
-    "jrdb": "data/datasets/jrdb",
-    "socialnav_sub_pilot": "data/datasets/socialnav_sub"
-  },
   "model": {
     "path": "models/Qwen3.8-27B-FP8",
     "served_name": "qwen3.8-27b-fp8",
@@ -32,32 +28,31 @@
     "max_tokens": 1024,
     "max_in_flight": 1,
     "automatic_retries": 0,
-    "response_constraint": "json-schema",
-    "prompt_profile": "object"
+    "response_constraint": "json-schema"
   },
-  "benchmark": {
-    "mode": "serial",
-    "limit": 3,
-    "warmups": 0,
-    "timeout_s": 60
-  },
-  "development": {
-    "sequences": {
-      "clark": "clark-center-intersection-2019-02-28_0",
-      "memorial": "memorial-court-2019-03-16_0",
-      "gates": "gates-to-clark-2019-02-28_1"
+  "tasks": {
+    "groups": {
+      "prompt": "decision/vlm/configs/prompts/wheelchair_t1_groups.txt",
+      "response": "activity_groups"
     },
-    "end_frames": [
-      75,
-      150,
-      225,
-      300,
-      375,
-      450,
-      525,
-      600
-    ],
-    "bundle": "data/datasets/jrdb_t1_dev",
-    "warning": "These are development windows with oracle geometry, NOT blind tests or reviewed REL gold."
+    "appearance": {
+      "prompt": "decision/vlm/configs/prompts/wheelchair_t2_appearance.txt",
+      "response": "id_match"
+    },
+    "follow": {
+      "prompt": "decision/vlm/configs/prompts/wheelchair_t2_follow.txt",
+      "response": "id_state",
+      "visual_memory_s": 4.5
+    },
+    "seating": {
+      "prompt": "decision/vlm/configs/prompts/wheelchair_t3_seating.txt",
+      "window_prompt": "decision/vlm/configs/prompts/wheelchair_t3_seating_window.txt",
+      "window_extent_m": [-4.0, 4.0, -4.0, 4.0],
+      "geometry_policy": "decision/vlm/configs/seating_geometry.json",
+      "adjustment_prompt": "decision/vlm/configs/prompts/wheelchair_t3_seating_adjustment.txt",
+      "adjustment_gate": {"distance_m": 0.15, "heading_deg": 15.0},
+      "response": "candidate_selection",
+      "max_tokens": 128
+    }
   }
 }

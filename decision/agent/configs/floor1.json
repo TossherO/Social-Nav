@@ -1,0 +1,13 @@
+{
+  "scope":"development_prior", "floor_id":"floor1", "frame_id":"map",
+  "asset":"data/maps/wheelchair/agent_floor1/catalog.json",
+  "source":"User semantic designation 2026-11-01; coordinates require review against current map and base_link",
+  "access":{"room_interiors":"excluded", "corridor_parking":"must_preserve_passage"},
+  "places":[
+    {"place_id":"elevator", "name":"电梯口", "aliases":["电梯门口"], "status":"pending_geometry_review", "reference":"base_link", "pose":null, "source_hint":"2026-10-29 floor1 lift approach"},
+    {"place_id":"lobby_entrance", "name":"大厅门口", "aliases":["大厅入口"], "status":"pending_geometry_review", "reference":"base_link", "pose":null, "source_hint":"Door traversed in 2026-10-29-15-59-09.bag"},
+    {"place_id":"lobby_center", "name":"大厅正中央", "aliases":["大厅中央"], "status":"pending_geometry_review", "reference":"base_link", "pose":null},
+    {"place_id":"corridor_wait", "name":"走廊远端等待点", "aliases":["走廊尽头"], "status":"pending_geometry_review", "reference":"base_link", "pose":null, "source_hint":"Select an open waiting location reached via corridor; preserve passage"},
+    {"place_id":"mission_start", "name":"本次出发点", "aliases":["起点"], "status":"bind_at_task_start", "reference":"base_link", "pose":null}
+  ]
+}

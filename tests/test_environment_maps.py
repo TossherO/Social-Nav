@@ -1,6 +1,7 @@
-"""Final-map and memory semantics; no ROS master, GPU, models or shared labels."""
+"""Final-map geometry and pose semantics; no ROS master, GPU, models or shared labels."""
 from pathlib import Path
 import tempfile
+import json
 import unittest
 
 import numpy as np
@@ -8,10 +9,10 @@ import yaml
 
 from perception.environment.layers import load_config
 from perception.environment.maps import static_geometry
-from perception.environment.memory import (PoseTimeline, KeyObservations, create_index,
-    add_observation, query_observations, query_places, add_place)
-from perception.environment.storage import EnvironmentMap, export_navigation, content_hash
-from perception.mapping_localization.results import read_pcd
+from perception.environment.poses import PoseTimeline
+from perception.environment.export import export_environment, export_endpoint_environment
+from perception.environment.storage import StaticEnvironmentMap, export_map_server_grid, content_hash
+from perception.mapping_localization.results import read_pcd, file_fingerprint, map_fingerprint
 
 
 def pose(stamp, *, x=0., health=0, session='local'):
@@ -19,16 +20,11 @@ def pose(stamp, *, x=0., health=0, session='local'):
                 session_id=session, generation=0, frame_id='odom', health=health)
 
 
-def observation(stamp, segment=1):
-    transform = np.eye(4); transform[0, 3] = stamp
-    return dict(stamp_s=stamp, image_stamp_ns=int(stamp*1e9), receipt_ns=int(stamp*1e9),
-                source_id='bag', segment=segment, frame_id='map', world_from_lidar=transform.tolist(),
-                world_from_camera=None)
 
 
-class MemoryTests(unittest.TestCase):
+class PoseTimelineTests(unittest.TestCase):
     def test_pose_queries_are_causal_do_not_bridge_failures_and_bind_final_corrections(self):
-        settings = load_config()['memory']
+        settings = load_config()['poses']
         rows = [pose(1), pose(1.1, x=.1), pose(1.2, health=2), pose(1.3, x=.3), pose(1.4, x=.4)]
         keys = np.array([[1, 10, 0, 0, 0, 0, 0, 0, 0], [1.4, 12, 0, 0, 0, 0, 0, 1, 0]])
         timeline = PoseTimeline(rows, settings, keys)
@@ -42,50 +38,33 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(timeline.at(1.4)['final_keyframe'], 1)
         self.assertIsNone(timeline.at(2.))
 
-    def test_local_memory_does_not_need_or_invent_a_map(self):
-        timeline = PoseTimeline([pose(1), pose(1.1)], load_config()['memory'])
+    def test_local_pose_lookup_does_not_invent_a_map(self):
+        timeline = PoseTimeline([pose(1), pose(1.1)], load_config()['poses'])
         row = timeline.at(1.15)
         self.assertEqual(row['pose_source'], 'recorded_local_pose')
         self.assertIsNone(row['final_keyframe'])
         self.assertEqual(row['local_frame'], 'odom')
         with self.assertRaises(ValueError):
-            PoseTimeline([pose(1), pose(1)], load_config()['memory'])
+            PoseTimeline([pose(1), pose(1)], load_config()['poses'])
 
-    def test_visual_selection_uses_motion_time_and_a_hard_budget(self):
-        settings = dict(load_config()['memory'], max_observations=3)
-        selector = KeyObservations(settings)
-        a = dict(segment=1, world_from_lidar=np.eye(4).tolist())
-        self.assertTrue(selector.accept(1, a))
-        self.assertFalse(selector.accept(2, a))
-        moved = np.eye(4); moved[0, 3] = 1.1
-        self.assertTrue(selector.accept(2, dict(a, world_from_lidar=moved.tolist())))
-        self.assertTrue(selector.accept(8, dict(a, segment=2)))
-        with self.assertRaises(ValueError):
-            selector.accept(20, a)
 
-    def test_places_queries_and_transitions_keep_time_and_local_segment_boundaries(self):
-        with tempfile.TemporaryDirectory() as directory:
-            db = create_index(Path(directory)/'observations.sqlite', dict(snapshot_id='bound'))
-            self.addCleanup(db.close)
-            first = add_observation(db, observation(1))
-            add_observation(db, observation(2))
-            add_observation(db, observation(3, segment=2))
-            self.assertEqual(db.execute('SELECT COUNT(*) FROM transitions').fetchone()[0], 1)
-            self.assertEqual([row['stamp_s'] for row in query_observations(db, as_of=1.5)], [1])
-            self.assertEqual(query_observations(db, as_of=3, position=[9, 9], radius=1), [])
-            place = add_place(db, 'hall', '入口', first['id'], aliases=['门口'], bounds=[-1, -1, 3, 3])
-            self.assertFalse(place['navigation_verified'])
-            self.assertEqual(query_places(db, as_of=.5), [])
-            self.assertEqual(query_places(db, as_of=3, name='门口')[0]['id'], 'hall')
-            self.assertEqual(query_places(db, as_of=3, bounds=[2, 2, 4, 4])[0]['id'], 'hall')
-            self.assertEqual(query_places(db, as_of=3, bounds=[8, 8, 9, 9]), [])
-            with self.assertRaises(ValueError):
-                add_place(db, 'bad', 'bad', 'unknown')
-            with self.assertRaises(ValueError):
-                query_observations(db, as_of=float('nan'))
 
 
 class StaticMapTests(unittest.TestCase):
+    def test_ground_cell_uses_unique_point_median_instead_of_last_point(self):
+        config=load_config();axis=np.arange(-2.,2.,.15);x,y=np.meshgrid(axis,axis)
+        floor=np.c_[x.ravel(),y.ravel(),np.full(x.size,-1.)]
+        samples=np.array([[.021,.021,-1.04],[.025,.025,-1.],[.029,.029,-.96]])
+        cloud=np.r_[floor,samples].astype(np.float32)
+        a=static_geometry(cloud,[[0,0,0],[.1,0,0]],config,map_id='prior',frame='map',stamp=10.)
+        b=static_geometry(cloud[::-1],[[.1,0,0],[0,0,0]],config,map_id='prior',frame='map',stamp=10.)
+        def height(s):
+            ix,iy=np.floor((samples[0,:2]-s.metadata['origin_xy'])/.1).astype(int)
+            return s.layers['ground_z'][iy,ix]
+        self.assertAlmostEqual(float(height(a)),-1.,places=5)
+        self.assertAlmostEqual(float(height(a)),float(height(b)),places=5)
+        self.assertEqual(a.metadata['ground_estimator'],'per_cell_median_of_unique_ground_points')
+
     def geometry(self):
         config = load_config()
         axis = np.arange(-2.5, 2.5, .15)
@@ -97,6 +76,7 @@ class StaticMapTests(unittest.TestCase):
 
     def test_endpoints_preserve_thin_obstacles_but_never_fabricate_free_space_or_times(self):
         snapshot = self.geometry()
+        self.assertEqual((snapshot.metadata['entity_type'],snapshot.metadata['map_type']),('map','static_environment_map'))
         self.assertTrue((snapshot.layers['occupancy'] == 100).any())
         self.assertFalse((snapshot.layers['occupancy'] == 0).any())
         self.assertTrue(np.isnan(snapshot.layers['last_observed']).all())
@@ -118,7 +98,7 @@ class StaticMapTests(unittest.TestCase):
     def test_standard_navigation_export_preserves_unknown_and_row_orientation(self):
         snapshot = self.geometry()
         with tempfile.TemporaryDirectory() as directory:
-            export_navigation(snapshot, directory)
+            export_map_server_grid(snapshot, directory)
             path = Path(directory)
             pixels = (path/'map.pgm').read_bytes().split(b'\n', 3)[3]
             original = snapshot.layers['occupancy']
@@ -126,34 +106,68 @@ class StaticMapTests(unittest.TestCase):
             self.assertEqual(pixels, expected.tobytes())
             self.assertEqual(yaml.safe_load((path/'map.yaml').read_text())['origin'], [*snapshot.metadata['origin_xy'], 0.])
             with self.assertRaises(FileExistsError):
-                export_navigation(snapshot, directory)
+                export_map_server_grid(snapshot, directory)
 
-    def test_package_binds_snapshot_and_index_and_rejects_wrong_frame_or_changed_layers(self):
+    def test_geometry_package_needs_no_visual_index_and_rejects_changed_layers(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory)
-            snapshot = self.geometry(); snapshot.save(path/'layers.npz')
-            binding = dict(snapshot_id=snapshot.metadata['snapshot_id'])
-            db = create_index(path/'observations.sqlite', binding)
-            first = add_observation(db, observation(1)); db.commit(); db.close()
-            manifest = dict(snapshot_id=snapshot.metadata['snapshot_id'], frame_id='map',
-                            memory_binding=binding, layers_sha256=content_hash(path/'layers.npz'),
-                            time_scope='offline_final_prior', source={})
+            path=Path(directory)
+            snapshot=self.geometry();snapshot.save(path/'layers.npz')
+            manifest=dict(kind='static_environment',snapshot_id=snapshot.metadata['snapshot_id'],frame_id='map',
+                layers_sha256=content_hash(path/'layers.npz'),time_scope='offline_final_prior',source={})
             (path/'manifest.yaml').write_text(yaml.safe_dump(manifest))
-            package = EnvironmentMap(path)
-            try:
-                self.assertEqual(package.summary()['observations'], 1)
-                self.assertEqual(package.query_observations(as_of=.5, frame='map'), [])
-                with self.assertRaises(ValueError):
-                    package.query_geometry([[0, 0]], frame='odom')
-                package.add_place('hall', '入口', first['id'], frame='map')
-                self.assertEqual(package.query_observations(as_of=2, place='hall', frame='map')[0]['id'], first['id'])
-                self.assertEqual(package.crop_map([-1, -1, 1, 1], frame='map')['snapshot_id'], manifest['snapshot_id'])
-            finally:
-                package.close()
-            with (path/'layers.npz').open('ab') as stream:
-                stream.write(b'changed')
-            with self.assertRaises(ValueError):
-                EnvironmentMap(path)
+            package=StaticEnvironmentMap(path)
+            self.assertEqual(package.summary()['map_type'],'static_environment_map')
+            self.assertEqual(package.crop_map([-1,-1,1,1],frame='map')['snapshot_id'],manifest['snapshot_id'])
+            with self.assertRaises(ValueError):package.query_geometry([[0,0]],frame='odom')
+            package.close()
+            manifest['kind']='local_environment_map'
+            (path/'manifest.yaml').write_text(yaml.safe_dump(manifest))
+            with self.assertRaises(ValueError):StaticEnvironmentMap(path)
+            manifest['kind']='static_environment'
+            (path/'manifest.yaml').write_text(yaml.safe_dump(manifest))
+            # Extra files in frozen old packages are not opened as current features.
+            (path/'observations.sqlite').write_bytes(b'NOT_AN_INDEX')
+            StaticEnvironmentMap(path).close()
+            with (path/'layers.npz').open('ab') as stream:stream.write(b'changed')
+            with self.assertRaises(ValueError):StaticEnvironmentMap(path)
+
+    def test_static_export_uses_geometry_without_rgb_or_camera_calibration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory);run=path/'run';mapping=run/'map'
+            (mapping/'keyframes').mkdir(parents=True)
+            (mapping/'COMPLETE').touch()
+            (mapping/'manifest.yaml').write_text('frame: map\n')
+            (mapping/'keyframes/poses.txt').write_text('1 0 0 0 0 0 0 0 0\n1.1 0 0 0 0 0 0 1 0\n')
+            axis=np.arange(-2.5,2.5,.15);x,y=np.meshgrid(axis,axis)
+            points=np.c_[x.ravel(),y.ravel(),np.full(x.size,-1.)]
+            with (mapping/'GlobalMap.pcd').open('w') as stream:
+                stream.write('FIELDS x y z\nSIZE 4 4 4\nTYPE F F F\nCOUNT 1 1 1\nPOINTS %d\nDATA ascii\n'%len(points))
+                np.savetxt(stream,points)
+            bag=path/'source.bag';bag.write_bytes(b'BOUND_SOURCE_NO_IMAGE_DECODING')
+            (run/'localization.jsonl').write_text(''.join(json.dumps(pose(t))+'\n' for t in (1.,1.1)))
+            record=dict(success=True,source='bag',mode='mapping',bag=str(bag),
+                playback=dict(bag_fingerprint=file_fingerprint(bag),map_fingerprint=map_fingerprint(mapping)))
+            (run/'run.json').write_text(json.dumps(record))
+            out=path/'export'
+            with self.assertRaisesRegex(ValueError,'sealed scan journal'):
+                export_environment(run,out,export_pgm=True)
+            manifest=export_environment(run,out,export_pgm=True,filter_mode='none')
+            self.assertEqual({p.name for p in out.iterdir()},{'manifest.yaml','layers.npz','map.pgm','map.yaml'})
+            self.assertEqual(manifest['kind'],'static_environment')
+            self.assertEqual(manifest['map_type'],'static_environment_map')
+            self.assertEqual(manifest['configuration']['compute']['backend'],'cpu')
+            self.assertNotIn('images',manifest)
+            self.assertNotIn('calibration',manifest)
+            self.assertEqual(StaticEnvironmentMap(out).summary()['frame_id'],'map')
+            # An older map can be imported independently, with missing rays explicitly retained as unknown.
+            old=path/'old_map_export'
+            imported=export_endpoint_environment(mapping,old,export_pgm=True)
+            package=StaticEnvironmentMap(old)
+            self.assertEqual(imported['source']['map_fingerprint'],map_fingerprint(mapping))
+            self.assertEqual(imported['source']['input_kind'],'localization_map_endpoints')
+            self.assertEqual(imported['configuration']['compute']['backend'],'cpu')
+            self.assertFalse((package.snapshot.layers['occupancy']==0).any())
+            self.assertIn('no_recorded_rays_or_free_space',imported['limitations'])
 
 
 if __name__ == '__main__':

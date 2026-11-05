@@ -1,3 +1,4 @@
+#include <functional>
 /*
  *  Copyright (c) 2019--2023, The University of Hong Kong
  *  All rights reserved.
@@ -81,6 +82,9 @@ struct dyn_share_datastruct
 {
 	bool valid;
 	bool converge;
+	int normal_count=0;
+	Eigen::Matrix<T,12,12> normal_matrix;
+	Eigen::Matrix<T,12,1> normal_rhs;
 	Eigen::Matrix<T, Eigen::Dynamic, 1> z;
 	Eigen::Matrix<T, Eigen::Dynamic, 1> h;
 	Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic> h_v;
@@ -111,7 +115,7 @@ class esekf{
 	};
 
 public:
-	
+	bool compact_update=false;
 	typedef typename state::scalar scalar_type;
 	typedef Matrix<scalar_type, n, n> cov;
 	typedef Matrix<scalar_type, m, n> cov_;
@@ -126,7 +130,7 @@ public:
 	typedef measurement measurementModel_share(state &, share_datastruct<state, measurement, measurement_noise_dof> &);
 	typedef Eigen::Matrix<scalar_type, Eigen::Dynamic, 1> measurementModel_dyn(state &, bool &);
 	//typedef Eigen::Matrix<scalar_type, Eigen::Dynamic, 1> measurementModel_dyn_share(state &,  dyn_share_datastruct<scalar_type> &);
-	typedef void measurementModel_dyn_share(state &,  dyn_share_datastruct<scalar_type> &);
+	typedef std::function<void(state &, dyn_share_datastruct<scalar_type> &)> measurementModel_dyn_share;
 	typedef Eigen::Matrix<scalar_type ,l, n> measurementMatrix1(state &, bool&);
 	typedef Eigen::Matrix<scalar_type , Eigen::Dynamic, n> measurementMatrix1_dyn(state &, bool&);
 	typedef Eigen::Matrix<scalar_type ,l, measurement_noise_dof> measurementMatrix2(state &, bool&);
@@ -1633,15 +1637,17 @@ public:
 		for(int i=-1; i<maximum_iter; i++)
 		{
 			dyn_share.valid = true;	
+			dyn_share.normal_count=0;
 			h_dyn_share(x_, dyn_share);
 			//Matrix<scalar_type, Eigen::Dynamic, 1> h = h_dyn_share(x_, dyn_share);
 		#ifdef USE_sparse
 			spMt h_x_ = dyn_share.h_x.sparseView();
 		#else
-			Eigen::Matrix<scalar_type, Eigen::Dynamic, 12> h_x_ = dyn_share.h_x;
+			Eigen::Matrix<scalar_type, Eigen::Dynamic, 12> h_x_;
+			if(!dyn_share.normal_count)h_x_=dyn_share.h_x;
 		#endif	
 			double solve_start = omp_get_wtime();
-			dof_Measurement = h_x_.rows();
+			dof_Measurement = dyn_share.normal_count ? dyn_share.normal_count : h_x_.rows();
 			vectorized_state dx;
 			x_.boxminus(dx, x_propagated);
 			dx_new = dx;
@@ -1709,7 +1715,7 @@ public:
 			}
 			*/
 
-			if(n > dof_Measurement)
+			if(n > dof_Measurement && !dyn_share.normal_count)
 			{
 			//#ifdef USE_sparse
 				//Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> K_temp = h_x * P_ * h_x.transpose();
@@ -1778,7 +1784,9 @@ public:
 			#else
 				cov P_temp = (P_/R).inverse();
 				//Eigen::Matrix<scalar_type, 12, Eigen::Dynamic> h_T = h_x_.transpose();
-				Eigen::Matrix<scalar_type, 12, 12> HTH = h_x_.transpose() * h_x_; 
+				Eigen::Matrix<scalar_type, 12, 12> HTH;
+				if(dyn_share.normal_count)HTH=dyn_share.normal_matrix;
+				else HTH=h_x_.transpose()*h_x_;
 				P_temp. template block<12, 12>(0, 0) += HTH;
 				/*
 				Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic> h_x_cur = Eigen::Matrix<scalar_type, Eigen::Dynamic, Eigen::Dynamic>::Zero(dof_Measurement, n);
@@ -1798,7 +1806,11 @@ public:
 				*/
 				cov P_inv = P_temp.inverse();
 				//std::cout << "line 1781" << std::endl;
-				K_h = P_inv. template block<n, 12>(0, 0) * h_x_.transpose() * dyn_share.h;
+				if(dyn_share.normal_count||compact_update){
+					Eigen::Matrix<scalar_type,12,1> htr;
+					if(dyn_share.normal_count)htr=dyn_share.normal_rhs;else htr=h_x_.transpose()*dyn_share.h;
+					K_h=P_inv.template block<n,12>(0,0)*htr;
+				}else K_h = P_inv.template block<n,12>(0,0)*h_x_.transpose()*dyn_share.h;
 				//std::cout << "line 1780" << std::endl;
 				//cov HTH_cur = cov::Zero();
 				//HTH_cur. template block<12, 12>(0, 0) = HTH;
@@ -1973,7 +1985,7 @@ private:
 	measurementMatrix2_dyn *h_v_dyn;
 
 	measurementModel_share *h_share;
-	measurementModel_dyn_share *h_dyn_share;
+	measurementModel_dyn_share h_dyn_share;
 
 	int maximum_iter = 0;
 	scalar_type limit[n];

@@ -1,0 +1,6 @@
+# Wall-clock software limits; no chassis command topic is configurable.
+period_s: 0.1
+packet_timeout_s: 0.3
+clock_stall_s: 0.3
+grid_timeout_s: 0.5
+inbox_size: 12

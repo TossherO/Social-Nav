@@ -16,6 +16,19 @@ float32[] obstacle_max_z
 float32[] clearance
 float32[] unknown_distance
 uint8[] frontier
+# Optional row-major history provenance; empty when the local policy is disabled.
+uint8[] near_field_free
+float64[] near_field_free_classified_at
+uint8[] near_field_obstacle
+float64[] near_field_obstacle_stamp
+float64[] near_field_obstacle_expires_at
+# Optional provenance: occupied exclusively by reliable person evidence on a
+# previously certified free background. Current occupancy remains occupied.
+uint8[] person_background_free
+# Optional derived navigation grid. Raw occupancy and measurement times stay intact.
+int8[] navigation_occupancy
+uint8[] navigation_source
+float64[] navigation_source_stamp
 bool rays_used
 string geometry_status
 string association_json

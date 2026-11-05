@@ -17,7 +17,7 @@ from perception.detection_tracking.inference.config import DEFAULT, load_config,
 from perception.detection_tracking.inference.geometry import (
     corners_xyz, similarity, transform_boxes, validate_boxes, validate_transform,
 )
-from perception.detection_tracking.inference.detector import prepare_single_frame
+from perception.detection_tracking.inference.detector import CausalSweeps, prepare_single_frame
 from perception.detection_tracking.inference.dataset import WheelchairSource, ManifestSource, CachedDetector
 from perception.detection_tracking.inference.pipeline import Frame, PerceptionPipeline, to_snapshot
 from perception.detection_tracking.inference.tracker import SimpleTrack
@@ -68,6 +68,23 @@ class GeometryTests(unittest.TestCase):
         local = (corners-result[:3]) @ Rotation.from_euler('z', result[6]).as_matrix()
         self.assertTrue(np.all(np.abs(local) <= result[3:6]/2+1e-8))
 
+    def test_batched_envelopes_match_individual_corner_construction(self):
+        random = np.random.default_rng(3)
+        boxes = np.c_[random.normal(size=(19, 3)), random.uniform(.1, 3, (19, 3)),
+                      random.uniform(-np.pi, np.pi, 19), np.ones(19)]
+        transform = np.eye(4)
+        transform[:3, :3] = Rotation.from_euler('xyz', [.4, -.2, 1.1]).as_matrix()
+        transform[:3, 3] = [10., -20., .5]
+        actual = transform_boxes(boxes, transform)
+        for source, target in zip(boxes, actual):
+            points = corners_xyz(source) @ transform[:3, :3].T+transform[:3, 3]
+            direction = transform[:3, :3] @ [np.cos(source[6]), np.sin(source[6]), 0.]
+            yaw = np.arctan2(direction[1], direction[0])
+            basis = Rotation.from_euler('z', yaw).as_matrix()
+            low, high = (points @ basis).min(0), (points @ basis).max(0)
+            np.testing.assert_allclose(target[:7], np.r_[((low+high)/2) @ basis.T, high-low, yaw], atol=1e-12)
+        self.assertEqual(transform_boxes(np.empty((0, 8)), transform).shape, (0, 8))
+
     def test_invalid_transform_and_boxes_fail_closed(self):
         bad = np.eye(4); bad[0,0] = 2
         with self.assertRaises(ValueError): validate_transform(bad)
@@ -81,6 +98,112 @@ class GeometryTests(unittest.TestCase):
         self.assertTrue(np.isnan(points[-1,0]))
         with self.assertRaises(ValueError): prepare_single_frame(np.empty((0,4)))
         with self.assertRaises(ValueError): prepare_single_frame(np.zeros((1,5)))
+
+
+class SweepTests(unittest.TestCase):
+    def test_scan_buffer_hash_matches_original_bytes_for_empty_and_strided_inputs(self):
+        import hashlib
+        from perception.sensors.pointcloud import input_fingerprint
+        for points in (np.empty((0,4)),np.arange(80,dtype=np.float32).reshape(20,4)[::2]):
+            canonical=np.ascontiguousarray(points,dtype='<f4')
+            previous=hashlib.sha256(f'seq\nscan\n1\nlidar\n{points.shape}\n'.encode()+canonical.tobytes()).hexdigest()
+            self.assertEqual(input_fingerprint(points,'seq','scan',1.,'lidar'),previous)
+
+    def test_history_uses_relative_pose_and_training_feature_convention(self):
+        sweeps = CausalSweeps(3)
+        past = frame()
+        past.points = np.array([[3., 1., 0., 255.], [1.2, 0., 0., 127.5], [.5, .5, 0., 255.]], dtype=np.float32)
+        sweeps.prepare(past)
+        pose = np.eye(4)
+        pose[:3, :3] = Rotation.from_euler('z', np.pi/2).as_matrix()
+        pose[0, 3] = 1
+        current = frame(1.1, pose)
+        points, context = sweeps.prepare(current)
+        # Remove ego points in their source scan, before transforming history.
+        np.testing.assert_allclose(points[1:], [[1., -2., 0., 1., .1], [0., -.2, 0., .5, .1]], atol=1e-6)
+        self.assertEqual(context['used_sweeps'], 2)
+        np.testing.assert_array_equal(past.points[-1], [.5, .5, 0., 255.])
+
+    def test_nearest_past_scans_expire_and_never_cross_lifecycles(self):
+        sweeps = CausalSweeps(3)
+        for stamp in (1., 1.1, 1.2, 1.3):
+            _, context = sweeps.prepare(frame(stamp))
+        self.assertEqual([h['stamp_s'] for h in context['history']], [1.1, 1.2])
+        self.assertEqual(context['status'], 'ready')
+        _, context = sweeps.prepare(frame(1.8))
+        self.assertEqual(context['used_sweeps'], 1)
+        changed = frame(1.9)
+        changed.pose_identity = ('new_session', 1)
+        _, context = sweeps.prepare(changed)
+        self.assertEqual(context['history'], [])
+        _, context = sweeps.prepare(frame(2., sequence='another_bag'))
+        self.assertEqual(context['history'], [])
+
+    def test_missing_stale_and_future_poses_cannot_merge_history(self):
+        sweeps = CausalSweeps(3)
+        sweeps.prepare(frame())
+        bad = frame(1.1)
+        bad.world_from_lidar = None
+        self.assertEqual(sweeps.prepare(bad)[1]['status'], 'unavailable')
+        self.assertEqual(sweeps.prepare(frame(1.2))[1]['used_sweeps'], 1)
+        stale = frame(1.3)
+        stale.pose_stamp_s = 1.1
+        self.assertEqual(sweeps.prepare(stale)[1]['status'], 'unavailable')
+        future = frame(1.4)
+        future.pose_stamp_s = 1.5
+        with self.assertRaises(ValueError):
+            sweeps.prepare(future)
+
+    def test_pipeline_jump_and_failure_clear_detector_history(self):
+        class HistoryDetector(Detector):
+            def __init__(self):
+                super().__init__()
+                self.sweeps = CausalSweeps(3)
+            def predict(self, observed):
+                _, self.last_input_context = self.sweeps.prepare(observed)
+                return self.boxes.copy()
+            def reset_history(self):
+                self.sweeps.reset()
+        detector = HistoryDetector()
+        pipeline = PerceptionPipeline(detector, CONFIG['tracking'])
+        pipeline.step(frame())
+        self.assertEqual(pipeline.step(frame(1.1))['detection_input']['used_sweeps'], 2)
+        pose = np.eye(4)
+        pose[0, 3] = 10
+        jumped = pipeline.step(frame(1.2, pose))
+        self.assertEqual(jumped['detection_input']['status'], 'unavailable')
+        self.assertEqual(pipeline.step(frame(1.3, pose))['detection_input']['used_sweeps'], 1)
+        pipeline.failure(frame(1.4), 'failed input')
+        self.assertEqual(len(detector.sweeps.history), 0)
+        before = pipeline.step(frame(1.5, pose))
+        restarted = frame(1.6, pose)
+        restarted.pose_identity = ('restarted_localization', 0)
+        after = pipeline.step(restarted)
+        self.assertEqual(after['detection_input']['used_sweeps'], 1)
+        self.assertGreater(after['generation'], before['generation'])
+        self.assertNotEqual(after['tracks'][0]['track_id'], before['tracks'][0]['track_id'])
+
+    def test_cached_multiframe_results_bind_history_pose_and_scan(self):
+        sweeps = CausalSweeps(3)
+        rows = []
+        frames = [frame(1.), frame(1.1), frame(1.2)]
+        for observed in frames:
+            _, context = sweeps.prepare(observed)
+            rows.append(dict(sequence_id=observed.sequence_id, observation_id=observed.observation_id,
+                stamp_s=observed.stamp_s, detection_frame_id=observed.sensor_frame,
+                input_fingerprint=observed.input_fingerprint(), detections=[box().tolist()], detection_input=context))
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)/'observations.jsonl'
+            path.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+            replay = CachedDetector(path)
+            for observed in frames:
+                replay.predict(observed)
+            replay = CachedDetector(path)
+            replay.predict(frames[0])
+            changed = frame(1.1)
+            changed.world_from_lidar[0, 3] = .2
+            with self.assertRaisesRegex(ValueError, 'history or poses'):
+                replay.predict(changed)
 
 
 class TrackerTests(unittest.TestCase):
@@ -115,8 +238,20 @@ class TrackerTests(unittest.TestCase):
     def test_expired_tracks_cannot_be_resurrected_across_a_gap(self):
         tracker = self.tracker()
         old = tracker.step([box()], 1)[0]
-        new = tracker.step([box()], 1.8)[0]
+        new = tracker.step([box()], 3.)[0]
         self.assertNotEqual(old['track_id'], new['track_id'])
+
+    def test_short_occlusion_keeps_identity_without_fabricating_observations(self):
+        tracker=self.tracker();old=tracker.step([box()],1.)[0]
+        for stamp in np.arange(1.1,2.3,.1):
+            predicted=tracker.step([],float(stamp))[0]
+            self.assertEqual(predicted['track_id'],old['track_id'])
+            self.assertEqual(predicted['state'],'predicted')
+            self.assertEqual(predicted['last_observed_stamp_s'],1.)
+        observed=tracker.step([box(3.1)],2.3)[0]
+        self.assertEqual(observed['track_id'],old['track_id'])
+        self.assertEqual(observed['state'],'observed')
+        self.assertEqual(observed['last_observed_stamp_s'],2.3)
 
     def test_duplicate_and_reverse_time_are_rejected(self):
         tracker = self.tracker(); tracker.step([box()], 1)

@@ -1,1 +1,4 @@
-"""Not implemented: sensor input, synchronization and calibration adapters."""
+"""Sensor drivers, ROS launch integration and source-bound calibration tools.
+
+Source availability and recorded-data calibration do not imply live hardware acceptance.
+"""

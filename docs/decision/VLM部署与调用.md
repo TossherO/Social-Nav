@@ -1,182 +1,316 @@
 # VLM 部署与调用
 
-在线推理与离线Prompt、Schema、语义和决策逻辑调试均优先使用自有服务器的SGLang＋DSPARK，通过Tailscale与SSH隧道访问。仅远程服务不可用或其所需GPU被其他任务占用时，才考虑本地Transformers＋Accelerate＋XGrammar备用方案。两种入口共用冻结模型输入、Prompt与动态Schema。服务器首次安装和构建只见 [SGLang服务部署方案](SGLang服务部署方案.md)；本文维护后端选择、服务启停与调用。
+局部 VLM 用于三类任务：T1 识别行人群组关系，T2 匹配并持续核对跟随目标，T3 从候选中选择目标点，当前主要用于轮椅在桌边停靠。本文说明模型服务的访问方式、任务输入，以及结果怎样交给导航接口。
 
-服务参数由 `decision/vlm/deployment/start_server.sh` 维护，环境与路径由同目录 `runtime_env.sh` 维护；公共客户端策略由 `decision/vlm/configs/project.json` 维护。具体机器、解释器、资源路径、已完成检查和当前运行状态只记录在 `ENVIRONMENT.local.md`。开发环境与模型服务环境分开，客户端只需httpx和jsonschema。
+模型、默认后端和各任务 Prompt 由 [project.json](../../decision/vlm/configs/project.json)登记。运行资源和已有结果见[本机记录](../../ENVIRONMENT.local.md)，新服务器从零安装见[SGLang 服务部署方案](SGLang服务部署方案.md)。
+
+外层 Agent 使用独立托管 API，通过单模型工具循环查询、观察和导航，不使用本文的自建服务或本地备用。其实现见[Agent 技术实现](Agent技术实现.md)，运行命令见[任务与测试](长程导航任务与评测计划.md#运行与测试操作)，选型与研究方法见[技术计划](Agent技术开发计划.md#模型与调用)。
 
 ## 后端选择
 
-先选择远程服务，确认服务就绪及所需GPU资源；这里的GPU占用指其他任务造成的资源冲突，SGLang自身常驻权重、显存和正常计算不算冲突。仅远程不可用或存在上述占用时，再按本机记录考虑本地备用，保留相同输入与约束并记录切换原因及实际后端。模型响应不合法或语义不一致仍按失败记录，不触发静默换后端重跑。
+局部 T1、T2、T3 的在线推理，以及离线 Prompt、Schema 和语义调试，优先调用远程 SGLang＋DSPARK。只有远程服务不可用，或所需 GPU 被其他任务占用时，才考虑本地 Transformers＋XGrammar。
 
-`project.json`的`inference.offline_backend`登记默认使用`sglang`。远程入口为`python -m decision.vlm.benchmark_vlm`，本地备用入口为`python -m decision.vlm.local_inference`；两者仍显式选择，不会自动探测GPU占用或切换后端。纯输入、配置与单元检查无需模型推理，`--dry-run`继续不联网、不读取私有连接配置。
+切换后端必须记录原因。不能因为某次响应错误就静默换模型或重放请求。代码检查和输入准备不依赖模型服务；当前本地入口也不支持 T3。
 
 ## 远程服务启停与访问（默认）
 
-通过已有SSH配置连接自有服务器，进入该机服务根目录；主机别名和路径以本机记录为准。已有环境直接启动，不重复安装或编译：
+先使用已有 SSH 配置连接服务器，在服务目录手动启动：
 
 ```bash
 ssh USER@SERVER
 cd /path/to/sglang-service
 tmux new -s sglang-service
-# 在tmux会话内执行；使用已测试的默认DSPARK配置。
-set -o pipefail
-bash start_server.sh 2>&1 | tee logs/server.log
+bash start_server.sh > logs/server.log 2>&1
 ```
 
-等待日志报告就绪。用 `Ctrl+B`、`D` 脱离会话，`tmux attach -t sglang-service` 返回；在服务终端按 `Ctrl+C` 停止。服务器重启后需手动启动。示例只维护最近一轮日志，需保留的故障证据先归入同一实验结果。只有明确需要时才切换配置：`SGLANG_PROFILE=mtp` 使用内置MTP，`mtp_previous` 和 `baseline` 保留旧对照入口；切换前停止已有服务。
+日志显示服务就绪后，可以脱离 tmux 会话。需要停止时回到该会话按 Ctrl+C。运行参数由[部署脚本](../../decision/vlm/deployment/start_server.sh)维护，客户端不会自动安装、编译或启动服务。
 
-在开发机另一个终端建立隧道并保持它运行：
+再在开发机建立 SSH 隧道：
 
 ```bash
 ssh -N -L 30000:127.0.0.1:30000 USER@SERVER
 ```
 
-服务器监听回环地址；开发机客户端使用 `http://127.0.0.1:30000/v1`。本机端口被占用时可改变隧道左端端口，并同步客户端地址。SSH可连接不表示模型服务已就绪；服务关闭时不要把连接拒绝当成环境损坏。
+客户端访问 `http://127.0.0.1:30000/v1`。如果改用其他本地端口，需要同时修改调用地址。SSH 能连接只说明网络路径可达，不能证明模型服务已经就绪。
 
 ## 仓库远程客户端
 
-仓库入口统一使用 `decision.vlm`，旧 `scripts.*` VLM包装已移除。从仓库根目录选择已有客户端解释器，并仅在首次准备时建立私有配置：
+先创建私有配置，再填写隧道地址和准确的模型别名。下面的复制命令不会覆盖已有配置：
 
 ```bash
 cp -n decision/vlm/configs/vlm_server.example.json configs/vlm_server.local.json
 chmod 600 configs/vlm_server.local.json
+python -B -m decision.vlm.server --server-info
 ```
 
-填写隧道对应的 `base_url`、模型别名 `qwen3.8-27b-fp8`，本地隧道无需API Key；`allow_insecure_http` 保持false。不要覆盖已有配置或提交连接信息。模型ID为空时只允许发现唯一匹配的模型，不静默换模型或服务。
+[server.py](../../decision/vlm/server.py)只读查询模型列表及可选运行元信息，不发送推理请求。本地隧道不需要 API Key；日志不输出凭证或服务错误正文。远程客户端只需 httpx 和 jsonschema。
 
-按目的选择检查，已有有效结果无需重跑：
+T2 和 [T3](#t3目标选择与就座)的任务入口见后文。T1 冻结输入可以复用 [vlm_api_common.make_body](../../decision/vlm/vlm_api_common.py)构造相同的 OpenAI 兼容请求。通用工具负责图像、流式解析及当前响应检查，不再维护旧数据集专用基准。
+
+程序分别检查 JSON 格式、当前人物身份的语义、正常结束和非思考输出。原始响应始终保留，不修复格式、不补删身份，也不自动重试。
+
+## 托管API对照（显式选用）
+
+[hosted_evaluation.py](../../decision/vlm/hosted_evaluation.py)可按固定计划，通过Agent已有的托管API测试T1、T2和T3。它复用Agent的私有HTTPS配置、模型和共享费用账本，独立于Agent工具循环；不会改变局部VLM默认后端，也不作为失败后的自动备用。当前开发对照结果由[本机记录](../../ENVIRONMENT.local.md)定位。
+
+计划指定各任务的冻结输入、原始三图、Prompt及摘要，参考答案另存。T2按本次有效回答推进历史。与Agent单张缩略图输入不同，该入口保留三张原图，方便与既有任务结果对照；需要确认所用服务允许接收这些项目数据。
 
 ```bash
-# 离线读取公共配置和输入，不读取私有连接配置，也不发送请求。
-python -m decision.vlm.benchmark_vlm --dry-run --limit 24
-
-# 只GET模型列表；输出使用新的临时目录。
-python -m decision.vlm.benchmark_vlm --check --out /tmp/vlm_endpoint_check
-
-# 三个场景的代表输入；会提交三次推理。
-python -m decision.vlm.benchmark_vlm --limit 3 --out /tmp/vlm_three_scenes
-
-# 仅在需要完整耗时比较时，选择串行或固定到达轮次。
-python -m decision.vlm.benchmark_vlm --limit 24 --out /tmp/vlm_serial
-python -m decision.vlm.benchmark_vlm --mode paced --rate-hz 0.5 \
-  --limit 24 --out /tmp/vlm_paced
+# 只检查计划，不读取API凭证或联网
+python -B -m decision.vlm.hosted_evaluation --plan /path/to/plan.json
+# 使用新的结果目录，明确执行计划中的请求
+python -B -m decision.vlm.hosted_evaluation --plan /path/to/plan.json \
+  --output /path/to/new_comparison --run
 ```
 
-以上目录必须尚不存在，可用 `--bundle` 指定其他冻结输入。正式计时前可用少量代表性多图输入初始化视觉路径，并单独记录；纯文本 `--warmups 1` 只预热固定前缀，不能覆盖首次视觉执行。比较配置时保持请求、轮次条件和缓存状态可比，客户端不自动清服务缓存。
+当前托管API拒绝数组的`uniqueItems`。计划可显式设置`schema_mode: portable`：T1在传输Schema移除该关键字，T2／T3使用平面枚举对象；本地仍按完整原Schema检查去重、PID、状态组合及候选成员。没有实测原`oneOf`的服务端支持情况，不能宣称此模式与DSPARK具有相同的服务端约束。请求失败或响应非法即停止，保留原文，不修复或自动重试。
 
-CLI优先于配置。只传 `--rate-hz` 时deadline沿用1/rate；同时传 `--deadline-s` 则独立设置完成时限。HTTP timeout是等待上限，不是机器人TTL。客户端固定非思考、temperature=0、单在途、零重试和object输出策略；非法配置直接报错。
+时延分别记录首输出文本和完整返回，包含每次新建连接及上传，图像准备另计。与旧DSPARK记录比较时，还须说明模型、缓存、预热和测试日期不同，不能把差值单独归因于网络。
 
 ## 本地备用推理
 
-满足前述备用条件后，先按本机记录核对模型、可用GPU与运行条件，再显式使用本地入口。本地使用独立Conda环境，与检测、ROS及远程服务环境分开。首次安装在本机执行；已有环境直接复用，普通Python库优先中国镜像，PyTorch与TorchVision使用官方cu130源：
+[local_inference.py](../../decision/vlm/local_inference.py)使用原有 Transformers、Accelerate 和 XGrammar 引擎。模型从 FP8 显式反量化为 BF16，并按层分配到多张 GPU；不会自动下载权重或把模型卸载到 CPU。
 
-```bash
-conda create -n social-nav-vlm --override-channels -c https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge python=3.12 pip
-conda activate social-nav-vlm
-python -m pip install --index-url https://download.pytorch.org/whl/cu130 \
-  'torch==2.13.0+cu130' 'torchvision==0.28.0+cu130'
-python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
-  -r decision/vlm/requirements-local.txt
-conda env config vars set PYTHONNOUSERSITE=1 'PYTHONPATH=' 'PYTHONHOME='
-conda deactivate
-conda activate social-nav-vlm
-```
+这个入口读取一份由 `make_body`生成的冻结请求 JSON，支持 `groups`、`appearance`和 `follow`。它保持原图像字节、顺序、Prompt、Schema 和输出预算，但不保证与远程逐字一致。
 
-从仓库根目录准备专用本机资源覆盖，只填写模型路径和GPU，不读取远程API配置：
+新机器按实际 Torch 和 CUDA 准备[本地依赖](../../decision/vlm/requirements-local.txt)及可选[融合内核](../../decision/vlm/requirements-local-kernels.txt)，普通包优先中国镜像。已有环境直接复用，路径和 GPU 选择见本机记录：
 
 ```bash
 cp -n decision/vlm/configs/vlm_local.example.json configs/vlm_local.local.json
-# 在该文件填写实际模型目录和可用GPU，然后运行：
-python -m decision.vlm.local_inference --dry-run --limit 3
-python -m decision.vlm.local_inference --limit 3 --out /tmp/vlm_local_debug
+python -B -m decision.vlm.local_inference \
+  --request /path/to/input/request.json --task follow --dry-run
+python -B -m decision.vlm.local_inference \
+  --request /path/to/input/request.json --task follow \
+  --fallback-reason remote_unavailable --out /path/to/new_local_result
 ```
 
-可用 `--model-path`、`--gpus 0,1,2,3` 显式覆盖资源，`--bundle` 指定相同协议的冻结输入，`--case-id` 选择具体窗口。默认只跑三个代表场景，输出必须是新目录且位于模型、冻结输入之外。模型常驻单个进程，多卡按层分摊一份模型，逐个处理样本，不创建HTTP服务、不联网取模型或自动重试。
+实际运行须填写 `--fallback-reason`，允许 `remote_unavailable`或 `remote_gpu_busy`。模型与 GPU 可在私有配置中填写，也可用 `--model-path`和 `--gpus`覆盖。输出位置必须在输入目录和模型目录之外。
 
-需要GDN融合加速时，在该独立环境额外安装 [内核依赖](../../decision/vlm/requirements-local-kernels.txt)。`fla-core`提供当前模型需要的算子，不必安装FLA的模型层包；`causal-conv1d`是原生CUDA扩展。先按本机记录设置与Torch匹配的CUDA Toolkit及`CC`／`CXX`，再执行：
+`--dry-run`不读私有配置，不加载 GPU，不联网，也不写结果。正式运行只生成一次，原样保存 `response.json`和切换原因。需要历史时，调用者依据此前接受的结果构造，不能读取参考答案。
 
-```bash
-python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
-  -c decision/vlm/requirements-local-kernels.txt ninja
-CAUSAL_CONV1D_FORCE_BUILD=TRUE MAX_JOBS=4 python -m pip install \
-  -i https://pypi.tuna.tsinghua.edu.cn/simple --no-build-isolation \
-  -c decision/vlm/requirements-local.txt -r decision/vlm/requirements-local-kernels.txt
-python -m pip check
-```
-
-原生扩展按当前Torch／CUDA／ABI构建，避免使用与系统glibc不匹配的预编译包；FLA的Triton算子在首次使用时编译，初始化耗时应与稳定请求耗时分开。结果元数据的`gdn`记录48层所选预填充、递归解码和卷积实现；`fast_path_available`或导入成功只证明可选择该路径，实际启用还应由少量请求中的函数调用／GPU执行验证。缺少这些依赖时仍可用PyTorch兼容实现，不能将其速度当作融合算子成绩。
-
-针对当前FP8资产，本地显式反量化为BF16加载，保留原始文件；这不能恢复量化前精度，也不保证与服务器FP8＋DSPARK逐字一致。权重分摊预算由公共配置维护，另需给视觉激活和缓存留出显存；设备不足时报错，不静默卸载到CPU或切换远程。模型路径与GPU实际情况见本机记录，不把另一设备的资源选择直接照搬。
-
-两端共用相同三图字节、`IMAGE_i`顺序、system／user文本、聊天模板、非思考设置和输出上限。本地使用相同版本XGrammar编译每个窗口的动态Schema，在 `generate()` 的每一步约束token，并为每次生成新建匹配状态；空白规则与现有SGLang一致。结构约束之外仍执行同一PID成员、跨组互斥、角色和完整结束校验，保留原始响应，错误或截断立即停止。
-
-只保留 `settings.json`、`requests.jsonl` 和 `summary.json`：记录模型小资产摘要、精度与设备分摊、实际输入token及图像网格、生成token和原始／合法结果。加载与生成时间用于排错，离线不判定在线deadline，也不伪装成HTTP／网络性能。`reference_request_sha256` 是同输入的参考HTTP正文摘要，正文未发送，不能当作一次真实网络请求。
-
-需要与已有远程结果对齐时，在本地命令中显式加 `--reference /path/to/remote_result`；只在全部本地生成结束后读取参考答案，要求原始输入指纹和参考正文摘要一致，再比较原始文本、关系结构与输入token数。参考结果不进入Prompt、不指导重试或输出修复。初次用少量代表样本确认输入和约束，后续按实际语义问题追加；复用已运行的远程服务与仍有效的结果，不为每次修改重复部署或重跑整套基线。
-
-## 独立客户端与部署材料
-
-已有服务器客户端可直接复用。需要迁移时，由现有打包器生成新目录和ZIP，不覆盖旧包：
-
-```bash
-# 普通包只包含冻结输入、Prompt、客户端与默认值。
-python -m decision.vlm.package_vlm_test --out /tmp/jrdb_client
-
-# 首次部署新服务器时，另附当前源码构建材料与两份手册。
-python -m decision.vlm.package_vlm_test --with-deployment --out /tmp/jrdb_service_bundle
-```
-
-可用 `--source` 指定输入。打包只复制每case白名单metadata／三图、固定Prompt、客户端及公开配置；不带原生社会标签、人工答案、源人物身份、权重、凭证、环境、编译缓存或旧结果，也不安装、构建、启动服务或请求模型。
-
-普通包README来自便携客户端模板。含部署材料的包额外携带当前启动／环境脚本、cu129约束、源码补丁与构建入口，以及本手册和SGLang手册；它不再携带替换原环境的旧安装器。新包导出公共默认值，已经填写的 `server_config.json` 和已有结果不随源码更新覆盖。
-
-在解压包根目录运行；仅全新客户端环境需要安装其依赖，普通库优先中国镜像：
-
-```bash
-python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
-# 填写server_config.json后，使用相同客户端命令。
-python benchmark.py --dry-run --limit 24
-python benchmark.py --limit 3 --out /tmp/jrdb_portable_smoke
-```
-
-服务器本地调用使用回环地址；开发机调用使用SSH隧道。两端使用同一输入与推理设置，但分别创建新的结果目录，不复制填写过的连接配置。
-
-## 请求、结果与耗时
-
-JSON Schema由客户端提交，返回后独立检查Schema、PID成员、角色、模型ID、正常流结束和非思考状态。保留原始响应，不修复格式、补删身份、改变关系或追加重试；合法JSON不证明语义正确，也不单独证明服务端硬约束已生效。默认忽略环境代理、单连接、不跟随重定向；可信代理只能通过 `--proxy` 显式指定。
-
-serial逐个等待完整结果；paced按计划到达，单请求在途，忙时丢弃而不排队。失败立即停止，停止后的未提交任务单独记录；迟到但合法的结果仍统计。机器人是否接受结果仍需未来的观察时间、身份、任务与TTL适配器。
-
-| 字段 | 含义与范围 |
-|---|---|
-| `prepare_s` | 读取已渲染图片、base64与请求编码 |
-| `response_headers_s`／`first_event_s` | HTTP开始至响应头／首个SSE事件，首事件可能只有元数据 |
-| `first_output_text_s`／`last_output_text_s` | 首段／末段最终content，末段不一定是流结束 |
-| `stream_complete_s`／`api_complete_s` | 完整流／HTTP上下文结束，须有DONE和正常finish_reason |
-| `validation_s` | 本地输出校验 |
-| `end_to_end_s` | 请求准备至完整校验，不含模型加载、实时感知或源渲染 |
-| `arrival_to_result_s` | paced计划到达至完整结果，包含启动滞后 |
-
-每轮保存 `settings.json`、`model_check.json`、`requests.jsonl` 和 `summary.json`；显式文本预热另记，不混入场景耗时。统计计划、提交、合法、丢弃和取消数量，以及合法子集耗时和按时覆盖。必要原始结果与唯一汇总集中在同一实验目录，临时检查不进入长期产物。
-
-只读比较同请求结果，可在仓库运行：
-
-```bash
-python -m decision.vlm.deployment.compare_results \
-  --reference /path/to/reference --candidate /path/to/candidate
-```
-
-含部署材料包可使用 `python compare_results.py`。比较器要求请求／输入指纹绑定一致，不仅凭case名配对，也不改摘要绕过差异。远程与同机差值包含客户端、链路、服务、缓存和轮次波动，不是纯RTT或GPU时间。API的缓存值为0也不证明没有缓存，需结合服务设置及已有日志。
-
-默认JRDB输入是带oracle几何与PID的冻结开发窗口，没有人工语义金标准；输入生成、标签和审核边界见仓库 `docs/experiments/JRDB参考.md`。三图短测通过不能代替长期运行、满上下文、语义准确率或实机感知—渲染—决策链路验证。T2／T3输入、在线状态接收和外层agent仍待实现。已有耗时报告由 `ENVIRONMENT.local.md` 定位，不在本手册重复维护成绩表。
+请求适配通过不等于实际 GPU 推理已验收，具体范围以本机记录为准。当前不能用该入口运行 T3。
 
 ## 环境上下文与只读工具
 
-感知环境的运行和来源边界由[建图与定位](../perception/技术实现-环境地图与场景表示.md#静态环境与视觉记忆)维护。决策侧有两个独立数据适配入口，均不发起模型请求或控制底盘：
+[environment_inputs.py](../../decision/vlm/environment_inputs.py)从感知场景组织当前 RGB、人物、局部环境和可选先验。[Agent 环境工具](../../decision/agent/tools/environment.py)提供只读查询，不控制底盘。场景来源和含义见[环境地图与场景表示](../perception/技术实现-环境地图与场景表示.md)。
 
-| 入口 | 用途与约束 |
+这些环境视图不能直接替换已经审核的任务三帧，也不能继承旧输入的人工标签。更换输入后，需要重新核对输入与标签的对应关系。
+
+## 直接运行时的三帧输入与响应接纳
+
+### 从感知观察生成三帧输入
+
+统一 runtime 默认不加载 YOLO。显式记录任务窗口时，它先保存原扫描、RGB、相机内参和人物位姿的只读历史，再由决策后台运行 YOLO、建立二维框与三维人物的对应关系，最后渲染三帧。启用方法见[感知导航速查](../感知导航操作速查.md#感知导航直接运行时)。
+
+图像准备不会回写三维跟踪或环境地图，也不依赖低频 `--record-views`。准备输入本身不启动 VLM 服务或发送 VLM 请求。
+
+| 实现 | 职责 |
 |---|---|
-| [environment_inputs.py](../../decision/vlm/environment_inputs.py)的`prepare_scene_context`／`render_environment_context` | 直接消费[统一场景](../perception/技术实现-环境地图与场景表示.md#统一场景输入)，绑定RGB、几何、人物、记忆和可选先验关联。RGB＋BEV中人物使用P编号，保留轨迹身份与观察／预测状态，历史位置使用H编号；不投影未经同安装标定绑定的RGB框。基础`prepare_environment_context`仍可用于仅几何／RGB输入。 |
-| [environment_tools.py](../../decision/agent/environment_tools.py)的`query_scene`／`query_environment` | 前者查询同一场景的元数据、RGB和几何，后者查询已有环境包的地点、观察及地图。请求绑定身份／指纹，保持未知语义和响应预算；没有导航目标执行或agent主循环。 |
+| [runtime/decision.py](../../runtime/decision.py) | 缓存原始主机数组。消费者持有只读租约期间，槽位不能覆盖；后台忙时跳过窗口。 |
+| [image_inputs.py](../../decision/vlm/image_inputs.py) | 在可选后台运行 YOLO 和二维、三维关联，根据原观察及相机内参提供图像辅助，不成为导航前置依赖。 |
+| [observations.py](../../decision/vlm/observations.py) | 选择前 1 秒、前 0.5 秒和当前观察，检查图像来源，保存三幅图、字段、人物映射和对应场景。 |
+| [navigation.py](../../decision/vlm/navigation.py) | 用 `DecisionRequest`管理单个请求的发起、响应使用、过期和取消，委托导航 `TaskPolicy`检查结果。 |
 
-统一场景视图使用`environment_scene_context`并保留原场景指纹，基础视图仍为`environment_context`；不自动替换既有REL三帧输入、Prompt或Schema，也不复用原协议人工标签。正式模型任务接入与语义评价仍待完成。渲染命令见[场景速查](../perception/感知操作速查.md#统一场景与混合模式)，复用已有NumPy／OpenCV及Pillow／Matplotlib，不增加普通HTTP客户端的依赖或启动模型服务。
+当前窗口的人物来自全方向三维跟踪，只使用已确认且在该帧有观测的目标。RGB 只绘制与同源 YOLO 检测可靠匹配的框。图像必须来自当前或过去，且时间差满足要求；缺图不补造，定位或跟踪重置后清空历史。
+
+生成的 `decision_inputs/<观察时间_标识>/input.json`和三幅 PNG 是新的派生输入。它们不包含人工答案，不继承旧标签，也不包含供规划使用的全套地图。
+
+新后台窗口还保存图像模型、标定来源和逐观察关联记录。旧记录仍可只读复用。图像支路失败时，只将该支路标为不完整，主链继续运行；两者共用 GPU 时仍可能竞争资源。
+
+`model_requests=0`表示没有 VLM 请求，不表示没有运行 YOLO；后者由 `image_detector_calls`另行记录。离线索引和二维缓存仍使用既有 `prepare/prepare-rgb`入口。
+
+### 如何把响应交给导航
+
+调用者需要保留发起请求时的原 `SceneInputs`。先把它和同源冻结窗口传给 `DecisionRequest.begin`，并使用返回的 Schema。收到响应后，再用最新场景和相同源时钟调用 `accept`。
+
+人物映射仍以原窗口为准，不能用新窗口的 PID 解释旧响应。PID 是当前模型窗口内的编号，不是永久人物身份。响应即使非法或迟到，也保留在 `last_response`中，是否写入持久存储由调用者负责。
+
+周期、响应期限和单请求策略由项目配置维护。该接口本身不发 HTTP 请求，不自动重试，也不会把 `plan`输出当作运动执行。统一 runtime 的自动模型调度仍待接入。
+
+## 实机T1群组输入
+
+T1 使用三帧 RGB 和全高度单帧扫描 BEV。标注审核与导出共用 `Store.model_image`，绘制来源和范围见[标注手册](决策任务标注.md#模型图像与输入审核)。
+
+当前 PID 覆盖已确认且有观测的全方向三维轨迹，不按相机视野筛选。缺少 RGB 或可靠图像框时，字段保持 `null`；浏览点云不能代替原始扫描。
+
+| 字段 | 含义 |
+|---|---|
+| `v` | 最后一份观察中的有效 PID 集合。 |
+| `dt`、`ts` | 三帧相对秒数、时间来源及 `clock_domain`。 |
+| `e` | 固定米制显示范围 `[xmin,xmax,ymin,ymax]`。 |
+| `o` | 每行包含 `[pid,三个XY,三个RGB框,三个人物像素高度]`。RGB 框按各轴归一化到 0–1000。 |
+| `d` | 每行包含 `[pid1,pid2,三个同一时刻的米制距离]`。 |
+
+每个 XY 都属于它所在观察的雷达坐标系，因此不能用跨帧坐标差直接计算行人速度。每张 BEV 中的历史轨迹已补偿自车运动；位姿失效时，不伪造世界轨迹。
+
+T1 使用[默认英文 Prompt](../../decision/vlm/configs/prompts/wheelchair_t1_groups.txt)，按 `walking`、`talking`、`photographing`和 `other`组织群组。每个 PID 全局最多出现一次，没有群组时返回 `{}`。[最终英文候选](../../decision/vlm/configs/prompts/wheelchair_t1_groups_en_candidate.txt)仅供显式选择，不会自动切换。动态 Schema 和成员检查由 `vlm_api_common.groups_schema / validate_groups`维护。
+
+标注器的富信息导出仍包含 `g/u`、未知、角色和覆盖信息，不能直接当作紧凑响应的答案。当前关系识别的离线开发已收尾，独立金标准、在线响应处理和导航消费仍需分别验收。最终本机结果由环境记录定位。
+
+## T2外观匹配与因果身份回放
+
+[follow.py](../../decision/vlm/follow.py)提供独立离线诊断，复用标注器的三帧 RGB、扫描 BEV 和 HTTP 工具，不调用 T1，也不控制底盘。
+
+`prepare`只读标注工程中的固定事实，另存明确标记的开发输入及参考，不修改标签状态、人物关联或审核时使用的输入。描述参考必须来自同一采集，且不晚于当前观察。人工身份、合理候选及参考答案不会进入模型请求。
+
+### 外观匹配
+
+先准备少量窗口，再手动启动远程 DSPARK 服务并建立连接：
+
+```bash
+# 先冻结少量外观匹配窗口；新目录不覆盖既有结果
+python -B -m decision.vlm.follow prepare \
+  --project /path/to/decision_annotation_project \
+  --out /path/to/new_t2_appearance --limit 20
+
+# 手动启动已有远程DSPARK服务并建立所需连接后执行
+python -B -m decision.vlm.follow run \
+  --out /path/to/new_t2_appearance \
+  --base-url http://127.0.0.1:30000/v1
+```
+
+外观匹配输出 `id/match`。`match`可以是 `unique`、`ambiguous`、`none`或 `insufficient`，只有 `unique`携带当前有效 PID，其余 `id`均为 `-1`。Prompt 由[外观配置](../../decision/vlm/configs/prompts/wheelchair_t2_appearance.txt)维护。
+
+这个接口只判断当前外观匹配，不输出完整跟随状态。目标没有 PID，也不能自动解释为目标已经离开。
+
+### 按历史顺序回放
+
+需要检验历史时，在同一目标任务中按时间选取已有观察点：
+
+```bash
+python -B -m decision.vlm.follow prepare \
+  --project /path/to/decision_annotation_project \
+  --out /path/to/new_t2_replay \
+  --target TARGET_TASK_ID --period-s 2 --limit 8
+python -B -m decision.vlm.follow run \
+  --out /path/to/new_t2_replay \
+  --base-url http://127.0.0.1:30000/v1
+```
+
+`TARGET_TASK_ID`是标注工程的目标任务 ID，不是模型 PID。`--period-s`规定已有观察点的最小采样间隔；指定时刻没有标注时，实际间隔可能更长，不补造连续观测。
+
+回放使用[跟随 Prompt](../../decision/vlm/configs/prompts/wheelchair_t2_follow.txt)，返回 `id/state`。`state`包括 `visible`、`occluded`、`uncertain`、`lost`和 `not_found`。历史只由本次运行的正式响应推进，预热不会推进历史；非法响应会终止该序列，不借用真值继续。
+
+程序根据带有生命周期信息的轨迹身份，把上一次接受的目标映射到当前 PID，不能直接复制旧编号。Prompt 只允许用最后一张图 IMAGE_2 左侧 RGB 确认当前视觉状态。标签框、有效三维 PID 和历史外观，都不能单独证明当前可见。
+
+短时保持身份需要有效位姿、连续轨迹、允许的年龄，以及尚未撤销的状态。`occluded`不会刷新最后视觉确认时刻。目前只支持原目标仍在当前有效三维候选中的保持，纯预测轨迹候选尚未接入。
+
+新输入与导航 `TaskPolicy`默认从 `tasks.follow.visual_memory_s`读取保持时间，并与 HTTP 响应期限分别检查。这个开发值考虑了一次推理周期、响应期限和少量调度余量，避免正常调用间隔内过早丢掉已确认身份；它不放宽场景、轨迹或控制反馈的新鲜度要求。旧冻结实验继续使用自身 settings，不重算历史成绩。
+
+### 结果保存与验证范围
+
+每次运行包含一次明确记录的预热和一遍正式请求，不自动续跑或重试。需要比较另一份 Prompt 时，可使用 `--prompt /path/to/prompt.txt --result-name NAME`，在新子目录保存独立历史和原始响应；也可用 `--result-out /path/to/new_result`指定独立结果目录，复用只读输入而不复制图像。两个结果位置选项互斥，都禁止覆盖已有结果。
+
+原生标注草稿提供固定身份、可见性和覆盖事实，不等于描述唯一性或完整五状态金标准。评测须分别报告身份命中、当前可见状态和端到端覆盖。RGB 关联框如果覆盖了前景路人，即使轨迹身份正确，也不能算当前视觉确认。
+
+独立新场景、完整状态覆盖、真实重捕获、T1 与 T2 联合请求、在线时效处理和导航执行仍需验证。保持年龄等诊断设置不是实机安全参数；本机结果由环境记录定位。
+
+## T3目标选择与就座
+
+T3 根据自然语言指令，从给定候选中选择目标。当前重点是轮椅在桌边停靠，不包含人体转移；狭窄通道倒退让行尚未实现。
+
+就座拟作为 Agent 调用的独立阶段：确认桌子，必要时移动观察，再选点、接近停靠，最后确认停止并返回结果。当前已有输入准备、候选、选点和反馈驱动的阶段核心，主动观察调度、Agent 服务及真实运动闭环仍未接通。
+
+代码集中在 [seating/](../../decision/vlm/seating)，统一入口为 `python -m decision.vlm.seating`，各子命令可用 `--help`查看参数：
+
+| 文件 | 职责 |
+|---|---|
+| [geometry.py](../../decision/vlm/seating/geometry.py) | 处理桌子轮廓和辅助桌边，采样、排序候选，提出观察位姿假设，并逐候选检查是否可规划。 |
+| [inputs.py](../../decision/vlm/seating/inputs.py) | 从 bag 抽帧，渲染并冻结单帧或三帧输入，准备辅助桌边复核。 |
+| [inference.py](../../decision/vlm/seating/inference.py) | 记录候选集合身份，生成动态 Schema，调用远程模型并保存原始响应。 |
+| [stage.py](../../decision/vlm/seating/stage.py) | 管理就座状态、完成条件、停止确认和导航反馈适配；实际反馈源仍待接入。 |
+
+### 输入与候选生成
+
+当前主入口使用近似桌子轮廓和三帧 RGB、BEV。窗口与 T1、T2 一致，选择前 1 秒、前 0.5 秒和当前的实际过去观察。图像共享布局、字体、浅色高度点云及颜色条，但不共用任务标签。
+
+每幅 BEV 使用对应帧的雷达坐标。过去帧显示当时扫描、自车和已知先验，当前帧显示本次 C 候选。保存输入时共同记录来源、RGB 时间、位姿、图像摘要和候选集合，拒绝未来观察或跨定位会话拼接。
+
+| 输入 | 需要提供的内容 |
+|---|---|
+| 指令 | 要选择方便的桌边停靠位置，并允许多个合理位置。略斜停、脚踏进入桌下等要求应明确写出。 |
+| 桌子先验 | 同一局部坐标中的近似矩形、假设高度、来源和最早可用时间。补全角点不能当作实测。 |
+| 当前观察 | 有效算法定位、原始扫描及当前或过去 RGB，不要求已有 T1、T2 标签。 |
+| 车体参考 | 显式提供足迹和雷达与车体的相对位置。历史资料只作离线假设，见[导航几何参考](../navigation/技术实现-路径规划.md#轮椅几何历史参考)。 |
+
+候选生成沿四条桌边采样位置、朝向和带符号的前缘间距。每一种朝向分别检查足迹是否超出桌边范围，再按近期桌边下方回波、直线距离和转角排序。筛选时先保留不同桌边，再按空间间隔保留最多 8 个候选，策略由 [seating_geometry.json](../../decision/vlm/configs/seating_geometry.json)维护。
+
+前缘间距是“假设足迹最前点到桌边”的距离。只有明确允许探索桌下位置时才使用负值，不能据此允许整个车体或乘员穿过桌面。
+
+近期回波只提供部分高度带的阻碍线索，没有回波不能证明空闲。当前排序不使用真实路径代价，自动生成候选的 `geometry`仍为 `unknown`。模型可以选出语义合理的位置，但执行前还须几何检查。候选 ID 只在本集合内有效，对应关系和响应含义见[接口约定](../接口约定.md#t3目标点选择)。
+
+辅助桌边流程从当前 RGB 的人工区域选回波，累积过去证据拟合支持段，并保留来源截止时间，不自动外推为桌角。对应子命令为 `prepare-edge`和 `refine-edge`。`prepare`用于单帧场景或扫描诊断，当前轮廓流程使用下面的 `prepare-window`。
+
+### 准备与调用
+
+已有同源感知结果时，先用系统 ROS 解释器抽取少量观察。`offsets`相对 bag 起点，示例用三个相隔 0.5 秒的时刻组成窗口：
+
+```bash
+/usr/bin/python3 -B -m decision.vlm.seating extract \
+  --run /path/to/perception_run --bag /path/to/source.bag \
+  --offsets 31 31.5 32 --out /path/to/new_observations
+```
+
+定位失效时，抽帧不会退回旧的有效帧；RGB 只使用当前或过去消息。程序保留原运行时钟：直接运行时为 `runtime_bag/runtime_live`，旧 ROS 回放为 `ros_sim_time`。只有来源没有记录且无法明确推断时，才指定 `--clock-domain`，不能用它覆盖冲突记录。
+
+需要规划对照时，在抽帧命令中增加 `--scenes /path/to/current_scene`。当前扫描必须与场景时间、位姿及定位会话一致，也可以依次提供三份同时间场景。派生观察保留原扫描 ID 和场景摘要，不修改源文件，也不为旧冻结候选重新赋予身份。
+
+随后在项目环境生成候选和模型输入，再显式调用远程服务：
+
+```bash
+python -B -m decision.vlm.seating prepare-window \
+  --observations /path/to/new_observations/O00 /path/to/new_observations/O01 /path/to/new_observations/O02 \
+  --table-prior /path/to/table_prior.json \
+  --vehicle-reference configs/wheelchair_geometry_reference.json \
+  --instruction "在这张桌子旁选择方便的轮椅就座位置，允许略斜停靠，脚踏可以进入桌下。" \
+  --out /path/to/new_input
+python -B -m decision.vlm.seating run \
+  --input /path/to/new_input --base-url http://127.0.0.1:30000/v1
+```
+
+准备阶段不调用模型。也可以用 `--candidates /path/to/candidates.json`替代先验、车体和指令参数，读取完整且来源已记录的候选集合。`--current-only`仅用于单帧图像对照，生成候选时仍可使用因果历史。
+
+输出目录必须为新目录。推理前先确认远程 DSPARK 可用，每份输入显式预热一次、正式请求一次，保存原始结果，失败即停。新实验使用新的 `--result-name`，手工指定 Prompt 使用 `--prompt`，不自动转到本地模型。
+
+候选与同一份真实场景对应时，可独立检查导航能否规划到各点，不调用 VLM：
+
+```bash
+python -B -m decision.vlm.seating check-navigation \
+  --input /path/to/new_input --scene /path/to/current_scene \
+  --out /path/to/new_navigation_check
+```
+
+该命令复用当前参考规划、足迹和运动配置，检查最多 8 个候选。桌边候选的车体假设必须与导航一致；运动配置不允许倒退时，不规划倒退动作。
+
+结果另存为 `navigation.json`，可查看路径或拒绝原因。它不会修改冻结候选的 `geometry=unknown`，也不会自动改变模型答案或证明实际停靠成功。当前候选排序仍只用局部证据、距离和转角，没有用这些结果重新训练或替换策略。
+
+统一入口按子命令加载依赖：`extract`用系统 ROS，其余准备和推理用项目环境。Prompt、近距路由和 BEV 范围由 [project.json](../../decision/vlm/configs/project.json)维护。路由仅按当前假设车体与候选的距离和转角决定；近距时补充小幅调整提示，不根据模型答案临时更换 Prompt。
+
+模型先判断 RGB 是否足以比较停靠位置，再选择候选。历史帧可以帮助确认桌子，但绿色先验轮廓不能替代当前视觉证据。朝向沙发等无关区域时可以返回证据不足；看到桌沿或桌下时，不要求完整桌面都可见。
+
+同一段开发数据的对照不能证明三帧必然优于单帧，也不能证明已找到全局最方便位置。评测范围见[数据与评测](../experiments/数据与评测.md#t3选点与就座阶段)。
+
+### 阶段与完成反馈
+
+`from decision.vlm.seating.stage import SeatingStage, CompletionLimits`提供进程内 API，不是 ROS 运动节点。调用者显式提供任务身份、完成容差和超时，依次调用 `select → geometry → observe`，并周期调用 `tick`检查超时。
+
+选点后，阶段先请求验证目标。只有收到同任务、同候选且尚未过期的几何反馈，才请求导航。`n/u`当前直接返回失败原因，不自动移动或重试。
+
+成功需要同时满足位置、朝向、桌边关系、定位和几何条件。实际线速度与角速度还须达到停车要求，并连续保持；随后阶段请求停止，收到新鲜停止确认后才返回成功。取消、超时和失效时，也根据控制是否激活请求停止，缺反馈不能算完成。
+
+完成容差由实际设备和任务定义提供，不能用演示末帧或模型回答代替。导航适配接口为 `observe_navigation(request, feedback, navigation_state=..., geometry_valid=..., table_relation_valid=..., now_s=...)`：
+
+- `request`来自同任务的 `TaskPolicy`。
+- `feedback`包含任务、目标修订、原请求摘要、定位会话、源时钟和时间、实测 `pose/velocity`、状态及停止确认，并声明真实来源和 `execution_feedback=true`。
+- 默认只接受 `scope=robot`。仿真须同时提供 `simulation=True`与 `scope=simulation`，结果保留仿真标记。
+- 影子建议和请求接收 ACK 均拒绝。`navigation_state`、桌边关系及几何有效性须来自对应检查，不能由 VLM 或候选选择补造。
+
+### 闭环联调待办
+
+地图表示、参考规划、局部控制和独立安全已有实现，T3 也有同源数据检查、逐候选规划和阶段反馈适配。下一步是把这些接口接入持续任务执行，不再针对同一批窗口反复搜索 Prompt。未完成事项统一见[感知导航待办](../感知导航待办与数据采集.md)，具体接入要点如下：
+
+1. 接入人工地图桌子标注、地图身份和有效地图到局部坐标的变换，核对车体、脚踏、扶手和乘员包络，再检查净空、路径及到达方式。
+2. 接通观察位姿的导航执行和补充观察调度。现有 `observation_goals`只根据桌外位置、相机视野比例和直线距离提出假设，没有处理遮挡，必须用实拍检查观察收益。没有可达观察点或补充次数用尽时返回原因。
+3. 接 Agent 工具以及真实导航和停止反馈，验收成功、失败、取消和超时。目标调度采用事件触发：证据充分时主要做选点，取得新观察或原目标失效后才重选；正常运动由本地导航维持目标，不采用持续周期调用。
+
+后续测试分别评价候选生成、模型选择、主动观察和真实执行。同一 bag 的视角来自原驾驶过程，不能记为算法执行观察目标的成果。唯一的本机结果入口见[环境记录](../../ENVIRONMENT.local.md)。

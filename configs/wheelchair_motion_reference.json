@@ -1,0 +1,41 @@
+{
+  "status": "historical_planner_settings_not_measured_hardware_limits",
+  "source_image": {
+    "name": "navigation_zhao:latest",
+    "id": "sha256:a4058147a1c4d8358ede0e59a3ed3eb06bd3650c067329c9f295a40ad7fe6468"
+  },
+  "inspection": {"container_started": false, "network": "none", "root_read_only": true},
+  "profiles": {
+    "teb": {
+      "source": "/home/wheel_nav/src/navigation/move_base/config/teb_local_planner_params.yaml",
+      "source_sha256": "9712684e93df4e436829ac92d0abc20d8e9413b5fdff1f293240ce4099b12672",
+      "loaded_by": "/home/wheel_nav/src/navigation/move_base/launch/move_base_lei.launch",
+      "launch_sha256": "9e573af956050d0e6bf9d4c752591c53299ba1e8a307a93149954f7301928d16",
+      "fields": {
+        "max_vel_x": 0.8, "max_vel_x_backwards": 0.2, "max_vel_theta": 0.32,
+        "acc_lim_x": 0.24, "acc_lim_theta": 0.24, "min_turning_radius": 1.12,
+        "free_goal_vel": false, "max_global_plan_lookahead_dist": 5.0,
+        "dt_ref": 0.4, "dt_hysteresis": 0.08, "controller_frequency": 20.0
+      }
+    },
+    "dwa": {
+      "source": "/home/wheel_nav/src/navigation/move_base/config/dwa_local_planner_params.yaml",
+      "source_sha256": "b7fc522648be6e081f1f509d452267a228462444ac85464a2a77ab4b71347fef",
+      "fields": {
+        "max_vel_x": 0.6, "max_trans_vel": 0.4, "min_vel_x": 0.0,
+        "max_rot_vel": 0.4, "acc_lim_x": 0.36, "acc_lim_th": 0.3
+      }
+    }
+  },
+  "adoption": {
+    "scope": "offline_reference_profile_only",
+    "selected_profile": "teb",
+    "selected_fields": ["max_vel_x", "max_vel_x_backwards", "max_vel_theta", "acc_lim_x", "acc_lim_theta"],
+    "braking_model": "symmetric_acc_lim_assumption_not_measured_braking",
+    "not_adopted": {
+      "min_turning_radius": "Not adopted as a measured hardware limit. The separate development motion policy references this value as an assumed finite radius while retaining differential kinematics.",
+      "footprint": "Keep the existing sourced convex wheelchair footprint, not the old TEB line segment.",
+      "free_goal_vel": "Decide from current pass-through/stop intent, not this historical global setting."
+    }
+  }
+}

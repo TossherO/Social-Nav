@@ -1,88 +1,28 @@
-"""Static contract tests; dynamic IDs/causality require a deployment validator."""
-
-import json
-import re
+"""Current wheelchair task semantics, independent of model or service availability."""
 import unittest
-from pathlib import Path
-
-from jsonschema import Draft202012Validator
-
-
-ROOT = Path(__file__).resolve().parents[1]
-SCHEMA = json.loads((ROOT / "decision/vlm/configs/schemas/social_nav_prompt.json").read_text())
-
-
-def validator(mode):
-    return Draft202012Validator({
-        "$schema": SCHEMA["$schema"],
-        "$defs": SCHEMA["$defs"],
-        "$ref": f"#/$defs/{mode}",
-    })
+from jsonschema import Draft202012Validator,ValidationError
+from decision.vlm.vlm_api_common import groups_schema,validate_groups
+from decision.vlm.follow import appearance_schema,follow_schema,validate_decision
 
 
 class PromptSchemaTests(unittest.TestCase):
-    def test_schema_valid(self):
-        Draft202012Validator.check_schema(SCHEMA)
+    def test_groups_are_dynamic_and_cross_group_overlap_is_rejected(self):
+        schema=groups_schema([0,1,2,3]);Draft202012Validator.check_schema(schema)
+        validate_groups({'walking':[[0,1]],'talking':[[2,3]]},[0,1,2,3],schema)
+        for raw in [{'walking':[[0,1]],'talking':[[1,2]]},{'walking':[[0,9]]},
+                    {'walking':[[False,1]]},{'g':[],'u':[]}]:
+            with self.subTest(raw=raw),self.assertRaises((ValueError,ValidationError)):
+                validate_groups(raw,[0,1,2,3],schema)
 
-    def test_legacy_appendix_examples_remain_valid(self):
-        document = (ROOT / "docs/archive/旧版方案.md").read_text().split("## 附录 A：主接口与 Prompt 契约", 1)[1]
-        examples = re.findall(r"```json\n(.*?)\n```", document, re.DOTALL)
-        self.assertGreaterEqual(len(examples), 7)
-        checker = Draft202012Validator(SCHEMA)
-        for example in examples:
-            with self.subTest(example=example):
-                checker.validate(json.loads(example))
+    def test_less_than_two_people_allows_only_empty_groups(self):
+        for pids in [[],[0]]:
+            validate_groups({},pids)
+            with self.assertRaises(ValidationError):validate_groups({'walking':[[0,1]]},pids)
 
-    def test_current_document_response_examples(self):
-        found = set()
-        names = ('系统方案.md', 'experiments/数据与评测.md', 'experiments/JRDB参考.md', '开发指南.md')
-        for name in names:
-            document = (ROOT / 'docs' / name).read_text(encoding='utf-8')
-            for example in re.findall(r'```json\n(.*?)\n```', document, re.DOTALL):
-                response = json.loads(example)
-                # Dataset snippets, split designs and artificial RLE placeholders
-                # are not model responses and have their own documented format.
-                if not isinstance(response, dict) or not {'g', 'u', 'p'} & set(response):
-                    continue
-                mode = 'GOAL' if 'p' in response else 'REL_FOLLOW' if {'id', 's'} & set(response) else 'REL'
-                with self.subTest(document=name, example=example):
-                    validator(mode).validate(response)
-                found.add(mode)
-        self.assertEqual(found, {'REL', 'REL_FOLLOW', 'GOAL'})
-
-    def test_mode_mismatch_rejected(self):
-        self.assertFalse(validator("REL").is_valid({"p": -1, "s": "u"}))
-        self.assertFalse(validator("GOAL").is_valid({"g": [], "u": []}))
-
-    def test_invalid_static_cases(self):
-        cases = [
-            ("REL", {"g": [{"m": [1], "r": "w", "k": 0}], "u": []}),
-            ("REL", {"g": [{"m": [1, 1], "r": "w", "k": 0}], "u": []}),
-            ("REL", {"g": [{"m": [1, 2], "r": "t", "k": 1}], "u": []}),
-            ("REL", {"g": [], "u": [100]}),
-            ("REL", {"g": []}),
-            ("REL_FOLLOW", {"g": [], "u": [], "id": -1, "s": "v"}),
-            ("REL_FOLLOW", {"g": [], "u": [], "id": 2, "s": "a"}),
-            ("GOAL", {"p": 8, "s": "v"}),
-            ("GOAL", {"p": -1, "s": "v"}),
-            ("GOAL", {"p": 2, "s": "u"}),
-            ("GOAL", {"p": -1, "s": "n", "reason": "extra"}),
-        ]
-        for mode, response in cases:
-            with self.subTest(mode=mode, response=response):
-                self.assertFalse(validator(mode).is_valid(response))
-
-    def test_twenty_person_structures(self):
-        groups = [{"m": [n, n + 1], "r": "w", "k": 0} for n in range(0, 20, 2)]
-        validator("REL_FOLLOW").validate({"g": groups, "u": [], "id": 19, "s": "v"})
-        validator("REL").validate({"g": [], "u": list(range(20))})
-
-    def test_dynamic_overlap_not_claimed_as_static_validation(self):
-        # This is intentionally schema-valid, but the deployment validator MUST
-        # reject overlap between g and u. Do not mistake these tests for it.
-        response = {"g": [{"m": [1, 2], "r": "q", "k": 1}], "u": [1]}
-        self.assertTrue(validator("REL").is_valid(response))
+    def test_appearance_and_history_states_cannot_be_interchanged(self):
+        with self.assertRaises(ValidationError):validate_decision({'id':0,'state':'visible'},appearance_schema([0]))
+        schema=follow_schema([0],dict(confirmed_before=False,hold_allowed=False))
+        with self.assertRaises(ValidationError):validate_decision({'id':0,'state':'occluded'},schema)
 
 
-if __name__ == "__main__":
-    unittest.main()
+if __name__=='__main__':unittest.main()

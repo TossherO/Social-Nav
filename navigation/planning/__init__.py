@@ -1,1 +1,1 @@
-"""Not implemented: global route/path planning and local trajectory planning."""
+"""Observation-bound paths and local trajectories; no motion or task-success output."""

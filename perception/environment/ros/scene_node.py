@@ -9,9 +9,8 @@ import time
 from perception.environment.context import query_scene
 from perception.environment.layers import load_config
 from perception.environment.scene import assemble_scene, latest_past, snapshot_from_message, live_scene_status
-from perception.environment.live_memory import PoseBuffer
-from perception.environment.storage import MemoryReader
-from perception.environment.prior import PriorMap, live_prior_status
+from perception.environment.poses import PoseBuffer
+from perception.environment.prior import StaticPriorView, live_prior_status
 from perception.sensors.image import rgb_array
 
 
@@ -21,13 +20,14 @@ class SceneNode:
         from std_msgs.msg import String
         from std_srvs.srv import Trigger
         from social_nav_environment.msg import EnvironmentGrid
+        from rospy.numpy_msg import numpy_msg
         from social_nav_localization.msg import LocalizationState, MapAssociation
         from nav_msgs.msg import OccupancyGrid
         from social_nav_environment.srv import QueryEnvironment
         self.rospy,self.String = rospy,String
         self.config = load_config(rospy.get_param('~config'))
         self.settings = self.config['scene']
-        for name in ('queue_size','cache_size','history_limit'):
+        for name in ('queue_size','cache_size'):
             if type(self.settings[name]) is not int or self.settings[name] <= 0:
                 raise ValueError('Scene cache/queue budgets must be positive integers')
         for name in ('join_wait_s','max_rgb_age_s','max_people_age_s','max_people_pose_age_s','max_association_age_s'):
@@ -41,18 +41,17 @@ class SceneNode:
         self.records = (self.output/'scenes.jsonl').open('x')
         self.clock = 'ros_sim_time' if rospy.get_param('/use_sim_time',False) else 'ros_time'
         self.people_enabled = rospy.get_param('~people_enabled',False)
-        self.memory_dir = rospy.get_param('~memory_dir','')
-        prior_dir = rospy.get_param('~prior_map','')
-        self.prior_map = None
+        prior_dir = rospy.get_param('~static_map',rospy.get_param('~prior_map',''))
+        self.prior_view = None
         if prior_dir:
             from perception.mapping_localization.results import map_fingerprint
-            self.prior_map = PriorMap(prior_dir,expected_map=map_fingerprint(rospy.get_param('~map_dir')))
+            self.prior_view = StaticPriorView(prior_dir,expected_map=map_fingerprint(rospy.get_param('~map_dir')))
         self.association = None
         self.retired_associations = deque(maxlen=32)
         self.displayed_prior = 'uninitialized'
         self.OccupancyGrid = OccupancyGrid
         self.condition = threading.Condition(threading.RLock())
-        self.poses = PoseBuffer(self.config['memory'])
+        self.poses = PoseBuffer(self.config['poses'])
         self.queue,self.images,self.people = deque(),deque(maxlen=64),deque(maxlen=64)
         self.cache = OrderedDict()
         self.retired = deque(maxlen=32)
@@ -65,10 +64,10 @@ class SceneNode:
         self.pub = rospy.Publisher(prefix,String,queue_size=1)
         self.state_pub = rospy.Publisher(prefix+'/state',String,queue_size=1,latch=True)
         self.prior_pub = rospy.Publisher(prefix+'/prior/occupancy',OccupancyGrid,queue_size=1,latch=True)
-        self.subscribers = [rospy.Subscriber(self.config['output_topic']+'/grid',EnvironmentGrid,self.grid,queue_size=2),
-            rospy.Subscriber(self.config['memory']['rgb_topic'],Image,self.image,queue_size=2,buff_size=8*1024*1024),
+        self.subscribers = [rospy.Subscriber(self.config['output_topic']+'/grid',numpy_msg(EnvironmentGrid),self.grid,queue_size=2,buff_size=8*1024*1024),
+            rospy.Subscriber(self.settings['rgb_topic'],Image,self.image,queue_size=2,buff_size=8*1024*1024),
             rospy.Subscriber(self.config['localization_topic'],LocalizationState,self.pose,queue_size=32)]
-        if self.prior_map is not None:
+        if self.prior_view is not None:
             self.subscribers.append(rospy.Subscriber('/localization/map_association',MapAssociation,self.associate,queue_size=8))
         if self.people_enabled:
             self.subscribers.append(rospy.Subscriber(self.settings['people_topic'],String,self.person,queue_size=8))
@@ -130,20 +129,6 @@ class SceneNode:
         except (ValueError,TypeError) as error:
             self.rospy.logerr_throttle(5,'Scene rejected people input: '+str(error))
 
-    def history(self, meta):
-        if not self.memory_dir:
-            return [],'not_enabled'
-        if not (Path(self.memory_dir)/'observations.sqlite').is_file():
-            return [],'not_ready'
-        reader = MemoryReader(self.memory_dir)
-        try:
-            rows = reader.query(dict(operation='query_observations',memory_id=reader.binding['memory_id'],
-                session_id=meta['session_id'],generation=meta['generation'],frame=meta['frame_id'],
-                as_of=meta['stamp_s'],limit=self.settings['history_limit']))['observations']
-            return rows,'valid' if rows else 'empty'
-        finally:
-            reader.close()
-
     def work(self):
         try:
             while True:
@@ -177,14 +162,13 @@ class SceneNode:
                 if selected is not None:
                     image = selected['message']
                     rgb = dict(stamp_s=selected['stamp_s'],frame_id=image.header.frame_id,pixels=rgb_array(image),
-                        reference=dict(kind='ros_topic',topic=self.config['memory']['rgb_topic'],
+                        reference=dict(kind='ros_topic',topic=self.settings['rgb_topic'],
                             stamp_ns=image.header.stamp.to_nsec(),frame_id=image.header.frame_id,
                             message_sha256=hashlib.sha256(image.data).hexdigest()))
-                observations,memory_status = self.history(snapshot.metadata)
                 bundle = assemble_scene(snapshot,clock_domain=self.clock,rgb=rgb,people=people,
-                    observations=observations,memory_status=memory_status,settings=self.settings)
-                if self.prior_map is not None:
-                    bundle = self.prior_map.attach(bundle,self.settings)
+                    settings=self.settings)
+                if self.prior_view is not None:
+                    bundle = self.prior_view.attach(bundle,self.settings)
                 data = json.dumps(bundle.record,ensure_ascii=False,allow_nan=False)
                 with self.condition:
                     self.latest = bundle

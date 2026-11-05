@@ -1,0 +1,24 @@
+# Assumed development limits, not measured hardware limits.
+# The historical profile name records provenance; no historical controller is loaded.
+model: differential
+parameters_assumed: true
+collision_backend: cpu
+collision_library: outputs/navigation/build/libsocial_nav_collision_cuda.so
+min_turning_radius_m: 1.12
+performance_reference: configs/wheelchair_motion_reference.json
+performance_profile: teb
+# Reverse capability confirmed by the user; numeric speed/braking limits remain assumed.
+allow_reverse: true
+reverse_tolerance_mps: 0.005
+max_initial_lateral_mps: 0.08
+max_initial_profile_ratio: 2.0
+state_window_s: 0.35
+state_max_age_s: 0.15
+state_max_gap_s: 0.16
+stationary_min_window_s: 0.2
+stationary_position_span_m: 0.004
+stationary_yaw_span_rad: 0.006
+stationary_max_linear_mps: 0.03
+stationary_max_angular_rps: 0.04
+max_result_age_s: 0.5
+brake_deceleration_scale: 0.75

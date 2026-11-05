@@ -55,19 +55,29 @@ def transform_boxes(boxes, parent_from_sensor):
     boxes = validate_boxes(boxes)
     transform = validate_transform(parent_from_sensor)
     result = boxes.copy()
-    for index, box in enumerate(boxes):
-        points = corners_xyz(box) @ transform[:3, :3].T + transform[:3, 3]
-        direction = transform[:3, :3] @ np.array([np.cos(box[6]), np.sin(box[6]), 0])
-        if np.linalg.norm(direction[:2]) < 1e-6:
-            raise ValueError('Box longitudinal direction is vertical; upright heading undefined')
-        yaw = np.arctan2(direction[1], direction[0])
-        c, s = np.cos(yaw), np.sin(yaw)
-        basis = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
-        local = points @ basis
-        low, high = local.min(axis=0), local.max(axis=0)
-        result[index, :3] = ((low + high) / 2) @ basis.T
-        result[index, 3:6] = high - low
-        result[index, 6] = wrap_angle(yaw)
+    if not len(boxes):
+        return result
+    c, s = np.cos(boxes[:, 6]), np.sin(boxes[:, 6])
+    rotation = np.stack((c, -s, s, c), axis=1).reshape(-1, 2, 2)
+    signs = np.array([[-1, -1], [1, -1], [1, 1], [-1, 1]])
+    xy = (signs[None]*boxes[:, None, 3:5]/2) @ rotation.transpose(0, 2, 1)+boxes[:, None, :2]
+    points = np.concatenate([np.concatenate((xy, np.broadcast_to(
+        (boxes[:, 2]+sign*boxes[:, 5]/2)[:, None, None], (len(boxes), 4, 1))), axis=2)
+        for sign in (-1, 1)], axis=1)
+    points = points @ transform[:3, :3].T+transform[:3, 3]
+    direction = np.c_[c, s, np.zeros(len(boxes))] @ transform[:3, :3].T
+    if np.any(np.linalg.norm(direction[:, :2], axis=1) < 1e-6):
+        raise ValueError('Box longitudinal direction is vertical; upright heading undefined')
+    yaw = np.arctan2(direction[:, 1], direction[:, 0])
+    c, s = np.cos(yaw), np.sin(yaw)
+    basis = np.zeros((len(boxes), 3, 3))
+    basis[:, 0, 0], basis[:, 0, 1] = c, -s
+    basis[:, 1, 0], basis[:, 1, 1], basis[:, 2, 2] = s, c, 1
+    local = points @ basis
+    low, high = local.min(axis=1), local.max(axis=1)
+    result[:, :3] = (((low+high)/2)[:, None] @ basis.transpose(0, 2, 1))[:, 0]
+    result[:, 3:6] = high-low
+    result[:, 6] = (yaw+np.pi) % (2*np.pi)-np.pi
     return result
 
 

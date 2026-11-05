@@ -2,6 +2,8 @@
 # Install torch from https://download.pytorch.org/whl/cu130 first.
 # Install torch-scatter==2.1.2 separately with --no-build-isolation after this file.
 # Build the repository's four CUDA extensions against CUDA Toolkit 13.0.
+# Optional YOLO/TensorRT additions: perception/detection_tracking/inference/requirements-image.txt.
+# Fused CUDA tracking uses the Triton dependency matched by this PyTorch build (JIT at tracker initialization).
 torch==2.13.0+cu130
 # Keep bindings/JIT on the CUDA 13.0 series instead of following later minors.
 cuda-bindings==13.0.3

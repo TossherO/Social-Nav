@@ -13,13 +13,23 @@ def arguments(argv=None):
     prepare.add_argument('--bag', nargs='+', help='按results顺序显式定位bag；默认从run.json读取')
     prepare.add_argument('--output', required=True)
     prepare.add_argument('--ros-python', default='/usr/bin/python3')
-    prepare.add_argument('--calibration', default=str(Path(__file__).resolve().parents[3] / 'perception/sensors/calibration/front_camera_lidar.yaml'))
+    prepare.add_argument('--calibration',help='相机—雷达外参；已记录二维结果时优先使用其封存参数，旧结果默认使用仓库前视外参')
     prepare.add_argument('--pointcloud-topic', default='/rslidar_points')
     prepare.add_argument('--rgb-topic', default='/camera/color/image_raw')
     prepare.add_argument('--camera-info-topic', default='/camera/color/camera_info')
+    prepare.add_argument('--max-rgb-age', type=float, default=.1, help='仅选扫描前此秒数内的RGB，默认0.1')
     prepare.add_argument('--root-group', help='共同原始采集来源；同一长bag切片须一致')
     prepare.add_argument('--start', type=float, default=0)
     prepare.add_argument('--duration', type=float)
+    prepare.add_argument('--with-rgb-associations',action='store_true',help='准备默认RGB关联；已有在线记录直接导入，旧结果需要Linux检测环境运行YOLO')
+    prepare.add_argument('--rgb-output',help='关联缓存目录；默认位于新工程内的rgb_association/')
+    prepare.add_argument('--image-device',default='0',help='可见设备内的YOLO GPU索引')
+    prepare.add_argument('--recompute-rgb',action='store_true',help='显式重算二维；默认导入感知已保存的关联')
+    rgb = commands.add_parser('prepare-rgb',help='准备／恢复二维关联，或登记已有完整缓存；不重跑定位和三维模型')
+    rgb.add_argument('--project',required=True)
+    rgb.add_argument('--output',help='二维缓存目录；完整兼容缓存直接登记，默认使用工程已登记路径或工程内rgb_association/')
+    rgb.add_argument('--device',default='0')
+    rgb.add_argument('--recompute',action='store_true',help='显式重算；默认复用已保存的二维结果')
     opened = commands.add_parser('open', help='独立Qt客户端')
     location = opened.add_mutually_exclusive_group(required=True)
     location.add_argument('--project')
@@ -44,8 +54,12 @@ def arguments(argv=None):
     drafts.add_argument('--output', required=True)
     args = parser.parse_args(argv)
     if args.command == 'prepare':
+        if not args.with_rgb_associations and (args.rgb_output or args.image_device != '0' or args.recompute_rgb):
+            parser.error('rgb-output／image-device需要--with-rgb-associations')
         if not math.isfinite(args.start) or args.start < 0 or (args.duration is not None and (not math.isfinite(args.duration) or args.duration <= 0)):
             parser.error('start须非负、duration须为正有限秒数')
+        if not math.isfinite(args.max_rgb_age) or args.max_rgb_age <= 0:
+            parser.error('max-rgb-age须为正有限秒数')
     if args.command == 'serve' and not 1 <= args.port <= 65535:
         parser.error('端口错误')
     return args
@@ -56,6 +70,9 @@ def main(argv=None):
     if args.command == 'prepare':
         from .prepare import prepare
         prepare(args)
+    elif args.command == 'prepare-rgb':
+        from .rgb_preparation import prepare_rgb
+        prepare_rgb(args.project,args.output,args.device,recompute=args.recompute)
     elif args.command == 'serve':
         from .service import serve
         serve(args)
@@ -64,7 +81,7 @@ def main(argv=None):
         run(args)
     elif args.command == 'export':
         from .export import export_project
-        print(json.dumps(export_project(args.project, args.output, args.include_inputs), ensure_ascii=False))
+        print(json.dumps(export_project(args.project,args.output,args.include_inputs), ensure_ascii=False))
     elif args.command == 'package-client':
         from .package_client import package_client
         print('打包文件数：' + str(package_client(args.output)))

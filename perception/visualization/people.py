@@ -13,6 +13,30 @@ from perception.detection_tracking.inference.geometry import corners_xyz, valida
 EDGES = [(i, (i//4)*4+(i+1)%4) for i in range(8)] + [(i, i+4) for i in range(4)]
 
 
+def render_rgb_associations(pixels,people,result):
+    """Display-only overlay; raw pixels, detections and identities remain unchanged."""
+    import cv2
+    output=np.asarray(pixels).copy()
+    labels=[]
+    for person in people:
+        record=result['tracks'].get(person['key'],{})
+        if record.get('status')!='matched' or record.get('rgb_box') is None:continue
+        x1,y1,x2,y2=np.rint(record['rgb_box']).astype(int)
+        color=(0,210,255) if person.get('observed') else (255,168,64)
+        cv2.rectangle(output,(x1,y1),(x2,y2),color,2)
+        label='ID '+person['key'].rsplit(':',1)[-1]
+        (width,height),_=cv2.getTextSize(label,cv2.FONT_HERSHEY_SIMPLEX,.5,1)
+        left=max(0,min(x1,output.shape[1]-width-6));bottom=max(height+6,y1-5)
+        for _ in range(len(labels)+1):
+            rect=(left,bottom-height-5,left+width+5,bottom+2)
+            if not any(min(rect[2],r[2])>max(rect[0],r[0]) and min(rect[3],r[3])>max(rect[1],r[1]) for r in labels):break
+            bottom=max(height+6,bottom-height-9)
+        labels.append(rect)
+        cv2.rectangle(output,rect[:2],rect[2:],(18,27,38),-1)
+        cv2.putText(output,label,(left+2,bottom-2),cv2.FONT_HERSHEY_SIMPLEX,.5,(240,245,250),1,cv2.LINE_AA)
+    return output
+
+
 class PeopleScene:
     def __init__(self, history_s=3.0, max_history_points=32):
         if not math.isfinite(history_s) or history_s <= 0 or max_history_points < 2:

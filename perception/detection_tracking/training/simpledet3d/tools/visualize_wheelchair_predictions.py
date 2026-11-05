@@ -34,9 +34,9 @@ from simple_det3d.datasets.weak_label_utils import (  # noqa: E402
 
 
 DEFAULT_CFG = 'configs/voxelrcnn_wheelchair_weak_stage3.yaml'
-DEFAULT_CKPT = str(
-    PROJECT_ROOT.parents[3] / 'models/wheelchair_detector/1frame/checkpoints/detector_best.pth'
-)
+REPOSITORY = PROJECT_ROOT.parents[3]
+CURRENT_DETECTOR = json.loads((REPOSITORY / 'perception/detection_tracking/configs/inference.json').read_text())['detector']
+DEFAULT_CKPT = str(REPOSITORY / CURRENT_DETECTOR['checkpoint'])
 SELECTION_MODES = (
     'missed', 'matched', 'crowded', 'low_support',
     'random', 'uniform', 'all',
@@ -48,7 +48,7 @@ def parse_args():
         description='Run a trained detector and visualize Wheelchair predictions in BEV',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument('--cfg_file', default=DEFAULT_CFG)
+    parser.add_argument('--cfg_file', default=None, help='Explicit experiment config; otherwise use current inference profile with legacy visualization data')
     parser.add_argument('--ckpt', default=DEFAULT_CKPT)
     parser.add_argument(
         '--info_path', nargs='+', default=None,
@@ -82,7 +82,7 @@ def parse_args():
         '--frame_id', action='append', default=None,
         help='Restrict to an exact token such as indoor1/sequence2_001/0001; repeatable',
     )
-    parser.add_argument('--score_thresh', type=float, default=0.3,
+    parser.add_argument('--score_thresh', type=float, default=None,
                         help='Display/matching threshold; model inference is unchanged')
     parser.add_argument(
         '--final_nms_thresh', type=float, default=None,
@@ -613,7 +613,7 @@ def _resolve_project_path(path):
 
 
 def _validate_args(args):
-    if not 0 <= args.score_thresh <= 1:
+    if args.score_thresh is not None and not 0 <= args.score_thresh <= 1:
         raise ValueError('--score_thresh must be in [0, 1]')
     if args.final_nms_thresh is not None and not 0 <= args.final_nms_thresh <= 1:
         raise ValueError('--final_nms_thresh must be in [0, 1]')
@@ -661,7 +661,7 @@ def main():
         validate_precision_support,
     )
 
-    cfg_path = _resolve_project_path(args.cfg_file)
+    cfg_path = _resolve_project_path(args.cfg_file or DEFAULT_CFG)
     checkpoint_path = _resolve_project_path(args.ckpt)
     if not cfg_path.is_file():
         raise FileNotFoundError(cfg_path)
@@ -669,6 +669,14 @@ def main():
         raise FileNotFoundError(checkpoint_path)
 
     cfg = load_config(cfg_path)
+    if args.cfg_file is None:
+        current = load_config(REPOSITORY / CURRENT_DETECTOR['config'])
+        cfg.MODEL, cfg.PRECISION, cfg.CLASS_NAMES = current.MODEL, current.PRECISION, current.CLASS_NAMES
+        for key, value in current.DATA_CONFIG.items():
+            if key not in ('DATA_PATH', 'INFO_PATH'):
+                cfg.DATA_CONFIG[key] = value
+    if args.score_thresh is None:
+        args.score_thresh = float(cfg.MODEL.POST_PROCESSING.SCORE_THRESH)
     cfg.TAG = cfg_path.stem
     cfg.LOCAL_RANK = 0
     cfg.ROOT_DIR = PROJECT_ROOT

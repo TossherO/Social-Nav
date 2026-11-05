@@ -9,7 +9,7 @@ def input_fingerprint(points, sequence_id, observation_id, stamp_s, sensor_frame
     points = np.ascontiguousarray(points, dtype='<f4')
     digest = hashlib.sha256()
     digest.update(f'{sequence_id}\n{observation_id}\n{stamp_s:.17g}\n{sensor_frame}\n{points.shape}\n'.encode())
-    digest.update(points.tobytes())
+    digest.update(points)
     return digest.hexdigest()
 
 

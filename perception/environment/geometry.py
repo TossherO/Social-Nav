@@ -1,6 +1,24 @@
 """Observed ground support; no missing region is filled with a presumed floor."""
+from functools import lru_cache
 import numpy as np
 import cv2
+
+
+def voxel_height_band(ground, resolution, minimum, maximum):
+    """Integer world-Z keys and counts for an inclusive voxel-centre band.
+
+    The 1e-5-cell boundary tolerance matches resident CPU/CUDA projection.
+    Promote ground before arithmetic so float32 and float64 use the same lattice.
+    """
+    ground = np.asarray(ground, dtype=np.float64)
+    low = np.zeros(ground.shape, np.int64)
+    count = np.zeros(ground.shape, np.int32)
+    finite = np.isfinite(ground)
+    first = np.ceil((ground[finite]+minimum)/resolution-.5-1e-5).astype(np.int64)
+    last = np.floor((ground[finite]+maximum)/resolution-.5+1e-5).astype(np.int64)
+    low[finite] = first
+    count[finite] = np.maximum(0, last-first+1).astype(np.int32)
+    return low, count
 
 
 def nearest_support(mask):
@@ -16,6 +34,21 @@ def nearest_support(mask):
 
 def distance_to_zero(mask):
     return cv2.distanceTransform(mask.astype(np.uint8),cv2.DIST_L2,cv2.DIST_MASK_PRECISE)
+
+
+def ground_cell_statistics(points, origin, resolution, width):
+    """Order-independent median/MAD of unique observed points in each XY cell."""
+    points=np.unique(np.asarray(points),axis=0)
+    if not len(points):return np.empty(0,int),np.empty(0),np.empty(0),np.empty(0,int)
+    xy=np.floor((points[:,:2]-origin)/resolution).astype(int)
+    keys=xy[:,1]*width+xy[:,0]
+    order=np.lexsort((points[:,2],keys));keys=keys[order];z=points[order,2]
+    cells,start,count=np.unique(keys,return_index=True,return_counts=True)
+    def middle(values):return (values[start+(count-1)//2]+values[start+count//2])/2
+    median=middle(z)
+    deviations=np.abs(z-np.repeat(median,count))
+    deviation_order=np.lexsort((deviations,keys))
+    return cells,median,middle(deviations[deviation_order]),count
 
 
 def interpolate_origins(offset_ms, stamp, samples, max_gap):
@@ -48,26 +81,43 @@ def ground_plane(points, sensor, config):
             (d[:,2] < -config['ground_min_below_sensor_m']) &
             (d[:,2] > -config['ground_max_below_sensor_m']))
     samples = points[keep]
+    return fit_ground_plane(samples, config)
+
+
+@lru_cache(maxsize=64)
+def _ground_sample_indices(count):
+    """The original forty independent draws, reused only for the same count."""
+    random = np.random.default_rng(0)
+    indices = np.array([random.choice(count, 3, replace=False) for _ in range(40)])
+    indices.flags.writeable = False
+    return indices
+
+
+def fit_ground_plane(samples, config):
+    """Fit already range/height-filtered points with the original sample budget."""
     if len(samples) < config['ground_min_points']:
         return None
     # The fit budget is independent of full scan density.
     samples = samples[::max(1, int(np.ceil(len(samples)/3000)))]
     xy = np.c_[samples[:,:2], np.ones(len(samples))]
-    random = np.random.default_rng(0)
-    best = None
-    for _ in range(40):
-        index = random.choice(len(samples), 3, replace=False)
-        if abs(np.linalg.det(xy[index])) < 1e-6:
-            continue
-        plane = np.linalg.solve(xy[index], samples[index,2])
-        if np.linalg.norm(plane[:2]) > np.tan(config['ground_max_slope_rad']):
-            continue
-        mask = np.abs(xy @ plane-samples[:,2]) <= config['ground_tolerance_m']
-        if best is None or mask.sum() > best[0]:
-            best = (int(mask.sum()), mask)
-    if best is None or best[0] < max(config['ground_min_points'], len(samples)*config['ground_min_ratio']):
+    indices = _ground_sample_indices(len(samples))
+    matrices = xy[indices]
+    valid = np.abs(np.linalg.det(matrices)) >= 1e-6
+    if not valid.any():
         return None
-    plane = np.linalg.lstsq(xy[best[1]], samples[best[1],2], rcond=None)[0]
+    planes = np.linalg.solve(matrices[valid], samples[indices[valid],2])
+    planes = planes[np.linalg.norm(planes[:,:2],axis=1) <= np.tan(config['ground_max_slope_rad'])]
+    if not len(planes):
+        return None
+    # Batched matrix-vector products keep each hypothesis's point order.
+    residual = np.abs((xy[None] @ planes[:,:,None])[...,0]-samples[None,:,2])
+    inliers = residual <= config['ground_tolerance_m']
+    counts = inliers.sum(axis=1)
+    best = int(np.argmax(counts))  # First maximum, matching the original tie rule.
+    if counts[best] < max(config['ground_min_points'], len(samples)*config['ground_min_ratio']):
+        return None
+    mask = inliers[best]
+    plane = np.linalg.lstsq(xy[mask], samples[mask,2], rcond=None)[0]
     if np.linalg.norm(plane[:2]) > np.tan(config['ground_max_slope_rad']):
         return None
     return plane

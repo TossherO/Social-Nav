@@ -90,6 +90,45 @@ class SceneTests(unittest.TestCase):
         np.testing.assert_array_equal(restored.layers['occupancy'],current.layers['occupancy'])
         self.assertEqual(restored.layers['observed'].dtype,bool)
 
+    def test_actual_ros_wire_preserves_history_masks_and_measurement_times(self):
+        import io
+        try:
+            from social_nav_environment.msg import EnvironmentGrid
+        except ImportError:
+            self.skipTest('Generated ROS messages unavailable; source ros1_env.sh')
+        from perception.environment.near_field import NearFieldFreeMemory
+        from perception.environment.scene import snapshot_from_message
+        from perception.environment.context import layer_binding
+        from tests.test_environment_near_field import sample
+        cfg=dict(load_config(),hit_invalidates_free=True)
+        memory=NearFieldFreeMemory(cfg,dict(remember_outside_ring=True,temporary_obstacle_overlay=True))
+        memory.update(sample(1,state=0),np.empty((0,3)))
+        current=memory.update(sample(10),np.empty((0,3)))
+        current.layers['person_background_free']=np.zeros(current.layers['occupancy'].shape,bool)
+        current.metadata['dynamic_navigation']=dict(policy='exclusive_person_on_certified_historical_free')
+        message=EnvironmentGrid();meta=current.metadata
+        message.snapshot_id=meta['snapshot_id'];message.session_id=meta['session_id'];message.generation=meta['generation']
+        message.header.frame_id=meta['frame_id'];message.header.stamp.secs=10
+        message.info.height,message.info.width=meta['shape'];message.info.resolution=meta['resolution']
+        message.info.origin.position.x,message.info.origin.position.y=meta['origin_xy']
+        message.metadata_json=json.dumps(meta)
+        for name,values in current.layers.items():setattr(message,name,values.ravel().tolist())
+        stream=io.BytesIO();message.serialize(stream)
+        from rospy.numpy_msg import numpy_msg
+        for message_type in (EnvironmentGrid,numpy_msg(EnvironmentGrid)):
+            received=message_type().deserialize(stream.getvalue());restored=snapshot_from_message(received)
+            self.assertEqual(layer_binding(restored),layer_binding(current))
+            self.assertEqual(restored.layers['last_observed'][40,45],1.)
+            self.assertIn('person_background_free',restored.layers)
+            self.assertTrue(all(not a.flags.writeable for a in restored.layers.values()))
+            encoded=io.BytesIO();received.serialize(encoded)
+            self.assertEqual(stream.getvalue(),encoded.getvalue())
+        received.person_background_free=b''
+        with self.assertRaisesRegex(ValueError,'dynamic person provenance'):snapshot_from_message(received)
+        received.person_background_free=bytes(current.layers['person_background_free'].size)
+        received.near_field_free=b''
+        with self.assertRaisesRegex(ValueError,'history provenance'):snapshot_from_message(received)
+
     def test_future_stale_clocks_and_local_lifecycles_are_not_merged(self):
         for change,reason in [(dict(stamp_s=10.1),'future_or_stale_people'),
                               (dict(stamp_s=8.),'future_or_stale_people'),
@@ -102,15 +141,13 @@ class SceneTests(unittest.TestCase):
         for stamp in (10.1,9.):
             self.assertEqual(self.assemble(rgb=rgb(stamp)).record['rgb']['status'],'missing')
 
-    def test_history_and_prior_are_bound_to_the_same_local_cutoff(self):
-        current=snapshot();history=dict(id='past',stamp_s=9.,pose_stamp_s=8.99,session_id='local',
-            generation=0,frame_id='odom',world_from_lidar=np.eye(4).tolist(),image_sha256='image')
+    def test_prior_is_bound_to_the_same_local_cutoff_without_visual_memory(self):
+        current=snapshot()
         current.metadata['association']=dict(valid=True,status='PRIOR_ASSOCIATED',stamp_s=10.,
             local_session_id='local',local_generation=0,measurement_stamp_s=9.9,
             map_from_local=np.eye(4).tolist(),map_id='map',association_generation=2)
-        scene=assemble_scene(current,clock_domain='synthetic',settings=self.settings,rgb=rgb(),people=person(),
-            observations=[history,dict(history,id='future',stamp_s=10.1),dict(history,id='other',generation=1)])
-        self.assertEqual([r['id'] for r in scene.record['memory']['observations']],['past'])
+        scene=assemble_scene(current,clock_domain='synthetic',settings=self.settings,rgb=rgb(),people=person())
+        self.assertNotIn('memory',scene.record)
         self.assertTrue(scene.record['prior']['valid'])
         current.metadata['association']['measurement_stamp_s']=9.
         stale=assemble_scene(current,clock_domain='synthetic',settings=self.settings).record['prior']
@@ -135,7 +172,7 @@ class SceneTests(unittest.TestCase):
             req=dict(operation='get_rgb',observation_id=bundle.record['observation_id'])
             self.assertEqual(query_scene(loaded,req,load_config()['consumer'])['data']['pixels_sha256'],
                              bundle.record['rgb']['sha256'])
-            from decision.agent.environment_tools import query_scene as agent_query
+            from decision.agent.tools.environment import query_scene as agent_query
             fact=agent_query(loaded,dict(req,operation='get_scene'))
             self.assertEqual(fact['data']['observation_id'],loaded.record['observation_id'])
             self.assertFalse(fact['navigation_reachability_verified'])

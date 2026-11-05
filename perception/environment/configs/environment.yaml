@@ -1,10 +1,37 @@
-resolution: 0.15
+# Shared XY grid resolution and occupancy voxel edge length, in metres.
+resolution: 0.10
+compute:
+  backend: cuda
+  device: 0
 window_m: 18.0
 max_height_m: 1.8
 min_obstacle_height_m: 0.12
-voxel_ttl_s: 8.0
+# Retain measured ground and voxel evidence through short near-field occlusion.
+# Confirmed people still use dynamic.transient_ttl_s; unknown is never filled.
+voxel_ttl_s: 16.0
+# Occupied evidence has a shorter life than measured free space/ground.
+# Expiration withdraws the obstacle to UNKNOWN; it never manufactures free rays.
+obstacle_ttl_s: 2.0
+# New hits withdraw earlier free odds in the current local evidence.
+# Offline full-map fusion retains its cumulative sensor model separately.
+hit_invalidates_free: true
+# Historical background is reused only within the nearest ground scan ring.
+near_field:
+  enabled: true
+  lowest_beam_deg: -15.0
+  max_radius_m: 3.5
+  boundary_margin_m: 0.15
+  max_sensor_tilt_rad: 0.35
+  ground_change_m: 0.15
+  remember_outside_ring: true
+  temporary_obstacle_overlay: true
+# Derived navigation view: measured static FREE over a confirmed floor, with
+# current/retained endpoints taking precedence. No generic UNKNOWN filling.
+navigation_support:
+  enabled: true
+  radius_m: 3.5
 max_range_m: 20.0
-max_rays: 2500
+max_rays: 5000
 max_voxels: 900000
 update_hz: 5.0
 # Deskewed endpoints do not contain moving ray origins. Ray updates require
@@ -19,11 +46,25 @@ ground_min_points: 30
 ground_min_ratio: 0.2
 ground_max_slope_rad: 0.26
 ground_support_radius_m: 0.45
+ground_tracking:
+  enabled: true
+  # Estimated from consecutive observed planes, never a presumed installation height.
+  min_observations: 5
+  min_inliers: 60
+  min_span_m: 0.6
+  max_height_mad_m: 0.04
+  height_tolerance_m: 0.15
+  search_band_m: 0.20
+  # Balance measured XY support and reject vertical columns before fitting.
+  support_cell_m: 0.25
+  max_cell_vertical_span_m: 0.30
+  max_extrapolation_error_m: 0.15
+  reacquire_observations: 5
 # Fraction of the collision-height voxel column with actual free evidence.
 # 1.0 is conservative: sparse coverage stays UNKNOWN, even with a visible floor.
 free_vertical_coverage: 1.0
 occupied_probability: 0.65
-free_probability: 0.35
+free_probability: 0.45
 pointcloud_topic: /cloud_registered_lidar
 pointcloud_frame: lidar
 sensor_frame: rslidar
@@ -33,46 +74,60 @@ output_topic: /perception/environment
 snapshot_cache_size: 12
 association_max_age_s: 0.4
 association_confirm_matches: 2
+dynamic:
+  enabled: true
+  max_people_age_s: 0.25
+  wait_s: 0.12
+  min_score: 0.5
+  min_hits: 3
+  padding_m: 0.12
+  max_radius_m: 0.65
+  seed_distance_m: 0.4
+  min_cluster_points: 3
+  transient_ttl_s: 0.2
+  static_observation_interval_s: 0.5
+  static_min_observations: 3
 # Offline final-map projection. Endpoint maps alone never provide free rays.
 static:
+  free_probability: 0.35
+  dynamic_filter: geometric
+  max_rays: 2500
   max_points: 4000000
   max_cells: 2000000
   ground_pose_spacing_m: 3.0
   max_ground_poses: 256
-  max_voxels: 3000000
+  max_voxels: 6000000
+  free_min_observations: 3
+  free_to_hit_ratio: 2.0
+  ray_end_margin_m: 0.20
+  mask_ground_extrapolation_m: 0.30
+  # Compact isolated returns are conditional route costs, not permanent barriers.
+  # Their measured occupancy remains in layers.npz and PGM exports.
+  conditional_max_area_m2: 0.8
+  conditional_max_extent_m: 2.0
 scan_recording:
   max_records: 12000
   max_bytes: 1073741824
-memory:
-  rgb_topic: /camera/color/image_raw
-  camera_info_topic: /camera/color/camera_info
+  queue_size: 8
+  max_pending_bytes: 67108864
+poses:
   max_pose_age_s: 0.15
   keyframe_time_tolerance_s: 0.01
-  displacement_m: 1.0
-  rotation_rad: 0.35
-  max_interval_s: 5.0
-  max_observations: 2000
-  max_image_bytes: 536870912
-  queue_size: 4
   pose_history_size: 256
-  source_search_s: 2.0
 consumer:
   max_geometry_age_s: 0.5
   max_rgb_age_s: 0.3
-  history_age_s: 30.0
-  history_limit: 8
   tool_crop_cells: 4096
 scene:
   output_topic: /perception/scene
+  rgb_topic: /camera/color/image_raw
   people_topic: /perception/people/json
   max_rgb_age_s: 0.3
   max_people_age_s: 0.3
   max_people_pose_age_s: 0.1
   max_association_age_s: 0.4
-  history_age_s: 30.0
-  history_limit: 8
   join_wait_s: 0.4
   queue_size: 4
   cache_size: 8
   prior_radius_m: 15.0
-  prior_max_cells: 50000
+  prior_max_cells: 100000

@@ -1,4 +1,11 @@
+#ifdef SOCIAL_NAV_NATIVE_ROLL
+#include "roll_support.h"
+#else
 #include"utility.h"
+#endif
+#ifdef SOCIAL_NAV_LIO_CUDA
+#include "cuda_matcher.h"
+#endif
 
 
 
@@ -9,6 +16,25 @@ class LOAMmapping : public ParamServer
         float transformGuess[6];
         std::vector<float, Eigen::aligned_allocator<float>> jacobianWorkspace, residualWorkspace;
         Eigen::Matrix<float, 6, 6> degeneracyProjection = Eigen::Matrix<float, 6, 6>::Identity();
+#ifdef SOCIAL_NAV_LIO_CUDA
+        std::unique_ptr<LioCuda> cudaCorner,cudaSurface;
+        std::vector<LioPoint> cudaQueries;
+        std::vector<LioMatch> cudaCornerMatches,cudaSurfaceMatches;
+        uint64_t cudaMapRevision=UINT64_MAX;
+        bool cudaUseCorners=false;
+        bool cudaPlaneFit=false;
+        void cuda_map(LioCuda& gpu,const pcl::PointCloud<PointType>& cloud) {
+            if(cloud.size()>=(1u<<24))throw std::runtime_error("ROLL CUDA map exceeds exact point identity range");
+            cudaQueries.resize(cloud.size());
+            for(size_t i=0;i<cloud.size();++i){const auto& p=cloud[i];cudaQueries[i]={p.x,p.y,p.z,float(i)};}
+            gpu.reset(cudaQueries.data(),cudaQueries.size());
+        }
+        void cuda_search(LioCuda& gpu,const pcl::PointCloud<PointType>& cloud,std::vector<LioMatch>& matches) {
+            cudaQueries.resize(cloud.size());matches.resize(cloud.size());
+            for(size_t i=0;i<cloud.size();++i){PointType p;pointAssociateToMap(&cloud[i],&p);cudaQueries[i]={p.x,p.y,p.z,0};}
+            gpu.search(cudaQueries.data(),cudaQueries.size(),1.f,matches.data());
+        }
+#endif
     public: 
         struct IterationStats {
             int iteration, correspondences;
@@ -19,6 +45,23 @@ class LOAMmapping : public ParamServer
         };
         // Detailed solver diagnostics are opt-in, like the run's other CSV outputs.
         bool traceEnabled = false;
+        uint64_t cudaFallbacks=0;
+#ifdef SOCIAL_NAV_LIO_CUDA
+        void enableCuda(int device,float cell,bool corners,bool plane_fit){
+            cudaUseCorners=corners;cudaCorner.reset(new LioCuda(device,.2f));cudaSurface.reset(new LioCuda(device,.2f));
+            cudaPlaneFit=plane_fit;cudaSurface->surface_fitting(plane_fit);
+            cudaCorner->search_resolution(cell);cudaSurface->search_resolution(cell);}
+        LioCudaStats cudaStats()const {
+            LioCudaStats s{};if(!cudaCorner)return s;auto a=cudaCorner->stats(),b=cudaSurface->stats();
+            s.points=a.points+b.points;s.h2d_bytes=a.h2d_bytes+b.h2d_bytes;s.d2h_bytes=a.d2h_bytes+b.d2h_bytes;
+            s.map_ms=a.map_ms+b.map_ms;s.match_ms=a.match_ms+b.match_ms;s.query_device_ms=a.query_device_ms+b.query_device_ms;return s;
+        }
+#endif
+        void beginFrame(){cornerTime=surfTime=optTime=solveTime=0;iterCount=0;cudaFallbacks=0;ranMatch=false;
+#ifdef SOCIAL_NAV_LIO_CUDA
+            if(cudaCorner){cudaCorner->frame_begin();cudaSurface->frame_begin();}
+#endif
+        }
         std::vector<IterationStats, Eigen::aligned_allocator<IterationStats>> iterationTrace;
         Eigen::Affine3f affine_out;
         pcl::KdTreeFLANN<PointType>::Ptr kdtreeCornerFromMap;
@@ -49,7 +92,8 @@ class LOAMmapping : public ParamServer
 
         double inlier_ratio = 0;
         double inlier_ratio2 = 0;
-        float cornerTime = 0, surfTime = 0, optTime = 0;
+        float cornerTime = 0, surfTime = 0, optTime = 0, solveTime=0;
+        bool ranMatch=false;
         double regiError;
 
         double minEigen = 1e+6;
@@ -66,7 +110,12 @@ class LOAMmapping : public ParamServer
 
         LOAMmapping(pcl::PointCloud<PointType>::Ptr lidarCloudCornerLastDSnew,pcl::PointCloud<PointType>::Ptr lidarCloudSurfLastDSnew,
             pcl::PointCloud<PointType>::Ptr lidarCloudCornerFromMapDSnew, pcl::PointCloud<PointType>::Ptr lidarCloudSurfFromMapDSnew,
-            const Eigen::Affine3f affine_guess_new, const ParamServer& params = ParamServer(),
+            const Eigen::Affine3f affine_guess_new,
+#ifdef SOCIAL_NAV_NATIVE_ROLL
+            const ParamServer& params,
+#else
+            const ParamServer& params = ParamServer(),
+#endif
             pcl::KdTreeFLANN<PointType>::Ptr cornerTree = {},
             pcl::KdTreeFLANN<PointType>::Ptr surfaceTree = {})
             : LOAMmapping(params)
@@ -81,7 +130,7 @@ class LOAMmapping : public ParamServer
                    pcl::PointCloud<PointType>::Ptr lidarCloudSurfFromMapDSnew,
                    const Eigen::Affine3f affine_guess_new,
                    pcl::KdTreeFLANN<PointType>::Ptr cornerTree = {},
-                   pcl::KdTreeFLANN<PointType>::Ptr surfaceTree = {})
+                   pcl::KdTreeFLANN<PointType>::Ptr surfaceTree = {},uint64_t geometryRevision=0)
         {
             // Matching only reads these clouds. The caller holds the map lock for
             // this match and invalidates the shared trees whenever geometry changes.
@@ -91,6 +140,13 @@ class LOAMmapping : public ParamServer
             lidarCloudSurfLastDS = lidarCloudSurfLastDSnew;
             kdtreeCornerFromMap = cornerTree;
             kdtreeSurfFromMap = surfaceTree;
+#ifdef SOCIAL_NAV_LIO_CUDA
+            if(cudaCorner){
+                if(!localizationMode||cudaMapRevision!=geometryRevision){
+                    if(cudaUseCorners)cuda_map(*cudaCorner,*lidarCloudCornerFromMapDS);
+                    cuda_map(*cudaSurface,*lidarCloudSurfFromMapDS);cudaMapRevision=geometryRevision;}}
+#endif
+            cudaFallbacks=0;
             if (!kdtreeCornerFromMap) {
                 kdtreeCornerFromMap.reset(new pcl::KdTreeFLANN<PointType>());
                 kdtreeCornerFromMap->setInputCloud(lidarCloudCornerFromMapDS);
@@ -120,7 +176,7 @@ class LOAMmapping : public ParamServer
             jacobianWorkspace.resize((corners + surfaces)*6);
             residualWorkspace.resize(corners + surfaces);
             edgePointCorrNum = surfPointCorrNum = iterCount = 0;
-            inlier_ratio = inlier_ratio2 = cornerTime = surfTime = optTime = 0;
+            inlier_ratio = inlier_ratio2 = cornerTime = surfTime = optTime = solveTime = 0;
             regiError = -1; minEigen = 1e6; isDegenerate = false;
             degeneracyProjection.setIdentity();
             iterationTrace.clear();
@@ -133,6 +189,7 @@ class LOAMmapping : public ParamServer
 
         void match( )
         {
+            ranMatch=true;
             iterCount = 0;
             for (; iterCount < optIteration; iterCount++)
             {
@@ -160,7 +217,10 @@ class LOAMmapping : public ParamServer
                 // it is actually for map extension, otherwise cv error happens
                 // 0.2 or higher would seriously deteriarate the performance
                 if (inlier_ratio2 < 0.1 ) break; 
-                if (LMOptimization(iterCount) == true)
+                TicToc solve;
+                bool converged=LMOptimization(iterCount);
+                solveTime+=solve.toc();
+                if (converged)
                 {
                     // cout<<"converged"<<endl;
                     break;              
@@ -196,10 +256,14 @@ class LOAMmapping : public ParamServer
     void cornerOptimization(int iterCount)
     {
         affine_out = trans2Affine3f(transformTobeMapped);
+#ifdef SOCIAL_NAV_LIO_CUDA
+        if(cudaCorner&&cudaUseCorners)cuda_search(*cudaCorner,*lidarCloudCornerLastDS,cudaCornerMatches);
+#endif
 
         // FLANN reads an immutable index. All query, fit and output scratch is
         // thread-local; each point writes its own slot, collected in scan order.
-        #pragma omp parallel num_threads(matchingThreads) if(lidarCloudCornerLastDSNum >= 256)
+        uint64_t fallback_count=0;
+        #pragma omp parallel num_threads(matchingThreads) if(lidarCloudCornerLastDSNum >= 256) reduction(+:fallback_count)
         {
         std::vector<int> pointSearchInd(5);
         std::vector<float> pointSearchSqDis(5);
@@ -210,7 +274,21 @@ class LOAMmapping : public ParamServer
 
             pointOri = lidarCloudCornerLastDS->points[i];
             pointAssociateToMap(&pointOri, &pointSel);
-            if (kdtreeCornerFromMap->nearestKSearch(pointSel, 5, pointSearchInd, pointSearchSqDis) < 5) continue;
+            int found;
+#ifdef SOCIAL_NAV_LIO_CUDA
+            if(cudaCorner && cudaUseCorners && !(cudaCornerMatches[i].flags&1)){
+                const auto& m=cudaCornerMatches[i];found=m.count;
+                for(int j=0;j<found;++j){pointSearchInd[j]=int(m.neighbors[j].intensity);pointSearchSqDis[j]=m.distance[j];}
+            }else
+#endif
+            {found=kdtreeCornerFromMap->nearestKSearch(pointSel,5,pointSearchInd,pointSearchSqDis);
+#ifdef SOCIAL_NAV_LIO_CUDA
+                if(cudaCorner&&cudaUseCorners){
+                    fallback_count++;
+                }
+#endif
+            }
+            if(found<5)continue;
 
 
             Eigen::Matrix3f matA1 = Eigen::Matrix3f::Identity();
@@ -293,13 +371,18 @@ class LOAMmapping : public ParamServer
             }
         }
         }
+        cudaFallbacks+=fallback_count;
     }
 
     void surfOptimization(int iterCount)
     {
         affine_out = trans2Affine3f(transformTobeMapped);
+#ifdef SOCIAL_NAV_LIO_CUDA
+        if(cudaSurface)cuda_search(*cudaSurface,*lidarCloudSurfLastDS,cudaSurfaceMatches);
+#endif
 
-        #pragma omp parallel num_threads(matchingThreads) if(lidarCloudSurfLastDSNum >= 256)
+        uint64_t fallback_count=0;
+        #pragma omp parallel num_threads(matchingThreads) if(lidarCloudSurfLastDSNum >= 256) reduction(+:fallback_count)
         {
         std::vector<int> pointSearchInd(5);
         std::vector<float> pointSearchSqDis(5);
@@ -310,7 +393,30 @@ class LOAMmapping : public ParamServer
 
             pointOri = lidarCloudSurfLastDS->points[i];
             pointAssociateToMap(&pointOri, &pointSel); 
-            if (kdtreeSurfFromMap->nearestKSearch(pointSel, 5, pointSearchInd, pointSearchSqDis) < 5) continue;
+#ifdef SOCIAL_NAV_LIO_CUDA
+            if(cudaSurface&&cudaPlaneFit&&(cudaSurfaceMatches[i].flags&2))fallback_count++;
+            if(cudaSurface&&cudaPlaneFit&&!(cudaSurfaceMatches[i].flags&3)){
+                const auto& m=cudaSurfaceMatches[i];
+                if(m.selected){coeff.x=m.normal[0];coeff.y=m.normal[1];coeff.z=m.normal[2];coeff.intensity=m.normal[3];
+                    lidarCloudOriSurfVec[i]=pointOri;coeffSelSurfVec[i]=coeff;lidarCloudOriSurfFlag[i]=true;}
+                continue;
+            }
+#endif
+            int found;
+#ifdef SOCIAL_NAV_LIO_CUDA
+            if(cudaSurface && !(cudaSurfaceMatches[i].flags&1)){
+                const auto& m=cudaSurfaceMatches[i];found=m.count;
+                for(int j=0;j<found;++j){pointSearchInd[j]=int(m.neighbors[j].intensity);pointSearchSqDis[j]=m.distance[j];}
+            }else
+#endif
+            {found=kdtreeSurfFromMap->nearestKSearch(pointSel,5,pointSearchInd,pointSearchSqDis);
+#ifdef SOCIAL_NAV_LIO_CUDA
+                if(cudaSurface){
+                    fallback_count++;
+                }
+#endif
+            }
+            if(found<5)continue;
 
             
             Eigen::Matrix<float, 5, 3> matA0;
@@ -370,6 +476,7 @@ class LOAMmapping : public ParamServer
             }
         }
         }
+        cudaFallbacks+=fallback_count;
     }
 
     void combineOptimizationCoeffs()

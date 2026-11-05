@@ -98,5 +98,5 @@ def configure_rviz(configuration, transport, frame=None):
         if display.get('Marker Topic') == '/perception/people/markers':
             display['Marker Topic'] = transport['output_topic']+'/markers'
         if display.get('Image Topic') == '/perception/people/rgb':
-            display['Image Topic'] = transport['output_topic']+'/rgb'
+            display['Image Topic'] = transport.get('people_image_topic',transport['output_topic']+'/rgb')
     return configuration

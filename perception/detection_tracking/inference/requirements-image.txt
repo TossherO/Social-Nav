@@ -1,0 +1,14 @@
+# Optional Linux image association profile; use with requirements-cu130.txt.
+# Install matching torch/torchvision from the official cu130 index first.
+# Prefer a China mirror for ordinary packages and NVIDIA's index for TensorRT wheels.
+torchvision==0.28.0+cu130
+ultralytics-opencv-headless==8.3.253
+ultralytics-thop==2.0.18
+polars==1.35.2
+psutil==7.2.2
+# ONNX is needed only for the explicit engine export action.
+onnx==1.19.1
+ml-dtypes==0.5.4
+# This revision uses cuda-toolkit[cudart], avoiding the deprecated runtime-cu13 package.
+cuda-toolkit==13.0.3.0
+tensorrt-cu13==10.13.3.9.post1

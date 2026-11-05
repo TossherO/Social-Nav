@@ -1,14 +1,15 @@
-# Deployment profile for the supplied Stage 3 best checkpoint.
-# Model and point processing follow its logged single-frame training config.
-# Keep this independent of recipes for future training.
-# Candidate score 0.1 supports tracking; birth/confirmation remains 0.3.
-# The historical evaluation used final score 0.3 and NMS 0.2.
+# Current task-scene candidate: 3-frame finetuning, epoch 2, final score 0.2.
+# This profile is independent of future training recipes and historical assets.
+# Keep dense/ROI proposal thresholds unchanged from the evaluated checkpoint.
 CLASS_NAMES:
 - Pedestrian
 PRECISION: fp32
 DATA_CONFIG:
   DATA_PATH: data/wheelchair_weak
-  MAX_SWEEPS: 1
+  MAX_SWEEPS: 3
+  MAX_SWEEP_TIME_LAG: 0.35
+  SWEEP_SELECT_MODE: near
+  HISTORY_MAX_POSE_AGE_S: 0.05
   POINT_CLOUD_RANGE:
   - -4.8
   - -9.6
@@ -256,7 +257,7 @@ MODEL:
     - 0.3
     - 0.5
     - 0.7
-    SCORE_THRESH: 0.1
+    SCORE_THRESH: 0.2
     OUTPUT_RAW_SCORE: false
     EVAL_METRIC: kitti
     NMS_CONFIG:

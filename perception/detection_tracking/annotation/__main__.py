@@ -35,6 +35,8 @@ def arguments(argv=None):
     predict = commands.add_parser('predict', parents=[common], help='顺序检测每一扫描，保留原始约10Hz，不启动窗口')
     predict.add_argument('--detector-python', type=Path, required=True, help='既有检测环境解释器')
     predict.add_argument('--gpu', default='0', help='一个可用的物理 GPU 编号')
+    predict.add_argument('--pose-results', type=Path, help='多帧检测必需：已有定位结果，按子包优先有图定位，其次无图定位')
+    predict.add_argument('--max-pose-age', type=float, default=.02, help='多帧检测只用过去有效位姿，最大时差秒；默认0.02')
     export = commands.add_parser('export', help='导出待标／已标帧的核验中心、当前RGB和原始历史点云，不启动训练')
     export.add_argument('--project', required=True, type=Path)
     export.add_argument('--out', type=Path, help='导出目录；默认仓库data/datasets/wheelchair_det_extra/<工程名>，已有目录不覆盖')
@@ -78,6 +80,9 @@ def arguments(argv=None):
             parser.error('--gpu 只接受一个物理设备编号')
         if not args.detector_python.is_file():
             parser.error('检测解释器不存在')
+        import math
+        if not math.isfinite(args.max_pose_age) or args.max_pose_age <= 0:
+            parser.error('--max-pose-age须为正有限数')
     if args.command == 'export' and args.out is None:
         args.out = (Path(__file__).resolve().parents[3] / 'data/datasets/wheelchair_det_extra' /
                     args.project.expanduser().resolve().name)
@@ -130,6 +135,8 @@ def main(argv=None):
         if not args.bag:
             raise ValueError('新建工程需要 --bag；继续工程只需 --project')
         settings, effective = detector_settings(args.config, args.checkpoint)
+        if args.command == 'predict' and effective['DATA_CONFIG']['MAX_SWEEPS'] > 1 and args.pose_results is None:
+            raise ValueError('多帧候选预计算需要--pose-results；未创建空标注工程')
         store = Store(args.project, create=True, settings=settings, effective=effective)
     else:
         if args.config or args.checkpoint:
@@ -145,7 +152,8 @@ def main(argv=None):
         store.close()
     if args.command == 'predict':
         from .offline import predict_project
-        print(json.dumps(predict_project(args.project, args.detector_python, args.gpu), ensure_ascii=False, indent=2))
+        print(json.dumps(predict_project(args.project, args.detector_python, args.gpu,
+              pose_results=args.pose_results, max_pose_age_s=args.max_pose_age), ensure_ascii=False, indent=2))
         return 0
     from .app import run
     return run(args)

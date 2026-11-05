@@ -184,6 +184,7 @@ class PeopleNode:
                         self.sequence_generation += 1
                         frame.sequence_id = f'{self.cfg["sequence_id"]}:{self.sequence_generation}'
                     self.localization_identity = identity
+                    frame.pose_identity = identity
                     frame.pose_health = record.health
                 if rospy.Time.now().to_sec()-stamp > self.cfg['max_input_age_s']:
                     raise ValueError('Cloud expired while waiting for localization')

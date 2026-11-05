@@ -1,13 +1,10 @@
-"""Offline REL inference with local Transformers and token-level XGrammar constraints.
+"""Explicit local fallback for a frozen wheelchair VLM request.
 
-No HTTP client, service startup, automatic downloads, retries or output repair.
-GPU dependencies are imported only when constructing the explicitly selected engine.
+Only constructs GPU dependencies after resource selection and explicit fallback
+reason. No downloads, HTTP requests, retries, source-label reads or output repair.
 """
-from __future__ import annotations
-
 import argparse
 from collections import Counter
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -15,15 +12,15 @@ from pathlib import Path
 import re
 import time
 
-from . import benchmark_defaults as defaults
-from . import vlm_api_common as common
-from .project_config import ROOT, load_config, project_path
+from jsonschema import Draft202012Validator
 
+from . import vlm_api_common as common
+from .project_config import ROOT,load_config,project_path
+from .annotation.rules import digest
 
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, separators=(",", ":"),
                                      allow_nan=False).encode()).hexdigest()
-
 
 def local_messages(body):
     """Translate transport image keys only; preserve bytes, order and every text."""
@@ -35,37 +32,6 @@ def local_messages(body):
                         if item["type"] == "image_url" else dict(item)) for item in content]
         messages.append({"role": message["role"], "content": content})
     return messages
-
-
-def compare_reference(rows, reference, settings):
-    """Read answers only after inference; pair exact source and logical request."""
-    reference = Path(reference)
-    old_settings = common.read_json(reference / "summary.json")["settings"]
-    controlled = ("model", "thinking", "temperature", "max_tokens", "constraint_requested")
-    if any(old_settings.get(k) != settings[k] for k in controlled):
-        raise ValueError("Reference inference settings differ")
-    old_rows = [json.loads(line) for line in (reference / "requests.jsonl").read_text().splitlines() if line.strip()]
-    old = {row["case_id"]: row for row in old_rows}
-    if len(old) != len(old_rows):
-        raise ValueError("Duplicate reference case IDs")
-    pairs = []
-    for row in rows:
-        other = old.get(row["case_id"])
-        if other is None:
-            raise ValueError("Missing reference case: " + row["case_id"])
-        if (row["input_fingerprint"] != other.get("input_fingerprint")
-                or row["reference_request_sha256"] != other.get("request_sha256")):
-            raise ValueError("Reference input/request binding differs")
-        pairs.append({"case_id": row["case_id"], "both_valid": bool(row["valid"] and other["valid"]),
-                      "identical_raw": row.get("raw_content") is not None and row.get("raw_content") == other.get("raw_content"),
-                      "identical_rel": bool(row["valid"] and other["valid"] and row["canonical_rel"] == other["canonical_rel"]),
-                      "same_prompt_tokens": row.get("usage", {}).get("prompt_tokens") == other.get("usage", {}).get("prompt_tokens")})
-    return {"reference": str(reference), "paired_cases": len(pairs), "cases": pairs,
-            "identical_raw": sum(p["identical_raw"] for p in pairs),
-            "identical_rel": sum(p["identical_rel"] for p in pairs),
-            "reference_read_after_generation": True, "semantic_accuracy_evaluated": False,
-            "same_model_execution_or_latency_assumed": False}
-
 
 class LocalEngine:
     def __init__(self, model_path, options):
@@ -184,131 +150,102 @@ class LocalEngine:
                 "generate_s": duration}
 
 
+def payload_fields(body,task):
+    if (body.get('temperature') != 0 or body.get('chat_template_kwargs',{}).get('enable_thinking') is not False
+            or type(body.get('max_tokens')) is not int or not 1 <= body['max_tokens'] <= 4096
+            or body.get('response_format',{}).get('type') != 'json_schema'):
+        raise ValueError('Expected a bounded, non-thinking JSON Schema request')
+    messages=body.get('messages',[])
+    if len(messages)!=2 or [m.get('role') for m in messages]!=['system','user']:
+        raise ValueError('Expected the current system plus user request')
+    content=messages[1]['content']
+    if len(content)!=7 or any(content[2*i].get('text')!='IMAGE_'+str(i) or
+                            content[2*i+1].get('type')!='image_url' for i in range(3)):
+        raise ValueError('Expected three real images in their original order')
+    fields=json.loads(content[-1]['text'])
+    expected={'v','dt','ts','e','o','d'}
+    if task!='groups':expected.add('target_description')
+    if task=='follow':expected.add('last_target')
+    if set(fields)!=expected:
+        raise ValueError('Task fields mismatch; labels and answers must stay separate')
+    common.groups_schema(fields['v'])
+    Draft202012Validator.check_schema(body['response_format']['json_schema']['schema'])
+    return fields
+
+
+def validate_result(raw,body,task,fields):
+    schema=body['response_format']['json_schema']['schema']
+    if task=='groups':
+        common.validate_groups(raw,fields['v'],schema)
+    else:
+        from .follow import validate_decision,follow_schema,appearance_schema
+        expected=follow_schema(fields['v'],fields['last_target']) if task=='follow' else appearance_schema(fields['v'])
+        if expected!=schema:
+            raise ValueError('The dynamic task Schema does not match its input context')
+        validate_decision(raw,schema)
+
+
 def arguments(argv=None):
-    config = load_config()
-    public = defaults.from_project(config)
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bundle", type=Path, default=project_path(config["development"]["bundle"]))
-    parser.add_argument("--config", type=Path, default=ROOT / "configs/vlm_local.local.json")
-    parser.add_argument("--model-path", type=Path)
-    parser.add_argument("--gpus", help="Comma-separated physical GPU IDs; selected before importing torch")
-    parser.add_argument("--out", type=Path)
-    parser.add_argument("--limit", type=int, default=public["limit"])
-    parser.add_argument("--case-id", action="append", help="Explicit subset of frozen case IDs")
-    parser.add_argument("--max-tokens", type=int, default=public["max_tokens"])
-    parser.add_argument("--reference", type=Path, help="Existing remote result; read only AFTER generation")
-    parser.add_argument("--dry-run", action="store_true", help="Inputs only; no private config, GPU imports or inference")
-    args = parser.parse_args(argv)
-    if not 1 <= args.limit <= 10000 or not 1 <= args.max_tokens <= 4096:
-        parser.error("Invalid sample or output token budget")
-    return args
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--request',type=Path,required=True,help='Frozen body produced by vlm_api_common.make_body')
+    parser.add_argument('--task',choices=['groups','appearance','follow'],required=True)
+    parser.add_argument('--config',type=Path,default=ROOT/'configs/vlm_local.local.json')
+    parser.add_argument('--model-path',type=Path)
+    parser.add_argument('--gpus')
+    parser.add_argument('--fallback-reason',choices=['remote_unavailable','remote_gpu_busy'])
+    parser.add_argument('--out',type=Path)
+    parser.add_argument('--dry-run',action='store_true',help='No private configuration, GPU or network access')
+    return parser.parse_args(argv)
 
 
-def run(args, engine_factory=LocalEngine):
-    config = load_config()
-    manifest, system, cases = common.load_bundle(args.bundle)
-    if args.case_id:
-        requested = set(args.case_id)
-        if not requested.issubset({c["entry"]["case_id"] for c in cases}):
-            raise ValueError("Unknown case ID")
-        cases = [c for c in cases if c["entry"]["case_id"] in requested]
-    cases = cases[:args.limit]
+def run(args,engine_factory=LocalEngine):
+    body=common.read_json(args.request)
+    fields=payload_fields(body,args.task)
     if args.dry_run:
-        print(json.dumps({"backend": "local_transformers", "cases": [c["entry"]["case_id"] for c in cases],
-                          "inference_requests": 0, "network_requests": 0, "constraint": "xgrammar_json_schema"}))
+        print(json.dumps(dict(task=args.task,inference_requests=0,network_requests=0,gpu_loaded=False)))
         return 0
-    if args.out is None:
-        raise ValueError("Specify a new --out directory outside frozen inputs and model assets")
-    options = dict(config["local_inference"])
+    if args.fallback_reason is None or args.out is None:
+        raise ValueError('Select an explicit fallback reason and a new output directory')
+    config=load_config();options=dict(config['local_inference'])
     if args.config.exists():
-        local = common.read_json(args.config)
-        if not isinstance(local, dict) or set(local) - {"model_path", "gpus", "max_memory_gib"}:
-            raise ValueError("Local config accepts only model_path, gpus and max_memory_gib")
-        options.update(local)
+        private=common.read_json(args.config)
+        if not isinstance(private,dict) or set(private)-{'model_path','gpus','max_memory_gib'}:
+            raise ValueError('Unexpected local resource settings')
+        options.update(private)
     if args.gpus is not None:
-        if not re.fullmatch(r"\d+(?:,\d+)*", args.gpus):
-            raise ValueError("GPU IDs must be comma-separated nonnegative integers")
-        options["gpus"] = [int(v) for v in args.gpus.split(",")]
-    gpus = options.get("gpus")
-    if gpus is not None and (not isinstance(gpus, list) or not gpus or any(type(g) is not int or g < 0 for g in gpus) or len(set(gpus)) != len(gpus)):
-        raise ValueError("Invalid GPU selection")
-    if type(options["max_memory_gib"]) is not int or options["max_memory_gib"] <= 0:
-        raise ValueError("Invalid per-GPU memory budget")
-    model_path = (args.model_path or project_path(options.get("model_path", config["model"]["path"]))).expanduser().resolve()
-    if not (model_path / "config.json").is_file():
-        raise ValueError("Set the actual local model directory")
-    out = args.out.resolve()
-    if any(out.is_relative_to(p.resolve()) for p in (args.bundle, model_path)):
-        raise ValueError("Output must be outside frozen input/model assets")
-    out.mkdir(parents=True, exist_ok=False)
-    settings = {"backend": "local_transformers", "model": config["model"]["served_name"],
-                "model_path": str(model_path), "thinking": False, "temperature": 0,
-                "constraint_requested": "json-schema", "max_tokens": args.max_tokens,
-                "started_at": datetime.now(timezone.utc).isoformat(), "runtime": options,
-                "inference_network_requests": 0, "automatic_retries": 0,
-                "source": "frozen_geometry_only_JRDB_development_NOT_semantic_gold"}
-    common.save_json(out / "settings.json", settings)
-    rows = []
+        if not re.fullmatch(r'\d+(?:,\d+)*',args.gpus):raise ValueError('Invalid GPU selection')
+        options['gpus']=[int(g) for g in args.gpus.split(',')]
+    gpus=options.get('gpus')
+    if gpus is not None and (not isinstance(gpus,list) or not gpus or
+            any(type(g) is not int or g<0 for g in gpus) or len(set(gpus))!=len(gpus)):
+        raise ValueError('Invalid GPU selection')
+    if type(options['max_memory_gib']) is not int or options['max_memory_gib']<=0:
+        raise ValueError('Invalid memory budget')
+    model=(args.model_path or project_path(options.get('model_path',config['model']['path']))).resolve()
+    if not (model/'config.json').is_file():raise ValueError('Set an existing local model')
+    output=args.out.resolve()
+    if output.is_relative_to(model) or output.is_relative_to(args.request.parent.resolve()):
+        raise ValueError('Output must not overwrite the request or model assets')
+    if body.get('model')!=config['model']['served_name']:
+        raise ValueError('The requested model differs from the configured frozen model')
+    output.mkdir(parents=True,exist_ok=False)
+    engine=engine_factory(model,options)
+    settings=dict(backend='local_transformers',task=args.task,fallback_reason=args.fallback_reason,
+                  logical_request_sha256=digest(body),automatic_retries=0,network_requests=0,
+                  model_runtime=engine.metadata)
+    common.save_json(output/'settings.json',settings)
+    row=dict(valid=False,logical_request_sha256=digest(body))
     try:
-        started = time.perf_counter()
-        engine = engine_factory(model_path, options)
-        settings.update(load_s=time.perf_counter() - started, engine=engine.metadata)
-        common.save_json(out / "settings.json", settings)
-        with (out / "requests.jsonl").open("x", encoding="utf-8") as log:
-            for case in cases:
-                body = common.make_body(system, case, model=settings["model"], max_tokens=args.max_tokens)
-                row = {"case_id": case["entry"]["case_id"], "scene": case["entry"]["scene"],
-                       "input_fingerprint": case["fingerprint"], "reference_request_sha256": fingerprint(body),
-                       "reference_http_body_not_sent": True, "submitted": True, "valid": False,
-                       "status": "error", "local_schema_valid": False, "timing": {}}
-                start = time.perf_counter()
-                stage = "generate"
-                try:
-                    row.update(engine.generate(body))
-                    row["timing"]["generate_s"] = row.pop("generate_s")
-                    stage = "completion"
-                    if row["finish_reason"] != "stop" or not row["grammar_terminated"]:
-                        raise ValueError("Truncated or unfinished constrained generation")
-                    if re.search(r"</?(?:think|analysis)\b", row["raw_content"], re.I):
-                        raise ValueError("Reasoning appeared despite non-thinking request")
-                    stage = "json_schema"
-                    raw = json.loads(row["raw_content"])
-                    case["validator"].validate(raw)
-                    row["local_schema_valid"] = True
-                    stage = "membership"
-                    row["canonical_order"] = common.validate_rel(raw, case)
-                    row.update(response=raw, canonical_rel=common.canonical_rel(raw), valid=True, status="success")
-                except Exception as error:
-                    row.update(error_type=type(error).__name__, error=str(error)[:1000], failure_stage=stage)
-                row["timing"]["end_to_end_s"] = time.perf_counter() - start
-                rows.append(row)
-                log.write(json.dumps(row, ensure_ascii=False) + "\n")
-                log.flush()
-                print(json.dumps({"case_id": row["case_id"], "valid": row["valid"],
-                                  "completion_tokens": row.get("usage", {}).get("completion_tokens")}), flush=True)
-                if not row["valid"]:
-                    break
-        summary = {"settings": settings, "planned_cases": len(cases), "submitted": len(rows),
-                   "valid": sum(row["valid"] for row in rows), "cancelled_after_error": len(cases) - len(rows),
-                   "semantic_accuracy_evaluated": False, "online_deadline_evaluated": False,
-                   "latency_valid_only_s": {"end_to_end_s": common.distribution([r["timing"]["end_to_end_s"] for r in rows if r["valid"]])}}
-        if args.reference:
-            summary["reference_comparison"] = compare_reference(rows, args.reference, settings)
-        common.save_json(out / "summary.json", summary)
-        return 0 if len(rows) == len(cases) and all(row["valid"] for row in rows) else 1
+        row.update(engine.generate(body))
+        if row['finish_reason']!='stop' or not row['grammar_terminated']:
+            raise ValueError('Incomplete constrained generation')
+        raw=json.loads(row['raw_content']);validate_result(raw,body,args.task,fields)
+        row.update(response=raw,valid=True)
     except Exception as error:
-        common.save_json(out / "summary.json", {"settings": settings, "submitted": len(rows),
-                         "valid": sum(r["valid"] for r in rows), "error_type": type(error).__name__, "error": str(error)[:2000]})
-        raise
+        row['error_type']=type(error).__name__
+    common.save_json(output/'response.json',row)
+    return 0 if row['valid'] else 1
 
 
-def main(argv=None):
-    try:
-        return run(arguments(argv))
-    except (ValueError, OSError, RuntimeError, ImportError) as error:
-        print(f"Local inference stopped: {type(error).__name__}: {error}")
-        return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+if __name__=='__main__':
+    raise SystemExit(run(arguments()))

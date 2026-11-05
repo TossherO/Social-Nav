@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <chrono>
 #include <time.h>
+#include <functional>
 
 
 #define EPSS 1e-6
@@ -97,7 +98,7 @@ class MANUAL_HEAP
         MANUAL_HEAP(int max_capacity = 100);
         ~MANUAL_HEAP();
         void pop();
-        PointType_CMP top();
+        const PointType_CMP& top() const;
         void push(PointType_CMP point);
         int size();
         void clear();
@@ -148,7 +149,7 @@ private:
     void Delete_by_point(KD_TREE_NODE ** root, PointType point, bool allow_rebuild);
     void Add_by_point(KD_TREE_NODE ** root, PointType point, bool allow_rebuild, int father_axis);
     void Add_by_range(KD_TREE_NODE ** root, BoxPointType boxpoint, bool allow_rebuild);
-    void Search(KD_TREE_NODE * root, int k_nearest, PointType point, MANUAL_HEAP &q, double max_dist);//priority_queue<PointType_CMP>
+    void Search(KD_TREE_NODE * root, int k_nearest, const PointType& point, MANUAL_HEAP &q, double max_dist);//priority_queue<PointType_CMP>
     void Search_by_range(KD_TREE_NODE *root, BoxPointType boxpoint, PointVector &Storage);
     bool Criterion_Check(KD_TREE_NODE * root);
     void Push_Down(KD_TREE_NODE * root);
@@ -156,13 +157,17 @@ private:
     void delete_tree_nodes(KD_TREE_NODE ** root);
     void downsample(KD_TREE_NODE ** root);
     bool same_point(PointType a, PointType b);
-    float calc_dist(PointType a, PointType b);
-    float calc_box_dist(KD_TREE_NODE * node, PointType point);    
+    float calc_dist(const PointType& a, const PointType& b);
+    float calc_box_dist(KD_TREE_NODE * node, const PointType& point);
     static bool point_cmp_x(PointType a, PointType b); 
     static bool point_cmp_y(PointType a, PointType b); 
     static bool point_cmp_z(PointType a, PointType b); 
 
 public:
+    // Optional exact point-set journal; numerical queries and tree rebuilds are
+    // unchanged. Rebuild replay does not emit the public mutations twice.
+    std::function<void(const PointType&,const BoxPointType*)> point_inserted;
+    std::function<void(const BoxPointType&)> box_erased;
     KD_TREE(float delete_param = 0.5, float balance_param = 0.6 , float box_length = 0.2);
     ~KD_TREE();
     void Set_delete_criterion_param(float delete_param);

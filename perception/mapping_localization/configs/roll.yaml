@@ -2,6 +2,12 @@
 roll:
   # Independent feature queries; output coefficients retain their scan order.
   matchingThreads: 2
+  matchingBackend: cuda
+  matchingCudaDevice: 0
+  matchingCudaCellSize: 0.5
+  matchingCudaCorners: false
+  matchingCudaThreads: 1
+  matchingCudaPlaneFit: false
   localizationStateTopic: /localization/state
   localFrame: odom
   publishLegacyOutputs: false

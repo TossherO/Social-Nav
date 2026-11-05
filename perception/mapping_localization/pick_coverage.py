@@ -162,7 +162,7 @@ def make_figure(map_path, output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--map', type=Path, required=True)
+    parser.add_argument('--localization-map','--map',dest='map', type=Path, required=True,help='3D localization map bundle; output is a trusted-region configuration')
     parser.add_argument('--out', type=Path, required=True, help='Coverage YAML; an existing file is loaded for editing')
     args = parser.parse_args()
     make_figure(args.map, args.out)

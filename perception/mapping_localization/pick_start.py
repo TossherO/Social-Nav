@@ -20,7 +20,7 @@ from .results import file_fingerprint, map_fingerprint, read_pcd, rpy_quaternion
 
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--map', required=True, help='Complete ROLL map bundle')
+    parser.add_argument('--localization-map','--map',dest='map', required=True, help='Complete ROLL 3D localization map bundle')
     parser.add_argument('--bag', required=True, help='Read one scan and its preceding RGB; never replay the bag')
     parser.add_argument('--out', help='New JSON annotation; default: BAG.initial_pose.json beside the bag')
     parser.add_argument('--start', type=float, default=0.0, help='Select the first scan after this recorded-time offset')

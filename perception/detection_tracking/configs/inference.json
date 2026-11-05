@@ -1,20 +1,24 @@
 {
   "detector": {
     "config": "perception/detection_tracking/configs/detector.yaml",
-    "checkpoint": "models/wheelchair_detector/1frame/checkpoints/detector_best.pth",
+    "checkpoint": "models/wheelchair_detector/3frame/task_scene/detector.pth",
     "extension_root": null,
     "precision": "fp32"
   },
   "tracking": {
     "association": "giou",
+    "association_backend": "cpu",
+    "association_device": "cuda:0",
+    "diou_weight": 0.2,
+    "motion_gate_chi2": 9.21,
     "birth_score": 0.3,
     "support_score": 0.1,
     "association_cost_max": 1.5,
     "support_similarity_min": -0.5,
     "center_gate_m": 1.5,
     "min_hits": 2,
-    "max_unobserved_s": 0.6,
-    "max_unsupported_s": 0.3,
+    "max_unobserved_s": 1.5,
+    "max_unsupported_s": 1.5,
     "reset_gap_s": 1.0,
     "pose_jump_translation_m": 2.0,
     "pose_jump_rotation_rad": 0.8,
@@ -26,6 +30,23 @@
     "max_history_points": 32,
     "stale_s": 0.5
   },
+  "image_association": {
+    "backend": "tensorrt",
+    "weights": "models/image_person_detector/yolo11s.pt",
+    "engine": "models/image_person_detector/yolo11s_fp16.engine",
+    "imgsz": 640,
+    "precision": "fp16",
+    "confidence": 0.25,
+    "nms_iou": 0.7,
+    "max_time_delta_s": 0.1,
+    "max_uncompensated_delta_s": 0.05,
+    "center_gate": 1.5,
+    "cost_max": 1.6,
+    "ambiguity_margin": 0.12,
+    "overlap_weight": 0.15,
+    "history_weight": 0.05,
+    "history_gap_s": 0.6
+  },
   "dataset": {
     "root": "data/datasets/wheelchair_raw",
     "nominal_rate_hz": 10.0
@@ -33,6 +54,7 @@
   "ros": {
     "pointcloud_topic": "/rslidar_points",
     "rgb_topic": "/camera/color/image_raw",
+    "camera_info_topic": "/camera/color/camera_info",
     "raw_odometry_topic": "/odom",
     "localization_topic": "/localization/state",
     "localization_message": "state",

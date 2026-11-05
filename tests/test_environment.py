@@ -2,11 +2,12 @@
 import tempfile
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
 from perception.mapping_localization.context import LocalizationContext
-from perception.environment.layers import GridSnapshot, LocalEnvironment, load_config
+from perception.environment.layers import GridSnapshot, LocalEnvironmentMap, load_config
 from perception.environment.context import crop_map, query_geometry
 from perception.environment.geometry import nearest_support, shift_array, interpolate_origins
 from perception.environment.occupancy import OccupancyTree
@@ -26,6 +27,33 @@ def match(stamp, *, health=0, generation=0):
 
 
 class AssociationTests(unittest.TestCase):
+    def test_frozen_match_binding_is_checked_once_without_trusting_caller_cache(self):
+        from perception.mapping_localization.context import pose_matrix
+        context=LocalizationContext('roll_fast_lio',confirm_matches=1)
+        context.update(pose(1))
+        measured=match(1);measured['_local_binding']=True
+        context.add_match(measured)
+        measured['position'][0]=99;measured['map_position'][0]=99
+        with patch('perception.mapping_localization.context.pose_matrix',wraps=pose_matrix) as compute:
+            for stamp in (1.1,1.2,1.3):
+                row,binding=context.update(pose(stamp))
+                self.assertTrue(binding['valid'])
+                self.assertAlmostEqual(row['map_matrix'][0,3],stamp+20)
+            calls=[c for c in compute.call_args_list if c.args[0]==[1,0,0]]
+            self.assertEqual(len(calls),1)
+        wrong=match(1.3);wrong.update(position=[99,0,0],_local_binding=True)
+        context.add_match(wrong)
+        self.assertEqual(context.update(pose(1.4))[1]['measurement_stamp_s'],1)
+        self.assertFalse(context.update(pose(1.5))[1]['valid'])
+
+    def test_cached_binding_still_waits_for_its_observation_and_late_failure_wins(self):
+        context=LocalizationContext('roll_fast_lio',confirm_matches=1)
+        context.update(pose(1));context.add_match(match(1.2))
+        self.assertFalse(context.update(pose(1.1))[1]['valid'])
+        self.assertTrue(context.update(pose(1.2))[1]['valid'])
+        context.add_match(match(1.2,health=2))
+        self.assertFalse(context.update(pose(1.3))[1]['valid'])
+
     def test_map_loss_retains_continuous_pose_and_reassociation_does_not_reset_local_identity(self):
         context = LocalizationContext('roll_fast_lio',requires_map=True,allow_local_only=True)
         for stamp in [1,1.1]:
@@ -72,6 +100,9 @@ class AssociationTests(unittest.TestCase):
 
 
 class GeometryTests(unittest.TestCase):
+    def test_default_runtime_backend_is_cuda_without_requiring_a_device_for_config_loading(self):
+        self.assertEqual(load_config()['compute']['backend'],'cuda')
+
     def test_moving_ray_origins_are_causal_and_never_extrapolated_across_a_gap(self):
         times=np.array([0,50,100.])
         samples=[(1.,[0,0,0]),(1.1,[.1,0,0])]
@@ -114,21 +145,43 @@ class GeometryTests(unittest.TestCase):
         voxels=tree.update(cloud,[0,0,0],bounds,1,config,rays=True)
         closest=np.argmin(np.linalg.norm(voxels[:,:3]-cloud[0],axis=1))
         self.assertGreater(voxels[closest,3],.65)
-        empty=tree.update(np.empty((0,3)),[0,0,0],bounds,10,config,rays=False)
+        empty=tree.update(np.empty((0,3)),[0,0,0],bounds,2+config['voxel_ttl_s'],config,rays=False)
         self.assertEqual(len(empty),0)
+
+    def test_retained_free_history_does_not_hide_a_new_obstacle(self):
+        config=load_config();config['resolution']=.1
+        tree=OccupancyTree(.1);self.addCleanup(tree.close)
+        bounds=[-1,-1,-1,4,1,3]
+        far=np.array([[3.05,.05,.25]],np.float32)
+        for stamp in [1.,1.1,1.2,1.3,1.4]:
+            tree.update(far,[0,0,.25],bounds,stamp,config)
+        retained=tree.update(np.empty((0,3)),[0,0,.25],bounds,10.,config,rays=False)
+        self.assertGreater(len(retained),0)
+        near=np.array([[1.05,.05,.25]],np.float32)
+        tree.update(near,[0,0,.25],bounds,10.1,config,rays=False)
+        floor=np.zeros((20,50));support=np.ones_like(floor,bool)
+        layers=tree.project(floor,support,[-1,-1],config,10.1,endpoints=near)
+        cell=np.floor((near[0,:2]+1)/.1).astype(int)
+        self.assertEqual(layers['occupancy'][cell[1],cell[0]],100)
 
     def test_local_geometry_unknown_visibility_and_snapshot_queries_survive_roundtrip(self):
         config=load_config(); config.update(window_m=6.,resolution=.15,ground_fit_radius_m=4.,max_range_m=5.)
-        engine=LocalEnvironment(config);self.addCleanup(engine.close)
+        config['compute']['backend']='cpu'  # This regression explicitly exercises the CPU reference.
+        engine=LocalEnvironmentMap(config);self.addCleanup(engine.close)
         axis=np.arange(-2.7,2.7,.15)
         xx,yy=np.meshgrid(axis,axis)
         floor=np.c_[xx.ravel(),yy.ravel(),np.full(xx.size,-1.)]
         wall=np.c_[np.full(40,1.5),np.linspace(-1,1,40),np.linspace(-.8,.7,40)]
         points=np.r_[floor,wall].astype(np.float32)
         first=engine.update(points,np.eye(4),1,('session',0),scan_duration=.1)
+        self.assertEqual((first.metadata['entity_type'],first.metadata['map_type']),('map','local_environment_map'))
         self.assertFalse(first.metadata['rays_used'])
         self.assertFalse((first.layers['occupancy']==0).any())
-        self.assertTrue((first.layers['occupancy']==100).any())
+        self.assertEqual(first.metadata['ground_tracking']['status'],'warming')
+        self.assertTrue((first.layers['occupancy']==-1).all())
+        for stamp in [1.02,1.04,1.06,1.08]:
+            initialized=engine.update(points,np.eye(4),stamp,('session',0),scan_duration=.1)
+        self.assertTrue((initialized.layers['occupancy']==100).any())
         snapshot=engine.update(points,np.eye(4),1.2,('session',0),scan_duration=.1)
         self.assertTrue(snapshot.metadata['rays_used'])
         self.assertTrue((snapshot.layers['occupancy']==-1).any())
@@ -144,6 +197,7 @@ class GeometryTests(unittest.TestCase):
             self.assertEqual(crop['snapshot_id'],snapshot.metadata['snapshot_id'])
         reset=engine.update(points,np.eye(4),2,('new',0),scan_duration=.1)
         self.assertFalse(reset.metadata['rays_used'])
+        self.assertEqual(reset.metadata['ground_tracking']['status'],'warming')
         with self.assertRaises(KeyError):
             engine.get_snapshot(snapshot.metadata['snapshot_id'])
 

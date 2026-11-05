@@ -1,0 +1,49 @@
+algorithm: dijkstra
+search_geometry: footprint
+safety_margin_m: 0.05
+clearance_cost_scale_m: 0.8
+clearance_cost_gain: 0.25
+conditional_obstacle_cost: 60
+local_replanning:
+  enabled: true
+  lookahead_m: 2.0
+  reuse_free_reference: true
+pose_search:
+  enabled: true
+  cache_heuristic: true
+  max_states: 600000
+  max_expansions: 100000
+  max_search_s: 0.8
+  goal_approach_straight_m: 0.6
+  radius_margin_m: 0.05
+  state_resolution_m: 0.2
+  local_state_resolution_m: 0.1
+  reverse_penalty: 1.1
+  turn_weight: 0.3
+people:
+  prediction_model: deterministic
+  body_radius_m: 0.30 # Development geometry; not a measured body-size guarantee.
+  # Planning may trade distant conflicts against progress. Safety checks the
+  # entire stopping path independently, without this planning cutoff.
+  hard_horizon_s: 1.0
+  future_conflict_cost: 1.0
+  required: false
+  max_tracks: 128
+  max_observation_age_s: 0.5
+  max_track_age_s: 0.8
+  horizon_s: 6.0
+  sample_s: 0.1
+  personal_front_m: 0.8
+  personal_back_m: 0.4
+  personal_side_m: 0.45
+  individual_cost: 0.2
+  group_cost: 1.0
+  group_distance_m: 0.75
+  decision_max_age_s: 2.0
+max_cells: 4000000
+max_path_samples: 200000
+max_geometry_age_s: 0.5
+max_association_age_s: 0.4
+native_library: outputs/navigation/build/libsocial_nav_global_planner.so
+# Explicitly selected historical geometry, never current hardware confirmation.
+geometry_reference: configs/wheelchair_geometry_reference.json

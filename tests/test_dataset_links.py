@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import yaml
 
-from decision.vlm import project_config, package_vlm_test
+from decision.vlm import project_config
 from scripts import dataset_links
 
 
@@ -41,7 +41,7 @@ class DatasetLinkTests(unittest.TestCase):
         for mode in ('missing', 'broken', 'directory', 'loop'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as folder:
                 entries, _, _ = self.fixture(folder)
-                alias = entries / 'jrdb'
+                alias = entries / 'wheelchair_weak'
                 alias.unlink()
                 if mode == 'broken':
                     alias.symlink_to(Path(folder) / 'missing_target')
@@ -61,13 +61,13 @@ class DatasetLinkTests(unittest.TestCase):
     def test_selected_datasets_do_not_require_deferred_resources(self):
         with tempfile.TemporaryDirectory() as folder:
             entries, _, _ = self.fixture(folder)
-            for name in ('jrdb', 'wheelchair_weak', 'wheelchair_annotations'):
+            for name in ('wheelchair_weak', 'wheelchair_annotations'):
                 (entries / name).unlink()
             selected = ('coda_raw', 'wheelchair_raw')
             report = dataset_links.inspect_links(folder, names=selected)
             self.assertEqual(report['status'], 'ready')
             self.assertEqual(report['checked_datasets'], list(selected))
-            self.assertIn('jrdb', report['unselected_datasets'])
+            self.assertIn('wheelchair_weak', report['unselected_datasets'])
             self.assertEqual(dataset_links.inspect_links(folder)['status'], 'missing_or_invalid_links')
             (entries / 'coda_raw').unlink()
             self.assertEqual(dataset_links.inspect_links(folder, names=selected)['status'],
@@ -83,10 +83,8 @@ class DatasetLinkTests(unittest.TestCase):
             root = Path(folder)
             self.fixture(root)
             with patch.object(project_config, 'ROOT', root):
-                self.assertEqual(project_config.dataset_path('jrdb'), root / 'data/datasets/jrdb')
-                self.assertEqual(project_config.dataset_path('socialnav_sub_pilot'), root / 'data/datasets/socialnav_sub')
+                self.assertEqual(project_config.project_path('data/datasets/wheelchair_raw'), root / 'data/datasets/wheelchair_raw')
                 self.assertEqual(project_config.project_path('/tmp/explicit_dataset'), Path('/tmp/explicit_dataset'))
-        self.assertEqual(package_vlm_test.SOURCE, project_config.project_path(project_config.load_config()['development']['bundle']))
 
     def test_detector_dataset_path_function_is_repo_relative_without_gpu_import(self):
         # Extract only the pure path function; do not import Torch/CUDA or load infos.
@@ -109,7 +107,7 @@ class DatasetLinkTests(unittest.TestCase):
                 raw = config.get(key, {}).get('RAW_DATA_PATH')
                 if raw is not None:
                     with self.subTest(config=path.name, section=key):
-                        self.assertIn(raw, ('data/coda_raw', 'data/wheelchair_raw'))
+                        self.assertIn(raw, ('data/coda_raw', 'data/wheelchair_raw', 'data/wheelchair_ros_centers'))
         script = (copied / 'train_wheelchair_3stage.sh').read_text()
         self.assertIn('require_dir "${PROJECT_DIR}/data/coda_raw"', script)
         self.assertIn('require_dir "${PROJECT_DIR}/data/wheelchair_raw"', script)

@@ -5,11 +5,13 @@
 #include <Eigen/Eigen>
 #include <pcl/point_types.h>
 #include <pcl/point_cloud.h>
+#include "ImuSample.h"
+#ifndef SOCIAL_NAV_NATIVE
 #include <fast_lio/Pose6D.h>
-#include <sensor_msgs/Imu.h>
 #include <nav_msgs/Odometry.h>
 #include <tf/transform_broadcaster.h>
 #include <eigen_conversions/eigen_msg.h>
+#endif
 
 using namespace std;
 using namespace Eigen;
@@ -34,7 +36,11 @@ using namespace Eigen;
 #define STD_VEC_FROM_EIGEN(mat)  vector<decltype(mat)::Scalar> (mat.data(), mat.data() + mat.rows() * mat.cols())
 #define DEBUG_FILE_DIR(name)     (string(string(ROOT_DIR) + "Log/"+ name))
 
+#ifdef SOCIAL_NAV_NATIVE
+typedef social_nav_native::Pose6D Pose6D;
+#else
 typedef fast_lio::Pose6D Pose6D;
+#endif
 typedef pcl::PointXYZINormal PointType;
 typedef pcl::PointCloud<PointType> PointCloudXYZI;
 typedef vector<PointType, Eigen::aligned_allocator<PointType>>  PointVector;
@@ -62,7 +68,7 @@ struct MeasureGroup     // Lidar data and imu dates for the curent process
     };
     double lidar_beg_time;
     PointCloudXYZI::Ptr lidar;
-    deque<sensor_msgs::Imu::ConstPtr> imu;
+    deque<SocialNavImu::ConstPtr> imu;
 };
 
 struct StatesGroup

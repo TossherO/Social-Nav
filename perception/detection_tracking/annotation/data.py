@@ -67,8 +67,9 @@ def detector_settings(config=None, checkpoint=None):
     if checkpoint:
         settings['detector']['checkpoint'] = str(Path(checkpoint).expanduser().resolve())
     effective = read_yaml(project_path(settings['detector']['config']))
-    if effective['DATA_CONFIG']['MAX_SWEEPS'] != 1 or effective['CLASS_NAMES'] != ['Pedestrian']:
-        raise ValueError('标注工具要求单帧 Pedestrian 检测配置')
+    sweeps = effective['DATA_CONFIG']['MAX_SWEEPS']
+    if type(sweeps) is not int or sweeps not in (1, 2, 3, 4) or effective['CLASS_NAMES'] != ['Pedestrian']:
+        raise ValueError('标注工具要求1～4帧 Pedestrian 检测配置')
     return settings, effective
 
 

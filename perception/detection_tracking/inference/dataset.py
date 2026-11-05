@@ -102,7 +102,8 @@ class ManifestSource:
                         pose_health=row.get('pose_health', 'invalid'),
                         pose_stamp_s=row.get('pose_stamp_s'),
                         rgb_asset_uri=str(self.path.parent/rgb) if rgb else None,
-                        rgb_stamp_s=row.get('rgb_stamp_s'))
+                        rgb_stamp_s=row.get('rgb_stamp_s'),
+                        pose_identity=tuple(row['pose_identity']) if row.get('pose_identity') else None)
 
 
 class CachedDetector:
@@ -118,10 +119,28 @@ class CachedDetector:
             validate_boxes(row['detections'])
             self.rows[key] = row
         self.metadata = {'backend': 'fingerprint_bound_detection_replay', 'source': str(Path(path).resolve())}
+        self.sweeps = None
+        self.last_input_context = None
+
+    def reset_history(self):
+        if self.sweeps is not None:
+            self.sweeps.reset()
+        self.last_input_context = None
 
     def predict(self, frame):
         row = self.rows[(frame.sequence_id, frame.observation_id)]
         if (row['stamp_s'] != frame.stamp_s or row['detection_frame_id'] != frame.sensor_frame
                 or row['input_fingerprint'] != frame.input_fingerprint()):
             raise ValueError('Cached detections do not match this source point cloud/time/frame')
+        context = row.get('detection_input')
+        if context is not None:
+            from .detector import CausalSweeps
+            if self.sweeps is None:
+                self.sweeps = CausalSweeps(context['max_sweeps'], context['max_time_lag_s'], context['max_pose_age_s'])
+            _, actual = self.sweeps.prepare(frame)
+            if actual != context:
+                raise ValueError('Cached detection history or poses do not match this input sequence')
+        elif self.sweeps is not None:
+            raise ValueError('Cached sequence mixes bound and unbound history')
+        self.last_input_context = context
         return validate_boxes(row['detections'])

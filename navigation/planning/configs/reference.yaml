@@ -1,0 +1,8 @@
+# A single asynchronous spatial-reference worker; local control has no job queue.
+retry_s: 1.0
+failure_retry_s: 3.0
+revalidate_s: 3.0
+timeout_s: 2.0
+max_age_s: 5.0
+startup_timeout_s: 12.0
+terminal_straight_m: 1.5

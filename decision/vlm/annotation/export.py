@@ -2,7 +2,8 @@
 import copy
 from pathlib import Path
 
-from decision.vlm.scene_inputs import render_observation
+from decision.vlm.scene_inputs import renderer_identity, MODEL_BACKGROUND
+from decision.vlm.trajectory_inputs import HISTORY_S, MAX_GAP_S, MAX_POSE_AGE_S
 from .rules import dumps, rel_response, require
 from .store import Store
 
@@ -47,10 +48,7 @@ def _export_project(store, output, inputs):
                 directory = output / 'inputs' / event['source_id'] / str(frame['ordinal'])
                 directory.mkdir(parents=True, exist_ok=True)
                 for i, fid in enumerate(window['frames']):
-                    source = store.frame(fid) if fid else None
-                    rgb = store.asset(fid, 'rgb') if fid else None
-                    image = render_observation(source, rgb, window['mapping'], (source['stamp_ns']-frame['stamp_ns'])/1e9 if source else 0,
-                                               window['fields']['e'])
+                    image = store.model_image(window, i)
                     image.save(directory / ('image_' + str(i) + '.png'))
                 (directory / 'input.json').write_text(dumps(window), encoding='utf-8')
                 rendered.add(ident)
@@ -79,7 +77,18 @@ def _export_project(store, output, inputs):
                                absent=target.get('absent', False), facts=facts, label_kind='fixed_facts_not_history_state_gold'))
     for name, rows in (('t1.jsonl', t1), ('t2.jsonl', t2)):
         (output / name).write_text(''.join(dumps(r)+'\n' for r in rows), encoding='utf-8')
+    source_ids = {row['document']['source_id'] for row in selected}
+    observation_sources = [{key: source[key] for key in ('id', 'name', 'bag_fingerprint', 'records_sha256',
+                           'calibration_sha256', 'calibration_scope', 'perception_provenance') if key in source}
+                           for source in store.sources() if source['id'] in source_ids]
     summary = dict(project_id=store.identity, asset_identity=store.asset_identity, events=sources,
+                   rgb_association_identity=store.rgb_cache.identity if store.rgb_cache else None,
+                   observation_sources=observation_sources,
+                   input_rendering=renderer_identity(),
+                   model_input_background=MODEL_BACKGROUND,
+                   display_view=store.view_binding,
+                   trajectory_policy=dict(history_per_image_s=HISTORY_S,max_gap_s=MAX_GAP_S,
+                       max_pose_age_s=MAX_POSE_AGE_S,frame='each_image_lidar',ego_reference='lidar_origin'),
                    counts=dict(t1=len(t1), t2=len(t2)), model_inputs_included=inputs,
                    t2_scope='fixed_facts; no fabricated LAST_TARGET or v/o/a/l/n history gold')
     (output / 'manifest.json').write_text(dumps(summary)+'\n', encoding='utf-8')

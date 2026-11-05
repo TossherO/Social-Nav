@@ -1,0 +1,6 @@
+# Independent local checks under explicit development braking assumptions.
+max_input_age_s: 0.5
+feedback_max_age_s: 0.15
+reaction_s: 0.2
+actuator_delay_s: 0.2
+max_sweep_samples: 2000

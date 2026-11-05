@@ -1,0 +1,15 @@
+{
+  "scope": "offline_historical_geometry_hypothesis",
+  "footrest_under_table_allowed": true,
+  "front_gaps_m": [-0.05, 0.05],
+  "yaw_offsets_deg": [-10.0, 0.0, 10.0],
+  "along_step_m": 0.10,
+  "min_along_separation_m": 0.25,
+  "lateral_zones": 4,
+  "end_guard_m": 0.10,
+  "evidence_window_s": 12.0,
+  "evidence_decay_s": 5.0,
+  "below_edge_band_m": [0.08, 0.60],
+  "voxel_m": 0.05,
+  "ranking_weights": {"observed_returns": 2.0, "approach_m": 1.0, "turn_rad": 0.3}
+}

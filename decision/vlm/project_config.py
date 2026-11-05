@@ -12,7 +12,7 @@ CONFIG_PATH = CONFIG_DIR / "project.json"
 
 def load_config():
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    sections = {"dataset_roots", "model", "deployment", "inference", "benchmark", "development"}
+    sections = {"model", "deployment", "inference", "local_inference", "tasks"}
     if not isinstance(config, dict) or any(not isinstance(config.get(name), dict) for name in sections):
         raise ValueError("Expected the complete project configuration")
     return config
@@ -22,7 +22,3 @@ def project_path(value):
     """Resolve a configured relative path against the repo, preserving aliases."""
     path = Path(value).expanduser()
     return path if path.is_absolute() else ROOT / path
-
-
-def dataset_path(name):
-    return project_path(load_config()["dataset_roots"][name])

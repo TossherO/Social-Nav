@@ -1,0 +1,14 @@
+# Bounded direct velocity selection; development settings, not measured hardware.
+linear_samples: 3
+angular_samples: 7
+max_candidates: 24
+prediction_s: 1.5
+sample_s: 0.1
+lookahead_m: 0.8
+path_window_m: 3.0
+path_weight: 8.0
+progress_weight: 2.0
+heading_weight: 0.8
+clearance_weight: 0.03
+change_weight: 0.1
+reference_max_age_s: 5.0

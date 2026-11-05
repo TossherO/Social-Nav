@@ -1,0 +1,202 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1880" viewBox="0 0 1200 1880" role="img" aria-labelledby="title description" data-results-sha256="83d840cb5bc9dfab97bb381f9b9008b6898d1c63f9ae89edacbd85ac8b113d49" data-age-unit="ms">
+<title id="title">感知导航：计算依赖、阶段耗时与输入年龄</title>
+<desc id="description">2026年11月4日当前代码完整影子回放。单张RTX3090，CPU0至3，人物期限0.2秒，CPU批量地面拟合及GPU二维静态支持。上半部分为计算依赖与阶段P95，下半部分为各自原观察到端点的P95，不能相加。真实底盘未接通。</desc>
+<defs>
+<style>
+text { font-family:"Noto Sans CJK SC","Microsoft YaHei",sans-serif; fill:#20334a; }
+.title { font-size:32px; font-weight:700; }
+.section { font-size:26px; font-weight:700; }
+.region-title { font-size:24px; font-weight:700; }
+.node-title { font-size:22px; font-weight:700; }
+.metric { font-size:30px; font-weight:700; font-variant-numeric:tabular-nums; }
+.body { font-size:20px; }
+.small { font-size:18px; fill:#475b70; }
+.row-label { font-size:22px; }
+.row-value { font-size:26px; font-weight:700; font-variant-numeric:tabular-nums; }
+.muted { fill:#475b70; }
+.green-text { fill:#086d61; }
+.blue-text { fill:#254ca4; }
+.purple-text { fill:#7544a0; }
+.red-text { fill:#9c302c; }
+.perception { fill:#edf8f4; stroke:#b5d8c9; stroke-width:1.5; }
+.navigation { fill:#eef3ff; stroke:#bdcdef; stroke-width:1.5; }
+.node { fill:#fff; stroke:#b9c8d6; stroke-width:1.5; }
+.background-node { fill:#f8f1fc; stroke:#c5a9d9; stroke-width:1.5; }
+.input-bar { fill:#fff; stroke:#a6badd; stroke-width:1.5; }
+.optional { fill:#f7f2fb; stroke:#c5a9d9; stroke-width:1.5; stroke-dasharray:6 5; }
+.age-panel { fill:#fff; stroke:#d3dce6; stroke-width:1.5; }
+.warning { fill:#fff2ed; stroke:#e2b3a8; stroke-width:1.5; }
+.arrow { fill:none; stroke-width:2.4; stroke-linecap:round; stroke-linejoin:round; }
+.main { stroke:#247c6c; }
+.state { stroke:#7544a0; stroke-dasharray:7 5; }
+.async { stroke:#7544a0; stroke-dasharray:7 5; }
+.transfer { stroke:#3157b2; }
+.grid { stroke:#e3e9f0; stroke-width:1; }
+.track { fill:#f0f3f7; }
+</style>
+</defs>
+<rect width="1200" height="1880" fill="#fafbfd" />
+<text x="30" y="44" class="title" font-size="32" fill="#20334a" font-weight="700">感知导航：计算依赖与输入年龄</text>
+<text x="30" y="81" class="body muted" font-size="20" fill="#475b70">当前完整负载 · 2026-11-04 · 2755 源扫描</text>
+<text x="30" y="112" class="body muted" font-size="20" fill="#475b70">RTX 3090 ×1，CPU0–3；CPU批量地面拟合，GPU二维支持。</text>
+<text x="30" y="153" class="section" font-size="26" fill="#20334a" font-weight="700">A  计算流程</text>
+<text x="720" y="153" class="body muted" font-size="20" fill="#475b70">节点标阶段耗时，箭头标数据与传输。</text>
+<rect x="30" y="175" width="1140" height="430" rx="16" class="perception" />
+<text x="60" y="208" class="region-title green-text" font-size="24" fill="#086d61" font-weight="700">感知</text>
+<rect x="30" y="680" width="1140" height="400" rx="16" class="navigation" />
+<text x="60" y="718" class="region-title blue-text" font-size="24" fill="#254ca4" font-weight="700">导航</text>
+<path d="M280 285 H350" class="arrow main" />
+<polygon points="350,285 338,290 338,280" fill="#247c6c" />
+<path d="M170 360 V502 H350" class="arrow main" />
+<polygon points="350,502 338,507 338,497" fill="#247c6c" />
+<text x="195" y="405" class="body" font-size="20" fill="#20334a">原始扫描</text>
+<text x="195" y="431" class="small" font-size="18" fill="#475b70">只读共享内存</text>
+<path d="M500 360 V440" class="arrow main" />
+<polygon points="500,440 495,428 505,428" fill="#247c6c" />
+<text x="516" y="399" class="body" font-size="20" fill="#20334a">有效位姿</text>
+<path d="M625 360 V416 H925 V440" class="arrow main" />
+<polygon points="925,440 920,428 930,428" fill="#247c6c" />
+<text x="786" y="402" class="small" text-anchor="middle" font-size="18" fill="#475b70">去畸变扫描 · 共享内存</text>
+<path d="M650 275 H750" class="arrow async" />
+<polygon points="750,275 738,280 738,270" fill="#7544a0" />
+<text x="700" y="257" class="body purple-text" text-anchor="middle" font-size="20" fill="#7544a0">异步</text>
+<path d="M800 360 V379 H671 V318 H650" class="arrow async" />
+<polygon points="650,318 662,313 662,323" fill="#7544a0" />
+<text x="733" y="372" class="small purple-text" text-anchor="middle" font-size="18" fill="#7544a0">地图修正</text>
+<path d="M650 502 H750" class="arrow main" />
+<polygon points="750,502 738,507 738,497" fill="#247c6c" />
+<text x="700" y="485" class="body" text-anchor="middle" font-size="20" fill="#20334a">人物</text>
+<path d="M400 235 V220 H20 V655 H600 V735" class="arrow state" />
+<polygon points="600,735 595,723 605,723" fill="#7544a0" />
+<text x="60" y="644" class="body purple-text" font-size="20" fill="#7544a0">最新位姿与健康 · 独立 Unix 通道</text>
+<path d="M1000 565 V655 H1040 V735" class="arrow transfer" />
+<polygon points="1040,735 1035,723 1045,723" fill="#3157b2" />
+<text x="980" y="622" class="body blue-text" text-anchor="end" font-size="20" fill="#254ca4">局部图与人物</text>
+<text x="980" y="648" class="body blue-text" text-anchor="end" font-size="20" fill="#254ca4">显存引用或共享快照</text>
+<g id="sensor-input">
+<rect x="60" y="235" width="220" height="125" rx="12" class="node" />
+<text x="78" y="266" class="node-title" font-size="22" fill="#20334a" font-weight="700">雷达与 IMU</text>
+<text x="78" y="305" class="small" font-size="18" fill="#475b70">bag 直读或 ROS 接入</text>
+<text x="78" y="336" class="body" font-size="20" fill="#20334a">扫描约 10Hz</text>
+</g>
+<g id="fast-lio">
+<rect x="350" y="235" width="300" height="125" rx="12" class="node" />
+<text x="368" y="264" class="node-title" font-size="22" fill="#20334a" font-weight="700">FAST-LIO 连续定位</text>
+<text x="368" y="307" class="metric" font-size="30" fill="#20334a" font-weight="700">24.12 ms</text>
+<text x="368" y="336" class="small" font-size="18" fill="#475b70">会话 26.26 ms，已含前端</text>
+</g>
+<g id="roll">
+<rect x="750" y="235" width="350" height="125" rx="12" class="background-node" />
+<text x="768" y="264" class="node-title" font-size="22" fill="#20334a" font-weight="700">ROLL 后台地图匹配</text>
+<text x="768" y="307" class="metric" font-size="30" fill="#20334a" font-weight="700">55.31 ms</text>
+<text x="768" y="336" class="small" font-size="18" fill="#475b70">GPU 近邻，CPU 拟合</text>
+</g>
+<g id="people">
+<rect x="350" y="440" width="300" height="125" rx="12" class="node" />
+<text x="368" y="469" class="node-title" font-size="22" fill="#20334a" font-weight="700">行人检测与跟踪</text>
+<text x="368" y="512" class="metric" font-size="30" fill="#20334a" font-weight="700">68.39 ms</text>
+<text x="368" y="541" class="small" font-size="18" fill="#475b70">GPU 检测与关联，CPU 状态</text>
+</g>
+<g id="environment">
+<rect x="750" y="440" width="350" height="125" rx="12" class="node" />
+<text x="768" y="469" class="node-title" font-size="22" fill="#20334a" font-weight="700">地图与二维支持</text>
+<text x="768" y="512" class="metric" font-size="30" fill="#20334a" font-weight="700">51.48 ms</text>
+<text x="768" y="541" class="small" font-size="18" fill="#475b70">取回/交接 10.33 ms</text>
+</g>
+<text x="60" y="592" class="body green-text" font-size="20" fill="#086d61">感知主循环 69.57 ms；异步地图任务，原生地图使用默认CUDA流。</text>
+<rect x="60" y="735" width="1080" height="50" rx="9" class="input-bar" />
+<text x="80" y="767" class="body" font-size="20" fill="#20334a">输入：目标、当前位姿、已就绪局部图与人物；静态先验可选。</text>
+<path d="M210 785 V815" class="arrow transfer" />
+<polygon points="210,815 205,803 215,803" fill="#3157b2" />
+<path d="M600 785 V815" class="arrow transfer" />
+<polygon points="600,815 595,803 605,803" fill="#3157b2" />
+<path d="M990 785 V815" class="arrow transfer" />
+<polygon points="990,815 985,803 995,803" fill="#3157b2" />
+<path d="M360 885 H450" class="arrow async" />
+<polygon points="450,885 438,890 438,880" fill="#7544a0" />
+<text x="405" y="870" class="body purple-text" text-anchor="middle" font-size="20" fill="#7544a0">参考</text>
+<path d="M750 885 H840" class="arrow main" />
+<polygon points="840,885 828,890 828,880" fill="#247c6c" />
+<text x="795" y="870" class="body" text-anchor="middle" font-size="20" fill="#20334a">提议</text>
+<path d="M990 955 V1004" class="arrow async" />
+<polygon points="990,1004 985,992 995,992" fill="#7544a0" />
+<g id="reference">
+<rect x="60" y="815" width="300" height="140" rx="12" class="background-node" />
+<text x="78" y="844" class="node-title" font-size="22" fill="#20334a" font-weight="700">空间参考 · CPU</text>
+<text x="78" y="887" class="metric" font-size="30" fill="#20334a" font-weight="700">1031.55 ms</text>
+<text x="78" y="916" class="small" font-size="18" fill="#475b70">CPU 累计；墙钟 1032.84 ms</text>
+<text x="78" y="940" class="small" font-size="18" fill="#475b70">Hybrid A* · 搜索层只读共享</text>
+</g>
+<g id="dwa">
+<rect x="450" y="815" width="300" height="140" rx="12" class="node" />
+<text x="468" y="844" class="node-title" font-size="22" fill="#20334a" font-weight="700">速度选择 DWA · GPU</text>
+<text x="468" y="887" class="metric" font-size="30" fill="#20334a" font-weight="700">27.79 ms</text>
+<text x="468" y="916" class="small" font-size="18" fill="#475b70">GPU 地图直接引用</text>
+<text x="468" y="940" class="small" font-size="18" fill="#475b70">设备事件 4.77 ms，已含</text>
+</g>
+<g id="safety">
+<rect x="840" y="815" width="300" height="140" rx="12" class="node" />
+<text x="858" y="844" class="node-title" font-size="22" fill="#20334a" font-weight="700">独立安全 · CPU</text>
+<text x="858" y="887" class="metric" font-size="30" fill="#20334a" font-weight="700">24.51 ms</text>
+<text x="858" y="916" class="small" font-size="18" fill="#475b70">含独立几何与时间复核</text>
+<text x="858" y="940" class="small" font-size="18" fill="#475b70">检查延迟和完整制动</text>
+</g>
+<rect x="840" y="1004" width="300" height="44" rx="9" class="input-bar" />
+<text x="990" y="1033" class="node-title" text-anchor="middle" font-size="22" fill="#20334a" font-weight="700">建议被接收（影子模式）</text>
+<text x="60" y="1015" class="body blue-text" font-size="20" fill="#254ca4">参考异步返回，控制可复用已有参考。</text>
+<text x="60" y="1047" class="body blue-text" font-size="20" fill="#254ca4">状态直达控制与安全，不等待本帧环境更新。</text>
+<rect x="30" y="1098" width="1140" height="56" rx="10" class="optional" />
+<text x="50" y="1133" class="body purple-text" font-size="20" fill="#7544a0">可选图像支路：RGB → YOLO 与关联 → VLM 输入准备。默认关闭，不阻塞主流程。</text>
+<text x="30" y="1207" class="section" font-size="26" fill="#20334a" font-weight="700">B  从各自起点到端点的时间</text>
+<text x="30" y="1241" class="body muted" font-size="20" fill="#475b70">每行使用自己的原始记录与样本，分别求时间差，再取 P95。</text>
+<rect x="30" y="1260" width="1140" height="470" rx="14" class="age-panel" />
+<text x="60" y="1292" class="body" font-size="20" fill="#20334a">起点 → 终点</text>
+<text x="1140" y="1292" class="body" text-anchor="end" font-size="20" fill="#20334a">P95</text>
+<text x="630" y="1292" class="small" text-anchor="middle" font-size="18" fill="#475b70">0</text>
+<path d="M630 1306 V1711" class="grid" />
+<text x="733.333" y="1292" class="small" text-anchor="middle" font-size="18" fill="#475b70">500</text>
+<path d="M733.333 1306 V1711" class="grid" />
+<text x="836.667" y="1292" class="small" text-anchor="middle" font-size="18" fill="#475b70">1000</text>
+<path d="M836.667 1306 V1711" class="grid" />
+<text x="940" y="1292" class="small" text-anchor="middle" font-size="18" fill="#475b70">1500 ms</text>
+<path d="M940 1306 V1711" class="grid" />
+<text x="60" y="1334" class="row-label" font-size="22" fill="#20334a">扫描末点 → 本帧感知末尾</text>
+<text x="60" y="1357" class="small" font-size="18" fill="#475b70">仅实际处理帧；不等待地图线程</text>
+<rect x="630" y="1316" width="310" height="24" rx="4" class="track" />
+<rect x="630" y="1316" width="20.90" height="24" rx="4" fill="#247c6c" />
+<text x="1140" y="1337" class="row-value" text-anchor="end" font-size="26" fill="#20334a" font-weight="700">101.11 ms</text>
+<text x="60" y="1390" class="row-label" font-size="22" fill="#20334a">控制开始 → 首次安全接收</text>
+<text x="60" y="1413" class="small" font-size="18" fill="#475b70">按候选身份匹配首次安全响应，可能拒绝</text>
+<rect x="630" y="1372" width="310" height="24" rx="4" class="track" />
+<rect x="630" y="1372" width="16.71" height="24" rx="4" fill="#3157b2" />
+<text x="1140" y="1393" class="row-value" text-anchor="end" font-size="26" fill="#20334a" font-weight="700">80.85 ms</text>
+<text x="60" y="1446" class="row-label" font-size="22" fill="#20334a">定位状态原时刻 → 控制开始</text>
+<text x="60" y="1469" class="small" font-size="18" fill="#475b70">状态通过独立通道到达导航</text>
+<rect x="630" y="1428" width="310" height="24" rx="4" class="track" />
+<rect x="630" y="1428" width="6.95" height="24" rx="4" fill="#7544a0" />
+<text x="1140" y="1449" class="row-value" text-anchor="end" font-size="26" fill="#20334a" font-weight="700">33.63 ms</text>
+<text x="60" y="1502" class="row-label" font-size="22" fill="#20334a">原控制状态 → 首次安全完成</text>
+<text x="60" y="1525" class="small" font-size="18" fill="#475b70">对应同一控制提议的首个响应</text>
+<rect x="630" y="1484" width="310" height="24" rx="4" class="track" />
+<rect x="630" y="1484" width="21.16" height="24" rx="4" fill="#7544a0" />
+<text x="1140" y="1505" class="row-value" text-anchor="end" font-size="26" fill="#20334a" font-weight="700">102.41 ms</text>
+<text x="60" y="1558" class="row-label" font-size="22" fill="#20334a">原控制状态 → 首次安全接收</text>
+<text x="60" y="1581" class="small" font-size="18" fill="#475b70">包含安全处理后的接收等待</text>
+<rect x="630" y="1540" width="310" height="24" rx="4" class="track" />
+<rect x="630" y="1540" width="21.44" height="24" rx="4" fill="#7544a0" />
+<text x="1140" y="1561" class="row-value" text-anchor="end" font-size="26" fill="#20334a" font-weight="700">103.75 ms</text>
+<text x="60" y="1614" class="row-label" font-size="22" fill="#20334a">复核地图原时刻 → 放行接收</text>
+<text x="60" y="1637" class="small" font-size="18" fill="#475b70">使用安全实际复核的地图，仅统计放行</text>
+<rect x="630" y="1596" width="310" height="24" rx="4" class="track" />
+<rect x="630" y="1596" width="61.27" height="24" rx="4" fill="#ae681d" />
+<text x="1140" y="1617" class="row-value" text-anchor="end" font-size="26" fill="#20334a" font-weight="700">296.47 ms</text>
+<text x="60" y="1670" class="row-label" font-size="22" fill="#20334a">查询地图原时刻 → 参考结果消费</text>
+<text x="60" y="1693" class="small" font-size="18" fill="#475b70">含失败查询、调度和消费等待</text>
+<rect x="630" y="1652" width="310" height="24" rx="4" class="track" />
+<rect x="630" y="1652" width="276.40" height="24" rx="4" fill="#ae681d" />
+<text x="1140" y="1673" class="row-value" text-anchor="end" font-size="26" fill="#20334a" font-weight="700">1337.44 ms</text>
+<text x="30" y="1767" class="body muted" font-size="20" fill="#475b70">各行独立统计；P95 不能相加，也不能相减来分解阶段耗时。</text>
+<text x="30" y="1800" class="body muted" font-size="20" fill="#475b70">不包含扫描形成、传感器上行与真实底盘响应。更细的阶段累计时间尚未记录。</text>
+<rect x="30" y="1822" width="1140" height="42" rx="9" class="warning" />
+<text x="50" y="1851" class="body red-text" font-size="20" fill="#9c302c">真实底盘尚未接通，整机执行闭环的总时延未测量。</text>
+</svg>

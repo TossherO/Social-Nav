@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import uuid
 
-from .rules import digest, dumps, require
+from .rules import digest, dumps, perception_continuity, require
 from .store import initialize_labels, initialize_observations
 
 
@@ -35,8 +35,11 @@ def indexed_people(row):
 
 def compact_result(row):
     fields = ('observation_id', 'sequence_id', 'stamp_s', 'clock_domain', 'timestamp_source', 'detection_frame_id',
-              'health', 'pose_health', 'world_from_lidar', 'detections', 'input_fingerprint', 'rgb_stamp_s')
+              'health', 'pose_health', 'world_from_lidar', 'detections', 'input_fingerprint', 'rgb_stamp_s',
+              'session_id', 'generation', 'frame_id', 'pose_source', 'pose_stamp_s',
+              'localization_binding', 'detection_input')
     result = {key: row.get(key) for key in fields}
+    result['continuity'] = perception_continuity(row)
     result['tracks'] = [{key: t[key] for key in ('track_id', 'lifecycle_generation', 'box', 'state', 'confirmed')}
                         for t in row.get('tracks', [])]
     return result
@@ -48,23 +51,53 @@ def prepare(args):
     results = [Path(p).expanduser().resolve() for p in args.results]
     bags = [Path(p).expanduser().resolve() for p in args.bag] if args.bag else []
     require(not bags or len(bags) == len(results), '--bag数量须与--results相同')
-    calibration = Path(args.calibration).resolve()
-    require(calibration.is_file(), '相机—雷达标定文件不存在')
+    calibration = Path(args.calibration).resolve() if args.calibration else ROOT/'perception/sensors/calibration/front_camera_lidar.yaml'
+    import yaml
     jobs = []
     for i, result in enumerate(results):
         records = result / 'people.jsonl' if result.is_dir() else result
         run = records.parent / 'run.json'
         require(records.is_file(), '缺少people.jsonl：' + str(records))
         metadata = json.loads(run.read_text()) if run.is_file() else {}
+        rgb = metadata.get('image_association')
+        saved = None
+        if isinstance(rgb,dict) and rgb.get('records') and not getattr(args,'recompute_rgb',False):
+            require(rgb.get('complete') is True and rgb.get('calibration'),
+                    '运行的二维记录未完成保存；请保留已有结果并显式选择恢复方式')
+        frozen=rgb.get('calibration') if isinstance(rgb,dict) and rgb.get('calibration') else metadata.get('camera_calibration')
+        if frozen:
+            if isinstance(rgb,dict) and rgb.get('calibration') and not getattr(args,'recompute_rgb',False):
+                require(rgb.get('complete') is True,'运行的二维结果未完成保存；若需恢复请显式选择重新推理')
+                from perception.detection_tracking.inference.rgb_recording import load_records
+                path=records.parent/rgb['records']
+                saved=load_records(path,rgb['records_sha256'])
+            if args.calibration:
+                require(calibration.is_file() and file_digest(calibration)==frozen['sha256'],
+                        '显式外参与保存的二维结果不符；请使用原标定或新结果')
+            camera_record=dict(lidar_to_camera_optical={key:frozen[key] for key in ('matrix','source_frame','target_frame')})
+            calibration_hash=frozen['sha256']
+        else:
+            require(calibration.is_file(),'相机—雷达标定文件不存在')
+            camera_record=yaml.safe_load(calibration.read_text())
+            calibration_hash=file_digest(calibration)
+        detector = metadata.get('detector_metadata') or metadata.get('cached_detection_retracking', {}).get('detector')
+        provenance = dict(run_sha256=file_digest(run) if run.is_file() else None,
+                          detector=dict(status='recorded', metadata=detector) if detector else dict(status='not_recorded'))
         bag = bags[i] if bags else Path(metadata.get('bag', '')).expanduser().resolve()
         require(bag.is_file(), '无法定位原bag；请按--results顺序显式提供--bag')
         require(output != bag and output not in bag.parents and output != records and output not in records.parents,
                 '观察输出不得覆盖输入')
         jobs.append(dict(id=uuid.uuid4().hex, name=bag.stem, bag=str(bag), records=str(records),
                          expected_bag=metadata.get('playback', {}).get('bag_fingerprint'),
+                         perception_provenance=provenance,
                          root_group=args.root_group or ('recording:' + bag.parent.name),
-                         start=args.start, duration=args.duration))
-    recipe = dict(jobs=jobs, pointcloud_topic=args.pointcloud_topic)
+                         start=args.start, duration=args.duration,
+                         camera_record=camera_record,calibration_sha256=calibration_hash,
+                         saved_rgb=saved,rgb_recording=(dict(path=str(path),sha256=rgb['records_sha256'],metadata=rgb)
+                                                       if saved is not None else None)))
+    recipe = dict(jobs=[{key:job[key] for key in ('id','bag','expected_bag')} for job in jobs],
+                  pointcloud_topic=args.pointcloud_topic)
+    with_rgb=getattr(args,'with_rgb_associations',False) or all(job['rgb_recording'] for job in jobs)
     print('读取各bag的首帧头信息与文件索引，不遍历图像或点云…', flush=True)
     with tempfile.TemporaryDirectory(prefix='vlm-annotation-prepare-') as temporary:
         request = Path(temporary) / 'request.json'
@@ -78,23 +111,26 @@ def prepare(args):
         if completed.returncode:
             raise ValueError(completed.stderr.strip() or '读取bag头信息失败')
         probes = json.loads(completed.stdout)
-    import yaml
-    calibration_data = yaml.safe_load(calibration.read_text())['lidar_to_camera_optical']
-    reader = dict(pointcloud_topic=args.pointcloud_topic, rgb_topic=args.rgb_topic, camera_info_topic=args.camera_info_topic,
-                  max_rgb_age_s=.1, max_points=6000, transform=calibration_data['matrix'],
-                  lidar_frame=calibration_data['source_frame'], camera_frame=calibration_data['target_frame'])
-    calibration_hash = file_digest(calibration)
     db = initialize_observations(output)
     counts, signatures = {}, []
     try:
         db.execute('INSERT INTO meta VALUES(?,?)', ('ros_python', dumps(args.ros_python)))
         for job in jobs:
+            calibration_record=job['camera_record']
+            calibration_data=calibration_record['lidar_to_camera_optical']
+            reader=dict(pointcloud_topic=args.pointcloud_topic,rgb_topic=args.rgb_topic,camera_info_topic=args.camera_info_topic,
+                max_rgb_age_s=args.max_rgb_age,max_points=6000,transform=calibration_data['matrix'],
+                lidar_frame=calibration_data['source_frame'],camera_frame=calibration_data['target_frame'])
+            if job['rgb_recording']:reader['rgb_pairing']='recorded'
             probe = probes[job['id']]
             require(probe['sensor_frame'].lstrip('/') == reader['lidar_frame'].lstrip('/'), '标定源坐标系与bag不匹配')
             meta = dict(bag=job['bag'], records=job['records'], root_group=job['root_group'], storage='rosbag_lazy',
                         bag_fingerprint=probe['bag_fingerprint'], origin_ns=probe['origin_ns'],
                         record_offset_ns=probe['record_offset_ns'], frame_id=probe['sensor_frame'],
-                        reader=reader, calibration_sha256=calibration_hash)
+                        reader=reader, calibration_sha256=job['calibration_sha256'],
+                        calibration_scope=calibration_record.get('mounting_scope', 'unspecified'),
+                        perception_provenance=job['perception_provenance'])
+            if job['rgb_recording']:meta['rgb_recording']=job['rgb_recording']
             db.execute('INSERT INTO sources VALUES(?,?,?)', (job['id'], job['name'], dumps(meta)))
             count, previous, content = 0, None, hashlib.sha256()
             print('导入已有检测／跟踪／位姿：'+job['name'], flush=True)
@@ -103,7 +139,11 @@ def prepare(args):
                     content.update(line)
                     if not line.strip():
                         continue
-                    row = compact_result(json.loads(line))
+                    raw=json.loads(line)
+                    row = compact_result(raw)
+                    if job['saved_rgb'] is not None:
+                        from perception.detection_tracking.inference.rgb_recording import observation_key,recorded_input
+                        row['recorded_rgb_input']=recorded_input(raw,job['saved_rgb'].get(observation_key(raw)))
                     stamp = row['stamp_s']
                     require(isinstance(stamp, (float, int)) and math.isfinite(stamp), '结果观察时间无效')
                     ns = round(stamp*1e9)
@@ -114,6 +154,7 @@ def prepare(args):
                         continue
                     metadata = dict(lazy=True, result=row, people=indexed_people(row), image_size=None,
                                     has_rgb=False, fingerprint=digest(row), sensor_frame=row['detection_frame_id'],
+                                    continuity=row['continuity'],
                                     clock_domain=row['clock_domain'], timestamp_source=row['timestamp_source'])
                     db.execute('INSERT INTO frames VALUES(?,?,?,?,?,?,?,?,?)',
                                (job['id']+'/'+str(count), job['id'], count, ns, elapsed, dumps(metadata), None, None, None))
@@ -122,15 +163,25 @@ def prepare(args):
             meta['records_sha256'] = content.hexdigest()
             db.execute('UPDATE sources SET metadata=? WHERE id=?', (dumps(meta), job['id']))
             counts[job['name']] = count
-            signatures.append((job['id'], meta['records_sha256'], probe['bag_fingerprint']))
+            signatures.append((job['id'], meta['records_sha256'], probe['bag_fingerprint'],job['calibration_sha256'],
+                               job['rgb_recording']['sha256'] if job['rgb_recording'] else None))
             db.commit()
             print('  '+str(count)+'帧索引已就绪；图像／点云按需读取', flush=True)
-        identity = digest(dict(sources=signatures, calibration=calibration_hash))
+        identity = digest(dict(sources=signatures))
         db.execute('INSERT INTO meta VALUES(?,?)', ('asset_identity', dumps(identity)))
+        if with_rgb:
+            cache = Path(args.rgb_output).expanduser().resolve() if getattr(args,'rgb_output',None) else output/'rgb_association'
+            db.execute('INSERT INTO meta VALUES(?,?)',('default_rgb_associations',
+                dumps(dict(status='pending',path=os.path.relpath(cache,output)))))
         db.execute('UPDATE meta SET value=? WHERE key=?', ('true', 'complete'))
         db.commit()
     finally:
         db.close()
     initialize_labels(output)
-    print('轻量标注工程已就绪：' + str(output))
+    print(('观察索引已建立，继续准备RGB关联：' if with_rgb else
+           '轻量标注工程已就绪：') + str(output))
     print('来源／观察数：' + dumps(counts))
+    if with_rgb:
+        from .rgb_preparation import prepare_rgb
+        return prepare_rgb(output,getattr(args,'rgb_output',None),getattr(args,'image_device','0'),
+                           recompute=getattr(args,'recompute_rgb',False))

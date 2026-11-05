@@ -441,6 +441,71 @@ class PeopleAnnotationTests(unittest.TestCase):
             self.assertEqual(result['reused'], 2)
             client.return_value.predict.assert_not_called()
 
+    def test_multiframe_precompute_requires_recorded_poses_before_loading_gpu(self):
+        from perception.detection_tracking.annotation.offline import predict_project
+        self.store.set_meta('effective', {'DATA_CONFIG': {'POINT_CLOUD_RANGE': BOUNDS, 'MAX_SWEEPS': 3}})
+        with patch('perception.detection_tracking.annotation.offline.index_source'), \
+             patch('perception.detection_tracking.annotation.offline.DetectorClient') as client:
+            with self.assertRaisesRegex(ValueError, '--pose-results'):
+                predict_project(self.store.path, 'unused', '0', lambda _: None)
+            client.assert_not_called()
+
+    def test_multiframe_resume_warms_cached_prefix_and_preserves_manual_work(self):
+        from perception.detection_tracking.annotation.offline import predict_project
+        from perception.detection_tracking.inference.detector import CausalSweeps
+        from perception.detection_tracking.inference.pipeline import Frame
+        self.store.set_meta('effective', {'DATA_CONFIG': {'POINT_CLOUD_RANGE': BOUNDS, 'MAX_SWEEPS': 3}})
+        with self.store.connection:
+            self.store.connection.execute('UPDATE frames SET fingerprint=NULL')
+            self.store.connection.execute('INSERT INTO frames '
+                '(id,source_id,ordinal,stamp_ns,record_ns,record_rank,sensor_frame,review) '
+                'VALUES (?,?,?,?,?,?,?,?)', ('source/1', 'source', 1, 1100000001, 2100000000, 0, 'rslidar', dumps(blank_review())))
+        manual = edit_review(blank_review(), 'add', BOUNDS, xy=[4., 3.])
+        self.store.save_review('source/0', manual)
+        raw = np.array([[3., 1., .5, 128.]], dtype=np.float32)
+        def stamp(ns):
+            return SimpleNamespace(to_nsec=lambda: ns)
+        messages = [('/points', SimpleNamespace(header=SimpleNamespace(stamp=stamp(s), frame_id='rslidar')), stamp(r))
+                    for s, r in [(1000000001, 2000000000), (1100000001, 2100000000)]]
+        calls = []
+        class Client:
+            metadata = dict(point_cloud_range=BOUNDS, checkpoint_sha256='three_frame', max_sweeps=3)
+            def __init__(self, *args):
+                self.sweeps = CausalSweeps(3)
+            def observe(self, row, points, pose):
+                calls.append(('observe', row['id']))
+                observed = Frame(row['id'], row['source_id'], row['stamp_ns']/1e9, points,
+                    sensor_frame=row['sensor_frame'], world_from_lidar=np.eye(4), pose_source='localization',
+                    pose_health='valid', pose_identity=('session', 0))
+                _, self.last_input_context = self.sweeps.prepare(observed)
+                return self.last_input_context
+            def predict(self, row, points, pose):
+                self.observe(row, points, pose)
+                calls.append(('predict', row['id']))
+                return BOXES
+            def close(self):
+                pass
+        with patch('perception.detection_tracking.annotation.offline.index_source'), \
+             patch('perception.detection_tracking.annotation.offline.BagReader') as reader, \
+             patch('perception.detection_tracking.annotation.offline.decode_cloud', return_value=raw), \
+             patch('perception.detection_tracking.annotation.poses.RecordedPoses') as provider, \
+             patch('perception.detection_tracking.annotation.offline.DetectorClient', Client):
+            provider.return_value.provenance = {'run': 'bound_test_pose'}
+            reader.return_value.bag.read_messages.side_effect = lambda **_: iter(messages)
+            first = predict_project(self.store.path, 'unused', '0', lambda _: None, pose_results='unused')
+            self.assertEqual(first['processed'], 2)
+            expected = self.store.frame('source/1')['model']['input_context']
+            # Simulate a stopped prefix without modifying any real user project.
+            with self.store.connection:
+                self.store.connection.execute('UPDATE frames SET candidates=NULL,model=NULL WHERE id=?', ('source/1',))
+            calls.clear()
+            second = predict_project(self.store.path, 'unused', '0', lambda _: None, pose_results='unused')
+            self.assertEqual((second['reused'], second['processed']), (1, 1))
+            self.assertEqual(calls[0], ('observe', 'source/0'))
+            self.assertEqual(self.store.frame('source/1')['model']['input_context'], expected)
+            self.assertEqual(expected['used_sweeps'], 2)
+            self.assertEqual(self.store.frame('source/0')['review'], manual)
+
 
 if __name__ == '__main__':
     unittest.main()

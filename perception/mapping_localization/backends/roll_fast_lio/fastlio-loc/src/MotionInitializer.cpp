@@ -34,7 +34,7 @@ void MotionInitializer::deskew(const Cloud& scan, double begin, double end, Clou
 }
 
 bool MotionInitializer::process(const Cloud::Ptr& scan, double begin,
-    const std::deque<sensor_msgs::Imu::ConstPtr>& messages, Cloud& deskewed) {
+    const std::deque<SocialNavImu::ConstPtr>& messages, Cloud& deskewed) {
     if (messages.empty() || scan->empty()) return false;
     end_stamp=begin;
     for (const auto& p:*scan) end_stamp=std::max(end_stamp,begin+p.curvature*.001);

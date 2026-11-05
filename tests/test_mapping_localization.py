@@ -2,11 +2,31 @@
 import contextlib
 import io
 from pathlib import Path
+import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
-from perception.mapping_localization.__main__ import arguments, algorithm_command, wait_for_native_drain, merge_timings
+from perception.mapping_localization.__main__ import arguments, algorithm_command, wait_for_native_drain, merge_timings, wait_for_display_recording
+
+
+class DisplayFinalizationTests(unittest.TestCase):
+    def test_waits_for_recorder_child_after_launcher_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'display.bag';active=Path(str(path)+'.active')
+            path.write_bytes(b'not_final_yet');active.write_bytes(b'complete_recording')
+            writer=threading.Timer(.03,lambda:active.replace(path));writer.start()
+            try:
+                binding=wait_for_display_recording(path,timeout=1)
+                self.assertEqual(path.read_bytes(),b'complete_recording')
+                self.assertEqual(binding['size'],len(b'complete_recording'))
+            finally:writer.join()
+
+    def test_missing_recording_still_fails_with_a_bounded_wait(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RuntimeError,'not finalized'):
+                wait_for_display_recording(Path(directory)/'missing.bag',timeout=.01)
 
 
 class TimingJoinTests(unittest.TestCase):
@@ -58,6 +78,24 @@ class NativeDrainTests(unittest.TestCase):
 
 
 class TaskArgumentsTests(unittest.TestCase):
+    def test_joint_3d_bag_and_live_do_not_require_image_policy_or_calibration(self):
+        with patch('perception.detection_tracking.inference.config.load_config',
+                   side_effect=AssertionError('3D task must not load optional image policy')):
+            for source in ('bag','live'):
+                with self.subTest(source=source):
+                    args=self.parse('odometry',source,extra=['--people-python',sys.executable])
+                    self.assertFalse(args.image_association)
+                    self.assertIsNone(args.decision_calibration)
+            self.rejected('odometry',extra=['--image-association'])
+
+    def test_pin_step_replay_accepts_3d_tracking_without_disabling_images_explicitly(self):
+        args=self.parse('mapping',extra=['--backend','pin_slam','--backend-python',sys.executable,
+                                        '--people-python',sys.executable,'--step-replay'])
+        self.assertTrue(args.step_replay)
+        self.assertFalse(args.image_association)
+        self.rejected('mapping',extra=['--backend','pin_slam','--backend-python',sys.executable,
+                                      '--people-python',sys.executable,'--step-replay','--image-association'])
+
     def test_environment_and_mixed_route_are_explicit_native_options(self):
         args=self.parse('localization',extra=['--environment','--allow-local-only','--scene'])
         command=algorithm_command(args,self.root/'new_run',self.map,True)
@@ -86,7 +124,7 @@ class TaskArgumentsTests(unittest.TestCase):
         if source == 'bag':
             argv += ['--bag', str(self.bag)]
         if mode == 'localization':
-            argv += ['--map', str(self.map)]
+            argv += ['--localization-map', str(self.map)]
         with contextlib.redirect_stdout(io.StringIO()):
             return arguments(argv + list(extra))
 
@@ -101,7 +139,9 @@ class TaskArgumentsTests(unittest.TestCase):
         self.rejected('localization',extra=['--environment','--prior-map',str(self.map)])
         args = self.parse('localization',extra=['--environment','--scene','--prior-map',str(self.map)])
         command = algorithm_command(args,self.root/'new_run',self.map,True)
-        self.assertIn('prior_map:='+str(self.map),command)
+        self.assertIn('static_map:='+str(self.map),command)
+        explicit = self.parse('localization',extra=['--environment','--scene','--static-map',str(self.map)])
+        self.assertEqual(algorithm_command(explicit,self.root/'new_run',self.map,True),command)
 
     def test_six_combinations_select_pipeline_without_creating_outputs(self):
         for source in ('bag', 'live'):
@@ -111,6 +151,11 @@ class TaskArgumentsTests(unittest.TestCase):
                     self.assertEqual(args.backend, 'fast_lio' if mode == 'odometry' else 'roll_fast_lio')
                     self.assertEqual(args.pose, [.1, .2, .3, 2, 3, 4] if mode == 'localization' else [0]*6)
         self.assertFalse((self.root / 'new_run').exists())
+
+    def test_display_recording_requires_environment(self):
+        self.rejected('mapping',extra=['--record-display'])
+        args=self.parse('localization',extra=['--environment','--record-display'])
+        self.assertTrue(args.record_display)
 
     def test_odometry_rejects_prior_map_pose_or_incompatible_backend(self):
         for extra in (['--map', str(self.map)], ['--pose', '0', '0', '0', '0', '0', '0'],
@@ -209,6 +254,26 @@ class TaskArgumentsTests(unittest.TestCase):
             self.assertTrue(command[1].endswith('/pin_slam.launch'))
             self.assertIn('python_executable:=' + str(Path('/usr/bin/python3').resolve()), command)
             self.assertFalse(any(value.startswith(('run_dir:=', 'rviz:=', 'keep_details:=')) for value in command))
+
+
+class FrontendBenchmarkTests(unittest.TestCase):
+    def test_small_rotation_difference_is_not_masked_by_rounded_calibration(self):
+        import numpy as np
+        from perception.mapping_localization.benchmark import difference
+        pose=np.eye(4)[None];pose[0,:3,:3]*=1.00002
+        states=np.zeros((1,13));states[0,9]=np.inf
+        reference=dict(poses=pose,states=states,cloud_hash=np.array(['same']))
+        same=difference(reference,reference)
+        self.assertTrue(same['exact_states']);self.assertEqual(same['angle_deg']['maximum'],0)
+        angle=np.deg2rad(.05);rotation=np.array([[np.cos(angle),-np.sin(angle),0],[np.sin(angle),np.cos(angle),0],[0,0,1]])
+        other={k:v.copy() for k,v in reference.items()}
+        other['poses'][0,:3,:3]=rotation@pose[0,:3,:3];other['poses'][0,0,3]=.01
+        other['states'][0,10]=4;other['states'][0,11]=7
+        result=difference(reference,other)
+        self.assertAlmostEqual(result['angle_deg']['maximum'],.05,places=6)
+        self.assertAlmostEqual(result['position_m']['maximum'],.01)
+        self.assertEqual(result['quality_differences'],1)
+        self.assertEqual(result['max_effective_point_difference'],7)
 
 
 if __name__ == '__main__':

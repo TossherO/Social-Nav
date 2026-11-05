@@ -10,13 +10,18 @@ def add_environment_display(configuration, topic='/perception/environment', *, p
             display['Topic'] = topic+'/scan'
     if prior_topic:
         configuration['Visualization Manager']['Displays'].append({
-            'Class':'rviz/Map','Name':'Historical prior (withdrawn when unassociated)',
+            'Class':'rviz/Map','Name':'Static prior view (withdrawn when unassociated)',
             'Enabled':True,'Topic':prior_topic,'Alpha':.3,
             'Color Scheme':'map','Draw Behind':True})
     configuration['Visualization Manager']['Displays'].append({
-        'Class':'rviz/Map','Name':'Observed environment (gray=unknown)',
+        'Class':'rviz/Map','Name':'Local environment map (gray=unknown)',
         'Enabled':True,'Topic':topic+'/occupancy','Alpha':.65,
         'Color Scheme':'map','Draw Behind':True})
+    for label,suffix in [('Historical free inference (provenance)','historical_free'),
+                         ('Recent obstacle coverage (provenance)','recent_obstacles')]:
+        configuration['Visualization Manager']['Displays'].append({
+            'Class':'rviz/Map','Name':label,'Enabled':False,'Topic':topic+'/'+suffix,
+            'Alpha':.5,'Color Scheme':'costmap','Draw Behind':False})
     return configuration
 
 
@@ -30,11 +35,18 @@ def plot_environment(snapshot):
     extent = [x,x+width*r,y,y+height*r]
     figure,axes = plt.subplots(1,3,figsize=(15,5),constrained_layout=True)
     categories = np.where(layers['occupancy']==-1,0,np.where(layers['occupancy']==0,1,2))
-    axes[0].imshow(categories,origin='lower',extent=extent,vmin=0,vmax=2,
-                   cmap=ListedColormap(['#b8c4cf','#ffffff','#263b4d']),interpolation='nearest')
-    axes[0].set_title('Occupancy: gray unknown / white free / dark occupied')
+    if 'conditional_obstacle' in layers: categories[layers['conditional_obstacle']]=3
+    axes[0].imshow(categories,origin='lower',extent=extent,vmin=0,vmax=3,
+                   cmap=ListedColormap(['#b8c4cf','#ffffff','#263b4d','#e7a343']),interpolation='nearest')
+    axes[0].set_title('Gray unknown / white free / dark occupied\nOrange conditional prior (still measured occupied)')
+    for name,color in [('near_field_free','#138a67'),('near_field_obstacle','#b34a24')]:
+        if name in layers and layers[name].any():
+            axes[0].contour(x+(np.arange(width)+.5)*r,y+(np.arange(height)+.5)*r,layers[name],
+                levels=[.5],colors=[color],linewidths=.6)
+    if 'near_field_free' in layers:
+        axes[0].set_title('Green: reused historical free\nRed: recent obstacle coverage; gray: unknown')
     ground = axes[1].imshow(layers['ground_z'],origin='lower',extent=extent,cmap='viridis',interpolation='nearest')
-    axes[1].set_title('Observed ground support (m)')
+    axes[1].set_title('Supported ground height (m; history explicitly tagged)')
     figure.colorbar(ground,ax=axes[1],shrink=.7)
     coverage = axes[2].imshow(layers['coverage'],origin='lower',extent=extent,vmin=0,vmax=1,
                              cmap='YlOrRd',interpolation='nearest')
@@ -49,43 +61,6 @@ def plot_environment(snapshot):
     for ax in axes:
         ax.set_xlabel(meta['frame_id']+' x (m)')
         ax.set_ylabel('y (m)')
-    figure.suptitle('t=%.3f | %s | rays: %s' % (meta['stamp_s'],meta['geometry_status'],meta['rays_used']))
-    return figure
-
-
-def plot_memory(snapshot, observations):
-    """Overlay only recorded observations; breaks never become invented routes."""
-    figure = plot_environment(snapshot)
-    axes = figure.axes[:3]
-    previous = None
-    positions = []
-    ordered = sorted(observations, key=lambda item: item['stamp_s'])
-    labelled = set(np.linspace(0, len(ordered)-1, min(16, len(ordered)), dtype=int))
-    for index, row in enumerate(ordered):
-        camera = row.get('world_from_camera')
-        pose = np.asarray(camera if camera is not None else row['world_from_lidar'])
-        point = pose[:2, 3]
-        positions.append(point)
-        forward = pose[:2, 2 if camera is not None else 0]
-        length = np.linalg.norm(forward)
-        if length > 1e-6:
-            forward = forward/length*.6
-        for axis in axes:
-            axis.plot(*point, 'o', color='#d44716', markersize=4)
-            if index in labelled:
-                axis.annotate(str(index+1), point, xytext=(4, 4), textcoords='offset points', color='#a43712', fontsize=8)
-            if length > 1e-6 and index in labelled:
-                axis.arrow(*point, *forward, color='#d44716', width=.025, length_includes_head=True)
-            if previous is not None and previous[0] == row['segment']:
-                axis.plot([previous[1][0], point[0]], [previous[1][1], point[1]], '--', color='#d44716', linewidth=1)
-        previous = row['segment'], point
-    supported = np.argwhere(snapshot.layers['ground_support'] | (snapshot.layers['occupancy'] == 100))
-    if len(supported):
-        region = supported[:, ::-1]*snapshot.metadata['resolution']+snapshot.metadata['origin_xy']
-        if positions:
-            region = np.r_[region, positions]
-        low, high = region.min(axis=0)-2, region.max(axis=0)+2
-        for axis in axes:
-            axis.set_xlim(low[0], high[0]); axis.set_ylim(low[1], high[1])
-    figure.suptitle('Supported-region view / historical observations (orange); no reachability claim')
+    role = meta.get('view_type') or meta.get('map_type') or 'Geometry snapshot (legacy metadata)'
+    figure.suptitle('%s | t=%.3f | %s | rays: %s' % (role,meta['stamp_s'],meta['geometry_status'],meta['rays_used']))
     return figure

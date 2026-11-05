@@ -1,5 +1,5 @@
-"""One causal observation envelope for geometry, RGB, people and visual memory."""
-from dataclasses import dataclass
+"""One causal observation envelope for geometry, RGB, people and optional prior."""
+from dataclasses import dataclass, field
 import copy
 import hashlib
 
@@ -7,6 +7,7 @@ import numpy as np
 
 from perception.detection_tracking.inference.geometry import validate_transform
 from .context import fingerprint, layer_binding
+from .near_field import HISTORY_DTYPES,DYNAMIC_DTYPES
 
 
 def latest_past(rows, stamp):
@@ -20,6 +21,18 @@ def local_identity(meta):
 
 def unavailable(reason, status='missing'):
     return dict(status=status,reason=reason)
+
+
+def people_observation(bundle):
+    """Restore the minimal validated observation envelope from a bound scene.
+
+    Scene storage intentionally omits repeated health/clock fields. Validity is
+    established by the bound parent status; missing/degraded people stay absent.
+    """
+    bundle.verify()
+    people=bundle.record.get('people',{})
+    if people.get('status')!='valid':return None
+    return dict(copy.deepcopy(people['data']),health='valid',clock_domain=bundle.record['clock_domain'])
 
 
 def live_scene_status(bundle, pose, now, max_age):
@@ -47,13 +60,17 @@ class SceneInputs:
     geometry: object
     rgb: object
     prior_geometry: object = None
+    _navigation_checks: dict = field(default_factory=dict, compare=False, repr=False)
 
     def verify(self):
         record = self.record
         if fingerprint({k:v for k,v in record.items() if k != 'input_fingerprint'}) != record['input_fingerprint']:
             raise ValueError('Scene metadata changed after observation binding')
-        if layer_binding(self.geometry) != record['geometry']['layer_binding']:
+        binding = layer_binding(self.geometry)
+        if binding != record['geometry']['layer_binding']:
             raise ValueError('Scene geometry changed after observation binding')
+        from .navigation import navigation_geometry
+        navigation_geometry(self, _layer_binding=binding)
         prior = record.get('prior_geometry',{})
         if prior.get('status') == 'valid':
             if self.prior_geometry is None or layer_binding(self.prior_geometry) != prior['layer_binding']:
@@ -99,8 +116,7 @@ class SceneInputs:
                 stream.write(data.tobytes())
 
 
-def assemble_scene(snapshot, *, clock_domain, rgb=None, people=None, observations=(),
-                   memory_status=None, settings):
+def assemble_scene(snapshot, *, clock_domain, rgb=None, people=None, settings):
     """Cutoff is the grid's acquisition time, not callback time. Never extrapolate people."""
     meta = snapshot.metadata
     stamp = float(meta['stamp_s'])
@@ -109,9 +125,13 @@ def assemble_scene(snapshot, *, clock_domain, rgb=None, people=None, observation
     identity = local_identity(meta)
     localized = meta['geometry_status'] in ('OBSERVED','GROUND_UNAVAILABLE') and meta.get('world_from_lidar') is not None
     pose = validate_transform(meta['world_from_lidar']) if localized else None
-    geometry = dict(status='valid' if localized else 'invalid',snapshot_id=meta['snapshot_id'],stamp_s=stamp,
+    geometry = dict(entity_type='map',map_type='local_environment_map',status='valid' if localized else 'invalid',snapshot_id=meta['snapshot_id'],stamp_s=stamp,
         frame_id=meta['frame_id'],session_id=meta['session_id'],generation=meta['generation'],age_s=0.,
         layer_binding=layer_binding(snapshot),geometry_status=meta['geometry_status'])
+    if 'near_field_memory' in meta:
+        geometry['near_field_memory']=copy.deepcopy(meta['near_field_memory'])
+    if 'navigation_fusion' in meta:
+        geometry['navigation_fusion']=copy.deepcopy(meta['navigation_fusion'])
     rgb_status, pixels = unavailable('no_rgb_at_or_before_cutoff'),None
     if rgb is not None:
         age = stamp-float(rgb['stamp_s'])
@@ -151,18 +171,6 @@ def assemble_scene(snapshot, *, clock_domain, rgb=None, people=None, observation
                       'input_fingerprint','localization_binding','pose_stamp_s','world_from_lidar',
                       'detections','detection_frame_id','tracks','covariance_order','velocity_semantics')
             people_status = dict(status='valid',age_s=age,data=copy.deepcopy({k:people[k] for k in fields}))
-    history = []
-    if localized:
-        for row in sorted(observations,key=lambda item:item['stamp_s'],reverse=True):
-            if local_identity(row) != identity:
-                continue
-            age = stamp-row['stamp_s']
-            if not np.isfinite(age) or not 0 <= age <= settings['history_age_s'] or row['pose_stamp_s'] > row['stamp_s']:
-                continue
-            validate_transform(row['world_from_lidar'])
-            history.append(copy.deepcopy(row))
-            if len(history) == settings['history_limit']:
-                break
     association = copy.deepcopy(meta.get('association') or {})
     if association.get('valid'):
         measured = association.get('measurement_stamp_s')
@@ -175,7 +183,7 @@ def assemble_scene(snapshot, *, clock_domain, rgb=None, people=None, observation
     if not association.get('valid'):
         association['map_from_local'] = None
     complete = localized and rgb_status['status'] == 'valid' and people_status['status'] == 'valid'
-    record = dict(protocol='perception_scene',observation_id='scene:%s:%s:%s'%(*identity[:2],meta['snapshot_id']),
+    record = dict(entity_type='scene',protocol='perception_scene',observation_id='scene:%s:%s:%s'%(*identity[:2],meta['snapshot_id']),
         as_of=stamp,clock_domain=clock_domain,frame_id=identity[2],session_id=identity[0],generation=identity[1],
         health='valid' if complete else 'degraded' if localized else 'invalid',
         localization=dict(status='valid' if localized else 'invalid',stamp_s=stamp,
@@ -183,11 +191,20 @@ def assemble_scene(snapshot, *, clock_domain, rgb=None, people=None, observation
                           sensor_frame=meta.get('sensor_frame','unspecified'),
                           world_from_lidar=pose.tolist() if pose is not None else None),
         geometry=geometry,rgb=rgb_status,people=people_status,prior=association,
-        memory=dict(status=memory_status or ('valid' if history else 'empty'),observations=history),
         units=dict(position='metres',angle='radians',time='seconds'),
-        scope='causal_scene_with_optional_prior_and_historical_evidence',navigation_reachability_verified=False)
+        scope='causal_scene_with_optional_static_prior',navigation_reachability_verified=False)
     record['input_fingerprint'] = fingerprint(record)
     return SceneInputs(record,snapshot,pixels)
+
+
+def assign_grid_layers(message, layers):
+    """Both regular genpy and numpy_msg accept these optional empty array values."""
+    from .navigation import NAVIGATION_DTYPES
+    for name,dtype in dict(HISTORY_DTYPES,**DYNAMIC_DTYPES,**NAVIGATION_DTYPES).items():
+        if hasattr(message,name):setattr(message,name,b'' if dtype in (bool,np.uint8) else np.empty(0,dtype))
+    for name,values in layers.items():
+        if not hasattr(message,name):raise ValueError('Grid message cannot preserve layer '+name)
+        setattr(message,name,values.tobytes() if values.dtype in (bool,np.uint8) else values.ravel())
 
 
 def snapshot_from_message(message):
@@ -214,4 +231,20 @@ def snapshot_from_message(message):
         array = np.asarray(values,dtype=dtypes.get(name,np.float32)).reshape(meta['shape'])
         array.flags.writeable = False
         layers[name] = array
+    from .navigation import NAVIGATION_DTYPES
+    extra=dict(HISTORY_DTYPES,**DYNAMIC_DTYPES,**NAVIGATION_DTYPES)
+    for name,dtype in extra.items():
+        values=getattr(message,name,())
+        if not len(values):continue  # Older bags keep their original message definition.
+        if isinstance(values,(bytes,bytearray,memoryview)):values=np.frombuffer(values,dtype=np.uint8)
+        array=np.asarray(values,dtype=dtype).reshape(meta['shape']);array.flags.writeable=False
+        layers[name]=array
+    history=meta.get('near_field_memory')
+    if history:
+        required=list(HISTORY_DTYPES) if history.get('settings',{}).get('temporary_obstacle_overlay') else list(HISTORY_DTYPES)[:2]
+        if any(name not in layers for name in required):raise ValueError('Grid wire lost local history provenance')
+    if meta.get('dynamic_navigation') and 'person_background_free' not in layers:
+        raise ValueError('Grid wire lost dynamic person provenance')
+    if meta.get('navigation_fusion') and any(name not in layers for name in NAVIGATION_DTYPES):
+        raise ValueError('Grid wire lost navigation fusion provenance')
     return GridSnapshot(meta,layers)

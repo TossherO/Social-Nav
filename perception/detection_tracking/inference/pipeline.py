@@ -1,7 +1,7 @@
 """Shared causal pipeline. Untrusted/raw odometry never silently becomes localization."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import time
 import uuid
@@ -29,6 +29,7 @@ class Frame:
     pose_stamp_s: float | None = None
     rgb_asset_uri: str | None = None
     rgb_stamp_s: float | None = None
+    pose_identity: tuple | None = None
 
     def input_fingerprint(self):
         return input_fingerprint(self.points, self.sequence_id, self.observation_id,
@@ -42,12 +43,15 @@ class PerceptionPipeline:
         self.session_id = session_id or uuid.uuid4().hex
         self.generation = 0
         self.sequence = self.world_frame = self.clock_domain = None
+        self.pose_identity = None
         self.last_stamp = None
         self.localized = False
         self.last_transform = None
 
     def reset(self):
         self.tracker.reset()
+        if hasattr(self.detector, 'reset_history'):
+            self.detector.reset_history()
         self.generation += 1
         self.localized = False
         self.last_transform = None
@@ -55,21 +59,21 @@ class PerceptionPipeline:
     def _begin(self, frame):
         if not math.isfinite(frame.stamp_s) or not frame.observation_id or not frame.sequence_id or not frame.sensor_frame:
             raise ValueError('Invalid observation identity/time/frame')
+        pose_identity = tuple(frame.pose_identity) if frame.pose_identity is not None else None
         changed = (frame.sequence_id != self.sequence or frame.clock_domain != self.clock_domain
-                   or frame.world_frame != self.world_frame)
+                   or frame.world_frame != self.world_frame or pose_identity != self.pose_identity)
         if not changed and self.last_stamp is not None and frame.stamp_s <= self.last_stamp:
             raise ValueError('Duplicate/reversed timestamp; start a new sequence on replay reset')
         gap = self.last_stamp is not None and frame.stamp_s-self.last_stamp > self.tracker.config['reset_gap_s']
         if changed or gap:
             self.reset()
         self.sequence, self.world_frame, self.clock_domain = frame.sequence_id, frame.world_frame, frame.clock_domain
+        self.pose_identity = pose_identity
         self.last_stamp = frame.stamp_s
 
     def step(self, frame):
         start = time.perf_counter()
         self._begin(frame)
-        boxes = validate_boxes(self.detector.predict(frame))
-        detector_done = time.perf_counter()
         localized = (frame.world_from_lidar is not None and frame.pose_health == 'valid'
                      and frame.pose_source in ('dataset_pose', 'localization', 'stationary_assumption'))
         reason = None
@@ -88,6 +92,13 @@ class PerceptionPipeline:
         if not localized:
             if self.localized:
                 self.reset()
+        # Reset invalid/jumped pose history before the detector can merge it.
+        detection_frame = (replace(frame, world_from_lidar=None, pose_health='invalid')
+                           if reason == 'localization_discontinuity' else frame)
+        boxes = validate_boxes(self.detector.predict(detection_frame))
+        detector_done = time.perf_counter()
+        detection_input = getattr(self.detector, 'last_input_context', None)
+        if not localized:
             tracks = []
             reason = reason or 'reliable_localization_unavailable'
         else:
@@ -109,6 +120,8 @@ class PerceptionPipeline:
             'pose_stamp_s': (frame.pose_stamp_s if frame.pose_stamp_s is not None else frame.stamp_s) if localized else None,
             'world_from_lidar': transform.tolist() if localized else None,
             'detections': boxes.tolist(), 'tracks': tracks, 'input_fingerprint': frame.input_fingerprint(),
+            'detection_input': detection_input,
+            'tracking_policy': self.tracker.association.metadata,
             'rgb_asset_uri': frame.rgb_asset_uri, 'rgb_stamp_s': frame.rgb_stamp_s,
             'covariance_order': ['x','y','z','dx','dy','dz','yaw','vx','vy','vz'],
             'velocity_semantics': 'world_motion' if localized else 'unavailable',

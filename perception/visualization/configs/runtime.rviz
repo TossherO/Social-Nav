@@ -1,0 +1,107 @@
+Panels:
+  - Class: rviz/Displays
+    Name: Displays
+  - Class: rviz/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Background Color: 38; 42; 48
+    Fixed Frame: odom
+    Frame Rate: 20
+  Displays:
+    - Class: rviz/Grid
+      Name: Grid
+      Enabled: false
+      Cell Size: 1
+      Plane Cell Count: 40
+    - Class: rviz/PointCloud2
+      Name: Current scan
+      Enabled: true
+      Topic: /social_nav_runtime_view/scan
+      Queue Size: 1
+      Style: Points
+      Size (Pixels): 2
+      Color Transformer: AxisColor
+      Axis: Z
+      Decay Time: 0
+    - Class: rviz/MarkerArray
+      Name: People
+      Enabled: true
+      Marker Topic: /social_nav_runtime_view/people
+      Queue Size: 1
+    - Class: rviz/PointCloud2
+      Name: Navigation occupancy (terrain height)
+      Enabled: true
+      Topic: /social_nav_runtime_view/ground_map
+      Queue Size: 1
+      Style: Squares
+      Size (m): 0.1
+      Color Transformer: RGB8
+      Alpha: 0.45
+      Decay Time: 0
+    - Class: rviz/Map
+      Name: Navigation occupancy (XY diagnostic)
+      Enabled: false
+      Topic: /social_nav_runtime_view/occupancy
+      Alpha: 0.5
+      Color Scheme: map
+    - Class: rviz/Map
+      Name: Raw local occupancy (XY diagnostic)
+      Enabled: false
+      Topic: /social_nav_runtime_view/raw_occupancy
+      Alpha: 0.5
+      Color Scheme: map
+    - Class: rviz/Path
+      Name: Observed base path (latest continuous segment)
+      Enabled: false
+      Topic: /social_nav_runtime_view/path
+      Color: 255; 160; 40
+      Line Style: Billboards
+      Line Width: 0.04
+    - Class: rviz/Path
+      Name: Raw LiDAR path (3D diagnostic)
+      Enabled: false
+      Topic: /social_nav_runtime_view/lidar_path
+      Color: 190; 120; 60
+      Line Style: Billboards
+      Line Width: 0.02
+    - Class: rviz/Path
+      Name: DWA prediction (not executed)
+      Enabled: false
+      Topic: /social_nav_runtime_view/trajectory
+      Color: 80; 220; 255
+      Line Style: Billboards
+      Line Width: 0.06
+    - Class: rviz/Path
+      Name: Spatial reference (continuous prefix)
+      Enabled: false
+      Topic: /social_nav_runtime_view/reference
+      Color: 235; 235; 235
+      Line Style: Billboards
+      Line Width: 0.05
+    - Class: rviz/MarkerArray
+      Name: Terrain paths, vehicle and planning status
+      Enabled: true
+      Marker Topic: /social_nav_runtime_view/navigation
+      Queue Size: 1
+    - Class: rviz/Image
+      Name: RGB
+      Enabled: true
+      Image Topic: /social_nav_runtime_view/rgb
+      Queue Size: 1
+  Tools:
+    - Class: rviz/MoveCamera
+    - Class: rviz/Interact
+    - Class: rviz/FocusCamera
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Target Frame: <Fixed Frame>
+      Distance: 18
+      Pitch: 0.8
+      Yaw: 0.8
+      Focal Point: {X: 0, Y: 0, Z: 0}
+Window Geometry:
+  Width: 1280
+  Height: 900

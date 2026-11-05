@@ -1,5 +1,9 @@
 #pragma once
+#ifdef SOCIAL_NAV_NATIVE_ROLL
+#include "roll_support.h"
+#else
 #include "utility.h"
+#endif
 #include <condition_variable>
 #include <thread>
 

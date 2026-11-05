@@ -349,7 +349,6 @@ void KD_TREE::Build(PointVector point_cloud){
 void KD_TREE::Nearest_Search(PointType point, int k_nearest, PointVector& Nearest_Points, vector<float> & Point_Distance, double max_dist){   
     MANUAL_HEAP q(2*k_nearest);
     q.clear();
-    vector<float> ().swap(Point_Distance);
     if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != Root_Node){
         Search(Root_Node, k_nearest, point, q, max_dist);
     } else {
@@ -368,11 +367,14 @@ void KD_TREE::Nearest_Search(PointType point, int k_nearest, PointVector& Neares
         pthread_mutex_unlock(&search_flag_mutex);      
     }
     int k_found = min(k_nearest,int(q.size()));
-    PointVector ().swap(Nearest_Points);
-    vector<float> ().swap(Point_Distance);
-    for (int i=0;i < k_found;i++){
-        Nearest_Points.insert(Nearest_Points.begin(), q.top().point);
-        Point_Distance.insert(Point_Distance.begin(), q.top().dist);
+    // Reuse per-query/per-point storage; reverse heap extraction retains the
+    // original nearest-first order without repeated allocation or front inserts.
+    Nearest_Points.resize(k_found);
+    Point_Distance.resize(k_found);
+    for (int i=k_found-1;i>=0;--i){
+        const auto nearest=q.top();
+        Nearest_Points[i]=nearest.point;
+        Point_Distance[i]=nearest.dist;
         q.pop();
     }
     return;
@@ -388,6 +390,7 @@ int KD_TREE::Add_Points(PointVector & PointToAdd, bool downsample_on){
     int tmp_counter = 0;
     for (int i=0; i<PointToAdd.size();i++){
         if (downsample_switch){
+            bool inserted=false;
             Box_of_Point.vertex_min[0] = floor(PointToAdd[i].x/downsample_size)*downsample_size;
             Box_of_Point.vertex_max[0] = Box_of_Point.vertex_min[0]+downsample_size;
             Box_of_Point.vertex_min[1] = floor(PointToAdd[i].y/downsample_size)*downsample_size;
@@ -412,6 +415,7 @@ int KD_TREE::Add_Points(PointVector & PointToAdd, bool downsample_on){
                 if (Downsample_Storage.size() > 1 || same_point(PointToAdd[i], downsample_result)){
                     if (Downsample_Storage.size() > 0) Delete_by_range(&Root_Node, Box_of_Point, true, true);
                     Add_by_point(&Root_Node, downsample_result, true, Root_Node->division_axis);
+                    inserted=true;
                     tmp_counter ++;                      
                 }
             } else {
@@ -424,6 +428,7 @@ int KD_TREE::Add_Points(PointVector & PointToAdd, bool downsample_on){
                     pthread_mutex_lock(&working_flag_mutex);
                     if (Downsample_Storage.size() > 0) Delete_by_range(&Root_Node, Box_of_Point, false , true);                                      
                     Add_by_point(&Root_Node, downsample_result, false, Root_Node->division_axis);
+                    inserted=true;
                     tmp_counter ++;
                     if (rebuild_flag){
                         pthread_mutex_lock(&rebuild_logger_mutex_lock);
@@ -434,6 +439,8 @@ int KD_TREE::Add_Points(PointVector & PointToAdd, bool downsample_on){
                     pthread_mutex_unlock(&working_flag_mutex);
                 };
             }
+            if(inserted && point_inserted)
+                point_inserted(downsample_result,Downsample_Storage.empty()?nullptr:&Box_of_Point);
         } else {
             if (Rebuild_Ptr == nullptr || *Rebuild_Ptr != Root_Node){
                 Add_by_point(&Root_Node, PointToAdd[i], true, Root_Node->division_axis);     
@@ -450,6 +457,7 @@ int KD_TREE::Add_Points(PointVector & PointToAdd, bool downsample_on){
                 }
                 pthread_mutex_unlock(&working_flag_mutex);       
             }
+            if(point_inserted)point_inserted(PointToAdd[i],nullptr);
         }
     }
     return tmp_counter;
@@ -515,6 +523,7 @@ int KD_TREE::Delete_Point_Boxes(vector<BoxPointType> & BoxPoints){
             }                
             pthread_mutex_unlock(&working_flag_mutex);
         }
+        if(box_erased)box_erased(BoxPoints[i]);
     } 
     return tmp_counter;
 }
@@ -822,7 +831,7 @@ void KD_TREE::Add_by_point(KD_TREE_NODE ** root, PointType point, bool allow_reb
     return;
 }
 
-void KD_TREE::Search(KD_TREE_NODE * root, int k_nearest, PointType point, MANUAL_HEAP &q, double max_dist){
+void KD_TREE::Search(KD_TREE_NODE * root, int k_nearest, const PointType& point, MANUAL_HEAP &q, double max_dist){
     if (root == nullptr || root->tree_deleted) return;   
     double cur_dist = calc_box_dist(root, point);
     if (cur_dist > max_dist) return;    
@@ -1270,13 +1279,13 @@ bool KD_TREE::same_point(PointType a, PointType b){
     return (fabs(a.x-b.x) < EPSS && fabs(a.y-b.y) < EPSS && fabs(a.z-b.z) < EPSS );
 }
 
-float KD_TREE::calc_dist(PointType a, PointType b){
+float KD_TREE::calc_dist(const PointType& a, const PointType& b){
     float dist = 0.0f;
     dist = (a.x-b.x)*(a.x-b.x) + (a.y-b.y)*(a.y-b.y) + (a.z-b.z)*(a.z-b.z);
     return dist;
 }
 
-float KD_TREE::calc_box_dist(KD_TREE_NODE * node, PointType point){
+float KD_TREE::calc_box_dist(KD_TREE_NODE * node, const PointType& point){
     if (node == nullptr) return INFINITY;
     float min_dist = 0.0;
     if (point.x < node->node_range_x[0]) min_dist += (point.x - node->node_range_x[0])*(point.x - node->node_range_x[0]);
@@ -1311,7 +1320,7 @@ void MANUAL_HEAP::pop(){
     return;
 }
         
-PointType_CMP MANUAL_HEAP::top(){
+const PointType_CMP& MANUAL_HEAP::top() const{
     return heap[0];
 }
         

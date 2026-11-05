@@ -13,21 +13,25 @@
   <arg name="assume_stationary" default="false"/>
   <arg name="environment" default="false"/>
   <arg name="record_environment_scans" default="false"/>
-  <arg name="visual_memory" default="false"/>
   <arg name="scene" default="false"/>
   <arg name="scene_people" default="false"/>
   <arg name="prior_map" default=""/>
+  <arg name="static_map" default="$(arg prior_map)"/>
   <arg name="association_coverage" default=""/>
-  <arg name="memory_bag" default=""/>
-  <arg name="memory_camera_calibration" default=""/>
   <arg name="allow_local_only" default="false"/>
   <arg name="environment_config" default="$(dirname)/../../environment/configs/environment.yaml"/>
+  <arg name="environment_backend" default=""/>
   <arg name="lidar_imu_calibration" default="$(dirname)/../../sensors/calibration/lidar_imu.yaml"/>
   <arg name="rviz_config" default="$(eval 'odometry.rviz' if arg('mode') == 'odometry' else 'roll.rviz')"/>
   <rosparam command="load" file="$(dirname)/../configs/fast_lio.yaml"/>
   <rosparam command="load" file="$(dirname)/../configs/roll.yaml"/>
   <rosparam command="load" file="$(dirname)/../configs/$(arg mode).yaml"/>
   <rosparam command="load" file="$(arg lidar_imu_calibration)"/>
+  <!-- CUDA numerics belong to the direct runtime; this diagnostic stays CPU. -->
+  <param name="matching_backend" value="cpu"/>
+  <param name="deskew_backend" value="cpu"/>
+  <param name="linearization_backend" value="cpu"/>
+  <param name="roll/matchingBackend" value="cpu"/>
   <param name="stationary_imu/enabled" value="false"/>
   <group if="$(arg assume_stationary)">
     <rosparam command="load" file="$(dirname)/../configs/stationary_imu.yaml"/>
@@ -81,24 +85,18 @@
     <node pkg="social_nav_environment" type="environment_node" name="environment" output="screen" required="true">
       <env name="SOCIAL_NAV_ROOT" value="$(dirname)/../../.."/>
       <param name="config" value="$(arg environment_config)"/>
+      <param name="backend" value="$(arg environment_backend)" type="str"/>
       <param name="output" value="$(arg run_dir)/environment"/>
       <param name="record_scans" value="$(arg record_environment_scans)"/>
-    </node>
-    <node if="$(arg visual_memory)" pkg="social_nav_environment" type="visual_memory" name="visual_memory" output="screen" required="true">
-      <env name="SOCIAL_NAV_ROOT" value="$(dirname)/../../.."/>
-      <param name="config" value="$(arg environment_config)"/>
-      <param name="output" value="$(arg run_dir)/environment"/>
-      <param name="bag" type="str" value="$(arg memory_bag)"/>
-      <param name="camera_calibration" type="str" value="$(arg memory_camera_calibration)"/>
+      <param name="people_enabled" value="$(arg scene_people)"/>
     </node>
     <node if="$(arg scene)" pkg="social_nav_environment" type="perception_scene" name="perception_scene" output="screen" required="true">
       <env name="SOCIAL_NAV_ROOT" value="$(dirname)/../../.."/>
       <param name="config" value="$(arg environment_config)"/>
       <param name="output" value="$(arg run_dir)/scene"/>
       <param name="people_enabled" value="$(arg scene_people)"/>
-      <param name="prior_map" type="str" value="$(arg prior_map)"/>
+      <param name="static_map" type="str" value="$(arg static_map)"/>
       <param name="map_dir" type="str" value="$(arg map_dir)"/>
-      <param name="memory_dir" type="str" value="$(eval arg('run_dir') + '/environment' if arg('visual_memory') else '')"/>
     </node>
   </group>
   <include if="$(arg start_frontend)" file="$(dirname)/frontend.launch">

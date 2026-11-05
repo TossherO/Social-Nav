@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-NAMES = ("jrdb", "socialnav_sub", "jrdb_t1_dev", "coda_raw", "wheelchair_raw",
+NAMES = ("coda_raw", "wheelchair_raw",
          "coda", "coda_downsample", "wheelchair", "wheelchair_weak", "wheelchair_annotations")
 DETECTOR_DATA = "perception/detection_tracking/training/simpledet3d/data"
 

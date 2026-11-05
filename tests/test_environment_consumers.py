@@ -7,10 +7,10 @@ import numpy as np
 import yaml
 
 from decision.vlm.environment_inputs import prepare_environment_context, render_environment_context
-from decision.agent.environment_tools import query_environment
+from decision.agent.tools.environment import query_environment
 from perception.environment.layers import GridSnapshot
-from perception.environment.memory import create_index
-from perception.environment.storage import EnvironmentMap, content_hash
+from perception.environment.context import layer_binding
+from perception.environment.storage import StaticEnvironmentMap, content_hash
 
 
 def snapshot():
@@ -23,9 +23,24 @@ def snapshot():
 
 
 class ConsumerTests(unittest.TestCase):
-    def context(self, current, history=()):
-        return prepare_environment_context(current,history,np.zeros((20,30,3),np.uint8),
-            rgb_stamp_s=9.9,as_of=10.,observation_id='camera_observation',clock_domain='synthetic',
+    def test_layer_binding_keeps_legacy_bytes_for_different_array_layouts(self):
+        current = snapshot()
+        expected = 'a17d05835a8fd03eba2755671f0e4456f8ed5be5ac2e099ee656572ff3ed0825'
+        for layout in ('C', 'F', 'strided'):
+            with self.subTest(layout=layout):
+                layers = {}
+                for name, values in current.layers.items():
+                    if layout == 'strided':
+                        buffer = np.empty((values.shape[0], values.shape[1]*2), dtype=values.dtype)
+                        buffer[:, ::2] = values
+                        layers[name] = buffer[:, ::2]
+                    else:
+                        layers[name] = np.array(values, order=layout)
+                self.assertEqual(layer_binding(GridSnapshot(current.metadata, layers)), expected)
+
+    def context(self, current, rgb_stamp_s=9.9):
+        return prepare_environment_context(current,np.zeros((20,30,3),np.uint8),
+            rgb_stamp_s=rgb_stamp_s,as_of=10.,observation_id='camera_observation',clock_domain='synthetic',
             rgb_reference=dict(kind='synthetic'))
 
     def test_context_is_source_bound_and_rejects_future_stale_or_final_map_input(self):
@@ -38,10 +53,8 @@ class ConsumerTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.context(wrong)
         old=GridSnapshot(dict(current.metadata,stamp_s=8.),current.layers)
         with self.assertRaises(ValueError):self.context(old)
-        future=dict(id='future',stamp_s=10.1,pose_stamp_s=10.,session_id='local',generation=0,frame_id='odom')
-        with self.assertRaises(ValueError):self.context(current,[future])
-        with self.assertRaises(ValueError):
-            self.context(current,[dict(future,stamp_s=9.9,pose_stamp_s=9.8,session_id='other')])
+        with self.assertRaises(ValueError):self.context(current,10.1)
+        with self.assertRaises(ValueError):self.context(current,8.)
 
     def test_renderer_rejects_changed_image_or_layers_and_uses_actual_rgb(self):
         current=snapshot(); context=self.context(current)
@@ -57,13 +70,11 @@ class ConsumerTests(unittest.TestCase):
         current=snapshot()
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory);current.save(path/'layers.npz')
-            binding=dict(snapshot_id=current.metadata['snapshot_id'])
-            db=create_index(path/'observations.sqlite',binding);db.close()
-            manifest=dict(snapshot_id=current.metadata['snapshot_id'],frame_id='odom',
-                memory_binding=binding,layers_sha256=content_hash(path/'layers.npz'),
-                time_scope='recorded_local_session',source={'kind':'synthetic'})
+            manifest=dict(kind='static_environment',snapshot_id=current.metadata['snapshot_id'],frame_id='odom',
+                layers_sha256=content_hash(path/'layers.npz'),
+                time_scope='offline_final_prior',source={'kind':'synthetic'})
             (path/'manifest.yaml').write_text(yaml.safe_dump(manifest))
-            package=EnvironmentMap(path)
+            package=StaticEnvironmentMap(path)
             try:
                 req=dict(operation='query_geometry',snapshot_id=manifest['snapshot_id'],frame='odom',points=[[-.5,-.5]])
                 answer=query_environment(package,req)

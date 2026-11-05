@@ -1,5 +1,6 @@
 """Continuous local pose with a separately timed, optional map association."""
 from collections import OrderedDict, deque
+from copy import deepcopy
 
 import numpy as np
 
@@ -39,13 +40,16 @@ class LocalizationContext:
         self.confirmation_floor = -np.inf
         self.trusted_correction = None
         self.trusted_map_identity = None
+        self.latest_row = None
 
     def add_match(self, row):
         if not np.isfinite(row['stamp_s']):
             raise ValueError('Map observation has no finite acquisition time')
         # Bound memory; a result only becomes eligible once its frontend pose is known.
         if (row['session_id'],row['generation']) not in self.retired_maps:
-            self.matches.append(dict(row))
+            frozen=deepcopy(row)
+            frozen['_local_binding']=None
+            self.matches.append(frozen)
 
     def update(self, row):
         stamp = float(row['stamp_s'])
@@ -75,6 +79,20 @@ class LocalizationContext:
         self.history[stamp] = local
         while len(self.history) > self.history_size:
             self.history.popitem(last=False)
+        self.latest_row = deepcopy(row)
+        return self._evaluate(self.latest_row, local)
+
+    def refresh(self):
+        """Evaluate new matches against the last real pose; never advance its time.
+
+        The owner must serialize this with update/add_match. Results are new
+        records; previously returned associations and source poses stay intact.
+        """
+        if self.latest_row is None:return None
+        return self._evaluate(self.latest_row, self.history[self.last_stamp])
+
+    def _evaluate(self, row, local):
+        stamp = float(row['stamp_s'])
         candidates = []
         for item in self.matches:
             measured = item['stamp_s']
@@ -82,8 +100,12 @@ class LocalizationContext:
                     or self.history[measured] is None):
                 continue
             try:
-                backend_local = pose_matrix(item['position'], item['quaternion_xyzw'])
-                if not np.allclose(backend_local, self.history[measured], atol=1e-4):
+                # Both this frozen match and the same-session history pose are
+                # immutable. Validate once, but keep eligibility/age checks above.
+                if item['_local_binding'] is None:
+                    backend_local = pose_matrix(item['position'], item['quaternion_xyzw'])
+                    item['_local_binding']=bool(np.allclose(backend_local,self.history[measured],atol=1e-4))
+                if not item['_local_binding']:
                     continue
                 candidates.append(item)
             except ValueError:
@@ -103,6 +125,9 @@ class LocalizationContext:
                 if self.coverage and not self.coverage.contains(item['map_position'],item['map_frame']):
                     break
                 accepted.append(item)
+                # Older history cannot change a satisfied consecutive-match
+                # requirement. Coverage and age of the selected pose still apply.
+                if len(accepted)>=self.confirm_matches:break
         age = stamp-match['stamp_s'] if match else None
         map_valid = (local is not None and len(accepted) >= self.confirm_matches and
                      age is not None and age <= self.max_map_age)

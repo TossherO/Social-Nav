@@ -5,7 +5,10 @@
 #include <thread>
 #include <fstream>
 #include <csignal>
+#include <functional>
+#ifndef SOCIAL_NAV_NATIVE
 #include <ros/ros.h>
+#endif
 #include <so3_math.h>
 #include <Eigen/Eigen>
 #include <common_lib.h>
@@ -13,6 +16,7 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <condition_variable>
+#ifndef SOCIAL_NAV_NATIVE
 #include <nav_msgs/Odometry.h>
 #include <pcl/common/transforms.h>
 #include <pcl/kdtree/kdtree_flann.h>
@@ -22,6 +26,11 @@
 #include <sensor_msgs/Imu.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <geometry_msgs/Vector3.h>
+#else
+#include <cassert>
+#define ROS_ASSERT assert
+#define ROS_INFO(...) do {} while (0)
+#endif
 #include "use-ikfom.hpp"
 
 /// *************Preconfiguration
@@ -40,7 +49,7 @@ class ImuProcess
   ~ImuProcess();
   
   void Reset();
-  void Reset(double start_timestamp, const sensor_msgs::ImuConstPtr &lastimu);
+  void Reset(double start_timestamp, const SocialNavImuConstPtr &lastimu);
   void set_extrinsic(const V3D &transl, const M3D &rot);
   void set_extrinsic(const V3D &transl);
   void set_extrinsic(const MD(4,4) &T);
@@ -67,6 +76,8 @@ class ImuProcess
   bool need_map_erected;
   bool gt_available;
   bool fixed_acceleration_scale = false;
+  double prepare_ms=0,predict_ms=0,deskew_ms=0;
+  std::function<void(PointCloudXYZI&,const vector<Pose6D>&,const state_ikfom&)> deskewer;
   double acceleration_scale = 1.0;
   void initializeMotion(const MeasureGroup& meas, state_ikfom& state,
       esekfom::esekf<state_ikfom, 12, input_ikfom>& filter) {
@@ -97,8 +108,8 @@ class ImuProcess
   void UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI &pcl_in_out);
 
   PointCloudXYZI::Ptr cur_pcl_un_;
-  sensor_msgs::ImuConstPtr last_imu_;
-  deque<sensor_msgs::ImuConstPtr> v_imu_;
+  SocialNavImuConstPtr last_imu_;
+  deque<SocialNavImuConstPtr> v_imu_;
   vector<Pose6D> IMUpose;
   vector<M3D>    v_rot_pcl_;
   M3D Lidar_R_wrt_IMU;
@@ -130,7 +141,7 @@ ImuProcess::ImuProcess()
   angvel_last     = Zero3d;
   Lidar_T_wrt_IMU = Zero3d;
   Lidar_R_wrt_IMU = Eye3d;
-  last_imu_.reset(new sensor_msgs::Imu());
+  last_imu_.reset(new SocialNavImu());
   
 }
 
@@ -147,7 +158,7 @@ void ImuProcess::Reset()
   init_iter_num     = 1;
   v_imu_.clear();
   IMUpose.clear();
-  last_imu_.reset(new sensor_msgs::Imu());
+  last_imu_.reset(new SocialNavImu());
   cur_pcl_un_.reset(new PointCloudXYZI());
 }
 
@@ -289,6 +300,7 @@ void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 
 
 void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI &pcl_out)
 {
+  double stage_begin=omp_get_wtime();
   /*** add the imu of the last frame-tail to the of current frame-head ***/
   auto v_imu = meas.imu;
   v_imu.push_front(last_imu_);
@@ -315,6 +327,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   double dt = 0;
 
   input_ikfom in;
+  prepare_ms=(omp_get_wtime()-stage_begin)*1000;stage_begin=omp_get_wtime();
   for (auto it_imu = v_imu.begin(); it_imu < (v_imu.end() - 1); it_imu++)
   {
     auto &&head = *(it_imu);
@@ -373,6 +386,8 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
   imu_state = kf_state.get_x();
   last_imu_ = meas.imu.back();
   last_lidar_end_time_ = pcl_end_time;
+  predict_ms=(omp_get_wtime()-stage_begin)*1000;stage_begin=omp_get_wtime();
+  if(deskewer){deskewer(pcl_out,IMUpose,imu_state);deskew_ms=(omp_get_wtime()-stage_begin)*1000;return;}
 
   /*** undistort each lidar point (backward propagation) ***/
   auto it_pcl = pcl_out.points.end() - 1;
@@ -409,6 +424,7 @@ void ImuProcess::UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikf
       if (it_pcl == pcl_out.points.begin()) break;
     }
   }
+  deskew_ms=(omp_get_wtime()-stage_begin)*1000;
 }
 // overload for loading initial pose
 void ImuProcess::Process(vector<double> initial_pose,const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI::Ptr cur_pcl_un_)

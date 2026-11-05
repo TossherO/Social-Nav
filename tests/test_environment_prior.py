@@ -11,11 +11,10 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import yaml
 
-from decision.agent.environment_tools import query_scene
+from decision.agent.tools.environment import query_scene
 from decision.vlm.environment_inputs import prepare_scene_context, render_environment_context
 from perception.environment.layers import GridSnapshot, load_config
-from perception.environment.memory import create_index
-from perception.environment.prior import PriorMap, map_digest, live_prior_status
+from perception.environment.prior import StaticPriorView, map_digest, live_prior_status
 from perception.environment.scene import SceneInputs, assemble_scene
 from perception.environment.storage import content_hash
 from tests.test_environment_consumers import snapshot
@@ -30,6 +29,9 @@ class PriorTests(unittest.TestCase):
         scene_names = {node.attrib['name'] for node in scene.findall('.//node')}
         display_names = {node.attrib['name'] for node in display.findall('.//node')}
         self.assertTrue(scene_names.isdisjoint(display_names))
+        self.assertIn('static_map',{node.attrib['name'] for node in scene.findall('arg')})
+        node=scene.find(".//node[@name='perception_scene']")
+        self.assertEqual(node.find("param[@name='static_map']").attrib['value'],'$(arg static_map)')
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -40,14 +42,12 @@ class PriorTests(unittest.TestCase):
         meta = dict(current.metadata,frame_id='map',snapshot_id='static',time_scope='offline_final_prior',
                     stamp_s=1.,geometry_status='STATIC_SCAN_OBSERVED')
         GridSnapshot(meta,current.layers).save(self.path/'layers.npz')
-        binding = dict(snapshot_id='static')
-        create_index(self.path/'observations.sqlite',binding).close()
         self.source = {'geometry':{'sha256':'synthetic_map'}}
         manifest = dict(kind='static_environment',snapshot_id='static',frame_id='map',
-            memory_binding=binding,layers_sha256=content_hash(self.path/'layers.npz'),
+            layers_sha256=content_hash(self.path/'layers.npz'),
             time_scope='offline_final_prior',source=dict(map_fingerprint=self.source))
         (self.path/'manifest.yaml').write_text(yaml.safe_dump(manifest))
-        self.prior = PriorMap(self.path,expected_map=self.source)
+        self.prior = StaticPriorView(self.path,expected_map=self.source)
 
     def scene(self, changes=None, local=None):
         current = local or snapshot()
@@ -60,13 +60,14 @@ class PriorTests(unittest.TestCase):
         return assemble_scene(current,clock_domain='synthetic',settings=self.settings,rgb=rgb(),people=person())
 
     def test_package_identity_and_query_frame_cannot_be_substituted(self):
-        with self.assertRaises(ValueError):PriorMap(self.path,expected_map={'other':True})
+        with self.assertRaises(ValueError):StaticPriorView(self.path,expected_map={'other':True})
         with self.assertRaises(ValueError):self.prior.attach(self.scene(dict(asset_fingerprint='other')),self.settings)
         with self.assertRaises(ValueError):self.prior.attach(self.scene(dict(map_frame='odom')),self.settings)
         bound = self.prior.attach(self.scene(),self.settings)
         request = dict(operation='query_prior_geometry',observation_id=bound.record['observation_id'],
                        frame='map',points=[[-.5,-.5],[100,100]])
         result = query_scene(bound,request)['data']['data']
+        self.assertEqual(result['cells'][0]['entity_type'],'view')
         self.assertEqual(result['cells'][0]['state'],'unknown')
         self.assertEqual(result['cells'][1]['state'],'outside_coverage')
         self.assertFalse(result['current_free_space'])
@@ -83,6 +84,24 @@ class PriorTests(unittest.TestCase):
             self.assertEqual(bound.record['people']['status'],'valid')
             bound.verify()
 
+    def test_default_prior_budget_accepts_a_ten_centimetre_static_map(self):
+        meta = dict(self.prior.snapshot.metadata, snapshot_id='static_ten_cm',
+                    resolution=load_config()['resolution'], origin_xy=[-20., -20.], shape=[400, 400])
+        layers = {name:np.full(meta['shape'], values[0, 0], dtype=values.dtype)
+                  for name, values in self.prior.snapshot.layers.items()}
+        directory = self.path/'ten_cm'
+        GridSnapshot(meta, layers).save(directory/'layers.npz')
+        manifest = dict(self.prior.manifest, snapshot_id=meta['snapshot_id'],
+                        layers_sha256=content_hash(directory/'layers.npz'))
+        (directory/'manifest.yaml').write_text(yaml.safe_dump(manifest))
+        prior = StaticPriorView(directory, expected_map=self.source)
+        bound = prior.attach(self.scene(), self.settings)
+        self.assertEqual(bound.prior_geometry.metadata['resolution'], .1)
+        self.assertEqual(bound.prior_geometry.layers['occupancy'].shape, (300, 300))
+        bound.verify()
+        with self.assertRaises(ValueError):
+            prior.attach(self.scene(), dict(self.settings, prior_max_cells=50000))
+
     def test_crop_uses_full_se3_and_clips_without_inventing_cells(self):
         current = snapshot()
         current.metadata['world_from_lidar'][2][3] = 2.
@@ -91,8 +110,13 @@ class PriorTests(unittest.TestCase):
                               [0,np.sin(angle),np.cos(angle),0],[0,0,0,1]])
         source = self.scene(dict(map_from_local=transform.tolist()),local=current)
         bound = self.prior.attach(source,self.settings)
+        self.assertEqual(bound.record['prior_geometry']['entity_type'],'view')
+        self.assertEqual(bound.prior_geometry.metadata['view_type'],'static_prior_view')
+        self.assertNotIn('map_type',bound.prior_geometry.metadata)
         self.assertAlmostEqual(bound.record['prior_geometry']['map_from_lidar'][1][3],-2*np.sin(angle))
         np.testing.assert_array_equal(bound.prior_geometry.layers['occupancy'],self.prior.snapshot.layers['occupancy'])
+        clipped = self.prior.attach(source,dict(self.settings,prior_max_cells=9))
+        self.assertEqual(clipped.prior_geometry.layers['occupancy'].size,9)
         far = transform.copy();far[0,3] = 1000
         outside = self.prior.attach(self.scene(dict(map_from_local=far.tolist())),self.settings)
         self.assertEqual(outside.record['prior_geometry']['reason'],'outside_prior_raster')

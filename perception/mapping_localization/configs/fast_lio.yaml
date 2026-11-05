@@ -2,6 +2,16 @@
 feature_extract_enable: false
 point_filter_num: 3
 max_iteration: 3
+# Matching workers only; mapping keeps one worker unless explicitly overridden.
+matching_threads: 1
+# Direct runtime defaults; the ROS diagnostic launch explicitly selects cpu.
+matching_backend: cuda
+matching_cuda_device: 0
+# Experimental device least-squares fit; false keeps the original Eigen QR.
+matching_cuda_plane_fit: false
+deskew_backend: cuda
+linearization_backend: cpu
+filter_compact_solve: false
 filter_size_surf: 0.4
 filter_size_map: 0.2
 cube_side_length: 600

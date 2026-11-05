@@ -1,0 +1,12 @@
+{
+  "scope": "simulation", "floor_id": "synthetic_floor1", "frame_id": "sim_odom",
+  "source": "Synthetic coordinates for framework development; unrelated to real floor1 coordinates",
+  "access": {"room_interiors": "excluded", "corridor_parking": "must_preserve_passage"},
+  "places": [
+    {"place_id":"elevator", "name":"电梯口", "aliases":["电梯门口"], "status":"simulation", "reference":"base_link", "pose":[5,4,0]},
+    {"place_id":"lobby_entrance", "name":"大厅门口", "aliases":["大厅入口"], "status":"simulation", "reference":"base_link", "pose":[6,4,0]},
+    {"place_id":"lobby_center", "name":"大厅正中央", "aliases":["大厅中央"], "status":"simulation", "reference":"base_link", "pose":[7,4,0]},
+    {"place_id":"corridor_wait", "name":"走廊远端等待点", "aliases":["走廊尽头"], "status":"simulation", "reference":"base_link", "pose":[8,4,0]},
+    {"place_id":"mission_start", "name":"本次出发点", "aliases":["起点"], "status":"simulation", "reference":"base_link", "pose":[4,4,3.141592653589793]}
+  ]
+}

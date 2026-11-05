@@ -28,6 +28,16 @@ def require(condition, message):
         raise ValueError(message)
 
 
+def perception_continuity(row):
+    """Map association changes do not change the continuous local pose lifecycle."""
+    if row.get('health') != 'valid' or row.get('pose_health') != 'valid' or row.get('world_from_lidar') is None:
+        return None
+    binding = row.get('localization_binding')
+    local = {key: binding.get(key) for key in ('session_id', 'generation', 'frame_id', 'source')} if binding else None
+    return digest([row.get(key) for key in ('sequence_id', 'clock_domain', 'session_id', 'generation',
+                                          'frame_id', 'detection_frame_id', 'pose_source')] + [local])
+
+
 def ids(values, allowed, name):
     require(isinstance(values, list) and all(isinstance(v, str) for v in values), name + '必须是身份列表')
     require(len(values) == len(set(values)), name + '含重复身份')

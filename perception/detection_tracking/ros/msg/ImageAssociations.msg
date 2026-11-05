@@ -1,0 +1,22 @@
+# header.stamp is the 3D observation capture time; frame_id is camera optical frame.
+std_msgs/Header header
+string observation_id
+string sequence_id
+string session_id
+uint32 generation
+string clock_domain
+bool has_rgb
+time rgb_stamp
+uint32 image_width
+uint32 image_height
+bool has_camera_info
+time camera_info_stamp
+string camera_model_fingerprint
+string perception_input_fingerprint
+string calibration_sha256
+string detector_identity
+string status
+string reason
+uint64 dropped_busy
+uint64 dropped_late
+ImageAssociation[] associations

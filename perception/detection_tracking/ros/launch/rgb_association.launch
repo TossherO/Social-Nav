@@ -1,0 +1,24 @@
+<launch>
+  <arg name="project_root" default="$(dirname)/../../../.."/>
+  <arg name="config" default="$(arg project_root)/perception/detection_tracking/configs/inference.json"/>
+  <arg name="local_config" default="$(arg project_root)/configs/detection_tracking.local.json"/>
+  <arg name="calibration" default="$(arg project_root)/perception/sensors/calibration/front_camera_lidar.yaml"/>
+  <arg name="python_executable" default=""/>
+  <arg name="device" default="0"/>
+  <arg name="backend" default=""/>
+  <arg name="people_topic" default="/perception/people/json"/>
+  <arg name="rgb_topic" default="/perception/people/rgb"/>
+  <arg name="camera_info_topic" default="/camera/color/camera_info"/>
+  <node pkg="social_nav_people" type="associate_people_rgb.py" name="social_nav_rgb_association"
+        output="screen" launch-prefix="$(arg python_executable)">
+    <env name="SOCIAL_NAV_ROOT" value="$(arg project_root)"/>
+    <param name="config" value="$(arg config)"/>
+    <param name="local_config" value="$(arg local_config)"/>
+    <param name="calibration" value="$(arg calibration)"/>
+    <param name="device" value="$(arg device)"/>
+    <param name="backend" value="$(arg backend)"/>
+    <param name="people_topic" value="$(arg people_topic)"/>
+    <param name="rgb_topic" value="$(arg rgb_topic)"/>
+    <param name="camera_info_topic" value="$(arg camera_info_topic)"/>
+  </node>
+</launch>

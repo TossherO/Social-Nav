@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--result', required=True, help='Run directory, complete map, JSONL or comparison directory')
-    parser.add_argument('--map', help='Relocate the same map referenced by a run')
+    parser.add_argument('--localization-map','--map',dest='map', help='Relocate the same 3D localization map referenced by a run')
     parser.add_argument('--phase', choices=('mapping', 'localization'), help='Select a comparison phase')
     parser.add_argument('--backend', help='Select a comparison series, e.g. ROLL, PIN, PIN_latest')
     parser.add_argument('--frame', choices=('auto', 'map', 'odom', 'lidar'), default='auto',

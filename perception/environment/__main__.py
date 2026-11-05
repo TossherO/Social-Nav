@@ -1,83 +1,102 @@
-"""Inspect geometry, export environment packages and query visual/place memory."""
+"""Inspect, export and query geometric environment maps."""
 import argparse
 import json
 from pathlib import Path
 import sys
-
-import numpy as np
 
 from .layers import GridSnapshot
 from .context import query_geometry
 
 
 def bundle_main(argv):
-    from .export import export_environment
-    from .storage import EnvironmentMap, MemoryReader
-    from .layers import load_config
+    from .export import export_environment, export_endpoint_environment, export_registered_environment
+    from .storage import StaticEnvironmentMap
+    from .layers import load_config, STATIC_FILTER_MODES
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
-    export = commands.add_parser('export', help='Build a new offline package from a recorded run')
-    export.add_argument('--run', required=True)
+    rebuild = commands.add_parser('rebuild-scenes',help='Causally rebuild local geometry from raw scans and saved poses')
+    rebuild.add_argument('--run',required=True);rebuild.add_argument('--scenes',nargs='+',required=True)
+    rebuild.add_argument('--out',required=True);rebuild.add_argument('--config')
+    rebuild.add_argument('--environment-backend',choices=['cpu','cuda'])
+    window=commands.add_parser('replay-window',help='Single-pass causal geometry replay at saved scene cutoffs')
+    window.add_argument('--run',required=True);window.add_argument('--out',required=True)
+    window.add_argument('--start-s',type=float,required=True);window.add_argument('--end-s',type=float,required=True)
+    window.add_argument('--warmup-s',type=float)
+    window.add_argument('--sampling',choices=['all','recorded'],default='all')
+    window.add_argument('--config')
+    window.add_argument('--environment-backend',choices=['cpu','cuda'])
+    people = commands.add_parser('prepare-people', help='Infer source-bound people for a recorded mapping/localization run')
+    people.add_argument('--run', required=True)
+    people.add_argument('--out', required=True)
+    people.add_argument('--detector-python', required=True)
+    people.add_argument('--gpu', required=True, help='Explicit physical GPU index for the detector worker')
+    people.add_argument('--detector-config')
+    export = commands.add_parser('export', help='Build a geometric environment package from a recorded mapping run')
+    export_source = export.add_mutually_exclusive_group(required=True)
+    export_source.add_argument('--run')
+    export_source.add_argument('--localization-map', help='Target ROLL map: registered scan evidence, or explicit endpoint-only --dynamic-filter none')
+    export.add_argument('--evidence-run',help='Sealed scan run to project into --localization-map')
+    export.add_argument('--reference-run',help='Same-bag fixed-map localization for --evidence-run')
     export.add_argument('--out', required=True)
     export.add_argument('--config')
+    export.add_argument('--bounds',type=float,nargs=4,metavar=('XMIN','YMIN','XMAX','YMAX'),
+                        help='Explicit source-map region, aligned outward to cells; omitted keeps the whole map')
     export.add_argument('--bag', help='Explicit relocation of the same bound source bag')
-    export.add_argument('--camera-calibration', help='Explicit same-installation camera/LiDAR YAML')
-    export.add_argument('--navigation', action='store_true', help='Also export standard map_server PGM/YAML')
-    query = commands.add_parser('query', help='Read one package; never invokes models or robot motion')
-    query.add_argument('--map', required=True)
-    query.add_argument('--operation', choices=['summary', 'observations', 'places', 'geometry', 'crop'], default='summary')
-    query.add_argument('--as-of', type=float, help='Required acquisition-time cutoff for memory queries')
+    export.add_argument('--people', help='Source-bound environment_people package from this mapping run')
+    export.add_argument('--dynamic-filter', choices=STATIC_FILTER_MODES,
+                        help='Default: static.dynamic_filter (geometric); sealed scans required, people optional; none allows endpoint-only export')
+    export.add_argument('--export-pgm','--navigation',dest='export_pgm',action='store_true',
+                        help='Export the occupancy layer as map_server PGM/YAML; does not build a navigation costmap')
+    query = commands.add_parser('query', help='Read geometry; never invokes models or robot motion')
+    query.add_argument('--static-map','--map',dest='map',required=True,help='Static environment map package, not a localization map')
+    query.add_argument('--operation', choices=['summary','geometry','crop'], default='summary')
     query.add_argument('--frame')
-    query.add_argument('--place')
     query.add_argument('--position', type=float, nargs=2)
-    query.add_argument('--radius', type=float)
-    query.add_argument('--heading', type=float, help='Radians, optical +Z or explicit LiDAR +X fallback')
-    query.add_argument('--limit', type=int, default=20)
     query.add_argument('--bounds', type=float, nargs=4)
     query.add_argument('--layers', nargs='+', default=['occupancy'])
-    image = commands.add_parser('image', help='Decode one indexed RGB observation from its original bag')
-    image_source = image.add_mutually_exclusive_group(required=True)
-    image_source.add_argument('--map')
-    image_source.add_argument('--memory', help='Live/replayed run environment directory')
-    image.add_argument('--observation', required=True)
-    image.add_argument('--bag')
-    image.add_argument('--out', required=True)
-    memory = commands.add_parser('query-memory', help='Read live/replayed visual memory with explicit local lifecycle')
-    memory.add_argument('--memory', required=True)
-    memory.add_argument('--as-of', type=float)
-    memory.add_argument('--session')
-    memory.add_argument('--generation', type=int)
-    memory.add_argument('--frame')
-    memory.add_argument('--limit', type=int, default=20)
-    view = commands.add_parser('view', help='View geometry and up to 256 indexed historical observations')
-    view.add_argument('--map', required=True)
-    view.add_argument('--as-of', type=float, required=True)
+    view = commands.add_parser('view', help='View the geometric map layers')
+    view.add_argument('--static-map','--map',dest='map',required=True,help='Static environment map package, not a localization map')
     view.add_argument('--out', help='New overview image')
     view.add_argument('--show', action='store_true')
-    place = commands.add_parser('add-place', help='Add one manually named place to an existing package')
-    place.add_argument('--map', required=True)
-    place.add_argument('--id', required=True)
-    place.add_argument('--name', required=True)
-    place.add_argument('--observation', required=True)
-    place.add_argument('--frame', required=True)
-    place.add_argument('--position', type=float, nargs=3)
-    place.add_argument('--bounds', type=float, nargs=4)
-    place.add_argument('--alias', action='append', default=[])
     args = parser.parse_args(argv)
-    if args.command == 'export':
-        data = export_environment(args.run, args.out, config=load_config(args.config), bag=args.bag,
-                                  calibration=args.camera_calibration, navigation=args.navigation)
-        print(json.dumps(dict(out=args.out, kind=data['kind'], images=data['images']), ensure_ascii=False))
+    if args.command in ('replay-window','rebuild-scenes'):
+        replay_config=load_config(args.config)
+        if args.environment_backend:
+            replay_config['compute']['backend']=args.environment_backend
+    if args.command=='replay-window':
+        from .replay import replay_window
+        result=replay_window(args.run,args.out,start_s=args.start_s,end_s=args.end_s,config=replay_config,
+                             warmup_s=args.warmup_s,sampling=args.sampling)
+        print(json.dumps(dict(out=args.out,frames=len(result['frames']))));return
+    if args.command == 'rebuild-scenes':
+        from .replay import rebuild_scenes
+        rebuild_scenes(args.run,args.scenes,args.out,config=replay_config);return
+    if args.command == 'prepare-people':
+        from .people import prepare_people
+        result = prepare_people(args.run, args.out, detector_python=args.detector_python,
+                                gpu=args.gpu, detector_config=args.detector_config)
+        print(json.dumps(dict(out=args.out, scans=result['scans'], valid=result['valid'])))
         return
-    live_memory = args.command == 'query-memory' or (args.command == 'image' and args.memory)
-    package = MemoryReader(args.memory) if live_memory else EnvironmentMap(args.map)
+    if args.command == 'export':
+        if args.localization_map:
+            if args.evidence_run or args.reference_run:
+                if not (args.evidence_run and args.reference_run) or args.bag or args.people or args.dynamic_filter not in (None,'geometric'):
+                    parser.error('Registered ray export requires both runs and geometric filtering')
+                data=export_registered_environment(args.localization_map,args.evidence_run,args.reference_run,args.out,
+                    config=load_config(args.config),bounds=args.bounds,export_pgm=args.export_pgm)
+            elif args.dynamic_filter != 'none' or args.bag or args.people:
+                parser.error('--localization-map requires --dynamic-filter none and cannot accept --bag or --people')
+            else:data = export_endpoint_environment(args.localization_map,args.out,config=load_config(args.config),
+                                               bounds=args.bounds,export_pgm=args.export_pgm)
+        else:
+            if args.evidence_run or args.reference_run:parser.error('Registered rays require --localization-map')
+            data = export_environment(args.run,args.out,config=load_config(args.config),bag=args.bag,
+                                      export_pgm=args.export_pgm,people=args.people,filter_mode=args.dynamic_filter,bounds=args.bounds)
+        print(json.dumps(dict(out=args.out,entity_type='map',map_type='static_environment_map',snapshot_id=data['snapshot_id']),ensure_ascii=False))
+        return
+    package = StaticEnvironmentMap(args.map)
     try:
-        if args.command == 'query-memory':
-            result = package.summary() if args.as_of is None else package.query(dict(
-                operation='query_observations',memory_id=package.binding['memory_id'],
-                session_id=args.session,generation=args.generation,frame=args.frame,
-                as_of=args.as_of,limit=args.limit))
-        elif args.command == 'view':
+        if args.command == 'view':
             if not args.out and not args.show:
                 parser.error('Choose --out or --show')
             if args.out and Path(args.out).exists():
@@ -85,61 +104,37 @@ def bundle_main(argv):
             if not args.show:
                 import matplotlib
                 matplotlib.use('Agg')
-            from perception.visualization.environment import plot_memory
-            rows = package.query_observations(as_of=args.as_of, frame=package.manifest['frame_id'], limit=256)
-            figure = plot_memory(package.snapshot, rows)
+            from perception.visualization.environment import plot_environment
+            figure = plot_environment(package.snapshot)
             if args.out:
-                figure.savefig(args.out, dpi=130)
+                figure.savefig(args.out,dpi=130)
             if args.show:
                 import matplotlib.pyplot as plt
                 plt.show()
-            result = dict(out=args.out, displayed_observations=len(rows), as_of=args.as_of)
-        elif args.command == 'image':
-            target = Path(args.out)
-            if target.exists():
-                raise FileExistsError('Select a new image path')
-            rgb = package.read_image(args.observation, bag_override=args.bag)
-            import cv2
-            success, data = cv2.imencode(target.suffix, rgb[:, :, ::-1])
-            if not success:
-                raise ValueError('Unsupported output image format')
-            with target.open('xb') as stream:
-                stream.write(data.tobytes())
-            result = dict(out=str(target), observation_id=args.observation)
-        elif args.command == 'add-place':
-            result = package.add_place(args.id, args.name, args.observation, frame=args.frame,
-                                       position=args.position, bounds=args.bounds, aliases=args.alias)
+            result = dict(out=args.out,snapshot_id=package.manifest['snapshot_id'])
         elif args.operation == 'summary':
             result = package.summary()
-        elif args.operation in ('observations', 'places'):
-            if args.as_of is None:
-                parser.error('Memory queries require an explicit --as-of acquisition timestamp')
-            if args.operation == 'observations':
-                result = package.query_observations(as_of=args.as_of, place=args.place, frame=args.frame,
-                    position=args.position, radius=args.radius, heading=args.heading, limit=args.limit)
-            else:
-                result = package.query_places(as_of=args.as_of, name=args.place, bounds=args.bounds, frame=args.frame)
         elif args.operation == 'geometry':
             if args.position is None:
                 parser.error('Geometry queries require --position X Y')
-            result = package.query_geometry([args.position], frame=args.frame)
+            result = package.query_geometry([args.position],frame=args.frame)
         else:
             if args.bounds is None:
                 parser.error('Map crops require --bounds xmin ymin xmax ymax')
-            result = package.crop_map(args.bounds, frame=args.frame, layers=args.layers)
+            result = package.crop_map(args.bounds,frame=args.frame,layers=args.layers)
         from .context import json_safe
-        print(json.dumps(json_safe(result), ensure_ascii=False, allow_nan=False))
+        print(json.dumps(json_safe(result),ensure_ascii=False,allow_nan=False))
     finally:
         package.close()
 
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] in ('export', 'query', 'image', 'view', 'add-place', 'query-memory'):
+    if argv and argv[0] in ('export', 'query', 'view', 'prepare-people','rebuild-scenes','replay-window'):
         return bundle_main(argv)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.epilog = 'Package commands: export, query, query-memory, image, view, add-place (COMMAND --help).'
-    parser.add_argument('--snapshot',required=True)
+    parser.epilog = 'Package commands: export, query, view, prepare-people, rebuild-scenes, replay-window (COMMAND --help).'
+    parser.add_argument('--snapshot',required=True,help='Geometry grid snapshot: local map, static map or derived view; inspect metadata for its role')
     parser.add_argument('--query',type=float,nargs=2,metavar=('X','Y'))
     parser.add_argument('--image',help='New overview image; no overwrite')
     parser.add_argument('--show',action='store_true')

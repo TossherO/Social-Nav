@@ -35,6 +35,18 @@ def stop(process, first_signal=signal.SIGINT):
         raise RuntimeError('ROS process did not exit cleanly')
 
 
+def wait_for_display_recording(path, timeout=10):
+    """rosbag's launcher may exit before its recorder child closes/renames the bag."""
+    path = Path(path)
+    active = Path(str(path)+'.active')
+    deadline = time.monotonic()+timeout
+    while active.exists() or not path.is_file():
+        if time.monotonic() >= deadline:
+            raise RuntimeError('Display recording was not finalized')
+        time.sleep(.05)
+    return file_fingerprint(path)
+
+
 def show_final_map(map_path):
     """Keep the saved map and optimized keyframes visible after computation stops."""
     print('建图已完成并保存。正在显示最终地图和优化后的关键帧轨迹；'
@@ -88,7 +100,7 @@ def finalize_artifacts(output, settings, keep_details=False):
             merge_timings(output)
         disposable = ['master.log', 'playback.log']
         if not keep_details:
-            disposable += ['algorithm.log', 'frontend.log', 'people.log', 'rviz.log', 'display.log',
+            disposable += ['algorithm.log', 'frontend.log', 'people.log', 'image_association.log', 'rviz.log', 'display.log', 'display_recording.log',
                            'trajectory.tum', 'timings.csv']
         for name in disposable:
             path = output / name
@@ -146,6 +158,58 @@ def wait_for_native_drain(status, alive, last_state_wall, timeout=20):
         time.sleep(.2)
 
 
+def prepare_decision_project(args, output):
+    """Run only after ROS/model teardown, preserving the now-frozen perception run."""
+    project = project_path(args.decision_project)
+    cache = output/'rgb_association'
+    run_metadata=json.loads((output/'run.json').read_text())
+    transport = run_metadata.get('people_transport',{})
+    command = [str(project_path(args.people_python)),'-B','-m','decision.vlm.annotation','prepare',
+               '--results',str(output),'--bag',str(project_path(args.bag)),'--output',str(project),
+               '--ros-python','/usr/bin/python3']
+    if not isinstance(run_metadata.get('image_association'),dict) or not run_metadata['image_association'].get('complete'):
+        command += ['--calibration',args.decision_calibration]
+    if getattr(args,'image_association',True):
+        command += ['--with-rgb-associations','--rgb-output',str(cache)]
+    for option,key in (('--pointcloud-topic','pointcloud_topic'),('--rgb-topic','rgb_topic'),('--camera-info-topic','camera_info_topic')):
+        if transport.get(key):command += [option,transport[key]]
+    if args.decision_root_group:
+        command += ['--root-group',args.decision_root_group]
+    print('感知已结束并释放资源；开始建立决策标注索引并接入二维结果…',flush=True)
+    process = subprocess.Popen(command,cwd=ROOT,start_new_session=True)
+    try:
+        if process.wait():
+            raise RuntimeError('决策标注准备失败；已有感知结果保留。索引已完成时可用'
+                               ' decision.vlm.annotation prepare-rgb --project '+str(project)+' 恢复二维阶段')
+    finally:
+        stop(process,first_signal=signal.SIGTERM)
+    if not getattr(args,'image_association',True):
+        import sqlite3
+        with sqlite3.connect((project/'observations.sqlite').as_uri()+'?mode=ro',uri=True) as db:
+            count=db.execute('SELECT count(*) FROM frames').fetchone()[0]
+        return dict(status='ready',project=str(project),observations=count,rgb_box_source='projection')
+    manifest = json.loads((cache/'manifest.json').read_text())
+    if not manifest.get('complete'):
+        raise RuntimeError('YOLO关联缓存未完成，不能报告标注已就绪')
+    # Do not rewrite run.json here: annotation provenance already binds its hash.
+    return dict(status='ready',project=str(project),rgb_associations=str(cache),
+                observations=manifest['observations'],association_identity=manifest['identity'])
+
+
+def wait_for_image_drain(condition,status,last_people,received,alive,timeout=15):
+    deadline=time.monotonic()+timeout
+    with condition:
+        while True:
+            state=status()
+            quiet=last_people[0] is not None and time.monotonic()-last_people[0]>.5
+            if (quiet and not state.get('busy',True) and state.get('last_processed')==last_people[1] and
+                    received()>=state.get('processed',0)):
+                return state
+            if not alive() or time.monotonic()>=deadline:
+                raise RuntimeError('RGB association did not drain its bound observations')
+            condition.wait(.1)
+
+
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mode', choices=('mapping', 'localization', 'odometry'), required=True,
@@ -163,7 +227,8 @@ def arguments(argv=None):
     parser.add_argument('--start', type=float, default=0.0, help='Bag offset in recorded seconds; bag input only')
     parser.add_argument('--assume-stationary', action='store_true',
                         help='Explicit verified-static experiment: synthesize IMU from scans; never a real-IMU fallback')
-    parser.add_argument('--map', help='Input map in localization; defaults to OUT/map in mapping')
+    parser.add_argument('--localization-map','--map',dest='map',
+                        help='Complete 3D localization map bundle; not a static occupancy package or PGM/YAML')
     parser.add_argument('--out', required=True, help='New directory beneath project outputs/ or /tmp/')
     initial_pose = parser.add_mutually_exclusive_group()
     initial_pose.add_argument('--pose', type=float, nargs=6, metavar=('ROLL', 'PITCH', 'YAW', 'X', 'Y', 'Z'))
@@ -177,23 +242,35 @@ def arguments(argv=None):
                         help='Show the running task; successful mapping then keeps the final map view open until closed')
     parser.add_argument('--loop-closure', choices=('on', 'off'),
                         help='Mapping only: override the default enabled ROLL loop closure')
-    parser.add_argument('--people-python', help='Explicit detector interpreter; enables people node')
+    parser.add_argument('--people-python', help='Detector interpreter; enables 3D detection and tracking')
+    images=parser.add_mutually_exclusive_group()
+    images.add_argument('--image-association',action='store_true',help='Explicit VLM/diagnostic YOLO branch; not required by 3D perception/navigation')
+    images.add_argument('--no-image-association',action='store_true',help='Disable optional image work, including a requested decision project')
+    parser.add_argument('--image-device',default='0',help='YOLO GPU index within CUDA_VISIBLE_DEVICES')
+    parser.add_argument('--decision-project',help='Bag only: create this NEW annotation project and reuse the saved joint perception results')
+    parser.add_argument('--camera-calibration','--decision-calibration',dest='decision_calibration',help='Camera/LiDAR calibration shared by runtime YOLO and decision preparation')
+    parser.add_argument('--decision-root-group',help='Common original recording group for subsequent annotation splits')
     parser.add_argument('--environment', action='store_true', help='Enable observed local geometry and shared scene queries')
     parser.add_argument('--environment-config', help='Explicit environment geometry YAML')
+    parser.add_argument('--environment-backend',choices=('cpu','cuda'),help='Explicit environment computation override')
     parser.add_argument('--record-environment-scans', action='store_true',
                         help='Mapping + environment: retain bounded deskewed scans for final ray fusion')
-    parser.add_argument('--visual-memory', action='store_true',
-                        help='Environment: index causal RGB observations in an independent worker')
+    parser.add_argument('--record-display', action='store_true',
+                        help='Environment: save processed scans, geometry grids, states and TF in display.bag for playback without recomputing SLAM')
     parser.add_argument('--scene', action='store_true',
-                        help='Environment: join causal geometry/RGB/people/memory into one scene input')
-    parser.add_argument('--association-coverage', help='Explicit map-bound XY coverage YAML; mixed localization only')
-    parser.add_argument('--prior-map', help='Static environment package for the associated scene prior view')
-    parser.add_argument('--memory-camera-calibration', help='Explicit same-installation camera/LiDAR YAML for visual memory')
+                        help='Environment: join causal geometry/RGB/people/prior into one scene input')
+    parser.add_argument('--association-coverage', help='Trusted-region polygon configuration bound to the localization map; mixed localization only')
+    parser.add_argument('--static-map','--prior-map',dest='prior_map',
+                        help='Static environment map asset used to build optional scene prior views')
     parser.add_argument('--allow-local-only', action='store_true',
                         help='Explicit mixed route: retain valid frontend pose when prior association is unavailable')
     parser.add_argument('--keep-details', action='store_true',
                         help='Write and retain per-scan results, trajectories and diagnostics')
     args = parser.parse_args(argv)
+    if args.image_association and not args.people_python:
+        parser.error('--image-association requires --people-python for source 3D tracks')
+    args.image_association=bool(args.people_python and not args.no_image_association and
+        (args.image_association or args.decision_project))
     args.backend = args.backend or ('fast_lio' if args.mode == 'odometry' else 'roll_fast_lio')
     if (args.mode == 'odometry') != (args.backend == 'fast_lio'):
         parser.error('odometry uses fast_lio; mapping/localization use roll_fast_lio or pin_slam')
@@ -204,7 +281,7 @@ def arguments(argv=None):
     if args.loop_closure is not None and (args.mode != 'mapping' or args.backend != 'roll_fast_lio'):
         parser.error('--loop-closure applies only to ROLL mapping')
     if args.mode == 'odometry' and (args.map or args.pose or args.pose_file):
-        parser.error('odometry starts a new local frame; --map and --pose do not apply')
+        parser.error('odometry starts a new local frame; --localization-map and --pose do not apply')
     if args.pose_file and (args.mode != 'localization' or args.source != 'bag' or args.backend != 'roll_fast_lio'):
         parser.error('--pose-file applies only to ROLL bag localization')
     pin = args.backend == 'pin_slam'
@@ -212,20 +289,20 @@ def arguments(argv=None):
         parser.error('Environment observation integration currently supports FAST-LIO/ROLL')
     if args.record_environment_scans and (not args.environment or args.mode != 'mapping'):
         parser.error('--record-environment-scans requires --environment and mapping')
-    if args.visual_memory and not args.environment:
-        parser.error('--visual-memory requires --environment')
+    if args.record_display and not args.environment:
+        parser.error('--record-display requires --environment')
     if args.scene and not args.environment:
         parser.error('--scene requires --environment')
     if args.prior_map and (not args.scene or args.mode != 'localization'):
-        parser.error('--prior-map requires --scene and fixed-map localization')
-    if args.memory_camera_calibration and (not args.visual_memory or not project_path(args.memory_camera_calibration).is_file()):
-        parser.error('--memory-camera-calibration requires --visual-memory and an existing YAML')
+        parser.error('--static-map requires --scene and fixed-map localization')
     if args.allow_local_only and (not args.environment or args.mode != 'localization'):
         parser.error('--allow-local-only requires --environment and fixed-map localization')
     if args.association_coverage and (not args.allow_local_only or not project_path(args.association_coverage).is_file()):
         parser.error('--association-coverage requires --allow-local-only and an existing map-bound YAML')
     if args.environment_config and (not args.environment or not project_path(args.environment_config).is_file()):
         parser.error('--environment-config requires --environment and an existing YAML')
+    if args.environment_backend and not args.environment:
+        parser.error('--environment-backend requires --environment')
     if not pin:
         args.lidar_imu_calibration = args.lidar_imu_calibration or 'perception/sensors/calibration/lidar_imu.yaml'
     if args.lidar_imu_calibration:
@@ -262,9 +339,32 @@ def arguments(argv=None):
     if (not any(base in output.parents for base in ((ROOT / 'outputs').resolve(), Path('/tmp'))) or output.exists()):
         parser.error('Output must be a NEW directory beneath project outputs/ or /tmp/')
     map_path = project_path(args.map) if args.map else output / 'map'
+    if not args.decision_project and args.decision_root_group:
+        parser.error('--decision-root-group requires --decision-project')
+    if not args.image_association and not args.decision_project and args.decision_calibration:
+        parser.error('--camera-calibration requires image association or --decision-project')
+    if args.image_association and args.step_replay:
+        parser.error('PIN acknowledged replay supports 3D detection only; omit the image branch or use ordinary replay')
+    if args.image_association or args.decision_project:
+        camera = project_path(args.decision_calibration or 'perception/sensors/calibration/front_camera_lidar.yaml')
+        if not camera.is_file():parser.error('Camera/LiDAR calibration does not exist')
+        args.decision_calibration = str(camera)
+    if args.decision_project:
+        if args.source != 'bag' or not args.people_python or not project_path(args.people_python).is_file():
+            parser.error('--decision-project requires bag input and an existing --people-python interpreter')
+        project = project_path(args.decision_project)
+        if project.exists() or project == output or project in output.parents or map_path == project or map_path in project.parents:
+            parser.error('Decision project must be NEW and must not contain the run or be inside its map')
+        args.decision_project = str(project)
+        from perception.detection_tracking.inference.config import load_config
+        if args.image_association:
+            image = load_config()['image_association']
+            artifact = project_path(image['engine'] if image['backend']=='tensorrt' else image['weights'])
+            if not artifact.is_file() or image['backend']=='tensorrt' and not artifact.with_suffix('.engine.json').is_file():
+                parser.error('Decision preparation requires prepared YOLO weights/engine and its build record; no automatic export')
     if args.mode == 'localization':
         if not args.map or not (map_path / 'COMPLETE').is_file():
-            parser.error('Localization requires an explicitly selected complete map')
+            parser.error('Localization requires an explicitly selected complete 3D localization map bundle')
         if args.pose_file:
             from .initial_pose import load_seed
             args.pose_file = str(project_path(args.pose_file))
@@ -328,22 +428,17 @@ def algorithm_command(args, output, map_path, use_sim_time, *, coverage_path=Non
             command += ['lidar_imu_calibration:=' + str(project_path(args.lidar_imu_calibration))]
         if args.environment:
             command += ['environment:=true','allow_local_only:='+str(args.allow_local_only).lower()]
+            if args.environment_config:
+                command += ['environment_config:='+str(project_path(args.environment_config))]
+            if args.environment_backend:
+                command += ['environment_backend:='+args.environment_backend]
             command += ['record_environment_scans:='+str(args.record_environment_scans).lower(),
-                        'visual_memory:='+str(args.visual_memory).lower(),
                         'scene:='+str(args.scene).lower(),
                         'scene_people:='+str(bool(args.people_python)).lower()]
             if args.association_coverage:
                 command += ['association_coverage:='+str(coverage_path or project_path(args.association_coverage))]
             if args.prior_map:
-                command += ['prior_map:='+str(project_path(args.prior_map))]
-            if args.visual_memory:
-                if args.bag:
-                    memory_bag = Path(args.bag).expanduser()
-                    command += ['memory_bag:='+str(memory_bag if memory_bag.is_absolute() else ROOT/memory_bag)]
-                if args.memory_camera_calibration:
-                    command += ['memory_camera_calibration:='+str(project_path(args.memory_camera_calibration))]
-            if args.environment_config:
-                command += ['environment_config:='+str(project_path(args.environment_config))]
+                command += ['static_map:='+str(project_path(args.prior_map))]
     return command
 
 
@@ -357,11 +452,11 @@ def replay_topics(args, parameters, people_transport=None, environment_config=No
         topics.append(common.get('imu_topic', '/camera/imu'))
     if people_transport and people_transport.get('rgb_topic'):
         topics.append(people_transport['rgb_topic'])
-    if getattr(args,'visual_memory',False) or getattr(args,'scene',False):
-        memory = environment_config['memory']
-        topics.append(memory['rgb_topic'])
-        if getattr(args,'visual_memory',False):
-            topics.append(memory['camera_info_topic'])
+    if getattr(args,'image_association',False):
+        from perception.detection_tracking.inference.config import load_config
+        topics.append((people_transport or {}).get('camera_info_topic') or load_config()['ros']['camera_info_topic'])
+    if getattr(args,'scene',False):
+        topics.append(environment_config['scene']['rgb_topic'])
     return list(dict.fromkeys(topics))
 
 
@@ -371,11 +466,19 @@ def main():
     bag, output = project_path(args.bag) if args.bag else None, project_path(args.out)
     map_path = (project_path(args.map) if args.map else output / 'map') if args.mode != 'odometry' else None
     from perception.detection_tracking.inference.config import load_config
-    display_transport = load_config()['ros']
+    inference_config=load_config()
+    display_transport = inference_config['ros']
+    if args.image_association:
+        policy=inference_config['image_association']
+        artifact=project_path(policy['engine'] if policy['backend']=='tensorrt' else policy['weights'])
+        if not artifact.is_file() or policy['backend']=='tensorrt' and not artifact.with_suffix('.engine.json').is_file():
+            raise ValueError('The requested image branch requires prepared YOLO weights/engine; omit it for 3D perception')
     environment_config = None
     if args.environment:
         from perception.environment.layers import load_config as load_environment_config
         environment_config = load_environment_config(project_path(args.environment_config) if args.environment_config else None)
+        if args.environment_backend:
+            environment_config.setdefault('compute',{})['backend']=args.environment_backend
     people_topic = display_transport['output_topic']
     bag_topics = None
     if bag is not None:
@@ -386,8 +489,11 @@ def main():
                 raise ValueError('Bag offset is outside this recording')
             if args.assume_stationary and any(v.msg_type == 'sensor_msgs/Imu' for v in bag_topics.values()):
                 raise ValueError('Bag already contains IMU; do not silently replace recorded inertial measurements')
-            if (args.visual_memory or args.scene) and environment_config['memory']['rgb_topic'] not in bag_topics:
-                raise ValueError('Scene/visual memory requires the configured RGB topic in the bag')
+            if args.scene and environment_config['scene']['rgb_topic'] not in bag_topics:
+                raise ValueError('Scene assembly requires the configured RGB topic in the bag')
+            if (args.decision_project or args.image_association) and any(topic not in bag_topics for topic in
+                    (display_transport['rgb_topic'],display_transport['camera_info_topic'])):
+                raise ValueError('Decision preparation requires RGB and CameraInfo in the original bag')
     output.mkdir(parents=True)
     (output / 'logs').mkdir()
     settings = dict(vars(args), bag=str(bag) if bag else None, map=str(map_path) if map_path else None,
@@ -397,6 +503,7 @@ def main():
         settings['environment_configuration'] = environment_config
     expected_source = localization_source(args.backend, args.assume_stationary)
     settings['localization_source'] = expected_source
+    settings['map_type'] = 'localization_map' if map_path is not None else None
     settings['inertial_input'] = 'synthetic_stationary_assumption' if args.assume_stationary else (
         'not_used' if pin else 'recorded_or_live_imu')
     settings['playback'] = {'records': 'localization.jsonl', 'reference': 'scan_end',
@@ -405,9 +512,9 @@ def main():
     if args.mode == 'localization':
         settings['playback']['map_fingerprint'] = map_fingerprint(map_path)
     if args.prior_map:
-        from perception.environment.prior import PriorMap
-        prior = PriorMap(project_path(args.prior_map),expected_map=settings['playback']['map_fingerprint'])
-        settings['prior_package'] = dict(snapshot_id=prior.manifest['snapshot_id'],
+        from perception.environment.prior import StaticPriorView
+        prior = StaticPriorView(project_path(args.prior_map),expected_map=settings['playback']['map_fingerprint'])
+        settings['prior_package'] = dict(entity_type='map',map_type='static_environment_map',snapshot_id=prior.manifest['snapshot_id'],
             layers_sha256=prior.manifest['layers_sha256'],asset_fingerprint=prior.asset)
     if args.association_coverage:
         import hashlib
@@ -417,16 +524,21 @@ def main():
         settings['association_coverage_record'] = coverage.record
         settings['association_coverage_fingerprint'] = coverage.fingerprint
     record_path = output / 'run.json'
+    if args.image_association:settings['image_association']=dict(complete=False,records='rgb_associations.jsonl')
     record_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + '\n')
     counts = {'localization': 0, 'valid': 0, 'invalid': 0, 'people': 0, 'people_valid': 0,
               'people_degraded': 0, 'people_rgb': 0, 'people_dropped_busy': 0,
               'detections': 0, 'confirmed_tracks': 0}
+    if args.image_association:
+        counts.update(rgb_records=0,rgb_matches=0,rgb_failed=0,rgb_inferred=0)
+    image_status=[{}]
+    last_people=[None,None]
     settings['localization_statuses'] = {}
     condition = threading.Condition()
     last_state_wall = [None]
     input_receipts = {}
     receipt = {'count': 0, 'stamp_ns': None}
-    master = algorithm = frontend = people = playback = view = display = None
+    master = algorithm = frontend = people = image_node = playback = view = display = None
     with tempfile.TemporaryDirectory(prefix='social-nav-ros-replay-') as temporary:
         frozen_coverage = None
         if args.association_coverage:
@@ -453,6 +565,7 @@ def main():
             return subprocess.Popen(command, env=env, stdout=stream, stderr=subprocess.STDOUT,
                                     start_new_session=True)
 
+        display_recording = None
         try:
             if bag:
                 settings['playback']['bag_fingerprint'] = file_fingerprint(bag)
@@ -476,6 +589,17 @@ def main():
                 # rospy decides whether to subscribe to /clock during init_node.
                 ServerProxy(env['ROS_MASTER_URI']).setParam('/social_nav_session', '/use_sim_time', True)
             rospy.init_node('social_nav_session', anonymous=True, disable_signals=True)
+            if args.record_display:
+                prefix = environment_config['output_topic']
+                display_topics = [prefix+'/scan', prefix+'/occupancy', prefix+'/grid',prefix+'/state',
+                                  prefix+'/historical_free',prefix+'/recent_obstacles',
+                                  '/localization/state', '/localization/map_association', '/tf', '/tf_static']
+                if args.scene:
+                    scene_prefix = environment_config['scene']['output_topic']
+                    display_topics += [scene_prefix, scene_prefix+'/prior/occupancy']
+                display_recording = launch(['rosbag','record','--lz4','--buffsize','128',
+                    '-O',str(output/'display.bag')]+display_topics, 'display_recording.log')
+                settings['display_recording_topics'] = display_topics
             use_sim_time = bool(rospy.get_param('/use_sim_time', False)) if live else True
             settings['use_sim_time'] = use_sim_time
             if not pin:
@@ -577,10 +701,12 @@ def main():
                         rospy.get_param('/common/lid_topic', '/rslidar_points'),
                     localization_topic='/localization/state', localization_source=expected_source)
                 settings['display_transport'] = display_transport
+                rviz_transport=dict(display_transport)
+                if args.image_association:rviz_transport['people_image_topic']=people_topic+'/rgb_associations/image'
                 local_view = args.mode == 'odometry' or (args.environment and args.initialization != 'rviz')
                 view_config = 'odometry.rviz' if local_view else 'roll.rviz'
                 view_path = ROOT / 'perception/visualization/configs' / view_config
-                configuration = configure_rviz(yaml.safe_load(view_path.read_text()), display_transport)
+                configuration = configure_rviz(yaml.safe_load(view_path.read_text()), rviz_transport)
                 if args.environment:
                     from perception.visualization.environment import add_environment_display
                     add_environment_display(configuration,environment_config['output_topic'],
@@ -628,7 +754,7 @@ def main():
                     # Initial picking uses the prior map view. Once accepted, the
                     # running scene stays in continuous odom through unmapped roads.
                     stop(view,first_signal=signal.SIGTERM)
-                    configuration = configure_rviz(yaml.safe_load((ROOT/'perception/visualization/configs/odometry.rviz').read_text()),display_transport)
+                    configuration = configure_rviz(yaml.safe_load((ROOT/'perception/visualization/configs/odometry.rviz').read_text()),rviz_transport)
                     add_environment_display(configuration,environment_config['output_topic'],
                         prior_topic=environment_config['scene']['output_topic']+'/prior/occupancy' if args.prior_map else None,
                         target_frame=environment_config['sensor_frame'])
@@ -657,7 +783,8 @@ def main():
 
                 keys = ['common', 'preprocess', 'mapping', 'publish', 'pcd_save', 'odometry', 'initialization',
                         'cube_side_length', 'max_iteration', 'point_filter_num', 'filter_size_surf',
-                        'filter_size_map', 'feature_extract_enable', 'need_map_erected']
+                        'filter_size_map', 'feature_extract_enable', 'need_map_erected', 'matching_threads',
+                        'matching_backend', 'deskew_backend', 'linearization_backend', 'filter_compact_solve']
                 if args.mode != 'odometry':
                     keys.append('roll')
                 if args.assume_stationary:
@@ -668,9 +795,6 @@ def main():
                 from std_srvs.srv import Trigger
                 rospy.wait_for_service(environment_config['output_topic']+'/status',timeout=30)
                 environment_status = rospy.ServiceProxy(environment_config['output_topic']+'/status',Trigger)
-            if args.visual_memory:
-                rospy.wait_for_service(environment_config['output_topic']+'/memory/status', timeout=30)
-                memory_status = rospy.ServiceProxy(environment_config['output_topic']+'/memory/status', Trigger)
             if args.scene:
                 rospy.wait_for_service(environment_config['scene']['output_topic']+'/status',timeout=30)
                 scene_status = rospy.ServiceProxy(environment_config['scene']['output_topic']+'/status',Trigger)
@@ -708,6 +832,8 @@ def main():
                     if people_file:
                         people_file.write(json.dumps(result, allow_nan=False) + '\n')
                     with condition:
+                        last_people[:]=[time.monotonic(),[result.get(key) for key in
+                            ('session_id','generation','sequence_id','clock_domain','observation_id','stamp_s')]]
                         counts['people'] += 1
                         counts['people_valid' if result['health'] == 'valid' else 'people_degraded'] += 1
                         counts['people_rgb'] += result.get('rgb_stamp_s') is not None
@@ -727,6 +853,37 @@ def main():
                     'people.log')
                 settings['people_transport'] = json.loads(
                     rospy.wait_for_message(people_topic+'/status', String, timeout=90).data)
+                settings['people_transport']['camera_info_topic']=display_transport['camera_info_topic']
+                if args.image_association:
+                    image_file=(output/'rgb_associations.jsonl').open('w')
+                    streams.append(image_file)
+                    image_topic=people_topic+'/rgb_associations'
+                    def on_image_record(message):
+                        record=json.loads(message.data)
+                        with condition:
+                            image_file.write(json.dumps(record,allow_nan=False)+'\n')
+                            counts['rgb_records']+=1
+                            counts['rgb_matches']+=record['result'].get('matches',0)
+                            counts['rgb_failed']+=record['result']['status']=='failed'
+                            counts['rgb_inferred']+=record.get('detector_s') is not None
+                            condition.notify_all()
+                    def on_image_status(message):
+                        with condition:
+                            image_status[0]=json.loads(message.data)
+                            condition.notify_all()
+                    image_sub=rospy.Subscriber(image_topic+'/records',String,on_image_record,queue_size=128,buff_size=16*1024*1024)
+                    image_status_sub=rospy.Subscriber(image_topic+'/status',String,on_image_status,queue_size=8)
+                    image_node=launch(['roslaunch',str(ROOT/'perception/detection_tracking/ros/launch/rgb_association.launch'),
+                        'project_root:='+str(ROOT),'python_executable:='+str(project_path(args.people_python)),
+                        'calibration:='+args.decision_calibration,'device:='+args.image_device,
+                        'people_topic:='+people_topic+'/json','rgb_topic:='+people_topic+'/rgb',
+                        'camera_info_topic:='+display_transport['camera_info_topic']], 'image_association.log')
+                    deadline=time.monotonic()+90
+                    with condition:
+                        while image_status[0].get('state')!='ready':
+                            if image_node.poll() is not None or time.monotonic()>=deadline:
+                                raise RuntimeError('YOLO node did not become ready; inspect image_association.log')
+                            condition.wait(.1)
             if args.rviz:
                 from sensor_msgs.msg import PointCloud2
                 from perception.visualization.scans import SCAN_TOPIC
@@ -742,8 +899,6 @@ def main():
                 settings['replayed_topics'] = topics
                 required = [t for t in topics if t != '/tf_static' and
                             t != settings.get('people_transport', {}).get('rgb_topic')]
-                if args.visual_memory:
-                    required = [t for t in required if t != environment_config['memory']['camera_info_topic']]
                 if any(topic not in bag_topics for topic in required):
                     raise ValueError('Bag is missing required input topics: ' + str(required))
                 command += [str(bag), '--topics'] + topics
@@ -753,7 +908,7 @@ def main():
                 print('Session ready: %s, %s. Ctrl+C %s.' % (args.mode, args.backend, ending), flush=True)
                 try:
                     while args.duration is None or time.monotonic()-replay_started < args.duration:
-                        if any(p is not None and p.poll() is not None for p in (algorithm, frontend, people, display)):
+                        if any(p is not None and p.poll() is not None for p in (algorithm, frontend, people, image_node, display)):
                             raise RuntimeError('An algorithm node exited; inspect its log')
                         time.sleep(.1)
                 except KeyboardInterrupt:
@@ -793,7 +948,7 @@ def main():
             else:
                 playback = launch(command, 'playback.log')
                 while playback.poll() is None:
-                    if any(p is not None and p.poll() is not None for p in (algorithm, frontend, people, display)):
+                    if any(p is not None and p.poll() is not None for p in (algorithm, frontend, people, image_node, display)):
                         raise RuntimeError('An algorithm node exited during replay; inspect its log')
                     time.sleep(.1)
                 if playback.returncode != 0:
@@ -837,6 +992,9 @@ def main():
                 raise RuntimeError('No accepted registration; inspect algorithm diagnostics')
             if args.people_python and counts['people_valid'] == 0:
                 raise RuntimeError('No localized detector output was received')
+            if args.image_association and not live:
+                wait_for_image_drain(condition,lambda:image_status[0],last_people,lambda:counts['rgb_records'],
+                                     lambda:image_node.poll() is None and people.poll() is None)
             if args.environment:
                 deadline = time.monotonic()+15
                 while True:
@@ -851,20 +1009,6 @@ def main():
                     time.sleep(.1)
                 if not settings['environment']['counts']['processed']:
                     raise RuntimeError('No observation-bound environment geometry was generated')
-            if args.visual_memory:
-                deadline = time.monotonic()+15
-                while True:
-                    response = memory_status()
-                    settings['visual_memory_statistics'] = json.loads(response.message)
-                    if not response.success:
-                        raise RuntimeError('Visual memory failed: '+response.message)
-                    if not settings['visual_memory_statistics']['busy'] and not settings['visual_memory_statistics']['pending']:
-                        break
-                    if time.monotonic() >= deadline:
-                        raise RuntimeError('Visual memory did not drain')
-                    time.sleep(.1)
-                if not settings['visual_memory_statistics']['counts']['selected']:
-                    raise RuntimeError('No valid RGB observation was indexed')
             if args.scene:
                 deadline = time.monotonic()+15
                 while True:
@@ -901,11 +1045,25 @@ def main():
                 stop(view, first_signal=signal.SIGTERM)
             except Exception as error:
                 cleanup_errors.append(str(error))
-            for process in (playback, display, people, frontend, algorithm):
+            for process in (playback, display, people):
                 try:
                     stop(process)
                 except Exception as error:
                     cleanup_errors.append(str(error))
+            if live and image_node is not None and last_people[0] is not None and image_node.poll() is None:
+                try:
+                    wait_for_image_drain(condition,lambda:image_status[0],last_people,lambda:counts['rgb_records'],
+                                         lambda:image_node.poll() is None)
+                except Exception as error:cleanup_errors.append(str(error))
+            for process in (image_node,frontend,algorithm):
+                try:stop(process)
+                except Exception as error:cleanup_errors.append(str(error))
+            try:
+                stop(display_recording)
+                if args.record_display:
+                    settings['display_recording_fingerprint'] = wait_for_display_recording(output/'display.bag')
+            except Exception as error:
+                cleanup_errors.append(str(error))
             if 'rospy' in locals():
                 rospy.signal_shutdown('Replay finished')
             try:
@@ -920,6 +1078,16 @@ def main():
                 settings['map_saved'] = (map_path / 'COMPLETE').is_file()
                 settings['success'] = settings.get('success', False) and settings['map_saved']
             settings['success'] = settings.get('success', False) and not cleanup_errors
+            if args.image_association:
+                metadata=dict(image_status[0],records='rgb_associations.jsonl')
+                metadata['complete']=bool(settings['success'] and metadata.get('state')=='ready')
+                metadata['recorded']=counts['rgb_records']
+                metadata['not_processed']=max(0,counts['people']-counts['rgb_records'])
+                path=output/'rgb_associations.jsonl'
+                if path.is_file():
+                    from perception.detection_tracking.inference.rgb_cache import file_digest
+                    metadata['records_sha256']=file_digest(path)
+                settings['image_association']=metadata
             if map_path is not None and (map_path / 'COMPLETE').is_file():
                 try:
                     actual_fingerprint = map_fingerprint(map_path)
@@ -933,14 +1101,22 @@ def main():
                 try:
                     from perception.environment.scans import sealed_scan_summary
                     scans = output/'environment/scans.sqlite'
-                    sealed_scan_summary(scans)
+                    archive=sealed_scan_summary(scans)
+                    final_environment=json.loads((output/'environment/summary.json').read_text())
+                    recording=final_environment['scan_recording']
+                    if recording.get('state','sealed')!='sealed' or recording.get('error'):
+                        raise ValueError('Environment reported an incomplete or failed archive')
+                    if archive['records']!=final_environment['counts']['processed']:
+                        raise ValueError('Sealed scan journal does not cover all processed environment observations')
+                    settings['environment']={key:value for key,value in final_environment.items() if key!='config'}
                     settings['environment_scans_fingerprint'] = file_fingerprint(scans)
                 except (OSError, ValueError) as error:
                     settings.update(success=False, error='Invalid scan journal: '+str(error))
-            if args.visual_memory and settings.get('success'):
-                settings['memory_index_fingerprint'] = file_fingerprint(output/'environment/observations.sqlite')
             finalize_artifacts(output, settings, keep_details=args.keep_details)
-    print(json.dumps({'success': settings['success'], 'counts': counts, 'out': str(output)},
+    summary = {'success': settings['success'], 'counts': counts, 'out': str(output)}
+    if settings['success'] and args.decision_project:
+        summary['decision_preparation'] = prepare_decision_project(args,output)
+    print(json.dumps(summary,
                      ensure_ascii=False), flush=True)
     if settings['success'] and args.mode == 'mapping' and args.rviz:
         # Read the frozen map, not historical per-scan estimates which are not

@@ -1,4 +1,4 @@
-"""Read-only system scaffold inspection; no component imports or execution."""
+"""Read-only module registry inspection; no component imports or execution."""
 from __future__ import annotations
 
 import argparse
@@ -7,7 +7,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "configs/system.json"
-STATUSES = {"source_available", "offline_ready", "planned", "not_implemented"}
+STATUSES = {"source_available", "offline_ready", "planning_only_ready", "simulation_prototype",
+            "simulation_and_causal_shadow_ready", "planned", "not_implemented"}
 
 
 def inspect_layout(root=ROOT):
@@ -27,7 +28,7 @@ def inspect_layout(root=ROOT):
             components.append({"component": key, "path": entry["path"], "status": entry["status"], "directory_present": present})
             if not present:
                 absent.append(key)
-            if entry["status"] in {"planned", "not_implemented"}:
+            if entry["status"] in {"planned", "not_implemented", "simulation_prototype", "simulation_and_causal_shadow_ready"}:
                 pending.append(key)
     contracts = (root / config["interfaces"]["path"]).resolve()
     if not contracts.is_relative_to(root) or not contracts.is_file():
