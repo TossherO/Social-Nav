@@ -6,18 +6,18 @@
   <arg name="serial_b" default=""/>
   <arg name="name_a" default="camera"/>
   <arg name="name_b" default="camera2"/>
-  <arg name="fps" default="15"/>
+  <arg name="fps" default="30"/>
   <arg name="imu_method" default="copy"/>
   <arg name="initial_reset" default="false"/>
-  <include if="$(arg lidar)" file="$(find wheelchair_sensors)/launch/lidar.launch"/>
-  <include if="$(arg camera_a)" file="$(find wheelchair_sensors)/launch/camera.launch">
+  <include if="$(arg lidar)" file="$(dirname)/lidar.launch"/>
+  <include if="$(arg camera_a)" file="$(dirname)/camera.launch">
     <arg name="serial" value="$(arg serial_a)"/>
     <arg name="name" value="$(arg name_a)"/>
     <arg name="fps" value="$(arg fps)"/>
     <arg name="imu_method" value="$(arg imu_method)"/>
     <arg name="initial_reset" value="$(arg initial_reset)"/>
   </include>
-  <include if="$(arg camera_b)" file="$(find wheelchair_sensors)/launch/camera.launch">
+  <include if="$(arg camera_b)" file="$(dirname)/camera.launch">
     <arg name="serial" value="$(arg serial_b)"/>
     <arg name="name" value="$(arg name_b)"/>
     <arg name="fps" value="$(arg fps)"/>

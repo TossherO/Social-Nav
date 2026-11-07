@@ -109,12 +109,14 @@ def inspect(config_path, *, motion_path=None, vehicle_profile=None, chassis_port
     motion = check('motion_config_valid', load_motion)
 
     def vehicle():
-        from navigation.control.vehicle import load_vehicle_profile
+        from navigation.control.vehicle import load_vehicle_profile,controller_settings
         asset('measured_vehicle_profile', vehicle_profile)
         if motion is None:
             raise ValueError('Motion configuration must pass first')
-        geometry, _, profile = load_vehicle_profile(resolve(vehicle_profile), motion, require_execution=execution)
+        geometry, selected, profile = load_vehicle_profile(resolve(vehicle_profile), motion, require_execution=execution)
+        from navigation.safety.config import load_stopping_config
         return dict(vehicle_id=profile['vehicle_id'], geometry_assumed=geometry.assumed,
+                    stopping_model=load_stopping_config(selected),controller=controller_settings(selected),
                     scope='declared_measurements_checked_against_selected_limits_not_physical_verification')
     if vehicle_profile or execution:
         check('measured_vehicle_profile', vehicle)

@@ -22,3 +22,9 @@ measured_limits:
 # 19200 baud; zero/mode3 -> zero/mode1 -> targets; zero/mode3 to disarm.
 # Confirm feedback payload-byte checksum and both joystick neutral fields as well.
 protocol: null  # af01_12_bf01_32_payload_sum_mode1_3
+# Optional per-vehicle stopping budgets. Only these two model times can be
+# increased; input freshness and the independent process watchdog stay fixed.
+stopping_model: null  # {reaction_s: ..., actuator_delay_s: ...}
+# Raw wire field meaning must be verified on this controller. Feedback bounds
+# are independent from the enforced host command caps.
+controller: null  # {velocity_limit_field: ..., feedback_max_linear_mps: ..., feedback_max_angular_rps: ...}

@@ -38,3 +38,5 @@ measured_limits:
   maximum_actuator_delay_s: null
   firmware_watchdog_s: null
 protocol: null  # Confirm af01_12_bf01_32_payload_sum_mode1_3 against this controller.
+stopping_model: null  # Optional reaction_s / actuator_delay_s, with supporting measurements.
+controller: null  # Explicit tested velocity_limit_field and feedback bounds required for execution.

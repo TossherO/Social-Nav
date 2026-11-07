@@ -193,6 +193,7 @@ class DriverTests(unittest.TestCase):
     def test_measured_profile_cannot_understate_braking_or_watchdog(self):
         profile=yaml.safe_load(Path('navigation/control/vehicle.example.yaml').read_text())
         profile.update(vehicle_id='synthetic_fixture',protocol='af01_12_bf01_32_payload_sum_mode1_3')
+        profile['controller']=dict(velocity_limit_field=1500,feedback_max_linear_mps=1.5,feedback_max_angular_rps=1.5)
         profile['verification']=dict(source='synthetic unit test, not a real vehicle',geometry_confirmed=True,motion_confirmed=True,protocol_confirmed=True)
         profile['geometry']=dict(footprint=[[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],base_from_lidar=np.eye(4).tolist())
         limits=profile['measured_limits']
@@ -244,7 +245,8 @@ class DriverTests(unittest.TestCase):
         import tty
         from navigation.control.chassis import ChassisProcess
         master,slave=pty.openpty();tty.setraw(slave);port=os.ttyname(slave);os.close(slave)
-        os.set_blocking(master,False);stop=threading.Event();writes=[]
+        os.set_blocking(master,False);stop=threading.Event();writes=[];wire_limits=[]
+        self.motion['controller']=dict(velocity_limit_field=1500,feedback_max_linear_mps=1.5,feedback_max_angular_rps=1.5)
         def controller():
             pending=bytearray();mode=3
             while not stop.wait(.015):
@@ -259,6 +261,7 @@ class DriverTests(unittest.TestCase):
                     packet=bytes(pending[:12]);del pending[:12]
                     _,_,v,w,mode,limit,error,led,checksum=struct.unpack('>2B2hBhBBB',packet)
                     writes.append((v,w,mode))
+                    wire_limits.append(limit)
                 try:os.write(master,frame(mode=mode))
                 except OSError:pass
         emulator=threading.Thread(target=controller);emulator.start();driver=None
@@ -271,6 +274,7 @@ class DriverTests(unittest.TestCase):
                     packet=self.packet(now);packet['units']=[-20,30]
                     driver.channel.send(json.dumps(packet).encode());time.sleep(.025)
                 self.assertIn((-20,30,1),writes)
+                self.assertTrue(wire_limits);self.assertEqual(set(wire_limits),{1500})
                 # No more parent traffic: independent watchdog must restore zero/mode3.
                 time.sleep(.4)
                 self.assertEqual(writes[-1],(0,0,3))

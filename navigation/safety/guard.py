@@ -1,7 +1,5 @@
 """Independent simulation/shadow gate with current geometry and stopping sweep."""
-from pathlib import Path
 import numpy as np
-import yaml
 from perception.environment.context import fingerprint
 from navigation.kinematics import ramp_path,braking_path,turning_residual,advance,velocity_step
 from navigation.planning.motion import interpolate_se2,motion_uncertainty_margin
@@ -66,7 +64,8 @@ class LocalSafety:
         self.shadow=shadow
         self.asset=asset
         self.geometry=geometry;self.motion=motion;self.margin=margin
-        self.settings=settings or yaml.safe_load(Path(__file__).with_name('config.yaml').read_text())
+        from .config import load_stopping_config
+        self.settings=settings if settings is not None else load_stopping_config(motion)
         if any(not np.isfinite(v) or v<=0 for v in self.settings.values()):raise ValueError('Invalid safety setting')
         if not 0<motion['brake_deceleration_scale']<=1:raise ValueError('Invalid braking assumption')
         self.braking_motion=dict(motion)

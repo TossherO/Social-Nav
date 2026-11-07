@@ -1,5 +1,5 @@
 <launch>
-  <arg name="config" default="$(find wheelchair_sensors)/config/rslidar.yaml"/>
+  <arg name="config" default="$(dirname)/../config/rslidar.yaml"/>
   <node pkg="rslidar_sdk" type="rslidar_sdk_node" name="rslidar_sdk_node" output="screen" required="true">
     <param name="config_path" value="$(arg config)"/>
   </node>

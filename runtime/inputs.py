@@ -39,7 +39,7 @@ def bag_observations(path,config,*,duration=None,image_topics=None,start=0.,mess
     if messages is None:import rosbag
     topic=config['common']['lid_topic'];imu_topic=config['common']['imu_topic']
     offset=config['common'].get('imu_time_offset',0.)
-    imu=deque();scans=deque();images=deque(maxlen=16);intrinsics=deque(maxlen=16);last_imu=-np.inf;first=None;origin=None
+    imu=deque();scans=deque();images=deque(maxlen=16);intrinsics=deque(maxlen=16);last_imu=-np.inf;last_imu_stamp_ns=None;first=None;origin=None
     image_topics=image_topics or {}
     rgb_topic=image_topics.get('rgb');info_topic=image_topics.get('camera_info')
     with (rosbag.Bag(str(path)) if messages is None else nullcontext(messages)) as bag:
@@ -47,8 +47,13 @@ def bag_observations(path,config,*,duration=None,image_topics=None,start=0.,mess
         for name,msg,_ in source:
             if name==imu_topic:
                 t=msg.header.stamp.to_sec()+offset
-                if t<=last_imu:raise ValueError('IMU timestamp reversed or duplicated')
-                last_imu=t;a=msg.linear_acceleration;g=msg.angular_velocity
+                stamp_ns=msg.header.stamp.to_nsec()
+                if t<=last_imu:
+                    caller=(getattr(msg,'_connection_header',None) or {}).get('callerid')
+                    raise ValueError('IMU timestamp reversed or duplicated: '
+                        f'topic={imu_topic}, previous_stamp_ns={last_imu_stamp_ns}, current_stamp_ns={stamp_ns}, '
+                        f'effective_delta_s={t-last_imu:.9f}, header_seq={getattr(msg.header,"seq",None)}, caller={caller}')
+                last_imu=t;last_imu_stamp_ns=stamp_ns;a=msg.linear_acceleration;g=msg.angular_velocity
                 imu.append((t,a.x,a.y,a.z,g.x,g.y,g.z))
                 if first is None:
                     while imu and t-imu[0][0]>1.:imu.popleft()

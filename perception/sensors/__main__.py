@@ -11,7 +11,7 @@ def main():
     parser.add_argument('--serial-rear')
     parser.add_argument('--lidar-only', action='store_true')
     parser.add_argument('--rear', action='store_true')
-    parser.add_argument('--fps', type=int, choices=(15, 30), default=15)
+    parser.add_argument('--fps', type=int, choices=(15, 30), default=30)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     local = root / 'configs/perception.local.json'
@@ -22,7 +22,8 @@ def main():
         parser.error('Select the front camera by --serial-front or configs/perception.local.json')
     if args.rear and (not rear or args.lidar_only):
         parser.error('--rear requires a rear serial and enabled cameras')
-    command = ['roslaunch', 'wheelchair_sensors', 'sensors.launch',
+    launch = root / 'perception/sensors/ros/wheelchair_sensors/launch/sensors.launch'
+    command = ['roslaunch', str(launch),
                'serial_a:=' + front, 'serial_b:=' + rear,
                'camera_a:=' + str(not args.lidar_only).lower(),
                'camera_b:=' + str(args.rear).lower(), 'fps:=' + str(args.fps)]

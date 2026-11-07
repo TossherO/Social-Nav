@@ -30,6 +30,8 @@
         "map_type": "localization_map",
         "status": "offline_ready",
         "entry": "bash perception/scripts/run.sh --help",
+        "mapping_entry": "bash perception/scripts/build_map.sh --help",
+        "mapping_scope": "offline_bag_native_fast_lio_roll_with_bounded_backpressure_and_optional_sealed_scans",
         "ros_diagnostic_entry": "bash perception/scripts/run_ros_diagnostic.sh --help",
         "default_backends": {
           "mapping": "roll_fast_lio",

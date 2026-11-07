@@ -41,7 +41,8 @@ class DwaController:
         self.diagnostics=False
         self.planning=copy.deepcopy(planning);self.motion=copy.deepcopy(motion);self.geometry=geometry;self.asset=asset
         self.settings=copy.deepcopy(settings) if settings is not None else load_config();self.goal_settings=tracking_config()
-        self.safety_settings=yaml.safe_load((Path(__file__).parents[1]/'safety/config.yaml').read_text())
+        from navigation.safety.config import load_stopping_config
+        self.safety_settings=load_stopping_config(motion)
         self.sweep=SweepChecker(motion.get('collision_backend','cpu'),motion.get('collision_library'))
         self.sweep.metrics=None if device_batch is None else device_batch.metrics
         sources=[Path(__file__),Path(__file__).parents[1]/'kinematics.py',Path(__file__).parents[1]/'safety/guard.py']

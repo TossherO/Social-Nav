@@ -1,7 +1,6 @@
 """Independent serial owner for explicitly enabled, supervised live navigation."""
 from collections import deque
 import json
-import math
 import multiprocessing as mp
 from multiprocessing.reduction import DupFd
 import os
@@ -12,12 +11,14 @@ import socket
 import time
 from .chassis_protocol import FeedbackFrames, encode_command_units
 from .telemetry import ChassisTelemetry
+from .vehicle import controller_settings
 
 
 class DriveState:
     """Bounded arming handshake and short-lived CPU safety authorizations."""
     def __init__(self, motion):
         self.motion = motion
+        self.controller=controller_settings(motion)
         self.state, self.reason = 'disarmed', 'operator_arm_required'
         self.revision = -1
         self.heartbeat = self.phase = None
@@ -58,8 +59,11 @@ class DriveState:
             self.stop('controller_mode_changed')
         elif self.state == 'armed':
             v,w=row['velocity_mps_rps']
-            if (not -self.motion['max_reverse_mps'] <= v <= self.motion['max_forward_mps'] or
-                    abs(w)>self.motion['max_angular_rps']):
+            low=-self.motion['max_reverse_mps'];high=self.motion['max_forward_mps']
+            if self.motion.get('controller') is not None:
+                low=-self.controller['feedback_max_linear_mps'];high=-low
+            if (not low<=v<=high or
+                    abs(w)>self.controller['feedback_max_angular_rps']):
                 self.stop('observed_velocity_over_limit')
 
     def command(self, now):
@@ -110,7 +114,7 @@ def _owner(channel_fd, port, output, motion):
     recorder = ChassisTelemetry(output)
     last_status = last_write = None
     status_at = 0.
-    limit = math.ceil(max(motion['max_forward_mps'], motion['max_reverse_mps'])*1000)
+    limit = state.controller['velocity_limit_field']
 
     def write(command):
         nonlocal last_write

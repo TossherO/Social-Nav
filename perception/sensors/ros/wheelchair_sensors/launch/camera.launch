@@ -1,7 +1,7 @@
 <launch>
   <arg name="serial"/>
   <arg name="name" default="camera"/>
-  <arg name="fps" default="15"/>
+  <arg name="fps" default="30"/>
   <arg name="imu_method" default="copy"/>
   <arg name="initial_reset" default="false"/>
   <include file="$(find realsense2_camera)/launch/rs_camera.launch">
