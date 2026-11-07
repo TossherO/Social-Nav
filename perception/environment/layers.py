@@ -75,10 +75,13 @@ def load_config(path=None):
         raise ValueError('Environment output_topic must be an explicit absolute ROS namespace')
     dynamic = values.get('dynamic')
     if dynamic is not None:
+        dynamic.setdefault('object_radius_limit_m',.55)
         for name in ('max_people_age_s', 'wait_s', 'padding_m', 'max_radius_m', 'seed_distance_m',
-                     'static_observation_interval_s'):
+                     'static_observation_interval_s','object_radius_limit_m'):
             if not np.isfinite(dynamic[name]) or dynamic[name] <= 0:
                 raise ValueError('Dynamic-filter sizes and time budgets must be positive')
+        if dynamic['object_radius_limit_m']>.98:
+            raise ValueError('Person ownership radius plus padding must fit the 1 m object budget')
         if not np.isfinite(dynamic['transient_ttl_s']) or dynamic['transient_ttl_s'] < 0:
             raise ValueError('Person lifetime must be finite and nonnegative')
         for name in ('min_hits', 'min_cluster_points', 'static_min_observations'):
@@ -285,6 +288,10 @@ class LocalEnvironmentMap:
             floor[~support] = np.nan
         else:
             support, floor = np.zeros((size,size),bool), np.full((size,size),np.nan,np.float32)
+        if status.get('history_suspended'):
+            # Retain the height for obstacle classification, not free certification.
+            # Stored ground values and original observation times remain untouched.
+            support.fill(False)
         return floor,support,status
 
     def update(self, points, transform, stamp, identity, *, frame='odom', association=None,
@@ -330,11 +337,22 @@ class LocalEnvironmentMap:
         bounds = [*origin, sensor[2]-config['ground_max_below_sensor_m']-.5,
                   *(origin+size*resolution), sensor[2]+config['max_height_m']+.5]
         masking, person_status = {}, dict(status='disabled')
+        owners=np.full(len(world),-1,np.int32);objects=None
         if config.get('dynamic', {}).get('enabled'):
             boxes, person_status = people_boxes(people, stamp, identity, frame, config['dynamic'], clock_domain=clock_domain)
-            transient = person_points(world, boxes, floor, origin, config)
+            if (people is not None and person_status['status']=='valid' and abs(people['stamp_s']-stamp)<1e-6
+                    and all(key is not None for key in person_status['track_ids'])
+                    and 'session_id' in people and 'generation' in people):
+                from .person_objects import point_owners,ownership_record
+                plane=ground_status.get('plane_world') if ground_status.get('status')=='tracked' else None
+                owners=point_owners(world,boxes,config,sensor,plane)
+                transient=owners>=0
+                if transient.any():
+                    objects=ownership_record(world,owners,boxes,person_status['track_ids'],people,stamp,identity,frame)
+            else:
+                transient = person_points(world, boxes, floor, origin, config)
             person_status.update(masked_points=int(transient.sum()), transient_ttl_s=config['dynamic']['transient_ttl_s'])
-            masking = dict(transient_mask=transient, transient_ttl=config['dynamic']['transient_ttl_s'])
+            masking = dict(transient_mask=transient, transient_ttl=config['dynamic']['transient_ttl_s'],omit_transient=objects is not None)
         count = self.tree.update(world,sensor,bounds,stamp,config,rays=rays,ray_origins=ray_origins,read=False,**masking)
         if metrics is not None and self.tree.backend=='cuda':
             metrics.transfer('h2d',world.astype(np.float32,copy=False).nbytes+
@@ -358,16 +376,20 @@ class LocalEnvironmentMap:
         if sensor_frame is not None:metadata['sensor_frame']=sensor_frame
         metadata['ground_tracking'] = ground_status
         metadata['dynamic_filter'] = person_status
+        if objects is not None:metadata['person_objects']=objects
         self.support_observation = dict(stamp_s=float(stamp),identity=(*identity,frame),
             endpoints=np.ascontiguousarray(world,np.float64),
-            transient_mask=np.ascontiguousarray(masking.get('transient_mask',np.zeros(len(world),bool)),np.uint8))
+            transient_mask=np.ascontiguousarray(masking.get('transient_mask',np.zeros(len(world),bool)),np.uint8),
+            person_owner=owners)
         backend=self.config.get('compute',{}).get('backend','cuda')
         metadata['hit_invalidates_free']=config.get('hit_invalidates_free',False)
         metadata['compute_components']=dict(occupancy=backend,projection=backend,distance_fields=backend,
             near_field=backend if self.near_field else 'disabled',ground_fit='cpu',ground_support='cpu',people_mask='cpu')
-        layers = self.tree.project(floor,support,origin,config,stamp,endpoints=world,
+        remaining=owners<0;view_points=world[remaining]
+        view_mask=masking.get('transient_mask');view_mask=None if view_mask is None else view_mask[remaining]
+        layers = self.tree.project(floor,support,origin,config,stamp,endpoints=view_points,
             view_metadata=metadata,near_field=self.near_field if backend=='cuda' else None,
-            transient_mask=masking.get('transient_mask'),device=device,metrics=metrics)
+            transient_mask=view_mask,device=device,metrics=metrics)
         if self.near_field and backend=='cuda':
             metadata.update(snapshot_id=metadata['snapshot_id']+':near_field:'+self.near_field.binding,
                             near_field_memory=self.tree.view_metadata)
@@ -381,7 +403,7 @@ class LocalEnvironmentMap:
             return snapshot
         snapshot=GridSnapshot(metadata,layers)
         if self.near_field and backend=='cpu':
-            snapshot=self.near_field.update(snapshot,world,transient_mask=masking.get('transient_mask'),
+            snapshot=self.near_field.update(snapshot,view_points,transient_mask=view_mask,
                 person_only=getattr(self.tree,'person_only',None))
         if 'person_background_free' in snapshot.layers:
             snapshot.metadata['dynamic_navigation']=dict(policy='exclusive_person_on_certified_historical_free',

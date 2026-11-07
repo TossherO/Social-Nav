@@ -158,7 +158,8 @@ class DynamicTests(unittest.TestCase):
         def value(point):
             col,row = np.floor((point[:2]-candidate.metadata['origin_xy'])/config['resolution']).astype(int)
             return filtered.layers['occupancy'][row, col]
-        self.assertNotEqual(value(ghost[0]), 100)
+        # Removing a contradicted endpoint does not prove the full column free.
+        self.assertEqual(value(ghost[0]), -1)
         self.assertEqual(value(wall[0]), 100)
         self.assertEqual(value(occluded[0]), 100)
         self.assertEqual(filtered.metadata['dynamic_filter']['geometric_rejected_endpoints'], 1)

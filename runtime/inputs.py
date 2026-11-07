@@ -6,6 +6,29 @@ from perception.sensors.pointcloud import pointcloud_fields
 from perception.sensors.image import rgb_array
 
 
+def selected_messages(path,config,*,start=0.,duration=None,messages=None,image_topics=None):
+    """Select a sensor interval, retaining its leading IMU measurements."""
+    from contextlib import nullcontext
+    if messages is None:import rosbag
+    lidar=config['common']['lid_topic'];imu=config['common']['imu_topic']
+    lead=deque();origin=first=None
+    with (rosbag.Bag(str(path)) if messages is None else nullcontext(messages)) as bag:
+        source=bag.read_messages(topics=[lidar,imu]+list((image_topics or {}).values())) if messages is None else bag
+        for row in source:
+            topic,msg,_=row;stamp=msg.header.stamp.to_sec()
+            if first is None:
+                if topic==imu:
+                    lead.append(row)
+                    while lead and stamp-lead[0][1].header.stamp.to_sec()>1.:lead.popleft()
+                if topic!=lidar:continue
+                if origin is None:origin=stamp
+                if stamp-origin<start-1e-6:continue
+                first=stamp
+                yield from lead;lead.clear()
+            if topic==lidar and duration is not None and stamp-first>duration:return
+            yield row
+
+
 def bag_observations(path,config,*,duration=None,image_topics=None,start=0.,messages=None):
     """Raw scans plus causally collected IMU; no roscore or internal topics.
 

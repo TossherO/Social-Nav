@@ -1,7 +1,7 @@
 """Bounded 2D static support over raw maps, with a small endpoint overlay.
 
-One stable floor reference per association; no inferred holes, voxel probes or
-person ownership history. Independent consumers recompute static-cell overlaps.
+Static elevations provide the background reference. Local ground classifies
+new obstacle returns; it does not gate access to an already measured prior.
 """
 import copy
 import hashlib
@@ -10,10 +10,10 @@ import numpy as np
 from .context import fingerprint
 from .geometry import shift_array
 from .layers import GridSnapshot
-from .navigation import (NavigationGround, GROUND_DEFAULTS, association_reason,
+from .navigation import (STATIC_GROUND_TOLERANCE_M, static_floor_reference, association_reason,
                          static_support, prior_floor, transform_plane, NAVIGATION_DTYPES)
 
-METHOD = 'bounded_static_support'
+METHOD = 'static_background_support'
 
 
 def region(metadata, radius):
@@ -21,21 +21,6 @@ def region(metadata, radius):
     xy=np.stack((x+.5,y+.5),axis=-1)*r+metadata['origin_xy']
     delta=np.abs(xy-np.asarray(metadata['world_from_lidar'])[:2,3])+r/2
     return (delta**2).sum(axis=-1)<=radius**2
-
-
-def confirmation_candidates(snapshot, prior, transform, plane, selected, tolerance):
-    """Cheap rejection only; accepted candidates still require full SAT overlap."""
-    m,pm=snapshot.metadata,prior.metadata;y,x=np.nonzero(selected)
-    xy=np.c_[x+.5,y+.5]*m['resolution']+m['origin_xy']
-    mapped=np.c_[xy,xy@plane[:2]+plane[2]]@transform[:3,:3].T+transform[:3,3]
-    ij=np.floor((mapped[:,:2]-pm['origin_xy'])/pm['resolution']).astype(int)
-    inside=((ij>=0)&(ij<np.asarray(pm['shape'][::-1]))).all(axis=1)
-    rows=np.flatnonzero(inside);xx,yy=ij[rows].T;l=prior.layers
-    valid=((l['occupancy'][yy,xx]==0)&l['ground_support'][yy,xx]&
-           (np.abs(l['ground_z'][yy,xx]-mapped[rows,2])<=tolerance)&
-           np.isfinite(l['last_observed'][yy,xx])&(l['last_observed'][yy,xx]<=m['stamp_s']))
-    result=np.zeros(m['shape'],bool);rows=rows[valid];result[y[rows],x[rows]]=True
-    return result
 
 
 class NavigationSupport:
@@ -47,55 +32,48 @@ class NavigationSupport:
         if (type(self.settings['enabled']) is not bool or
                 not np.isfinite(self.settings['radius_m']) or not 0<self.settings['radius_m']<=9):
             raise ValueError('Invalid navigation support region')
-        self.ground=NavigationGround(dict(GROUND_DEFAULTS))
         self.reset()
 
     def reset(self):
         self.key=None;self.stamp=None;self.origin=None;self.reference=None
-        self.hits=None;self.cached_asset=None;self.ready=None;self.ground.reset()
+        self.hits=None;self.cached_asset=None;self.ready=None
 
-    def _prepare(self, snapshot, asset):
+    def _prepare(self, snapshot, asset, diagnostics=None):
         m=snapshot.metadata;stamp=m['stamp_s'];a=m.get('association',{})
         reason=association_reason(snapshot,asset,self.config['association_max_age_s'])
         if reason:
+            if diagnostics is not None:diagnostics['reset_reason']=reason
             self.reset();return None,reason
         key=(m['session_id'],m['generation'],m['frame_id'],m['resolution'],tuple(m['shape']),
              a['map_id'],a['map_frame'],a.get('association_session'),a.get('association_generation'),
              a.get('map_revision'),
              asset.manifest['snapshot_id'],asset.manifest['layers_sha256'])
         if key!=self.key or (self.stamp is not None and stamp<=self.stamp):
+            if diagnostics is not None:diagnostics['reset_reason']='identity_or_nonmonotonic_stamp'
             self.reset();self.key=key
         self.stamp=stamp
         transform=np.asarray(a['map_from_local'],float)
-        ground=m.get('ground_tracking',{})
-        if ground.get('clear_ground_history'):
-            self.reference=None;self.hits=None;self.ground.reset()
-        if self.reference is None:
-            if ground.get('status')!='tracked' or ground.get('plane_world') is None:
-                return None,'floor_unavailable'
-            plane,model=self.ground.update(snapshot,transform,self.settings['radius_m'])
-            if plane is None:return None,'floor_warming'
-            selected=region(m,self.settings['radius_m'])
-            selected=confirmation_candidates(snapshot,asset.snapshot,transform,plane,selected,GROUND_DEFAULTS['ground_tolerance_m'])
-            minimum=max(1,int(np.ceil(.25/m['resolution']**2)))
-            if selected.sum()<minimum:return None,'floor_prior_unconfirmed'
-            allowed,_=static_support(snapshot,asset.snapshot,transform,plane,
-                [self.config['min_obstacle_height_m'],self.config['max_height_m']],selected,
-                GROUND_DEFAULTS['ground_tolerance_m'])
-            indices=np.flatnonzero(selected)[allowed]
-            if len(indices)<minimum:return None,'floor_prior_unconfirmed'
-            confirmation={k:copy.deepcopy(m[k]) for k in ('stamp_s','resolution','shape','origin_xy','world_from_lidar')}
-            confirmation.update(map_from_local=transform.tolist(),cells=indices[:minimum].tolist())
-            self.reference=dict(map_plane=model['map_plane'],stamp_s=stamp,model=model,
-                confirmation=confirmation,
-                association_identity=[a['map_id'],a['map_frame'],a.get('association_session'),a.get('association_generation'),a.get('map_revision')])
+        self.reference=static_floor_reference(snapshot,asset.snapshot,transform,self.settings['radius_m'],
+            [self.config['ground_min_below_sensor_m'],self.config['ground_max_below_sensor_m']])
+        if self.reference is None:return None,'static_floor_unavailable'
+        if diagnostics is not None:diagnostics['floor_source']='selected_static_map'
         return transform_plane(np.asarray(self.reference['map_plane']),np.linalg.inv(transform)),None
 
     def apply(self, snapshot, asset=None, *, observation=None, metrics=None):
         if not self.settings['enabled']:return snapshot
         if 'navigation_fusion' in snapshot.metadata:raise ValueError('Support requires the raw snapshot')
-        plane,reason=self._prepare(snapshot,asset)
+        diagnostics={} if metrics is not None and getattr(metrics,'trace_path',None) is not None else None
+        plane,reason=self._prepare(snapshot,asset,diagnostics)
         m=snapshot.metadata
+        if diagnostics is not None:
+            a=m.get('association',{})
+            metrics.trace('navigation_support',measurement_stamp_s=m['stamp_s'],snapshot_id=m['snapshot_id'],
+                support_status=reason or 'active',ground_tracking=m.get('ground_tracking'),
+                association={k:a.get(k) for k in ('status','measurement_stamp_s','map_from_local',
+                    'association_session','association_generation','map_revision')},diagnostics=diagnostics,
+                reference_stamp_s=None if self.reference is None else self.reference['stamp_s'],
+                endpoint_count=None if observation is None else len(observation['endpoints']),
+                transient_endpoint_count=None if observation is None else int(np.count_nonzero(observation['transient_mask'])))
         if plane is None:
             metadata=dict(m,navigation_support_status=reason)
             if hasattr(snapshot,'consume'):
@@ -105,7 +83,8 @@ class NavigationSupport:
         proof=dict(method=METHOD,source_snapshot_id=m['snapshot_id'],as_of=m['stamp_s'],
             association_binding=fingerprint(m.get('association',{})),max_association_age_s=self.config['association_max_age_s'],
             radius_m=self.settings['radius_m'],height_band=[self.config['min_obstacle_height_m'],self.config['max_height_m']],
-            ground_tolerance_m=GROUND_DEFAULTS['ground_tolerance_m'],floor_reference=copy.deepcopy(self.reference),
+            sensor_height_band_m=[self.config['ground_min_below_sensor_m'],self.config['ground_max_below_sensor_m']],
+            ground_tolerance_m=STATIC_GROUND_TOLERANCE_M,floor_reference=copy.deepcopy(self.reference),
             obstacle_retention_s=self.config['obstacle_ttl_s'],person_retention_s=min(self.config['obstacle_ttl_s'],self.config['dynamic']['transient_ttl_s']),
             reason=reason,static_map=None if asset is None else {k:asset.manifest[k] for k in ('snapshot_id','layers_sha256')})
         if plane is not None and (observation is None or observation['stamp_s']!=m['stamp_s'] or
@@ -117,6 +96,17 @@ class NavigationSupport:
                     not np.isfinite(points).all() or moving.dtype!=np.uint8 or moving.shape!=(len(points),) or
                     not moving.flags.c_contiguous or not np.isin(moving,[0,1]).all()):
                 raise ValueError('Invalid static support endpoints or transient mask')
+        # Filter in the local frame before projection. Association Z error must
+        # not turn floor returns into obstacles or hide real obstacle heights.
+        ground=m.get('ground_tracking',{});local_plane=ground.get('plane_world')
+        reference=np.asarray(local_plane,float) if ground.get('status')=='tracked' and local_plane is not None else plane
+        points=observation['endpoints'];height=points[:,2]-(points[:,:2]@reference[:2]+reference[2])
+        keep=(height>=proof['height_band'][0])&(height<=proof['height_band'][1])
+        owners=observation.get('person_owner')
+        if owners is not None:keep&=owners<0
+        observation=dict(observation,endpoints=np.ascontiguousarray(points[keep]),
+                         transient_mask=np.ascontiguousarray(observation['transient_mask'][keep]))
+        proof['obstacle_height_source']='local_observed_plane' if reference is not plane else 'static_floor_fallback'
         if hasattr(snapshot,'consume'):
             result=self._device(snapshot,asset,plane,proof,observation,metrics)
             self.ready=result.ready
@@ -146,9 +136,7 @@ class NavigationSupport:
             self.hits=np.stack([shift_array(v,dx,dy,-np.inf) for v in self.hits])
         points=observation['endpoints'];ij=np.floor((points[:,:2]-m['origin_xy'])/m['resolution']).astype(int)
         inside=((ij>=0)&(ij<np.asarray(shape[::-1]))).all(axis=1)
-        height=np.full(len(points),np.nan);xx,yy=ij[inside].T
-        height[inside]=points[inside,2]-floor[yy,xx]
-        keep=inside&(height>=proof['height_band'][0])&(height<=proof['height_band'][1])
+        keep=inside
         x,y=ij[keep].T;moving=observation['transient_mask'][keep].astype(int)
         self.hits[moving,y,x]=m['stamp_s']
         active=supported&((m['stamp_s']-self.hits[0]<=proof['obstacle_retention_s'])|
@@ -211,29 +199,18 @@ def verify(scene, *, now=None, asset=None, check_asset=False):
                 not 0< p['radius_m']<=9 or not 0<= (stamp if now is None else now)-measured<=p['max_association_age_s'] or
                 np.any(selected&~region(m,p['radius_m']))):
             raise ValueError('navigation_prior_future_or_stale')
-        reference=p['floor_reference'];model=reference['model'];samples=model['samples']
-        from .navigation import ground_model
-        computed,_=ground_model(samples,np.asarray(model['anchor_map_xy']),model['radius_m'])
+        reference=p['floor_reference']
         if (reference['association_identity']!=[a['map_id'],a['map_frame'],a.get('association_session'),a.get('association_generation'),a.get('map_revision')] or
-                not samples or samples[-1]['stamp_s']!=reference['stamp_s'] or reference['stamp_s']>stamp or
-                not np.allclose(computed,reference['map_plane'],rtol=0,atol=1e-10)):
+                reference.get('source')!='selected_static_map' or reference['stamp_s']!=stamp or
+                np.shape(reference['map_plane'])!=(3,) or not np.isfinite(reference['map_plane']).all()):
             raise ValueError('Navigation support floor mismatch')
         if check_asset:
             if (association_reason(raw,asset,p['max_association_age_s'],now=now) or
                     p['static_map']!={k:asset.manifest[k] for k in ('snapshot_id','layers_sha256')}):
                 raise ValueError('Navigation support asset mismatch')
-            transform=np.asarray(a['map_from_local']);plane=transform_plane(np.asarray(reference['map_plane']),np.linalg.inv(transform))
-            confirmation=reference['confirmation'];cm=GridSnapshot(confirmation,{})
-            mask=np.zeros(confirmation['shape'],bool);indices=np.asarray(confirmation['cells'],int)
-            minimum=max(1,int(np.ceil(.25/confirmation['resolution']**2)))
-            if (len(np.unique(indices))<minimum or not ((indices>=0)&(indices<mask.size)).all() or
-                    confirmation['stamp_s']!=reference['stamp_s']):raise ValueError('Navigation floor confirmation invalid')
-            mask.ravel()[indices]=True
-            if np.any(mask&~region(confirmation,p['radius_m'])):raise ValueError('Navigation floor confirmation outside region')
-            ct=np.asarray(confirmation['map_from_local'])
-            cp=transform_plane(np.asarray(reference['map_plane']),np.linalg.inv(ct))
-            confirmed,_=static_support(cm,asset.snapshot,ct,cp,p['height_band'],mask,p['ground_tolerance_m'])
-            if not confirmed.all():raise ValueError('Navigation floor confirmation mismatch')
+            transform=np.asarray(a['map_from_local'])
+            if static_floor_reference(raw,asset.snapshot,transform,p['radius_m'],p['sensor_height_band_m'])!=reference:
+                raise ValueError('Navigation static floor reference mismatch')
             floor=prior_floor(raw,asset.snapshot,transform,reference['map_plane'],selected=selected)
             if not np.isfinite(floor[selected]).all():raise ValueError('Navigation floor support absent')
             allowed,seen=static_support(raw,asset.snapshot,transform,np.zeros(3),p['height_band'],selected,p['ground_tolerance_m'],floor=floor)

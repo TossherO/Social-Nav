@@ -44,7 +44,7 @@ class PlanningRecordTests(unittest.TestCase):
 
     def test_reference_details_preserve_unknown_rejection(self):
         from navigation.planning.reference import ReferenceRuntime
-        from tests.test_navigation_runtime import FakeWorker
+        from tests.navigation_fixtures import FakeWorker
         from tests.test_navigation_planning import bundle
         import numpy as np
         f=fixtures.DwaTests();f.setUp();scene=bundle(np.full((60,60),-1,np.int8))

@@ -5,6 +5,7 @@ import time
 import jsonschema
 from .async_model import AsyncModel
 from .session import TERMINAL
+from ..tools.framework import Reply
 
 
 class AgentLoop:
@@ -48,9 +49,9 @@ class AgentLoop:
                 if on_tick is not None:
                     on_tick(self)
                 state = self.state
-                key = (state['status'], state['revision'], self.session.skill.record['status'])
+                key = (state['status'], state['revision'], self.session.skill.record['status'],state.get('assistant_text'))
                 if key != previous:
-                    emit(dict(status=key[0], revision=key[1], navigation=key[2], reason=state['reason']))
+                    emit(dict(status=key[0], revision=key[1], navigation=key[2], reason=state['reason'],assistant_text=key[3]))
                     previous = key
                 if state['status'] in TERMINAL:
                     self.exit_reason = 'task_terminal'
@@ -104,13 +105,27 @@ class AgentLoop:
                     self.session.observation = None
                     self.session.wait_for_event('observation')
                     self.session._save('await_fresh_observation')
+                if self.session.spatial_view is not None and not self.session.spatial_view.current(self.session.navigation.snapshot()['stamp_s']):
+                    self.session.spatial_view = None
+                    self.session._save('spatial_view_expired')
             elif not result['ok']:
                 self.session.stop('needs_clarification', 'model_'+result['error_type'])
                 self.session._save('model_failed', dict(automatically_retried=False))
             else:
-                value = result['value']
+                reply = result['value']
                 try:
-                    output = self.session.call(value['tool'], **value['arguments'])
+                    if not isinstance(reply,Reply):
+                        raise ValueError('Model worker must return a checked native reply')
+                    self.session.conversation.validate(reply)
+                    s['assistant_text'] = reply.message.get('content')
+                    if reply.action is None:
+                        self.session.conversation.commit(reply)
+                        self.session.stop('needs_clarification',s['assistant_text'])
+                        self.session._save('assistant_message',dict(message=reply.message,task_success=False))
+                        return s
+                    value = reply.action
+                    output = self.session.call(value['tool'], _context=result['context'], **value['arguments'])
+                    self.session.conversation.commit(reply,output)
                     if self.session.memory is not None and 'observation_id' in result['context']:
                         self.session.memory.remember(dict(kind='historical_model_tool_choice', call=value,
                             result_status=output.get('status')), result['context'],
@@ -125,12 +140,18 @@ class AgentLoop:
         if self.requests >= self.max_requests:
             self.session.stop('needs_clarification', 'model_request_limit')
             return s
+        now = self.session.navigation.snapshot()['stamp_s']
+        if self.session.observation is not None and not 0 <= now-self.session.observation.record['stamp_s'] <= 3:
+            self.session.observation = None
+            self.session._save('observation_expired_before_request')
+        if self.session.spatial_view is not None and not self.session.spatial_view.current(now):
+            self.session.spatial_view = None
+            self.session._save('spatial_view_expired_before_request')
         context = self.session.context()
         payload = self.session.prompt()
         observation = copy.deepcopy(self.session.observation)
-        if observation is not None:
-            payload['observation'] = observation.prompt()
-        self.model.submit('tool', context, lambda: self.work(payload, observation))
+        spatial_view = copy.deepcopy(self.session.spatial_view)
+        self.model.submit('tool', context, lambda: self.work(payload, observation, spatial_view))
         self.requests += 1
         return s
 

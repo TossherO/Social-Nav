@@ -22,6 +22,16 @@ class CudaEnvironmentTests(unittest.TestCase):
         for engine in engines:self.addCleanup(engine.close)
         return engines
 
+    def test_suspended_history_matches_cpu_and_preserves_obstacle_updates(self):
+        from tests.test_environment_near_field import suspended_history_sequence,person_background_sequence
+        cpu=suspended_history_sequence('cpu');gpu=suspended_history_sequence('cuda')
+        for (a,am),(b,bm) in zip(cpu,gpu):
+            for key in a:np.testing.assert_allclose(a[key],b[key],atol=3e-7,rtol=2e-7,err_msg=key)
+            for key in ('cached_cells','restored_cells','history_suspended','temporary_obstacle_cells'):
+                self.assertEqual(am[key],bm[key],key)
+        for layers in person_background_sequence('cuda',suspended=True):
+            self.assertFalse(layers['person_background_free'].any())
+
     def test_integer_height_coverage_preserves_complete_missing_and_occupied_columns(self):
         from tests.test_environment_projection import height_column
         cases = [dict(), dict(ground=-.8701), dict(shift=10), dict(missing=(8,)),

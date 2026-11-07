@@ -1,173 +1,187 @@
 # Agent 技术实现
 
-外层 Agent 使用托管 VLM 理解长程导航指令，当前模型标识为 `qwen3.8-flash`。它采用单模型工具循环：每轮选择一个工具，读取工具返回的结果，再决定下一步。任务规划和视觉审查由同一个模型完成，导航、控制和独立安全仍由本地模块承担。当前不依赖局部 T1、T2、T3。
+外层 Agent 用一个托管 VLM 理解指令、选择导航位姿并审查任务结果。当前优先处理室内完备地图下的点目标、区域目标，以及两者的有序串联。模型为 `qwen3.8-flash`，采用原生工具调用和累积对话，仍是单模型循环，不依赖局部 T1、T2、T3。
 
-本文结合代码说明输入如何变成工具调用，以及程序怎样处理观察、反馈和用户事件。研究依据与待开发内容见[技术开发计划](Agent技术开发计划.md)，启动命令与测试方法见[长程导航任务与评测计划](长程导航任务与评测计划.md)。
+主要流程是：模型登记任务要求，读取空间信息，自主提交连续位姿，等待导航反馈，再检查当前子任务是否完成。任务要求单独保留，导航工具不会从候选集合替模型选择位置或朝向。当前已有反馈仿真和非执行影子适配，Agent 尚未连接实车执行反馈。
+
+研究依据与后续工作见[技术开发计划](Agent技术开发计划.md)，任务设计、启动命令与测试方法见[导航任务与评测计划](长程导航任务与评测计划.md)。
 
 ## 代码组织与入口
 
-`decision/agent/` 按核心循环、工具、外部适配和运行流程组织。目录表示代码职责，不表示多个 Agent，也没有额外的任务规划器。
+`decision/agent/` 按职责组织，目录不代表多个 Agent：
 
 ```text
 decision/agent/
-  __main__.py                 python -m decision.agent 的薄入口
-  cli.py                      参数解析与流程选择
-  __init__.py                 项目根目录和配置目录
+  cli.py / __main__.py       参数解析和 python -m decision.agent 入口
   core/
-    loop.py                   AgentLoop.run：统一运行，tick 单步调度，stop 取消确认
-    session.py                AgentSession：任务状态、工具分派和上下文
-    model.py                  Model：托管 API、Prompt 与响应处理
-    async_model.py            AsyncModel：单个后台请求及结果失效
-    memory.py                 EvidenceMemory：可关闭的证据记忆
-    store.py                  Store 与 Budget：会话数据库和共享费用账本
+    loop.py                 AgentLoop.run、tick、stop 与用户事件
+    session.py              会话状态、工具分派和异步结果对应关系
+    conversation.py         累积对话、原生调用配对和按完整轮裁剪
+    tasks.py                有序任务要求、模型选定位姿与完成记录
+    model.py                原生工具 API、流式参数、Prompt 和当前图像
+    async_model.py          单个后台请求及结果失效
+    memory.py               可关闭的证据记忆
+    store.py                会话 SQLite、地图图像与共享费用账本
   tools/
-    framework.py              工具定义、响应 Schema 和参数检查
-    navigation.py             NavigationSkill：单次导航调用的生命周期
-    places.py                 Catalog：地点目录与本次出发点
-    observations.py           Observation 与 ObservationSet：同源观察及保存读取
-    environment.py            独立只读场景和地图查询
+    framework.py            工具参数 Schema、原生回复检查和离线夹具
+    places.py               地图条件、人工标注与本次起点
+    spatial.py              米制地图渲染及来源记录
+    navigation.py           单次异步导航调用及执行证明
+    observations.py         同源 RGB、场景和观察数据库
+    environment.py          其他只读环境查询函数
   adapters/
-    simulation.py             合成运动反馈
-    shadow.py                 已保存观察和 runtime 的非执行导航适配
-    runtime.py                Unix socket 客户端与后台 RGB 观察生成
+    simulation.py           共用导航算法的合成运动反馈
+    shadow.py               保存观察和 runtime 的非执行适配
+    runtime.py              Unix socket 客户端及后台 RGB 观察
   workflows/
-    common.py                 组装模型和循环，输出JSON
-    run.py / shadow.py        准备仿真或影子后端，调用统一循环并保存结果
-    drivers.py                仿真时间预算、离线观察推进与测试节奏
-    prepare.py / evaluate.py  因果 RGB 准备与合成反馈检查
-    replay.py / interaction.py 离线工具轨迹与终端用户事件
-  configs/                    地点登记配置
+    common.py               模型与循环组装
+    run.py / shadow.py      准备后端并调用统一循环
+    drivers.py              测试时间、保存输入及显式脚本事件
+    prepare.py              为已有场景准备因果 RGB
+    evaluate.py / replay.py 固定工具决策的离线检查
+    interaction.py          终端用户事件
+  configs/                  合成目录与真实一楼登记入口
 ```
 
-[cli.py](../../decision/agent/cli.py)选择后端和输入，再通过 `workflows/` 调用同一个 `AgentLoop.run()`。两个启动脚本不再分别维护持续调度循环。配置仍集中在 `configs/`；项目根目录和配置目录由包入口计算，移动内部文件不会改变资产路径。统一入口仍为 `python -B -m decision.agent`。
+[cli.py](../../decision/agent/cli.py)选择后端，再由运行流程创建 `AgentSession` 和 `AgentLoop`。仿真与影子入口都调用 `AgentLoop.run()`；测试侧时间和输入推进留在 `workflows/drivers.py`，不进入 Agent 核心。
 
 ## 输入、模型与工具
 
-### core/loop.py：一轮决策怎样进行
+### 地图条件与空间输入
 
-`workflows/run.py` 或 `workflows/shadow.py` 先创建导航适配器、会话数据库和 `AgentSession`，再由 `make_loop()` 组装 `AgentLoop`。默认使用托管模型；显式指定 `--actions` 时使用离线工具轨迹，不读取 API 凭证。
+地图条件表示任务开始时有哪些先验，区别于底层的定位地图、静态环境地图和当前局部地图。
 
-`AgentLoop.run()` 是持续运行入口，例如已有会话和模型调用函数时：
+| 条件 | 含义与当前支持 |
+|---|---|
+| `complete`，完备地图 | 具有整个场景的建图结果，以及任务涉及的人工点、区域和对象标注。当前实现目标提交与检查。 |
+| `simple`，简单地图 | 人工简图或地图软件的俯视截图，主要通道和障碍大致可辨，未必具有比例尺。保留条件接口，尚不支持执行。 |
+| `none`，无图 | 没有地图先验，任务依赖纯文本描述和现场观察。保留条件接口，尚不支持执行。 |
 
-```python
-agent = AgentLoop(session, model_call)
-state = agent.run(console=console)
-```
+选择 `simple` 或 `none` 不会向模型暴露完备地图的标注，目标工具返回能力尚未实现。简单图不能直接当成米制地图，后续需要单独实现图像坐标、拓扑和实际定位之间的关系。
 
-循环接收用户事件、执行单步调度，并在任务完成或取消后返回。没有交互输入时，需要用户回答、继续或恢复的状态也会返回，保存原状态供查看。核心循环不读取仿真时间；可选 `timeout_s` 限制墙钟运行时间，退出后仍执行必要的取消确认。单步入口 `tick()` 保留给局部检查与显式调度。
+[Catalog](../../decision/agent/tools/places.py)在完备地图中管理三种人工标注：点使用 `place_id` 和 `pose`，区域使用 `region_id` 和二维 `polygon`，语义对象使用 `landmark_id` 和二维 `position`。坐标统一属于目录的 `frame_id`，位置单位为米，角度单位为弧度。新增区域和对象可以写在登记配置中，加载时覆盖到本次目录副本，不修改原地图资产。
 
-[workflows/drivers.py](../../decision/agent/workflows/drivers.py)提供测试侧驱动。`SimulationDriver` 管理仿真时长、测试节奏及显式脚本用户事件；`SavedObservationDriver` 在等待观察或导航事件时推进保存输入，模型请求期间保持原观察。等待澄清不会继续遍历录包，输入耗尽会返回 `input_exhausted`。普通实时后端不需要这两个驱动。
+模型调用 `query_map` 后，下一轮收到两张 PNG：带标注的全局地图，以及当前自车附近或指定 `bounds=[xmin,ymin,xmax,ymax]` 内的局部图。图中绘制坐标轴、自车位置和朝向、车体足迹、点、区域、语义对象，以及可用的当前人物。结构化摘要同时给出原坐标和来源，图中的 P、R、L 编号仅供阅读，工具仍使用对应的正式身份。
 
-[AgentLoop.tick()](../../decision/agent/core/loop.py)按以下顺序工作：
+全局图是静态先验。局部图有同源场景时叠加当前局部栅格，历史先验、当前自由、占据和未知使用不同颜色；当前 runtime 观察出口不提供完整局部栅格时，只渲染静态图裁剪，并明确标为 `static_prior_only`。不能据此推断动态区域当前空闲。车体几何保留假设状态，箭头表示 `base_link` 前向；未提供相机外参时，不把箭头方向当成相机光轴。
 
-1. 调用 `AgentSession.tick()`，处理导航反馈、取消确认和等待事件。
-2. 从 `AsyncModel` 取回已经结束的请求，核对任务修订、活动调用、观察及空间上下文。
-3. 结果仍适用时，调用 `AgentSession.call()` 执行一项工具，并保存返回值。已经过期或被取消的结果仅记录，不应用。
-4. 会话可以继续且没有未决请求时，组装下一轮上下文并提交后台模型请求。等待事件时不反复调用模型。
+`observe_scene` 另行读取当前 RGB 和同源场景。没有有效图像时返回不可用，不拿旧图代替。一次模型请求最多包含两张地图和一张当前 RGB。地图图像与目录、栅格、位姿、源时间和图像摘要共同生成 `view_id`，用于核对返回的位姿是否依据仍有效的空间输入。
 
-```mermaid
-flowchart LR
-    W[workflows 创建会话和后端] --> L[AgentLoop.run 统一循环]
-    L --> M[core.model.Model]
-    M -->|tool 与 arguments| L
-    L --> S[core.session.AgentSession]
-    S --> N[tools.navigation.NavigationSkill]
-    N --> A[adapters 提供导航反馈]
-    A --> S
-    S -->|工具结果与当前状态| L
-    U[用户暂停、取消或补充] --> L
-```
+### 模型调用与响应
 
-`AsyncModel` 一次只允许一个后台请求。用户暂停或取消会立即使未决结果失效，无需等待 API 返回；导航状态仍由主循环处理。退出时尚未返回的请求保留费用预留。
+[Model.decide()](../../decision/agent/core/model.py)把保留的对话和本轮当前状态交给托管模型。工具定义通过 API 的 `tools` 参数独立提供，模型使用原生 `tool_calls` 选择工具；客户端不再要求回复正文生成统一的动作 JSON。
 
-### core/model.py：模型实际收到什么
+每次请求包含三部分：系统规则、累积对话，以及程序追加的 `runtime_current_state` 消息。初始对话保存原指令和标注目录，随后追加助手说明、工具调用和对应结果。当前状态摘要保存任务修订、要求及完成状态、当前导航和少量证据记忆，不再重复拼装整套工具历史或参数定义。每次 API 请求仍会发送当前保留的对话，不依赖服务端常驻会话。
 
-[Model.decide()](../../decision/agent/core/model.py)是唯一的模型决策入口。输入来自 `AgentSession.prompt()`：原指令、用户补充、任务修订、有限工具历史、地点目录、当前导航状态，以及可选记忆。已确认到达记录单独保存，不依赖模型记忆。
+空间和观察元数据可能已经完整出现在工具结果中。客户端只在该完整记录仍保留于本轮对话且与当前记录逐项相同时，用 `details_in_tool_call_id` 引用原结果，同时保留当前观察身份、源时间和坐标约定。图像仍正常发送。历史裁剪后找不到完整记录时，当前附件恢复完整元数据，不修改任何摘要、测量时间或图像。
 
-只有模型先调用 `observe_scene`，下一轮才附带取得的 RGB 和同源场景摘要。没有当前有效图像时返回不可用，不拿历史图冒充当前图。客户端维护图像缩放、输入上限、输出预算和请求设置。
-
-模型返回一个对象，例如：
+模型可以附带简短进度说明，每轮最多调用一项工具。例如，已经登记区域要求并读取地图后，返回消息的相关字段如下：
 
 ```json
-{"tool":"navigate","arguments":{"place_id":"lobby_entrance"}}
+{
+  "role": "assistant",
+  "content": "我选择停在区域内的开阔位置。",
+  "tool_calls": [
+    {
+      "id": "call_example",
+      "type": "function",
+      "function": {
+        "name": "navigate",
+        "arguments": "{\"goal_id\":\"second_stop\",\"pose\":[7,4,0],\"view_id\":\"本轮地图查询返回的完整摘要\",\"orientation_source\":\"semantic\"}"
+      }
+    }
+  ]
+}
 ```
 
-[tools/framework.py](../../decision/agent/tools/framework.py)集中维护 `TOOL_SPECS`、`action_schema()` 和 `validate_call()`。外层 Schema 限定工具和参数名称，本地再检查该工具的必填项和类型。客户端保留原始响应，不修复参数、拆分数组、更换工具或重试。当前使用受限 JSON，不依赖服务端原生函数调用，也不要求输出模型内部思维链。
+这些坐标仅为合成示例。实际位置和朝向由 VLM 根据地图、语义、视野及后续任务直接选择。工具检查原始连续位姿；不生成候选终点，不推荐朝向，也不吸附或改写模型输出。
 
-API 地址和密钥来自被忽略的 `configs/agent_api.local.json`，密钥也可由环境变量提供。客户端使用 HTTPS，不继承无关 shell 代理；保存的请求不含密钥、认证头或私有地址。本机解释器见[本机记录](../../ENVIRONMENT.local.md#外层agent开发)。Agent 使用独立托管 API，局部 SGLang 不作为自动备用。
+[framework.py](../../decision/agent/tools/framework.py)维护每个工具的参数 Schema，并将原生回复转为经过检查的 `Reply`。客户端按流索引拼接函数参数，调用 ID 和类型属于固定元数据；收到重复值时核对一致性。完整调用仍检查工具名称、必填字段、类型和语义，不修复参数、不补调用身份、不把正文中的动作 JSON 转成调用，也不自动重试或更换模型。工具定义随请求提供，不代表已经验证服务端对参数施加了硬约束。
+
+工具执行后，对话追加原助手消息和 `role=tool` 的结果，使用 `tool_call_id` 对应原调用。只有通过任务、观察和时效检查的回复才进入有效对话，迟到结果只保留原始记录。重复消费调用 ID 或一轮返回多项调用会被拒绝。完整数据结构合法仍可能包含错误的场景判断。
+
+地图和 RGB 作为本轮观察附在当前状态消息后，不将像素长期累积进历史。成功提交导航或输入过期后，后续请求不再携带旧图；对话中的旧工具结果仍保留其原时间和标识。需要观察时由模型重新查询。纯文字回复会进入等待用户状态，有活动调用时先请求取消，不会自动报告任务成功；成功仍须调用 `finish_task`。
+
+API 连接来自被忽略的 `configs/agent_api.local.json`，密钥也可由环境变量提供。客户端使用 HTTPS，不继承无关 shell 代理；记录不含凭证、认证头或私有服务地址。Agent 使用独立托管服务，局部 SGLang 不作为自动备用。
+
+### 输入缓存
+
+默认保留服务端隐式缓存。系统规则、工具及字段顺序保持稳定，原指令和目录置于前面，变化的当前状态和图像位于末尾。隐式缓存是否命中由服务端决定，当前客户端不缓存或重放模型答案。减少重复元数据可以降低每轮新增输入，但不能保证推理时间缩短。
+
+客户端另支持显式缓存策略：分别在系统规则、初始目录和完整历史末尾设置 `cache_control` 标记，当前状态和图像不设置标记。标记只添加到请求副本，不改变本地对话或观察。当前服务已验证缓存创建和后续命中，但小样本对照未显示显式策略优于隐式，因此未设为默认。策略选择见[运行操作](长程导航任务与评测计划.md#合成反馈与交互)。服务拒绝显式参数时记录失败，不自动换策略或重试。
+
+响应保留原始 `usage`，另汇总输入、缓存命中、缓存创建 token 和命中比例。缺少的统计保持未知，不填零；共享费用账本继续按保守费率计提，没有按通用缓存折扣推算实际账单。参数和服务限制参考[缓存文档](https://www.alibabacloud.com/help/en/model-studio/context-cache)，实际对照及未通过的输出见[缓存检查报告](../../outputs/decision/agent/cache_optimization/report.md)。
 
 ## 任务执行与反馈
 
-### core/session.py：任务状态与工具分派
+### 任务要求与执行位姿分别保存
 
-[AgentSession](../../decision/agent/core/session.py)保存一个任务的原指令、补充、修订、工具历史、当前观察和导航调用。它按 `TOOL_SPECS` 将工具名登记到同名方法；`call()` 检查参数、记录意图、执行方法，再保存结果。它不维护逐步骤运行的完整计划。
+[TaskGoals](../../decision/agent/core/tasks.py)保存模型通过 `record_task` 从原指令提取的有序要求。这是一份完成条件记录，不是另一套自动执行的工具计划。
 
-| 工具 | 实际代码与行为 |
+| 字段 | 含义 |
 |---|---|
-| `lookup_places` | `AgentSession.lookup_places()` 查询 `Catalog`，仅向模型提供地点身份、名称、坐标和状态等允许字段。 |
-| `observe_scene` | `AgentSession.observe_scene()` 从后端读取观察，检查源时间、RGB、定位和地图对应关系，供下一轮使用。 |
-| `navigate` | 调用 `NavigationSkill.start()`，内部检查目标与几何后异步提交。 |
-| `get_navigation_state` | 返回 `NavigationSkill.snapshot()`，含当前调用、已确认到达和尝试记录。查询不刷新测量时间。 |
-| `cancel_navigation` | 调用 `NavigationSkill.cancel()`，有活动调用时等待对应反馈。 |
-| `wait_for_event` | 在会话中等待导航、新观察或用户继续事件。 |
-| `ask_user` | 保存澄清问题并等待回答；活动导航必须先撤销并确认。 |
-| `finish_task` | 检查执行依据后记录结果。成功目前只允许仿真范围；失败涉及活动导航时先请求取消。 |
+| `goal_id`、`description` | 本任务中的稳定子任务身份及原意说明。 |
+| `kind`、`target_id` | 点或区域类型，以及人工标注身份。匿名点使用空身份并提供用户明确指定的 `position`。 |
+| `required_yaw` | 用户硬性指定的朝向，缺省表示没有数值朝向约束。 |
+| `facing` | 需要面向的已标注对象身份。检查器核对模型提交的朝向，不生成朝向。 |
+| `semantic_conditions` | 需要到达后通过当前 RGB 判断的条件，例如能看见某个入口。 |
 
-`answer` 补充原任务，澄清内容独立保存，不会随工具历史裁剪而丢失。`replace` 更换指令，等待旧调用撤销后才增加任务修订并生效。暂停和取消直接进入 `AgentLoop.event()`，随后由会话请求停止，不经模型决策。
+点目标保留原位置。即使点资产中含有朝向，也不自动把它当成用户要求；未指定朝向时，VLM 仍需给出合适的执行朝向。区域只规定范围和语义，VLM 自行选择区域中的位置及朝向。区域内判断针对 `base_link` 参考点，完整车体是否可停、路径是否可行仍由导航检查。
 
-等待 `user_continue` 前必须有停车反馈；影子模式不能提供这一证明，澄清提问也不代替停车确认。等待新观察时，只有不同于等待开始时的观察才会唤醒循环。恢复暂停后由模型依据实际状态决定下一步，不自动重发旧目标。
+每个要求分别保存原始要求摘要、待完成或已完成状态、模型选定位姿、导航句柄及完成依据。完成当前要求之前不能操作后续要求；登记后不能删改要求来使结果通过。用户明确替换任务时，先确认撤销旧调用，再创建新修订和要求记录。模型仍可能误解或遗漏自然语言内容，必须通过独立任务评测检查。
 
-[tools/environment.py](../../decision/agent/tools/environment.py)另外提供只读场景和地图查询函数，目前尚未全部登记为模型工具。
+### 工具怎样配合
 
-### tools/navigation.py：一次导航调用如何完成
+| 工具 | 行为 |
+|---|---|
+| `record_task` | 登记完整指令的有序要求，不自动提交导航。 |
+| `lookup_places` | 查询点的名称、身份、坐标和状态。 |
+| `query_map` | 返回两张地图及结构化空间信息，不生成位姿。 |
+| `observe_scene` | 取得当前 RGB 和同源场景，供下一轮模型使用。 |
+| `navigate` | 检查当前要求、模型位姿和地图来源，再经导航几何检查异步提交。 |
+| `get_navigation_state` | 查询当前调用、尝试与已确认到达，不刷新测量时间。 |
+| `cancel_navigation` | 撤销活动调用并等待对应反馈。 |
+| `wait_for_event` | 等待导航、新观察或用户继续，期间不反复请求模型。 |
+| `check_goal` | 检查当前子任务的执行、实际位姿和必要语义依据。 |
+| `ask_user` | 保存问题并等待回答；有活动导航时必须先取消。 |
+| `finish_task` | 检查全部登记要求已完成后结束任务，或记录失败并处理停止。 |
 
-[NavigationSkill](../../decision/agent/tools/navigation.py)只管理一个异步导航调用，不理解长程指令。`start()` 先查询地点、检查当前定位与路线，再记录意图并提交目标。接收 ACK 只表示请求被接收，活动调用仍保留。
+[AgentLoop](../../decision/agent/core/loop.py)持续处理反馈和用户事件，接收后台原生回复，再调用 `AgentSession.call()`。导航完成、新观察和用户补充作为明确来源的事件加入对话。一次最多有一个模型请求。任务修订、对话修订、活动导航、原观察或地图来源变化后，迟到结果只记录，不再应用。地图和 RGB 在请求前及返回时检查源年龄，不改成 API 完成时间。
 
-`tick()` 持续检查后端反馈的任务、目标修订、调用身份、来源、坐标与测量时间。定位健康失效、源数据过期或空间上下文变化时请求取消。断连或 ACK 丢失会保留未确认调用，不自动重发目标；新目标必须等待旧调用结束。
+导航工具一次只管理一个调用。`accepted` 表示请求已接收，不能推进任务。目标、源时间、定位和地图身份必须与反馈对应；断连或 ACK 丢失时保留未确认意图，不自动重发。模型提交成功后清除缓存地图和 RGB，避免在移动中重复使用旧的自车叠图。
 
-仿真到达需要同一调用的执行反馈、完成和停稳证明。runtime 取消需要对应 `cancelled_request` 回执及空活动目标，旧空状态不足以确认处理。取消影子意图也不等于轮椅实际停车。跨模块字段含义见[接口约定](../接口约定.md#外层agent开发接口)。
+### 怎样确认一个子任务完成
 
-`finish_task(succeeded)` 还要求本任务修订有已确认到达记录、全部已尝试地点完成、无活动调用，以及当前有效停稳反馈。这些检查不能形式化证明完整自然语言要求；遗漏站点、顺序错误或视觉误判仍需具体任务评测。
+`check_goal` 必须找到当前选定位姿对应的导航完成记录，并确认本次修订仍有效、车辆已停、当前定位有效。随后使用反馈中的实际位姿检查点距离、区域范围、用户朝向及面向对象条件。容差由[导航完成配置](../../navigation/control/config.yaml)维护，不另设 Agent 参数副本。
+
+有视觉条件时，还必须取得到达后的有效 RGB。语义结果必须对应本次模型请求实际读过的那份观察，并给出简短可见证据。`unknown` 和 `not_satisfied` 均不完成任务。模型可以根据新信息重新选定位姿；检查器不会替它换点。同一 VLM 的视觉判断是任务证据，不是独立人工真值。
+
+当前执行完成仅在仿真范围内成立。保存 bag 的原驾驶、runtime 影子状态及图像中接近目标，都不能证明 Agent 导航到达。`finish_task(succeeded)` 要求全部登记要求通过检查、无活动调用且当前停稳；缺少实车反馈时不能报告真实任务完成。
+
+用户的暂停和取消直接进入循环，不等待模型。回答澄清保留原任务，明确替换才更换要求；恢复后由模型决定下一步，不自动重发旧目标。循环退出时请求撤销活动调用并短时等待，不能确认时保存停止未确认。
 
 ## 观察与导航适配
 
-核心循环接收后端对象，不直接驱动底盘。导航技能使用其 `snapshot()`、`check_route()`、`start()`、`tick()` 和 `cancel()`；存在相机数据的后端另提供 `observe()`。
-
-| 后端与文件 | 输入和反馈范围 |
+| 后端 | 反馈和空间信息范围 |
 |---|---|
-| [SimulationNavigation](../../decision/agent/adapters/simulation.py) | 调用项目参考规划、DWA、独立安全和差速积分，生成明确属于合成仿真的运动反馈。没有真实相机渲染。 |
-| [SavedShadowNavigation](../../decision/agent/adapters/shadow.py) | 读取已有观察和几何，提交目标建议。bag 中的驾驶不响应 Agent，不能报告执行成功。 |
-| [RuntimeShadowNavigation](../../decision/agent/adapters/shadow.py) | 通过 `RuntimeClient` 查询状态、读取可选 RGB、提交影子目标和取消，无底盘输出。 |
+| [SimulationNavigation](../../decision/agent/adapters/simulation.py) | 使用项目参考规划、DWA、独立安全和差速积分。全局图来自已知合成静态地图，局部图来自当前仿真场景，没有真实 RGB 渲染。 |
+| [SavedShadowNavigation](../../decision/agent/adapters/shadow.py) | 读取保存的观察、原场景和登记静态地图，只提交目标建议。bag 驾驶不响应 Agent。 |
+| [RuntimeShadowNavigation](../../decision/agent/adapters/shadow.py) | 通过私有 Unix socket 查询状态、按需读取 RGB、提交影子目标和取消。地图视图当前使用登记静态图裁剪，无底盘输出。 |
 
-[tools/observations.py](../../decision/agent/tools/observations.py)定义 `Observation` 和保存读取它的 `ObservationSet`。一份观察保留源场景、RGB 摘要、源时间和位姿；RGB 必须来自观察截止时刻之前。跟踪缺失时人数保持未知。
+[Observation](../../decision/agent/tools/observations.py)保留源场景、RGB 摘要、测量时间和位姿，RGB 不能来自观察之后。跟踪缺失时人数保持未知。runtime 仅显式启用 `--agent-observations` 时，在后台复制并编码限频 RGB，不加载 YOLO、不等待模型，也不传整套 GPU 地图。
 
-[adapters/runtime.py](../../decision/agent/adapters/runtime.py)包含只允许状态、目标和取消请求的 `RuntimeClient`，以及 `ObservationWorker`。后者复制即将释放的共享主机 RGB，在限频、限队列的后台支路中编码，保留同源 CPU 场景。runtime 只有显式启用 `--agent-observations` 才运行这条支路，不加载 YOLO、不传整套 GPU 地图，也不等待模型。
+`Catalog.bind_start()` 为本次任务创建目录副本，把有效测量起点保存为 `mission_start`，不写回共享资产。缺有效起点时不补零。合成返程测试的预设朝向与测得初始朝向分别记录。
 
-[tools/places.py](../../decision/agent/tools/places.py)读取地点登记。`Catalog.bind_start()` 为每次任务创建目录副本，把有效车体起点记为 `mission_start`，不写回共享资产。有图起点须对应当前地图；缺失时返回 `destination_not_bound`，不补零坐标。合成测试预设的返程朝向与测得的初始朝向分别记录。
+[simulation.json](../../decision/agent/configs/simulation.json)提供合成点、区域和对象；[floor1.json](../../decision/agent/configs/floor1.json)引用真实一楼开发资产，缺资产时仅保留无坐标模板。原 R1、R2 草图继续禁用，没有将它们转换为新格式的有效区域。真实区域任务需提供与当前地图对应的人工区域及对象标注。
 
-[floor1.json](../../decision/agent/configs/floor1.json)引用真实一楼开发资产，资产不存在时保留无坐标模板。[simulation.json](../../decision/agent/configs/simulation.json)使用合成坐标，两者的可达性结论不能互用。
+## 记忆、记录与扩展
 
-## 记忆与持久化
+[Conversation](../../decision/agent/core/conversation.py)按完整交互轮维护消息，助手调用与工具结果一起保留或裁剪，不产生缺失配对的工具消息。原指令和初始目录始终保留，要求和当前进度另从本地任务记录生成，不依赖旧对话摘要。当前采用有界裁剪，不额外请求模型总结历史；替换任务建立新对话，旧事件仍留在数据库，不自动恢复旧任务。
 
-[EvidenceMemory](../../decision/agent/core/memory.py)是可关闭的上下文组件，目前保存带源观察的历史模型工具选择。它按地点和源时间检索，不自动提取或认证地标事实，也不证明当前通行或任务到达。定位会话、时钟或地图对应关系改变后，历史记录保留，空间有效性撤销，旧任务不会自动恢复。`--no-memory` 关闭这一组件，但保留原任务、补充和必要历史。
+[EvidenceMemory](../../decision/agent/core/memory.py)记录带源观察的历史工具选择，按地点和源时间检索。它不自动认证地标事实，也不证明当前通行或已经到达。定位或地图关系变化后保留历史，撤销空间有效性。`--no-memory` 只关闭该组件，保留正常对话、任务要求和执行依据。
 
-`AgentSession.context()` 为请求记录任务修订、活动调用、观察身份、实际输入摘要和空间上下文；`valid_context()` 在结果返回时重新核对这些对应关系及观察年龄。源时间始终是测量时间，不改成 API 返回时间。过期结果只记录，不能覆盖新状态，也不自动重试失败请求。
+[Store](../../decision/agent/core/store.py)把会话状态、原生消息轮、工具事件、要求、完成依据和原始请求响应保存在一个 `session.sqlite`。对话裁剪不删除原事件。地图元数据记录在事件中，实际输入 PNG 存入同一数据库的 `map_images` 表，便于复核输入。`Budget` 使用跨会话共享账本，发送前预留、按返回用量计提；结果不明时保留预留，新建会话不会重置额度。进程重启后只能只读查看，不自动续跑。
 
-[Store](../../decision/agent/core/store.py)在单个 `session.sqlite` 中保存任务状态、工具事件、执行证明和原始请求响应。给模型的旧导航历史使用摘要，完整结果仍留在数据库。`Budget` 使用跨会话共享账本，发送前预留、按返回用量计提；结果不明时保留预留，新建会话不会重置额度。
+新增模型工具时，在 `framework.py` 声明参数并在 `AgentSession` 增加处理方法。新的导航反馈来源放在 `adapters/`，沿用调用身份、测量时间和停止检查。简单图、无图、主动移动观察及局部技能的后续接口由工具和适配器增加，不另建模型调度层；当前 Agent 不提供任意 Shell、底盘速度、人工使能或解除安全保护的工具。
 
-`AgentLoop.run()` 在超预算、输入结束、中断或异常退出时，通过 `stop()` 撤销活动调用并短时等待确认；无法确认时保存停止未确认，未决模型结果也会失效。退出原因保存在事件和运行摘要中。等待取消期间断连不会改变用户要求的终止结果。进程重启后只能只读查看记录，不能自动续跑。
-
-## 运行流程与扩展位置
-
-| 要处理的内容 | 从哪里修改 |
-|---|---|
-| 启动参数、流程选择 | `cli.py`；`__main__.py` 只调用入口。 |
-| 持续运行、用户事件和退出处理 | `core/loop.py` 的 `run()` 与 `stop()`。 |
-| 仿真或影子测试的准备与结果保存 | `workflows/run.py`、`workflows/shadow.py`；模型与循环组装在 `common.py`。 |
-| 仿真时长、离线输入和测试节奏 | `workflows/drivers.py`，不把环境时钟写入 Agent 核心。 |
-| 原有场景补充 RGB | `workflows/prepare.py`；仅准备图像对应关系，不重算检测或定位。 |
-| 无模型的工具与反馈检查 | `workflows/replay.py`、`workflows/evaluate.py`；固定工具动作不计为 VLM 任务成绩。 |
-| 新增模型工具 | 在 `tools/framework.py` 声明参数，在 `AgentSession` 增加同名处理方法；复杂执行逻辑放对应工具模块。 |
-| 接新的导航反馈来源 | 在 `adapters/` 实现相同方法，再由运行流程选择；沿用导航技能中的调用和停止检查。 |
-
-当前只实现反馈仿真和非执行影子运行。真实底盘反馈、主动移动观察及局部技能调度仍待接通；Agent 不提供任意 Shell、`override` 或解除安全保护的工具。后续工作见[技术计划](Agent技术开发计划.md#后续开发)，已有验证见[任务与测试](长程导航任务与评测计划.md#开发验收与已有依据)。
+最新检查及其限制见[开发验收与已有依据](长程导航任务与评测计划.md#开发验收与已有依据)，跨模块字段见[接口约定](../接口约定.md#外层agent开发接口)。

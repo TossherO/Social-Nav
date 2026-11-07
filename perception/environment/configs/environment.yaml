@@ -82,6 +82,7 @@ dynamic:
   min_hits: 3
   padding_m: 0.12
   max_radius_m: 0.65
+  object_radius_limit_m: 0.55
   seed_distance_m: 0.4
   min_cluster_points: 3
   transient_ttl_s: 0.2

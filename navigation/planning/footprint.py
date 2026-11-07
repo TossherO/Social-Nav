@@ -49,6 +49,34 @@ def footprint_status(snapshot, geometry, pose, margin):
     return polygon_status(snapshot, geometry.polygon(pose), margin)
 
 
+def goal_obstruction(snapshot, geometry, goal, margin):
+    """Prove a blocked endpoint; None means undecided, not a free full body.
+
+    An XY goal permits every yaw. Only the disk contained in every rotated
+    footprint may reject all orientations. Use actual XY and cell rectangles,
+    never an inflated cell-centre cost or a finite failed yaw sample.
+    """
+    if len(goal)==3:
+        status=footprint_status(snapshot,geometry,goal,margin)
+        return None if status=='free' else status
+    polygon=geometry.footprint;next_vertex=np.roll(polygon,-1,axis=0)
+    cross=polygon[:,0]*next_vertex[:,1]-polygon[:,1]*next_vertex[:,0]
+    if not ((cross>0).all() or (cross<0).all()):return None
+    radius=geometry.inscribed_radius+margin;xy=np.asarray(goal[:2],float)
+    m=snapshot.metadata;resolution=m['resolution'];origin=np.asarray(m['origin_xy']);cells=snapshot.layers['occupancy']
+    shape=np.array(cells.shape)[::-1]
+    if (xy-radius<origin).any() or (xy+radius>origin+shape*resolution).any():return 'outside'
+    lo=np.maximum(0,np.floor((xy-radius-origin)/resolution).astype(int))
+    hi=np.minimum(shape-1,np.floor((xy+radius-origin)/resolution).astype(int))
+    y,x=np.mgrid[lo[1]:hi[1]+1,lo[0]:hi[0]+1]
+    centres=origin+np.stack((x+.5,y+.5),axis=-1)*resolution
+    delta=np.maximum(abs(centres-xy)-resolution/2,0.)
+    values=cells[y,x][(delta**2).sum(axis=-1)<(radius-1e-10)**2]
+    if (values==100).any():return 'occupied'
+    if (values==-1).any():return 'unknown'
+    return None
+
+
 def polygon_status(snapshot, polygon, margin):
     """Classify an entire convex polygon, including touched grid cells."""
     res = float(snapshot.metadata['resolution'])

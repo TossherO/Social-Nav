@@ -15,10 +15,12 @@ class PoseGrid:
         self.backend=backend or FootprintSearch(config['pose_search'].get('native_library',config['native_library']),
             cache_heuristic=config['pose_search'].get('cache_heuristic',True))
 
-    def search(self,start,goal,guide=None):
+    def search(self,start,goal,guide=None,*,max_search_s=None):
         # The reverse wavefront uses the full current grid rather than a short
         # list of waypoints; one search can follow arbitrarily many bends.
-        poses,detail=self.backend.search(self.snapshot,self.geometry,self.config,self.clearance,self.costs,start,goal,
+        config=self.config if max_search_s is None else dict(self.config,
+            pose_search=dict(self.config['pose_search'],max_search_s=max_search_s))
+        poses,detail=self.backend.search(self.snapshot,self.geometry,config,self.clearance,self.costs,start,goal,
             state_resolution_m=self.state_resolution)
         if poses is None:return None,detail
         poses=compact_poses(poses)

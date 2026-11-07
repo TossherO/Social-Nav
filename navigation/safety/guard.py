@@ -58,8 +58,11 @@ def stopping_trajectories(feedback,desired,motion,settings,dt,*,pending=None,obs
 
 
 class LocalSafety:
-    def __init__(self,geometry,motion,margin,*,settings=None,people_settings=None,simulation=False,shadow=False,asset=None):
-        if bool(simulation)==bool(shadow):raise ValueError('Choose explicit simulation or non-executing shadow mode')
+    def __init__(self,geometry,motion,margin,*,settings=None,people_settings=None,simulation=False,shadow=False,execution=False,asset=None):
+        if sum(map(bool,(simulation,shadow,execution)))!=1:raise ValueError('Choose one explicit safety mode')
+        if execution and (geometry.assumed or motion.get('parameters_assumed',True)):
+            raise ValueError('Execution requires measured vehicle geometry and motion')
+        self.execution=execution
         self.shadow=shadow
         self.asset=asset
         self.geometry=geometry;self.motion=motion;self.margin=margin
@@ -89,7 +92,7 @@ class LocalSafety:
         return cached[2]
 
     def gate(self,proposal,request,scene,feedback,*,now,clock_domain,dt,emergency_stop=False,manual_override=False):
-        result=dict(velocity=[0.,0.],state='braking',reason=None,executable=False,scope='shadow_safety' if self.shadow else 'simulation_safety',
+        result=dict(velocity=[0.,0.],state='braking',reason=None,executable=False,scope='execution_check' if self.execution else 'shadow_safety' if self.shadow else 'simulation_safety',
             request_binding=fingerprint(request),scene_binding=scene.record['input_fingerprint'])
         # Deliberately independent of the controller's validity function.
         r=scene.record

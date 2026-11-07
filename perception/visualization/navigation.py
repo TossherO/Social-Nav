@@ -51,7 +51,7 @@ class NavigationView:
             if not self.history or row['stamp_s']>self.history[-1][0]:
                 self.history.append((row['stamp_s'],pose.copy(),z))
                 self.raw_history.append((row['stamp_s'],list(row['position']),list(row['quaternion_xyzw'])))
-        out=dict(frame_id=row['frame_id'],stamp_s=row['stamp_s'],history=list(self.history),
+        out=dict(frame_id=row['frame_id'],stamp_s=row['stamp_s'],localization_row=row,history=list(self.history),
             raw_history=list(self.raw_history),pose=pose,reference=None,trajectory=None,goal=None,
             text='SHADOW | no control observation',level='waiting',z=z,ground_source=ground_source,
             text_z=z+1.6 if np.isfinite(z) else float(row['position'][2])+.8)
@@ -119,9 +119,9 @@ class NavigationView:
         if pose is not None:
             polygon=self.geometry.polygon(pose);polygon=np.vstack([polygon,polygon[0]])
             polygon=sample_poses(np.c_[polygon,np.zeros(len(polygon))],surface.resolution)[:,:2]
-            heights,_=surface.sample(polygon);out['footprint']=np.c_[polygon,heights+.01]
+            heights,_=surface.sample(polygon);out['footprint']=np.c_[polygon,heights+.04]
             heading=np.vstack([pose[:2],pose[:2]+.8*np.array([np.cos(pose[2]),np.sin(pose[2])])])
-            heights,_=surface.sample(heading);out['heading']=np.c_[heading,heights+.02]
+            heights,_=surface.sample(heading);out['heading']=np.c_[heading,heights+.05]
         if out['goal'] is not None:out['goal_z']=float(surface.sample([out['goal'][:2]])[0][0])
         status={0:'unknown (markers omitted)',1:'supported cells',2:'fitted near vehicle',3:'fixed XY diagnostic',4:'static supported cells'}[out['ground_source']]
         for key in ('reference','trajectory'):
@@ -129,6 +129,7 @@ class NavigationView:
             if data is not None:
                 data['display_poses']=sample_poses(data['points'],surface.resolution)
                 data['heights'],data['height_sources']=surface.sample(data['display_poses'][:,:2])
+                if key=='trajectory':data['heights']+=.02
                 status+=' | %s height %d/%d'%(key,int(np.isfinite(data['heights']).sum()),len(data['heights']))
         out['text']+='\nGROUND: '+status
         return out

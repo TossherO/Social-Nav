@@ -102,26 +102,51 @@ class FloorTests(unittest.TestCase):
         for _ in range(config['ground_tracking']['reacquire_observations']-1):
             plane,status=tracker.fit(floor,np.zeros(3),config)
             self.assertIsNone(plane);self.assertAlmostEqual(tracker.reference,.54)
-            self.assertTrue(status['clear_ground_history'])
+            self.assertFalse(status['clear_ground_history'])
+            self.assertTrue(status['history_suspended'])
         plane,status=tracker.fit(floor,np.zeros(3),config)
         self.assertIsNotNone(plane);self.assertAlmostEqual(tracker.reference,.85,places=2)
         self.assertTrue(status['reference_changed'])
+        self.assertTrue(status['clear_ground_history'])
+        self.assertFalse(status['history_suspended'])
         table=floor.copy();table[:,2]=-.3
         for _ in range(12):
             plane,status=tracker.fit(table,np.zeros(3),config)
             self.assertIsNone(plane);self.assertAlmostEqual(tracker.reference,.85)
 
-    def test_reference_conflict_withdraws_ground_and_near_field_history(self):
+    def test_reference_conflict_withdraws_use_but_retains_ground_history(self):
         config=load_config();config['compute']['backend']='cpu'
         model=LocalEnvironmentMap(config);self.addCleanup(model.close)
         x,y=np.meshgrid(np.linspace(-3,3,40),np.linspace(-3,3,40))
         floor=np.c_[x.ravel(),y.ravel(),np.full(x.size,-.85)]
         for i in range(5):view=model.update(floor,np.eye(4),1+i*.1,('test',0),scan_duration=.1)
         self.assertTrue(view.layers['ground_support'].any())
+        previous_ground=model.ground_z.copy();previous_times=model.ground_seen.copy()
         model.ground_tracker.reference=.54  # Explicit fault injection, not sensor feedback.
         view=model.update(floor,np.eye(4),1.6,('test',0),scan_duration=.1)
         self.assertFalse(view.layers['ground_support'].any())
         self.assertFalse(view.layers['near_field_free'].any())
+        np.testing.assert_array_equal(model.ground_z,previous_ground)
+        np.testing.assert_array_equal(model.ground_seen,previous_times)
+        self.assertTrue(view.metadata['ground_tracking']['history_suspended'])
+
+    def test_interrupted_lower_ground_confirmation_needs_observed_recovery(self):
+        config=load_config();tracker=GroundTracker(config['ground_tracking'])
+        x,y=np.meshgrid(np.linspace(-3,3,25),np.linspace(-3,3,25))
+        floor=np.c_[x.ravel(),y.ravel(),np.full(x.size,-.85)]
+        for _ in range(5):tracker.fit(floor,np.zeros(3),config)
+        lower=floor.copy();lower[:,2]-=.25
+        plane,status=tracker.fit(lower,np.zeros(3),config)
+        self.assertIsNone(plane);self.assertTrue(status['history_suspended'])
+        self.assertFalse(status['clear_ground_history'])
+        plane,status=tracker.fit(np.empty((0,3)),np.zeros(3),config)
+        self.assertEqual(len(tracker.pending),0)
+        self.assertTrue(status['history_suspended'])
+        self.assertAlmostEqual(tracker.reference,.85)
+        # Missing observations are not evidence that the old floor is valid again.
+        plane,status=tracker.fit(floor,np.zeros(3),config)
+        self.assertIsNotNone(plane);self.assertFalse(status['history_suspended'])
+        self.assertFalse(status['clear_ground_history']);self.assertFalse(status['reference_changed'])
 
     def test_floor_bootstrap_ignores_larger_table_then_tracks_partial_floor(self):
         config=load_config();tracker=GroundTracker(config['ground_tracking'])

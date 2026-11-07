@@ -1,4 +1,4 @@
-"""Synthetic worker and observation fixtures for current reference-runtime tests."""
+"""Shared synthetic worker and observation fixtures; not a test entry point."""
 from perception.environment.scene import assemble_scene
 from perception.environment.layers import load_config as environment_config
 from tests.test_navigation_planning import bundle

@@ -5,6 +5,7 @@ from pathlib import Path
 import time
 import numpy as np
 import yaml
+from perception.environment.context import fingerprint
 from .continuity import context_binding,check_reference
 from .inputs import scene_status,request_status
 from .footprint import footprint_status
@@ -36,6 +37,7 @@ class ReferenceRuntime:
         self.latest=None;self.current=None;self.reference=None;self.reason='waiting_for_observation'
         self.cancelled={};self.last_sent=-np.inf;self.next_retry=-np.inf;self.blocked=False;self.need_replan=False
         self.diagnostics=False;self.last_reply=None;self.start_evidence=None
+        self.failure=None
 
     def __enter__(self):return self
     def __exit__(self,*args):self.close()
@@ -49,6 +51,7 @@ class ReferenceRuntime:
             req=self.latest['request'];self.cancelled[req['task_id']]=req['goal_revision']
         self.epoch+=1;self.latest=self.current=self.reference=None;self.context=None
         self.reason=reason;self.blocked=False;self.need_replan=False;self.last_sent=self.next_retry=-np.inf
+        self.failure=None
         if self.worker.job is not None:self.worker.restart()
         self._event('invalidated',reason=reason)
 
@@ -102,8 +105,12 @@ class ReferenceRuntime:
             try:
                 if reply['error']:raise ValueError(reply['error'])
                 if self.latest is None or job['epoch']!=self.epoch or job['context']!=self.context:raise ValueError('superseded_context')
-                check_reference(reply['result'],self.latest['request'],self.latest['scene'],self.latest['asset'],self.settings['max_age_s'])
-                self.reference=self.current=reply['result'];self.need_replan=False
+                check_reference(reply['result'],self.latest['request'],self.latest['scene'],self.latest['asset'],self.settings['max_age_s'],require_path=False)
+                if result['status']!='path_found' or len(result.get('path',[]))<2:
+                    self.failure=dict(request_binding=fingerprint(job['request']),reason=result['reason'],
+                        as_of=job['scene'].record['as_of'],job_id=job['job_id'])
+                    raise ValueError('reference_has_no_path')
+                self.reference=self.current=reply['result'];self.need_replan=False;self.failure=None
                 self._event('reference_ready',**fields)
             except (ValueError,KeyError,TypeError) as error:
                 self.reason=str(error);self.next_retry=mono+self.settings['failure_retry_s']

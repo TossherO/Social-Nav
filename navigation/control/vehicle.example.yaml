@@ -1,0 +1,24 @@
+# Fill from measurements on THIS wheelchair. Nulls intentionally prevent execution.
+format: wheelchair_vehicle_profile
+vehicle_id: null
+verification:
+  source: null
+  geometry_confirmed: false
+  motion_confirmed: false
+  protocol_confirmed: false
+geometry:
+  footprint: null  # Ordered convex polygon, base XY in metres, including rider/load.
+  base_from_lidar: null  # Measured 4x4 rigid transform.
+measured_limits:
+  max_forward_mps: null
+  max_reverse_mps: null
+  max_angular_rps: null
+  max_acceleration_mps2: null
+  max_angular_acceleration_rps2: null
+  minimum_braking_mps2: null
+  minimum_angular_braking_rps2: null
+  maximum_actuator_delay_s: null
+  firmware_watchdog_s: null
+# 19200 baud; zero/mode3 -> zero/mode1 -> targets; zero/mode3 to disarm.
+# Confirm feedback payload-byte checksum and both joystick neutral fields as well.
+protocol: null  # af01_12_bf01_32_payload_sum_mode1_3

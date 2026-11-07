@@ -1,0 +1,22 @@
+# Explicit low-speed trial candidate, not measured wheelchair limits.
+# Keep motion.yaml as the everyday default. Real execution still requires a
+# measured vehicle profile and separate operator arming; no acceleration field
+# is sent to the chassis. See docs/感知导航运行手册.md, RViz交互测试.
+model: differential
+parameters_assumed: true
+max_forward_mps: 0.10
+max_reverse_mps: 0.05
+max_angular_rps: 0.15
+max_acceleration_mps2: 0.10
+max_angular_acceleration_rps2: 0.15
+brake_deceleration_scale: 0.75
+min_turning_radius_m: 1.05
+allow_reverse: true
+allow_in_place_rotation: true
+reverse_tolerance_mps: 0.005
+max_initial_lateral_mps: 0.08
+max_initial_profile_ratio: 2.0
+state_window_s: 0.35
+state_max_age_s: 0.15
+state_max_gap_s: 0.16
+max_result_age_s: 0.5

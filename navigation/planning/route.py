@@ -119,7 +119,7 @@ class RoutePlan:
 
     def request(self, segment_id, scene, geometry, *, task_id, goal_revision, now, clock_domain,
                 config, progress_m=0., lookahead_m=2., max_advance_m=8., max_cross_track_m=2.,
-                asset=None, anchor=None):
+                asset=None, anchor=None, alternatives=False):
         """Explicit leg selection; returned progress is geometric, never execution feedback.
 
         Persist progress per task/leg/local lifecycle. On reset rebind/reselect it;
@@ -161,7 +161,24 @@ class RoutePlan:
             route_segment_id=segment_id,floor_id=segment['floor_id'],route_source=segment['source'])
         if mode=='mapped':request['map_snapshot_id']=asset.manifest['snapshot_id']
         else:request['route_anchor_observation']=anchor.observation_binding
-        return dict(status='reference_ready',executable=False,request=request,progress_m=progress,
+        lengths=np.linalg.norm(np.diff(points,axis=0),axis=1);arc=np.r_[0.,np.cumsum(lengths)]
+        request['route_target']=dict(progress_m=progress,target_progress_m=min(total,progress+lookahead_m),
+            terminal=bool(terminal),cross_track_m=cross_track)
+        candidates=[request]
+        # Route-owned intermediate goals only. An explicit stopping endpoint is
+        # never replaced by a shorter point, even when that endpoint is blocked.
+        if alternatives and request['goal_behavior']!='stop':
+            settings=config['route_goals'];step=settings['step_m']
+            for distance in np.arange(lookahead_m-step,step/2,-step):
+                target=min(total,progress+distance)
+                if target>=candidates[-1]['route_target']['target_progress_m']-1e-7:continue
+                if len(candidates)>=settings['max_candidates']:break
+                candidate=copy.deepcopy(request)
+                candidate['goal']=[float(np.interp(target,arc,points[:,k])) for k in range(2)]
+                candidate['goal_behavior']='pass_through'
+                candidate['route_target'].update(target_progress_m=float(target),terminal=False)
+                candidates.append(candidate)
+        return dict(status='reference_ready',executable=False,request=request,candidates=candidates,progress_m=progress,
                     segment_length_m=total,cross_track_m=cross_track,at_reference_end=bool(total-progress<.1),
                     task_completed=False)
 

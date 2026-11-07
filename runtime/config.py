@@ -55,6 +55,9 @@ def algorithm_config(*,mode,source_run=None,map_directory=None,pose=None,pose_fi
         config=_overlay(config,override)
         # A new calibration must not inherit the old validation/scope declaration.
         config['calibration']=copy.deepcopy(override.get('calibration') or {})
+        if 'imu_time_offset' not in override.get('common',{}):
+            config.setdefault('common',{}).pop('imu_time_offset',None)
+        config['common']['time_sync_en']=override.get('common',{}).get('time_sync_en',False)
     if mode=='odometry' and source_run is not None:config=_overlay(config,yaml.safe_load((ROOT/'perception/mapping_localization/configs/odometry.yaml').read_text()))
     config.setdefault('odometry',{})['publish_state']=mode=='odometry'
     roll=config.setdefault('roll',{});roll['localizationMode']=mode=='localization'

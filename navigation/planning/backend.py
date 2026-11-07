@@ -78,9 +78,12 @@ class FootprintSearch:
 
     def search(self,snapshot,geometry,config,clearance,costs,start,goal,*,state_resolution_m=None):
         cfg=config['pose_search'];policy=config['motion_constraints'];hard=len(goal)==3
+        spin=policy.get('allow_in_place_rotation',False)
+        if spin and not hasattr(self.library,'social_nav_pose_supports_rotation'):
+            raise RuntimeError('Rebuild the native footprint-search library for in-place rotation')
         point=np.r_[goal[:2],goal[2] if hard else 0.].astype(np.float64)
         params=np.array([policy['min_turning_radius_m']+cfg['radius_margin_m'],config['safety_margin_m'],
-            cfg['max_states'],cfg['max_expansions'],cfg['max_search_s'],float(policy['allow_reverse']),
+            cfg['max_states'],cfg['max_expansions'],cfg['max_search_s'],float(int(policy['allow_reverse'])|2*int(spin)),
             cfg['reverse_penalty'],cfg['turn_weight'],cfg['goal_approach_straight_m'],
             cfg['state_resolution_m'] if state_resolution_m is None else state_resolution_m],np.float64)
         meta=snapshot.metadata;h,w=snapshot.layers['occupancy'].shape
@@ -100,7 +103,8 @@ class FootprintSearch:
         detail=dict(reason=reasons[int(stats[6])],search_ms=float(stats[0]),native_call_wall_ms=native_wall_ms,
             expanded=int(stats[1]),states=int(stats[2]),
             collision_checks=int(stats[3]),heuristic_ms=float(stats[4]),endpoint_connections_checked=int(stats[5]),
-            motion_model='finite_radius_straight_and_arc',search_radius_m=params[0],
+            motion_model='differential_straight_arc_and_rotation' if spin else 'finite_radius_straight_and_arc',search_radius_m=params[0],
+            allow_in_place_rotation=spin,
             min_turning_radius_m=policy['min_turning_radius_m'],allow_reverse=policy['allow_reverse'],
             state_resolution_m=max(meta['resolution'],params[9]),
             implementation='native_hybrid_astar_wavefront')

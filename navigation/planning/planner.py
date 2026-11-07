@@ -8,7 +8,7 @@ from perception.environment.context import fingerprint
 from perception.environment.changes import PriorRevisions, reference_grid
 from perception.environment.navigation import navigation_geometry
 from .backend import GlobalPlanner
-from .footprint import footprint_status, footprint_details, path_poses, swept_check, wrap
+from .footprint import footprint_status, footprint_details, goal_obstruction, path_poses, swept_check, wrap
 from .inputs import association_status, scene_status, cell_of, validate_grid,request_status
 from .curvature import motion_valid,reference_tails
 
@@ -102,6 +102,15 @@ class Planner:
         if mode not in ('static', 'mapped', 'local'): raise ValueError('Unknown planning mode')
         goal = np.asarray(r['goal'], dtype=float)
         if goal.shape not in [(2,), (3,)] or not np.isfinite(goal).all(): raise ValueError('Invalid goal')
+        selection=r.get('route_goal_selection');search_budget=None
+        if selection is not None:
+            search_budget=selection['search_budget_s'];detour_limit=selection['max_path_length_m']
+            if (not r.get('route_binding') or not r.get('route_segment_id') or
+                    type(search_budget) not in (int,float) or not np.isfinite(search_budget) or
+                    not 0<search_budget<=self.config['pose_search']['max_search_s'] or
+                    detour_limit is not None and (type(detour_limit) not in (int,float) or
+                        not np.isfinite(detour_limit) or detour_limit<=0)):
+                raise ValueError('Invalid route candidate budget')
         algorithm = r.get('algorithm', self.config['algorithm'])
         if algorithm not in ('dijkstra', 'astar','hybrid_astar'): raise ValueError('Unknown algorithm')
         out['algorithm'] = algorithm
@@ -169,6 +178,12 @@ class Planner:
         if value!=0:
             out.update(status='unavailable' if value==-1 else 'no_path',
                        reason='goal_unknown' if value==-1 else 'goal_occupied',needs_observation=bool(value==-1));return
+        obstruction=goal_obstruction(grid,self.geometry,goal,self.config['safety_margin_m']) if len(goal)==2 else None
+        if obstruction is not None:
+            out.update(status='unavailable' if obstruction=='unknown' else 'no_path',
+                reason='goal_footprint_'+obstruction,needs_observation=obstruction=='unknown',
+                goal_evidence=dict(method='full_pose' if len(goal)==3 else 'orientation_invariant_inner_disk',status=obstruction))
+            return
         cost_binding = (grid.metadata['snapshot_id'], fingerprint(grid.metadata),
                        out['input_binding']['scene'] if mode == 'local' else fingerprint(out['input_binding']['static_map']))
         if mode=='mapped':
@@ -240,7 +255,7 @@ class Planner:
                 self._pose_grid=PoseGrid(grid,self.geometry,self.config,costs=costs,clearance=self._clearance,
                     local=mode=='local',backend=self._pose_backend)
                 self._pose_binding=pose_binding
-            poses,detail=self._pose_grid.search(start,goal,guide=poses)
+            poses,detail=self._pose_grid.search(start,goal,guide=poses,max_search_s=search_budget)
             detail['geometry_cache_reused']=reused
             out['timing_ms']['footprint_state_search']=(time.perf_counter()-began)*1000
             attempts.append(dict(backend='bounded_curvature_hybrid_astar',**detail))
@@ -259,6 +274,9 @@ class Planner:
                        reason='returned_path_'+check['status']); return
         out.update(status='path_found', reason=None, path=poses.tolist(), current_path_valid=True,
                    path_length_m=float(np.linalg.norm(np.diff(poses[:,:2],axis=0),axis=1).sum()))
+        if selection is not None and selection['max_path_length_m'] is not None and out['path_length_m']>selection['max_path_length_m']:
+            out.update(status='no_path',reason='route_candidate_detour',path=[],current_path_valid=False)
+            return
         if grid is not measured_grid:
             audit=swept_check(measured_grid,self.geometry,poses,self.config['safety_margin_m'],
                               self.config['max_path_samples'],prefix=False)

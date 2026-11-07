@@ -6,12 +6,13 @@ import time
 
 
 class ControlLoop:
-    def __init__(self,reference,controller,batch,safety,pose_socket,commands,settings,scene_settings,metrics,record,*,asset=None,initial_goal=None,clock_domain='runtime_bag',display=None,route_replay=None,planning_recorder=None):
+    def __init__(self,reference,controller,batch,safety,pose_socket,commands,settings,scene_settings,metrics,record,*,asset=None,initial_goal=None,clock_domain='runtime_bag',display=None,route_replay=None,planning_recorder=None,session=None):
         self.reference,self.controller,self.batch,self.safety=reference,controller,batch,safety
         self.pose_socket,self.commands=pose_socket,commands;self.settings=settings;self.scene_settings=scene_settings
         self.metrics,self.record,self.asset=metrics,record,asset;self.request=initial_goal;self.clock_domain=clock_domain;self.display=display
         self.route_replay=route_replay
         self.planning_recorder=planning_recorder;self.offered_mono=None
+        self.session=session;self.session_epoch=0;self.preview_token=None
         self.lock=threading.Lock();self.pending=(None,None);self.rows=deque(maxlen=256)
         self.device=None;self.scene=None;self.done=threading.Event();self.error=None;self.count=0;self.clock=None
         self.cancelled_request=None
@@ -53,12 +54,40 @@ class ControlLoop:
                             (row['session_id'],row['generation'])!=(self.rows[-1]['session_id'],self.rows[-1]['generation'])):
                             self.rows.clear();self.reference.invalidate('localization_reset')
                         self.rows.append(row)
+                    if self.session is not None and self.session.epoch!=self.session_epoch:
+                        self.session_epoch=self.session.epoch
+                        if self.request is not None:
+                            self.safety.command('cancel',{k:self.request[k] for k in ('task_id','goal_revision')})
+                        self.request=None;self.reference.invalidate('bag_pause_or_resume');self.controller.controller.clear()
                     for kind,value in self.commands.drain():
                         if kind=='goal':self.request=value;self.reference.invalidate('goal_changed');self.controller.controller.clear()
                         elif kind=='cancel' and (self.request is None or
                             value['task_id']==self.request['task_id'] and value['goal_revision']>=self.request['goal_revision']):
                             if self.request is not None:self.reference.cancel(self.request)
                             self.request=None;self.controller.controller.clear();self.cancelled_request=value
+                    if self.session is not None and (self.session.pause_requested or self.session.paused):
+                        if self.session.paused and self.rows:
+                            with self.lock:self.scene,self.device=self.pending
+                            self.session.publish_observation(self.scene,self.rows[-1],goal_intent=self.request)
+                            token=self.session.command_generation
+                            if self.request is not None and token!=self.preview_token:
+                                self.preview_token=token
+                                if self.scene is None:
+                                    result=dict(scope='frozen_bag_observation',reason='observation_unavailable',executable=False)
+                                else:
+                                    from navigation.planning.frozen import preview
+                                    self.batch.bind(self.device)
+                                    scene=self._search_scene(self.scene)
+                                    result=preview(self.request,scene,list(self.rows),self.controller.controller,
+                                        self.reference.planning,asset=self.asset,dt=self.settings['control_period_s'])
+                                    if self.display is not None:
+                                        from perception.visualization.interactive import preview_geometry
+                                        from perception.visualization.surface import DisplayGrids
+                                        # A query-only copy avoids sharing the display thread's mutable cache.
+                                        grid=DisplayGrids(self.metrics,asset=self.asset).get(self.device)
+                                        result['display']=preview_geometry(result,grid,self.asset,self.display.buffer.settings)
+                                self.session.publish_preview(result,token)
+                        self.done.wait(.01);continue
                     mono=time.monotonic()
                     if self.clock is None:self.done.wait(.005);continue
                     period=self.settings['control_period_s']
@@ -74,12 +103,14 @@ class ControlLoop:
                     next_tick=mono+max(period,self.controller.motion['state_max_age_s'])
                     previous=self.scene
                     with self.lock:self.scene,self.device=self.pending;offered_mono=self.offered_mono
+                    if self.session is not None:self.session.publish_observation(self.scene,self.rows[-1],goal_intent=self.request)
                     if previous is not None and self.scene is None:self.reference.invalidate('localization_invalid')
                     now=self.clock['clock_s']+(mono-self.clock['clock_mono'])*self.clock['clock_rate']
                     self.metrics.add('feedback_age_at_control',max(0.,now-self.rows[-1]['stamp_s']))
                     if self.route_replay is not None:
                         if self.commands.route_preempted:self.route_replay.disable('preempted_by_external_command')
-                        action=self.route_replay.step(self.scene,self.rows[-1],now=now,clock_domain=self.clock_domain)
+                        action=self.route_replay.step(self.scene,self.rows[-1],now=now,clock_domain=self.clock_domain,
+                            failure=self.reference.failure)
                         accepted=False
                         if action is not None:
                             kind,value=action;accepted=self.commands.route_command(kind,value)

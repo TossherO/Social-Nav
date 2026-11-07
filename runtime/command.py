@@ -1,4 +1,4 @@
-"""Local navigation-intent IPC. Commands never bypass the independent shadow gate."""
+"""Local navigation-intent IPC. Commands never bypass independent safety."""
 import argparse
 from collections import deque
 import copy
@@ -25,10 +25,10 @@ def validate(kind,value):
 
 
 class CommandInbox:
-    def __init__(self,path,safety):
+    def __init__(self,path,safety,*,session=None):
         from .agent_state import AgentState
         self.agent_state=AgentState()
-        self.path=Path(path);self.safety=safety;self.pending=deque();self.lock=threading.Lock();self.done=False
+        self.path=Path(path);self.safety=safety;self.session=session;self.pending=deque();self.lock=threading.Lock();self.done=False
         self.route_preempted=False
         if self.path.exists():raise FileExistsError(self.path)
         # Linux sockaddr_un limits the address length even before symlink
@@ -50,6 +50,7 @@ class CommandInbox:
         with self.lock:
             if len(self.pending)>=64:raise RuntimeError('Command inbox is full')
             self.route_preempted=True
+            if self.session is not None:self.session.note_command(kind,value)
             self.safety.command(kind,value);self.pending.append((kind,value))
 
     def route_command(self,kind,value):
@@ -72,6 +73,9 @@ class CommandInbox:
             try:
                 request=connection.recv()
                 if set(request)!={'kind','value'}:raise ValueError('Use kind and value')
+                if request['kind'] in ('session_status','playback','arm'):
+                    if self.session is None:raise ValueError('Interactive session is not enabled')
+                    connection.send(self.session.handle(request['kind'],request['value']));continue
                 if request['kind']=='agent_state':
                     value=request['value']
                     if not isinstance(value,dict) or set(value)!={'with_image'} or type(value['with_image']) is not bool:
@@ -91,7 +95,8 @@ class CommandInbox:
 
 def send_request(path,kind,value,*,timeout=2.):
     """Submit one intent; the reply acknowledges receipt, never execution."""
-    value=validate(kind,value)
+    if kind not in ('session_status','playback','arm'):value=validate(kind,value)
+    elif not isinstance(value,dict):raise ValueError('Session commands require an object')
     if not 0<timeout<=10:raise ValueError('Command timeout must be in (0,10] seconds')
     sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);sock.settimeout(timeout)
     wire=Connection(sock)

@@ -16,7 +16,7 @@ from ..core.session import AgentSession
 def run(args):
     if args.duration <= 0 or args.interactive and args.observations:
         raise ValueError('Positive duration required; interactive input is for runtime shadow')
-    catalog = Catalog.load(args.catalog)
+    catalog = Catalog.load(args.catalog,condition=args.map_condition)
     dataset = ObservationSet(args.observations) if args.observations else None
     if dataset is not None:
         sequences = args.sequences or dataset.sequences()

@@ -41,7 +41,8 @@ struct HeuristicCache {
 double wrap(double x) {return x-2*pi*std::floor((x+pi)/(2*pi));}
 double mod(double x) {x-=2*pi*std::floor(x/(2*pi));return std::min(x,2*pi-x)<1e-8?0.:x;}
 Pose advance(Pose a,double distance,double curvature) {
-  const double angle=distance*curvature;
+  // A zero-distance segment stores its rotation angle in the second field.
+  const double angle=distance==0.?curvature:distance*curvature;
   const double sinc=std::abs(angle)<1e-8?1.-angle*angle/24:std::sin(angle/2)/(angle/2);
   return {a[0]+distance*sinc*std::cos(a[2]+angle/2),a[1]+distance*sinc*std::sin(a[2]+angle/2),a[2]+angle};
 }
@@ -55,7 +56,7 @@ struct State {double cost;bool closed=false;};
 struct Search {
   const int8_t* cells;const uint8_t* costs;const float* clearance;
   int w,h,vertices,max_states,max_expanded;double res,state_res,ox,oy,radius,margin,budget,reverse_penalty,turn_weight,approach;
-  bool reverse,hard_yaw;Pose start,goal;std::vector<XY> footprint;
+  bool reverse,spin,hard_yaw;Pose start,goal;std::vector<XY> footprint;
   double outer=0.;Clock::time_point began=Clock::now();
   int expanded=0,checks=0,joins=0,code=3;double heuristic_ms=0.;
   HeuristicCache* cache;bool cache_enabled=false,profile=false,heuristic_cached=false,wavefront_complete=false;
@@ -114,11 +115,12 @@ struct Search {
   bool freeMotion(const Pose& from,double distance,double curvature,int depth=0) {
     ScopeTime timer(profile&&depth==0?&motion_ms:nullptr);
     if((checks&255)==0&&expired())return false;
-    const Pose mid=advance(from,distance/2,curvature);
-    const double enclosure=std::abs(distance)/2*(1.+outer*std::abs(curvature));
+    const double half_curve=distance==0.?curvature/2:curvature;
+    const Pose mid=advance(from,distance/2,half_curve);
+    const double enclosure=(std::abs(distance)+outer*std::abs(distance==0.?curvature:distance*curvature))/2;
     if(freePose(mid,enclosure))return true;
     if(!freePose(mid)||enclosure<1e-4||depth>=15)return false;
-    return freeMotion(from,distance/2,curvature,depth+1)&&freeMotion(mid,distance/2,curvature,depth+1);
+    return freeMotion(from,distance/2,half_curve,depth+1)&&freeMotion(mid,distance/2,half_curve,depth+1);
   }
   bool freeCurve(const Pose& from,const Curve& curve) {
     Pose p=from;
@@ -132,8 +134,9 @@ struct Search {
   void append(std::vector<Pose>& path,const Curve& curve)const {
     for(int j=0;j<curve.count;++j) {
       auto segment=curve.segments[j];
-      const Pose p=path.back();const int n=std::max(1,int(std::ceil(std::max(std::abs(segment.distance)/(res/2),std::abs(segment.distance*segment.curvature)/.05))));
-      for(int i=1;i<=n;++i)path.push_back(advance(p,segment.distance*i/n,segment.curvature));
+      const double angle=segment.distance==0.?segment.curvature:segment.distance*segment.curvature;
+      const Pose p=path.back();const int n=std::max(1,int(std::ceil(std::max(std::abs(segment.distance)/(res/2),std::abs(angle)/.05))));
+      for(int i=1;i<=n;++i)path.push_back(advance(p,segment.distance*i/n,segment.distance==0.?angle*i/n:segment.curvature));
     }
   }
   std::vector<Curve> curves(Pose from,Pose to,bool backwards)const {
@@ -181,6 +184,16 @@ struct Search {
       if(ending){anchor[0]-=ending*std::cos(goal[2]);anchor[1]-=ending*std::sin(goal[2]);}
       std::vector<Curve> candidates;
       candidates.reserve(reverse?288:144);
+      if(spin)for(int direction=0;direction<(reverse?2:1);++direction) {
+        Curve c;c.reverse=direction==1;
+        const double yaw=distance<1e-8?p[2]:std::atan2(goal[1]-p[1],goal[0]-p[0])+(c.reverse?pi:0.);
+        const double first=wrap(yaw-p[2]),last=hard_yaw?wrap(goal[2]-yaw):0.;
+        if(std::abs(first)>1e-8)c.segments[c.count++]={0.,first};
+        if(distance>1e-8)c.segments[c.count++]={c.reverse?-distance:distance,0.};
+        if(std::abs(last)>1e-8)c.segments[c.count++]={0.,last};
+        c.length=distance+outer*(std::abs(first)+std::abs(last));c.order=candidates.size();
+        candidates.push_back(c);
+      }
       for(int direction=0;direction<(reverse?2:1);++direction) {
         std::vector<double> headings=hard_yaw?std::vector<double>{anchor[2]}:std::vector<double>{std::atan2(anchor[1]-p[1],anchor[0]-p[0]),p[2]};
         if(!hard_yaw)for(int k=0;k<16;++k)headings.push_back(k*pi/8);
@@ -240,7 +253,7 @@ struct Search {
   double heuristic(const Pose& p)const {
     const int i=cell(p);const double d=std::hypot(p[0]-goal[0],p[1]-goal[1]);
     double estimate=i>=0&&std::isfinite(potential[i])?std::max(d,double(potential[i])):d;
-    if(hard_yaw&&!reverse) {
+    if(hard_yaw&&!reverse&&!spin) {
       double dubins=std::numeric_limits<double>::infinity();
       for(const auto& curve:curves(p,goal,false))dubins=std::min(dubins,curve.length);
       estimate=std::max(estimate,dubins);
@@ -252,7 +265,7 @@ struct Search {
     Curve ending;
     std::vector<Pose> incumbent;double incumbent_cost=std::numeric_limits<double>::infinity();
     auto connectionCost=[&](const Curve& curve) {
-      double value=0.;for(int i=0;i<curve.count;++i){auto edge=curve.segments[i];value+=std::abs(edge.distance)*(1.+turn_weight*radius*std::abs(edge.curvature))*(curve.reverse?reverse_penalty:1.);}
+      double value=0.;for(int i=0;i<curve.count;++i){auto edge=curve.segments[i];value+=(edge.distance==0.?outer*std::abs(edge.curvature)*(1.+turn_weight):std::abs(edge.distance)*(1.+turn_weight*radius*std::abs(edge.curvature)))*(curve.reverse?reverse_penalty:1.);}
       return value;
     };
     if(connect(start,ending)) {
@@ -261,7 +274,8 @@ struct Search {
       // Retain long analytic detours as an incumbent while searching multi-bend
       // alternatives; return immediately only near the obstacle-free lower bound.
       double lower=std::hypot(start[0]-goal[0],start[1]-goal[1]);
-      if(hard_yaw&&!reverse) {
+      if(spin&&hard_yaw)lower=std::max(lower,outer*std::abs(wrap(goal[2]-start[2])));
+      if(hard_yaw&&!reverse&&!spin) {
         lower=std::numeric_limits<double>::infinity();
         for(const auto& curve:curves(start,goal,false))lower=std::min(lower,curve.length);
       }
@@ -321,6 +335,14 @@ struct Search {
         if(!freeMotion(node.pose,edge.distance,edge.curvature))continue;
         states[id]={cost,false};nodes.push_back({p,cost,entry.index,edge});queue.push({cost+1.2*heuristic(p),cost,int(nodes.size()-1)});
       }
+      if(spin)for(double angle:{-pi/12,pi/12}) {
+        Segment edge{0.,angle};Pose p=advance(node.pose,0.,angle);
+        const double cost=node.cost+outer*std::abs(angle)*(1.+turn_weight);
+        const auto id=key(p);auto old=states.find(id);
+        if(old!=states.end()&&(old->second.closed||cost>=old->second.cost))continue;
+        if(!freeMotion(node.pose,0.,angle))continue;
+        states[id]={cost,false};nodes.push_back({p,cost,entry.index,edge});queue.push({cost+1.2*heuristic(p),cost,int(nodes.size()-1)});
+      }
     }
     visited=int(states.size());if(!incumbent.empty()){code=0;return incumbent;}
     if(code!=1)code=queue.empty()?3:2;return {};
@@ -328,7 +350,8 @@ struct Search {
 };
 }
 
-// params: radius, margin, max_states, max_expanded, seconds, reverse,
+// params: radius, margin, max_states, max_expanded, seconds, capability flags
+// (bit 0 reverse, bit 1 in-place rotation),
 // reverse_penalty, turn_weight, preferred_final_straight, state_resolution_m.
 // stats: elapsed_ms, expanded, visited, collision_checks, heuristic_ms, joins, reason.
 // The cached entry appends connector, motion, loop timings and a cache-hit flag.
@@ -347,7 +370,7 @@ static int plan_search(HeuristicCache* cache,int options,const int8_t* cells,con
     if(params[0]<=0||params[1]<0||params[2]<1||params[2]>600000||params[3]<1||params[4]<=0||params[4]>5||params[9]<=0||params[9]>1)return -1;
     Search s(cache);s.cache_enabled=options&1;s.profile=options&2;
     s.cells=cells;s.costs=costs;s.clearance=clearance;s.w=width;s.h=height;s.res=resolution;s.ox=origin[0];s.oy=origin[1];s.vertices=vertices;
-    s.radius=params[0];s.margin=params[1];s.max_states=int(params[2]);s.max_expanded=int(params[3]);s.budget=params[4];s.reverse=params[5]!=0;
+    s.radius=params[0];s.margin=params[1];s.max_states=int(params[2]);s.max_expanded=int(params[3]);s.budget=params[4];s.reverse=int(params[5])&1;s.spin=int(params[5])&2;
     s.reverse_penalty=params[6];s.turn_weight=params[7];s.approach=params[8];s.hard_yaw=hard_yaw!=0;
     s.state_res=std::max(resolution,params[9]);
     s.start={start[0],start[1],start[2]};s.goal={goal[0],goal[1],goal[2]};
@@ -367,6 +390,7 @@ static int plan_search(HeuristicCache* cache,int options,const int8_t* cells,con
 extern "C" void* social_nav_pose_create() noexcept {
   try{return new HeuristicCache;}catch(...){return nullptr;}
 }
+extern "C" int social_nav_pose_supports_rotation() noexcept {return 1;}
 extern "C" void social_nav_pose_destroy(void* context) noexcept {
   delete static_cast<HeuristicCache*>(context);
 }

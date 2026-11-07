@@ -17,6 +17,7 @@ class Store:
         self.db = sqlite3.connect(path, timeout=10)
         self.db.execute('CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, wall_s REAL, kind TEXT, value TEXT)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS map_images (view_id TEXT, role TEXT, sha256 TEXT, png BLOB, PRIMARY KEY(view_id,role))')
         self.db.commit()
 
     def save(self, state, kind, value):
@@ -31,6 +32,14 @@ class Store:
     def event(self, kind, value):
         with self.db:
             self.db.execute('INSERT INTO events(wall_s,kind,value) VALUES (?,?,?)', (time.time(), kind, encode(value)))
+
+    def spatial_view(self, view):
+        view.verify()
+        record = view.record
+        with self.db:
+            self.db.executemany('INSERT OR IGNORE INTO map_images VALUES (?,?,?,?)',
+                [(record['view_id'],role,digest,image) for role,digest,image in
+                 zip(record['image_roles'],record['image_sha256'],view.images)])
 
     def close(self):
         self.db.close()

@@ -41,7 +41,7 @@ def column_sequence(backend):
     finally:tree.close()
 
 
-def person_background_sequence(backend):
+def person_background_sequence(backend, *, suspended=False):
     """Real resident evidence: person-only, unknown background, then mixed chair/person."""
     from perception.environment.cuda_view import native_view
     config=dict(load_config(),resolution=.1,hit_invalidates_free=True)
@@ -58,6 +58,7 @@ def person_background_sequence(backend):
             tree.update(points,[0,0,.84],[-4,-4,-2,4,4,3],stamp,config,rays=False,
                 transient_mask=moving,transient_ttl=.8,read=False)
             metadata=sample(stamp).metadata
+            metadata['ground_tracking']['history_suspended']=suspended
             layers=tree.project(np.zeros(shape,np.float32),np.ones(shape,bool),[-4,-4],config,stamp,endpoints=points,
                 view_metadata=metadata,near_field=memory if backend=='cuda' else None,transient_mask=moving)
             if backend=='cpu':layers=memory.update(GridSnapshot(metadata,layers),points,transient_mask=moving,person_only=tree.person_only).layers
@@ -66,9 +67,47 @@ def person_background_sequence(backend):
     finally:tree.close()
 
 
+def suspended_history_sequence(backend):
+    """A false ground alarm retains provenance while new obstacles still arrive."""
+    from perception.environment.cuda_view import native_view
+    config=load_config();memory=NearFieldFreeMemory(config,{k:v for k,v in config['near_field'].items() if k!='enabled'})
+    tree=OccupancyTree(.1,backend=backend);results=[]
+    try:
+        for stamp,state,paused,points in [(1.,0,False,[]),(2.,0,True,[]),
+                (3.,-1,True,[[.55,.05,.5]]),(3.1,-1,True,[]),(3.2,-1,False,[]),(6.,-1,False,[])]:
+            seed=sample(stamp,state=state);seed.metadata['ground_tracking']['history_suspended']=paused
+            if stamp==2.:
+                # A new raw-free column during suspension must not enter memory.
+                for key,value in [('occupancy',0),('ground_support',True),('coverage',1.),('last_observed',stamp)]:
+                    seed.layers[key][40,46]=value
+            points=np.asarray(points,dtype=float).reshape(-1,3)
+            if backend=='cpu':
+                view=memory.update(seed,points);results.append((view.layers,view.metadata['near_field_memory']))
+            else:
+                results.append(native_view(tree,seed.layers['ground_z'],seed.layers['ground_support'],[-4,-4],config,stamp,points,
+                    source_layers=seed.layers,metadata=seed.metadata,policy=memory))
+        return results
+    finally:tree.close()
+
+
 class NearFieldTests(unittest.TestCase):
     def model(self):
         return NearFieldFreeMemory(dict(load_config(),hit_invalidates_free=True))
+
+    def test_ground_suspension_retains_times_and_obstacles_without_new_free(self):
+        views=suspended_history_sequence('cpu')
+        self.assertEqual([int(v['occupancy'][40,45]) for v,_ in views],[0,-1,100,100,100,0])
+        for layers,description in views[1:4]:
+            self.assertFalse(layers['near_field_free'].any())
+            self.assertTrue(description['history_suspended'])
+            self.assertEqual(description['cached_cells'],1)
+        self.assertEqual(views[-1][0]['near_field_free_classified_at'][40,45],1.)
+        self.assertEqual(views[-1][0]['last_observed'][40,45],1.)
+        self.assertEqual(views[-1][0]['occupancy'][40,46],-1)
+
+    def test_suspended_person_columns_cannot_restore_historical_background(self):
+        for layers in person_background_sequence('cpu',suspended=True):
+            self.assertFalse(layers['person_background_free'].any())
 
     def test_person_background_requires_free_history_and_excludes_mixed_ordinary_evidence(self):
         first,mixed,hidden=person_background_sequence('cpu')

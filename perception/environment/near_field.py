@@ -80,9 +80,11 @@ class NearFieldFreeMemory:
         self.ground_cache=None
         self.hit_expires=None
         self.ordinary_stamp=None
+        self.history_suspended=False
 
     def prepare_plane(self, ground, transform):
         """Small policy state only; both backends use the same causal plane choice."""
+        self.history_suspended=ground.get('history_suspended',False)
         plane=ground.get('plane_world')
         if plane is not None:self.plane=np.asarray(plane,float)
         elif self.plane is not None and ground.get('reference_height_m') is not None:
@@ -93,6 +95,7 @@ class NearFieldFreeMemory:
     def describe(self, source_id, counts, ring, backend):
         cached,invalidated,conflicts,hits,restored,active=map(int,counts)
         return dict(source_snapshot_id=source_id,settings=self.settings,ring=ring,
+            history_suspended=self.history_suspended,
             restored_cells=restored,cached_cells=cached,invalidated_hit_cells=invalidated,
             hit_conflict_cells=hits,ground_conflict_cells=conflicts,temporary_obstacle_cells=active,
             obstacle_overlay_lifetime_s=self.config['obstacle_ttl_s'],
@@ -128,12 +131,12 @@ class NearFieldFreeMemory:
                 self.hit_expires=shift_array(self.hit_expires,dx,dy,np.nan)
                 self.ordinary_stamp=shift_array(self.ordinary_stamp,dx,dy,-np.inf)
         self.origin=origin.copy();self.stamp=stamp
-        measured_ground=raw['ground_support']&np.isfinite(raw['ground_z'])
-        self.ground_cache[measured_ground]=raw['ground_z'][measured_ground]
         self.prepare_plane(m.get('ground_tracking',{}),m['world_from_lidar'])
+        measured_ground=raw['ground_support']&np.isfinite(raw['ground_z'])&(not self.history_suspended)
+        self.ground_cache[measured_ground]=raw['ground_z'][measured_ground]
         blind,ring=ground_blind_zone(snapshot,self.plane,self.settings)
         valid=np.isfinite(self.confirmed)
-        comparable=valid&raw['ground_support']&np.isfinite(raw['ground_z'])
+        comparable=valid&measured_ground
         conflict=np.zeros(shape,bool)
         conflict[comparable]=np.abs(raw['ground_z'][comparable]-self.fields['ground_z'][comparable])>self.settings['ground_change_m']
         hit=raw['occupancy']==100
@@ -172,7 +175,7 @@ class NearFieldFreeMemory:
                 self.hit_expires[touched]=np.maximum(stamp+ttl[touched],self.ordinary_stamp[touched]+self.config['obstacle_ttl_s'])
         invalidated=int((valid&hit).sum())
         certified=(raw['occupancy']==0)&raw['ground_support']&(
-            raw['coverage']>=self.config['free_vertical_coverage'])&~hit
+            raw['coverage']>=self.config['free_vertical_coverage'])&~hit&(not self.history_suspended)
         retained=valid if self.settings['remember_outside_ring'] else valid&blind
         blocked=np.zeros(shape,bool) if self.settings['temporary_obstacle_overlay'] else hit
         valid=(retained|certified)&~blocked&~conflict
@@ -186,10 +189,13 @@ class NearFieldFreeMemory:
         self.ordinary_stamp[certified]=-np.inf
         possible=np.isfinite(self.ground_cache)&blind&np.isfinite(self.hit_stamp)&np.isfinite(self.hit_expires)
         active=np.zeros(shape,bool);active[possible]=stamp<=self.hit_expires[possible]
-        restored=valid&blind&(raw['occupancy']==-1)&~active
+        restored=valid&blind&(raw['occupancy']==-1)&~active&(not self.history_suspended)
         layers=dict(raw)
-        if restored.any() or active.any():
+        if restored.any() or active.any() or self.history_suspended:
             layers={k:v.copy() for k,v in raw.items()}
+            if self.history_suspended:
+                layers['occupancy'][layers['occupancy']==0]=-1
+                layers['ground_support'].fill(False)
             for k,v in self.fields.items():layers[k][restored]=v[restored]
             layers['occupancy'][restored]=0
             layers['ground_support'][restored]=True
@@ -215,7 +221,7 @@ class NearFieldFreeMemory:
         if person_only is not None:
             person_only=np.asarray(person_only)
             if person_only.dtype!=bool or person_only.shape!=shape:raise ValueError('Invalid exclusive person columns')
-            layers['person_background_free']=valid&person_only&(layers['occupancy']==100)
+            layers['person_background_free']=valid&person_only&(layers['occupancy']==100)&(not self.history_suspended)
         metadata=dict(m,snapshot_id=m['snapshot_id']+':near_field:'+self.binding,
             near_field_memory=self.describe(m['snapshot_id'],[valid.sum(),
                 0 if self.settings['temporary_obstacle_overlay'] else invalidated,conflict.sum(),

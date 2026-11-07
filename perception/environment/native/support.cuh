@@ -2,12 +2,12 @@
 // XY zonotope must have measured static FREE, compatible ground and old time.
 struct SupportPolicy { double v[30]; int h,w,ph,pw,dx,dy; };
 __global__ void support_cells(const int8_t* raw,const double* seen,const double* prior,
-    const double* previous,double* hits,double* out,uint8_t* allowed,double* floors,SupportPolicy p) {
+    const double* previous,double* hits,double* out,uint8_t* allowed,SupportPolicy p) {
     int i=blockIdx.x*blockDim.x+threadIdx.x,n=p.h*p.w;if(i>=n)return;
     const double* v=p.v;const double* t=v+18;const double* plane=v+15;
     int x=i%p.w,y=i/p.w,ox=x-p.dx,oy=y-p.dy;
     for(int k=0;k<2;++k)hits[k*n+i]=previous && ox>=0 && ox<p.w && oy>=0 && oy<p.h?previous[k*n+oy*p.w+ox]:-INFINITY;
-    out[i]=raw[i];out[n+i]=raw[i]==0?1:raw[i]==100?2:0;out[2*n+i]=raw[i]==-1?NAN:seen[i];allowed[i]=0;floors[i]=NAN;
+    out[i]=raw[i];out[n+i]=raw[i]==0?1:raw[i]==100?2:0;out[2*n+i]=raw[i]==-1?NAN:seen[i];allowed[i]=0;
     double X=(x+.5)*v[0]+v[2],Y=(y+.5)*v[0]+v[3];
     double rx=fabs(X-v[6])+v[0]/2,ry=fabs(Y-v[7])+v[0]/2;
     if(rx*rx+ry*ry>v[8]*v[8])return;
@@ -17,7 +17,7 @@ __global__ void support_cells(const int8_t* raw,const double* seen,const double*
     if(px<0 || px>=p.pw || py<0 || py>=p.ph)return;
     int pn=p.ph*p.pw,pi=py*p.pw+px;
     if(prior[pi]!=0 || !prior[2*pn+pi] || !isfinite(prior[pn+pi]))return;
-    Z=(prior[pn+pi]-X*t[8]-Y*t[9]-t[11])/t[10];floors[i]=Z;
+    Z=(prior[pn+pi]-X*t[8]-Y*t[9]-t[11])/t[10];
     double mid=Z+(v[10]+v[11])/2;
     double cx=t[0]*X+t[1]*Y+t[2]*mid+t[3],cy=t[4]*X+t[5]*Y+t[6]*mid+t[7];
     double ax=t[0],ay=t[1],bx=t[4],by=t[5],det=ax*by-ay*bx;
@@ -52,13 +52,12 @@ __global__ void support_cells(const int8_t* raw,const double* seen,const double*
     allowed[i]=1;
     if(raw[i]==-1) {out[i]=0;out[n+i]=3;out[2*n+i]=oldest;}
 }
-__global__ void support_hits(const double* xyz,const uint8_t* moving,int count,const double* floors,double* hits,SupportPolicy p) {
+__global__ void support_hits(const double* xyz,const uint8_t* moving,int count,double* hits,SupportPolicy p) {
     int j=blockIdx.x*blockDim.x+threadIdx.x;if(j>=count)return;
     double x=xyz[3*j],y=xyz[3*j+1];
     int xx=floor((x-p.v[2])/p.v[0]),yy=floor((y-p.v[3])/p.v[0]);
     if(xx<0 || xx>=p.w || yy<0 || yy>=p.h)return;
-    double height=xyz[3*j+2]-floors[yy*p.w+xx];
-    if(!isfinite(height) || height<p.v[10] || height>p.v[11])return;
+    // Endpoints were classified against local observed ground before upload.
     max_atomic(hits+(moving[j]?p.h*p.w:0)+yy*p.w+xx,p.v[9]);
 }
 __global__ void support_overlay(const int8_t* raw,const uint8_t* allowed,const double* hits,double* out,SupportPolicy p) {

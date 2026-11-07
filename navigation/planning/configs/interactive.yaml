@@ -1,0 +1,7 @@
+# One validated map/region pair for interactive development; paths are repo-relative.
+map: outputs/perception/wheelchair_20261020/environment_integration/mapping/map
+static_map: outputs/navigation/october20_route_replay/static_map
+coverage: outputs/perception/wheelchair_20261020/environment_integration/localization_coverage_manual.yaml
+# Only initial roll, pitch and map Z are used as a guess. XY and yaw come from RViz.
+initial_pose_hint: outputs/perception/wheelchair_20261020/environment_integration/localization2.initial_pose.json
+motion_config: navigation/planning/configs/motion.yaml

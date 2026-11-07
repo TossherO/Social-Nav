@@ -59,13 +59,15 @@ class GroundTracker:
         self.heights=deque(maxlen=max(25,settings.get('min_observations',1)))
         self.pending=deque(maxlen=self.settings['reacquire_observations'])
         self.reference=None;self.slope=np.zeros(2)
+        self.history_suspended=False
 
     def fit(self, points, sensor, config):
         settings=self.settings
         if not settings.get('enabled',True):
             return ground_plane(points,sensor,config),dict(status='disabled')
         info=dict(status='unavailable',source='causal_measured_floor',reference_height_m=self.reference,
-                  no_missing_cells_filled=True,clear_ground_history=False)
+                  no_missing_cells_filled=True,clear_ground_history=False,
+                  history_suspended=self.history_suspended)
         support,seeds=spatial_floor_points(points,sensor,config,settings)
         if len(seeds)<config['ground_min_points']:
             self.pending.clear()
@@ -111,7 +113,10 @@ class GroundTracker:
                 self.pending.clear()
                 return None,dict(info,reason='raised_surface_without_ground_connection')
             self.pending.append(height)
-            info.update(reason='confirming_lower_ground',clear_ground_history=True,
+            # Withdraw use immediately, but commit destructive changes only after
+            # confirmation. Missing/uncertain scans cannot release this suspension.
+            self.history_suspended=True
+            info.update(reason='confirming_lower_ground',history_suspended=True,
                         reacquire_observations=len(self.pending))
             if (len(self.pending)<settings['reacquire_observations'] or
                     np.ptp(self.pending)>2*settings['max_height_mad_m']):return None,info
@@ -124,7 +129,8 @@ class GroundTracker:
                     np.ptp(self.heights)>2*settings['max_height_mad_m']):
                 return None,dict(info,status='warming')
         self.reference=median;self.slope=plane[:2].copy()
+        self.history_suspended=False
         info.pop('reason',None)
         info.update(status='tracked',reference_height_m=self.reference,plane_world=plane.tolist(),
-                    reference_changed=changed,clear_ground_history=changed)
+                    reference_changed=changed,clear_ground_history=changed,history_suspended=False)
         return plane,info

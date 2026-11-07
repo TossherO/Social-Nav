@@ -25,7 +25,7 @@ class SimulationNavigation:
         # Offline development only: allow a bounded CPU search through U-turns.
         # This never modifies the online planning configuration.
         self.planning['pose_search']['max_search_s'] = 2.0
-        self.planning['motion_constraints'] = {k: self.motion[k] for k in ('min_turning_radius_m', 'allow_reverse')}
+        self.planning['motion_constraints'] = {k: self.motion[k] for k in ('min_turning_radius_m', 'allow_reverse', 'allow_in_place_rotation')}
         self.geometry = VehicleGeometry.historical(ROOT/'configs/wheelchair_geometry_reference.json')
         self.world = PlanarWorld('agent')
         self.planner = Planner(self.planning, self.geometry, require_actual_start=True)
@@ -61,6 +61,14 @@ class SimulationNavigation:
                     reference_reason=None if self.reference is None else self.reference['result']['reason'],
                     planning_search_budget_s=self.planning['pose_search']['max_search_s'],
                     stopped=bool(np.max(np.abs(self.velocity)) < 1e-8 and all(np.max(abs(x)) < 1e-8 for x in self.queue)))
+
+    def spatial_inputs(self):
+        from perception.environment.layers import GridSnapshot
+        scene = self.world.scene(self.t,self.pose,self.geometry)
+        metadata = dict(scene.geometry.metadata,snapshot_id='synthetic:agent:static')
+        global_grid = GridSnapshot(metadata,dict(occupancy=self.world.static.copy()))
+        return dict(global_grid=global_grid,scene=scene,pose=self.pose.tolist(),local_pose=self.pose.tolist(),
+                    stamp_s=10+self.t,clock_domain=self.clock_domain,geometry=self.geometry)
 
     def check_route(self, place):
         scene = self.world.scene(self.t, self.pose, self.geometry)

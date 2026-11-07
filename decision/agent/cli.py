@@ -12,16 +12,20 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     p = sub.add_parser('catalog', help='只读查看地点，不读取API凭证')
     p.add_argument('--catalog', default=str(CONFIG_DIR/'floor1.json'))
+    p.add_argument('--map-condition', choices=('complete','simple','none'))
     p = sub.add_parser('status', help='只读检查任务，不自动恢复执行')
     p.add_argument('--session', required=True)
     for name in ('run', 'shadow'):
         p = sub.add_parser(name)
         p.add_argument('--instruction', required=True)
         p.add_argument('--catalog', default=str(CONFIG_DIR/('simulation.json' if name == 'run' else 'floor1.json')))
+        p.add_argument('--map-condition', choices=('complete','simple','none'), help='地图先验条件；当前仅complete支持目标执行')
         p.add_argument('--output', required=True)
         p.add_argument('--actions', help='显式工具动作JSON数组；不读取凭证或调用API，不接收旧计划格式')
         p.add_argument('--max-requests', type=int, default=32)
         p.add_argument('--api-config', default=str(ROOT/'configs/agent_api.local.json'))
+        p.add_argument('--cache-mode',choices=('explicit','implicit'),default='implicit',
+                       help='默认隐式缓存；explicit显式标记稳定前缀，不自动降级或重试')
         p.add_argument('--interactive', action='store_true')
         p.add_argument('--no-memory', action='store_true', help='关闭附加证据记忆，仍保留原任务与有界工具历史')
         if name == 'run':
@@ -37,7 +41,7 @@ def main():
     p.add_argument('--output', required=True)
     args = parser.parse_args()
     if args.command == 'catalog':
-        emit(Catalog.load(args.catalog).value)
+        emit(Catalog.load(args.catalog,condition=args.map_condition).prompt())
     elif args.command == 'status':
         import sqlite3
         db = sqlite3.connect(Path(args.session).resolve().as_uri()+'?mode=ro', uri=True)

@@ -1,0 +1,40 @@
+# Current wheelchair profile, pending motion/protocol verification.
+# Geometry below was confirmed by the user; it is unchanged from the runtime.
+# Fill vehicle identity and remaining evidence before selecting --vehicle-profile.
+format: wheelchair_vehicle_profile
+vehicle_id: null
+verification:
+  source:
+    geometry:
+      confirmation: user_confirmed_current_rectangular_footprint_and_lidar_to_base_transform
+      date: '2026-11-07'
+      statement: '车体的矩形轮廓和雷达到车体的外参当前的版本确定是正确的'
+      reference: configs/wheelchair_geometry_reference.json
+      reference_sha256: f43c11c01e0236abc63a2ef35454aafaf590d70a50203fe33caa746ba02c7679
+  geometry_confirmed: true
+  motion_confirmed: false
+  protocol_confirmed: false
+geometry:
+  # Ordered polygon in base_link XY, metres. X forward, Y left.
+  footprint:
+    - [-0.28, -0.33]
+    - [0.82, -0.33]
+    - [0.82, 0.33]
+    - [-0.28, 0.33]
+  # p_base = base_from_lidar @ p_lidar; translation is not ground clearance.
+  base_from_lidar:
+    - [1.0, 0.0, 0.0, 0.67]
+    - [0.0, 1.0, 0.0, 0.33]
+    - [0.0, 0.0, 1.0, -0.20]
+    - [0.0, 0.0, 0.0, 1.0]
+measured_limits:
+  max_forward_mps: null
+  max_reverse_mps: null
+  max_angular_rps: null
+  max_acceleration_mps2: null
+  max_angular_acceleration_rps2: null
+  minimum_braking_mps2: null
+  minimum_angular_braking_rps2: null
+  maximum_actuator_delay_s: null
+  firmware_watchdog_s: null
+protocol: null  # Confirm af01_12_bf01_32_payload_sum_mode1_3 against this controller.

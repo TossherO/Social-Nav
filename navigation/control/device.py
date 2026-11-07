@@ -151,6 +151,13 @@ class DeviceDwaBatch:
                 torch.zeros_like(occupancy), occupancy,
             )
             clearance = None
+        if dynamic.get('fallback_circles'):
+            # Exceptional stale/missing tracking packet: preserve the exact CPU
+            # contact view. Normal delegated objects require no grid upload.
+            values=np.array(grid.layers['occupancy'],copy=True)
+            occupancy=torch.from_numpy(values).to(layers['occupancy'].device)
+            clearance=None
+            if self.metrics is not None:self.metrics.transfer('h2d',values.nbytes,'dwa_person_fallback_grid')
         self.navigation_occupancy = occupancy
         if (occupancy.dtype != torch.int8 or
                 clearance is not None and clearance.dtype != torch.float32):
@@ -159,7 +166,10 @@ class DeviceDwaBatch:
         parameters = self._parameters(
             controller, grid, model, start, initial, pending, feedback, age, dt, progress
         )
-        if len(prepared[3]) != len(path):
+        rotating = not len(prepared[2])
+        if rotating and not hasattr(self.lib,'sn_dwa_supports_rotation'):
+            raise RuntimeError('Rebuild the DWA CUDA library for rotation references')
+        if not rotating and len(prepared[3]) != len(path):
             raise ValueError(
                 'GPU DWA requires the same nondegenerate reference segments as the CPU adapter'
             )
@@ -175,7 +185,7 @@ class DeviceDwaBatch:
         targets, reference, arc, state, footprint, people, pairs, social = self._upload_inputs([
             ('dwa_targets', choices),
             ('dwa_reference', path),
-            ('dwa_reference_arc', prepared[3]),
+            ('dwa_reference_arc', np.zeros(len(path)) if rotating else prepared[3]),
             ('dwa_state', parameters),
             ('dwa_footprint', controller.geometry.footprint),
             ('dwa_people', people),

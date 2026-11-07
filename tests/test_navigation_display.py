@@ -34,7 +34,6 @@ def navigation_display_fixture():
     raw.layers['ground_z'][:]=np.nan;raw.layers['ground_support'][:]=False
     raw.layers['occupancy'][25,25]=100
     support=NavigationSupport(environment_config())
-    support.ground.settings['ground_min_observations']=1
     derived=support.apply(raw,static,observation=points(raw,[[2.05,2.05,-.3]],[1]))
     return raw,derived,static
 
@@ -128,6 +127,8 @@ class NavigationDisplayTests(unittest.TestCase):
         renderer=NavigationView(self.geometry,self.cfg)
         view=renderer.update(self.row,packet,mono=.1)
         self.assertEqual(view['stamp_s'],10.1)
+        self.assertEqual(view['localization_row']['stamp_s'],10.1)
+        self.assertEqual(view['localization_row']['position'],[2.1,2.,-2.])
         np.testing.assert_allclose(view['pose'],[2.1,2.,0.])
         self.assertEqual(view['history'][0][0],10.1)
         renderer.update(self.row,packet,mono=.2)
@@ -157,8 +158,8 @@ class NavigationDisplayTests(unittest.TestCase):
         second=renderer.update(row,None,grid=ground_grid(-2.,10.1),mono=.1)
         self.assertAlmostEqual(second['z'],-1.97)
         np.testing.assert_allclose([p[2] for p in second['history']],[-.97,-1.97])
-        self.assertTrue(np.allclose(first['footprint'][:,2],-.96))
-        self.assertTrue(np.allclose(second['footprint'][:,2],-1.96))
+        self.assertTrue(np.allclose(first['footprint'][:,2],-.93))
+        self.assertTrue(np.allclose(second['footprint'][:,2],-1.93))
         self.assertEqual(second['raw_history'][1][1][2],-3.)
 
     def test_slope_and_holes_are_sampled_between_sparse_reference_endpoints(self):
@@ -208,6 +209,70 @@ class NavigationDisplayTests(unittest.TestCase):
         self.assertEqual(calls[0]['fields'],['occupancy','ground_z','ground_support'])
         self.assertEqual(calls[0]['consumer'],'optional_ros_display')
         self.assertIs(cache.get(host),host)
+
+
+class FrozenDisplayTests(unittest.TestCase):
+    def test_accepted_goal_marker_keeps_xy_yaw_and_rejects_unknown_height(self):
+        from perception.visualization.interactive import goal_geometry
+        grid=ground_grid(-2.)
+        request=dict(frame_id='odom',goal=[2.,2.,.7])
+        view=goal_geometry(request,grid)
+        np.testing.assert_allclose(view['position'],[2.,2.,-1.9]);self.assertEqual(view['yaw'],.7)
+        self.assertEqual(request['goal'],[2.,2.,.7])
+        self.assertIsNone(goal_geometry(None,grid))
+        self.assertIsNone(goal_geometry(dict(request,frame_id='map'),grid))
+        request['goal']=[2.,2.]
+        self.assertIsNone(goal_geometry(request,grid)['yaw'])
+        grid.layers['ground_support'][:]=False
+        self.assertIsNone(goal_geometry(request,grid))
+
+    def setUp(self):
+        from perception.visualization.interactive import preview_geometry
+        self.project=preview_geometry;self.grid=ground_grid(-2.)
+        self.asset=asset();self.asset.snapshot=ground_grid(-1.)
+        self.asset.snapshot.metadata['frame_id']='map';self.asset.manifest['frame_id']='map'
+        self.settings=dict(path_z_m=.03,height_mode='ground',ground_plane_radius_m=0.)
+        self.preview=dict(as_of=10.,reference=dict(result=dict(frame_id='map',start=[2.,2.,0.],path=[[2.,2.,0.],[4.,2.,0.]])),
+            trajectory=dict(frame_id='odom',points=[[0.,2.,2.,0.],[1.,3.,2.,0.]]))
+
+    def test_mapped_reference_and_local_prediction_use_own_terrain_frames(self):
+        import json
+        original=copy.deepcopy(self.preview)
+        view=self.project(self.preview,self.grid,self.asset,self.settings)
+        ref=view['curves']['reference'];dwa=view['curves']['trajectory']
+        self.assertEqual(ref['frame_id'],'map');self.assertEqual(dwa['frame_id'],'odom')
+        np.testing.assert_allclose(np.asarray(ref['segments'])[:,2],-.97)
+        np.testing.assert_allclose(np.asarray(dwa['segments'])[:,2],-1.95)
+        self.assertEqual(ref['stamp_s'],10.);self.assertEqual(dwa['stamp_s'],10.)
+        self.assertAlmostEqual(view['label_position'][2],1.23)
+        self.assertEqual(self.preview,original)
+        json.dumps(view,allow_nan=False)
+
+    def test_unknown_static_and_local_heights_leave_gaps_without_zero_fill(self):
+        self.asset.snapshot.layers['ground_support'][:,28:31]=False
+        self.grid.layers['ground_support'][:]=False
+        view=self.project(self.preview,self.grid,self.asset,self.settings)
+        ref=view['curves']['reference'];dwa=view['curves']['trajectory']
+        self.assertLess(ref['height_count'],ref['point_count'])
+        segments=np.asarray(ref['segments']).reshape(-1,2,3)
+        self.assertFalse(np.any((segments[:,0,0]<2.8)&(segments[:,1,0]>=3.1)))
+        self.assertLessEqual(ref['prefix'][-1][0],2.8)
+        self.assertEqual(dwa['segments'],[]);self.assertEqual(dwa['prefix'],[])
+        np.testing.assert_allclose(self.grid.layers['ground_z'],-2.)
+
+    def test_failed_reference_anchors_status_in_measured_local_frame(self):
+        self.preview['reference']['result']=dict(reason='association_unavailable')
+        self.preview['trajectory']=None
+        view=self.project(self.preview,self.grid,self.asset,self.settings)
+        self.assertEqual(view['label_frame'],'odom')
+        self.assertEqual(view['curves']['reference']['segments'],[])
+        self.assertAlmostEqual(view['label_position'][2],.23)
+
+    def test_stale_local_height_is_not_used_for_frozen_prediction(self):
+        self.preview['as_of']=11.
+        view=self.project(self.preview,self.grid,self.asset,self.settings)
+        self.assertEqual(view['curves']['trajectory']['segments'],[])
+        self.assertTrue(view['curves']['reference']['segments'])
 
 
 class NavigationMapDisplayTests(unittest.TestCase):

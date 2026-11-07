@@ -35,7 +35,7 @@ struct NearCell {
 };
 struct NearPolicy {
     int height,width; double x,y,resolution,stamp,minimum,maximum,coverage;
-    double settings[10],pose[16],plane[3]; bool has_plane;
+    double settings[10],pose[16],plane[3]; bool has_plane,history_suspended;
 };
 struct Grid {
     int3 lo,dim; double resolution; double bounds[6];
@@ -68,7 +68,7 @@ struct Tree {
     Buffer<NearCell> memory_a,memory_b; Buffer<unsigned> memory_flags;
     Buffer<double> view,ring,hit_bounds; Buffer<int> memory_counts; Buffer<float> distance_rows;
     Buffer<uint8_t> view_transient;Buffer<unsigned> person_columns;
-    bool memory_initialized=false; int memory_height=0,memory_width=0;
+    bool memory_initialized=false,history_suspended=false; int memory_height=0,memory_width=0;
     double memory_x=0,memory_y=0,memory_resolution=0,memory_stamp=0;
     Tree(double r,int d):device(d),resolution(r) { Guard g(d); count_device.reserve(1); }
 };
@@ -244,16 +244,17 @@ __global__ void person_endpoints(const double* xyz,int n,const uint8_t* moving,c
 #include "support.cuh"
 }
 extern "C" {
+int sn_navigation_support_local_heights() { return 1; }
 int sn_navigation_support(const int8_t* raw,const double* seen,const double* prior,
-    const double* previous,double* hits,double* out,uint8_t* allowed,double* floors,const double* points,
+    const double* previous,double* hits,double* out,uint8_t* allowed,const double* points,
     const uint8_t* moving,int count,const double* params,int h,int w,int ph,int pw,int dx,int dy,
     void* stream,int device) {
     try {
         Guard guard(device);SupportPolicy p{};std::copy(params,params+30,p.v);
         p.h=h;p.w=w;p.ph=ph;p.pw=pw;p.dx=dx;p.dy=dy;
         auto s=static_cast<cudaStream_t>(stream);
-        support_cells<<<blocks(h*w),256,0,s>>>(raw,seen,prior,previous,hits,out,allowed,floors,p);
-        if(count)support_hits<<<blocks(count),256,0,s>>>(points,moving,count,floors,hits,p);
+        support_cells<<<blocks(h*w),256,0,s>>>(raw,seen,prior,previous,hits,out,allowed,p);
+        if(count)support_hits<<<blocks(count),256,0,s>>>(points,moving,count,hits,p);
         support_overlay<<<blocks(h*w),256,0,s>>>(raw,allowed,hits,out,p);
         check(cudaGetLastError());return 0;
     } catch(const std::exception& e) { error=e.what();return -1; }
@@ -361,6 +362,9 @@ int sn_occupancy_view_from_layers(void* ptr,const double* raw,const double* floo
     } catch(const std::exception& e) { error=e.what(); return -1; }
 }
 int sn_occupancy_reset_view(void* ptr) { static_cast<Tree*>(ptr)->memory_initialized=false;return 0; }
+int sn_occupancy_suspend_free_history(void* ptr,int suspended) {
+    static_cast<Tree*>(ptr)->history_suspended=suspended!=0;return 0;
+}
 int sn_occupancy_project_device_view(void* ptr,const double* floor,const uint8_t* support,const int32_t* required,
     int height,int width,const double* origin,const double* p,double stamp,const double* endpoints,int n,
     const double* pose,const double* plane,const double* settings,const uint8_t* moving,double* device_out,int* counts,double* ring,

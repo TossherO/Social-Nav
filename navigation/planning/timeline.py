@@ -15,7 +15,7 @@ import tempfile
 REASONS = {
     'candidate': ('已生成DWA候选', '速度与预测轨迹已经生成；仍需独立安全复核，不代表真实执行。'),
     'no_active_goal': ('没有活动目标', '当前控制周期没有活动导航目标，不能计为搜索失败。结合路线状态判断初始化、取消或暂停。'),
-    'start_footprint_not_free': ('参考搜索起点足迹非自由', '车体完整足迹及安全余量未全部落在自由格中，参考搜索受到阻止。此日志未区分未知、占据或图外。'),
+    'start_footprint_not_free': ('参考搜索起点足迹非自由', '车体完整足迹及安全余量未全部落在自由格中，参考搜索受到阻止。具体状态以本周期足迹证据为准；缺失时不推断。'),
     'current_footprint_not_free': ('DWA当前足迹非自由', '当前车体足迹检查未通过，DWA在候选评估前退出。'),
     'waiting_for_background_reference': ('等待后台参考路径', 'DWA没有可用参考。应先看同周期参考原因和最近搜索事件；等待本身不等于搜索已判无路。'),
     'reference_has_no_path': ('参考结果没有可用路径', '后台返回的结果未通过路径检查。旧日志只保存这一汇总原因；搜索内部更具体的拒绝原因可能没有记录。'),
@@ -310,7 +310,8 @@ def attach_planning(data,source):
         if name and name not in maps and (directory/'scenes'/name/'scene.json').exists():
             scene=SceneInputs.load(directory/'scenes'/name)
             if scene.record['input_fingerprint']!=name:raise ValueError('Recorded navigation map changed')
-            grid=scene.geometry;cells=grid.layers.get('navigation_occupancy',grid.layers['occupancy'])
+            from perception.environment.navigation import navigation_geometry
+            grid=scene.geometry;cells=navigation_geometry(scene).layers['occupancy']
             palette=np.array([[200,159,80],[215,221,227],[240,88,72]],np.uint8)
             pixels=palette[np.where(cells==0,1,np.where(cells==100,2,0))]
             stream=io.BytesIO();Image.fromarray(pixels).save(stream,format='PNG')

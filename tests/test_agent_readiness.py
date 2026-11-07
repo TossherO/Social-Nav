@@ -13,7 +13,7 @@ from decision.agent.adapters.shadow import RuntimeShadowNavigation, SavedShadowN
 from decision.agent.tools.observations import ObservationSet
 from decision.agent.core.store import Store
 from decision.agent.core.session import AgentSession
-from tests.test_agent import ScriptedFeedback, action
+from tests.test_agent import ScriptedFeedback, reply, navigate
 
 
 class AgentReadinessTests(unittest.TestCase):
@@ -53,7 +53,7 @@ class AgentReadinessTests(unittest.TestCase):
 
     def test_disconnect_during_cancel_does_not_resend_or_overwrite_user_intent(self):
         tools = self.tools()
-        tools.call('navigate', place_id='elevator')
+        navigate(tools, 'elevator')
         calls = []
         def cancel(handle):
             calls.append(handle)
@@ -75,7 +75,7 @@ class AgentReadinessTests(unittest.TestCase):
             self.nav.state.update(handle=copy.deepcopy(handle),status='running',stopped=False)
             raise TimeoutError('ACK lost')
         self.nav.start=start
-        result=tools.call('navigate',place_id='elevator')
+        result=navigate(tools, 'elevator')
         tools.tick(); tools.tick()
         self.assertEqual(result['status'],'uncertain')
         self.assertEqual(len(calls),1)
@@ -84,7 +84,7 @@ class AgentReadinessTests(unittest.TestCase):
 
     def test_reset_finishes_cancel_without_completing_task(self):
         tools=self.tools()
-        tools.call('navigate',place_id='elevator')
+        navigate(tools, 'elevator')
         self.nav.state['generation']=1
         tools.tick()
         self.assertEqual(tools.state['status'],'stopping')
@@ -95,16 +95,16 @@ class AgentReadinessTests(unittest.TestCase):
 
     def test_answer_survives_tool_history_eviction_and_replace_clears_it(self):
         tools=self.tools()
-        actor=AgentLoop(tools,lambda *_:action('observe_scene'))
+        actor=AgentLoop(tools,lambda *_:reply('observe_scene'))
         try:
             tools.call('ask_user',question='哪个入口？')
             dispatch('answer 玻璃门内侧',actor)
             for _ in range(30):
                 tools.call('get_navigation_state')
-            self.assertEqual(tools.prompt()['clarifications'][0]['answer'],'玻璃门内侧')
+            self.assertEqual(tools.prompt()['current_state']['clarifications'][0]['answer'],'玻璃门内侧')
             self.assertEqual(tools.state['instruction'],'返回本次起点')
             dispatch('replace 改去大厅中央',actor)
-            self.assertEqual(tools.prompt()['clarifications'],[])
+            self.assertEqual(tools.prompt()['current_state']['clarifications'],[])
         finally:
             actor.close()
 

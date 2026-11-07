@@ -20,6 +20,9 @@ class PeopleModel:
         if config.get('prediction_model')!='deterministic':raise ValueError('Unsupported people prediction model')
         self.tracks=[];self.ids=[];self.origin=self.as_of;self.source=None
         self._navigation_grid=None
+        from perception.environment.person_objects import observed_objects
+        self.observed_objects=observed_objects(scene.geometry)
+        self.delegated=set()
         people=scene.record.get('people',{})
         if people.get('status')!='valid':return
         data=people.get('data',{});r=scene.record
@@ -60,6 +63,17 @@ class PeopleModel:
                 self.xy=np.array([t['xy'] for t in self.tracks]);self.known=np.array([t['velocity'] is not None for t in self.tracks])
                 self.velocity=np.array([t['velocity'] if t['velocity'] is not None else [0.,0.] for t in self.tracks])
                 self.radii=np.array([t['radius'] for t in self.tracks])
+                ownership=scene.geometry.metadata.get('person_objects',{})
+                if ownership.get('people_source')==self.source:
+                    by_id={key:i for i,key in enumerate(self.ids)}
+                    for obj in self.observed_objects:
+                        key=tuple(obj['identity']);i=by_id.get(key)
+                        if i is None or not np.allclose(self.xy[i],obj['xy'],rtol=0,atol=1e-8):continue
+                        # Each track is independent. Unknown velocity uses its
+                        # current circle; another person's velocity cannot gate it.
+                        self.radii[i]=max(self.radii[i],obj['radius_m'])
+                        self.tracks[i]['radius']=self.radii[i]
+                        self.delegated.add(key)
             self.group_cache=None
             self.status='valid';self.reason=None
         except (KeyError,ValueError,TypeError) as error:
@@ -97,10 +111,18 @@ class PeopleModel:
         status=raw.metadata.get('dynamic_filter',{})
         report=dict(status='raw_geometry',restored_cells=0,source_scene=scene.record['input_fingerprint'],
             source_layers=scene.record['geometry']['layer_binding'],people_source=self.source)
-        grid=navigation_geometry(scene)
+        grid=navigation_geometry(scene,include_people=False)
         binding=scene.record['geometry']['layer_binding'] if grid is raw else layer_binding(grid)
         if grid is not raw:
             report.update(status='static_prior_fusion',prior_fusion=raw.metadata['navigation_fusion'])
+        if self.observed_objects:
+            from perception.environment.person_objects import circle_view
+            fallback=[obj for obj in self.observed_objects if tuple(obj['identity']) not in self.delegated]
+            grid=circle_view(grid,fallback);binding=layer_binding(grid)
+            report.update(status='tracked_person_objects',delegated_tracks=len(self.delegated),
+                fallback_circles=fallback,scope='background_geometry_and_timed_people')
+            self._navigation_grid=grid,binding,report
+            return self._navigation_grid
         if (self.status=='valid' and self.tracks and self.known.all()
                 and mask is not None and status.get('status')=='valid' and status.get('input_fingerprint')==self.source):
             if mask.dtype!=bool or mask.shape!=raw.layers['occupancy'].shape:

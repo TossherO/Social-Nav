@@ -86,11 +86,12 @@ class PlanarWorld:
 
 def run_case(kind,planning,motion,geometry,*,max_s=75.,progress=False,global_period_s=None,plant_delay_s=.1,plant_acceleration_scale=1.,feedback_noise_m=0.,feedback_noise_rad=0.):
     planning=copy.deepcopy(planning)
-    planning['motion_constraints']={k:motion[k] for k in ('min_turning_radius_m','allow_reverse')}
+    planning['motion_constraints']={k:motion[k] for k in ('min_turning_radius_m','allow_reverse','allow_in_place_rotation')}
     global_period_s=3. if global_period_s is None else global_period_s
     world=PlanarWorld(kind);pose=np.array([2.,2.,0.]);velocity=np.zeros(2);dt=.1
     goal=[8.,6.,np.pi/2] if kind in ('turn','turn_stop') else [8.,2.,0.]
     if kind=='heading':pose=np.array([2.,4.,np.pi/2]);goal=[8.,4.,0.]
+    if kind=='rotation':goal=[2.,2.,np.pi/2]
     if kind=='narrow':pose=np.array([2.,3.,0.]);goal=[5.5,7.,np.pi/2]
     if kind=='infeasible':goal=[4.,2.,np.pi/2];max_s=min(max_s,3.)
     request=dict(request_id=kind,task_id=kind,goal_revision=1,mode='local',frame_id='sim_odom',target_reference='base_link',
@@ -274,7 +275,7 @@ function animate(t){if(playing&&t-last>=100){frame=(frame+1)%D.cases[Number(sele
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--output',required=True)
-    p.add_argument('--case',choices=['straight','turn','dynamic','crossing','follow','faults','heading','narrow','turn_stop','infeasible'],action='append')
+    p.add_argument('--case',choices=['straight','turn','dynamic','crossing','follow','faults','heading','rotation','narrow','turn_stop','infeasible'],action='append')
     p.add_argument('--plant-delay-s',type=float,default=.1)
     p.add_argument('--plant-acceleration-scale',type=float,default=1.)
     p.add_argument('--feedback-noise-m',type=float,default=0.)
@@ -294,7 +295,7 @@ def main():
         if not np.isfinite(args.min_turning_radius_m) or args.min_turning_radius_m<=0:p.error('Turning radius must be positive and finite')
         motion['min_turning_radius_m']=args.min_turning_radius_m
         motion['turning_radius_source']='explicit_simulation_comparison_not_measured'
-    planning['motion_constraints']={k:motion[k] for k in ('min_turning_radius_m','allow_reverse')}
+    planning['motion_constraints']={k:motion[k] for k in ('min_turning_radius_m','allow_reverse','allow_in_place_rotation')}
     results=[];data=dict(scope='simulation_only_no_chassis',planning=planning,motion=motion,controller='dwa',cases=results,run_complete=False)
     for kind in args.case or ['straight','turn','dynamic','faults']:
         r=run_case(kind,planning,motion,geometry,max_s=args.max_s,progress=True,plant_delay_s=args.plant_delay_s,

@@ -7,9 +7,10 @@ import signal
 import threading
 import time
 import numpy as np
-from perception.mapping_localization.runtime import LocalizationSession
+import yaml
 from perception.environment.geometry import interpolate_origins
-from .inputs import bag_observations
+from perception.mapping_localization.runtime import LocalizationSession
+from .inputs import selected_messages,bag_observations
 from .buffers import SharedArrayPool
 from .transport import Connection,frame_wire
 from .metrics import Metrics
@@ -24,6 +25,8 @@ def main():
     p.add_argument('--duration',type=float);p.add_argument('--rate',type=float,default=1.);p.add_argument('--coverage');p.add_argument('--map-output')
     p.add_argument('--with-rgb',action='store_true',help='Read camera input only for explicitly requested display, archive or VLM preparation')
     p.add_argument('--start',type=float,default=0.)
+    p.add_argument('--playback-fd',type=int)
+    p.add_argument('--pause-at',type=float)
     p.add_argument('--origin-gap',type=float,default=.2)
     p.add_argument('--timing-output',help='Optional bounded scalar timing trace; flushed at shutdown')
     args=p.parse_args();wire=Connection(socket.socket(fileno=args.socket_fd));states=Connection(socket.socket(fileno=args.pose_fd))
@@ -38,7 +41,12 @@ def main():
         try:association_channel.send(json.dumps(value,allow_nan=False,separators=(',',':')).encode())
         except BlockingIOError:metrics.event('association_updates_dropped');return
         metrics.trace('association_publish',measurement_stamp_s=value['stamp_s'],association_stamp_s=value['measurement_stamp_s'],valid=value['valid'])
-    session=LocalizationSession(args.config,mode=args.mode,coverage=args.coverage,allow_local_only=True,metrics=metrics,association_ready=association_ready)
+    with open(args.config) as stream:config=yaml.safe_load(stream)
+    session=None;playback=None
+    if args.playback_fd is not None:
+        if args.live:raise ValueError('Live input cannot use bag playback control')
+        from .playback import BagPlayback
+        playback=BagPlayback(socket.socket(fileno=args.playback_fd),rate=args.rate,pause_at=args.pause_at)
     pending={};first=None;anchor=None;count=0;cpu_start=time.process_time();positions=deque(maxlen=64)
     def release():
         ack=wire.recv();key=(ack['slot'],ack['epoch']);ref=pending.pop(key)
@@ -46,14 +54,22 @@ def main():
     try:
         if args.live:
             from .ros_input import messages
-            source=messages(session.config,stop_event=stop,include_rgb=args.with_rgb)
+            source=messages(config,stop_event=stop,include_rgb=args.with_rgb)
         else:source=None
-        iterator=bag_observations(args.bag,session.config,duration=args.duration,start=args.start,messages=source,
-            image_topics=dict(rgb='/camera/color/image_raw',camera_info='/camera/color/camera_info') if args.with_rgb else None)
+        image_topics=dict(rgb='/camera/color/image_raw',camera_info='/camera/color/camera_info') if args.with_rgb else None
+        raw_source=selected_messages(args.bag,config,duration=args.duration,start=args.start,messages=source,image_topics=image_topics)
+        session=LocalizationSession(args.config,mode=args.mode,coverage=args.coverage,
+            allow_local_only=True,metrics=metrics,association_ready=association_ready)
+        iterator=bag_observations(None,config,messages=raw_source,image_topics=image_topics)
         for batch in iterator:
+            if playback is not None:
+                playback.boundary(wire.send,stop)
+                if playback.anchor is not None:anchor=playback.anchor
             if stop.is_set():break
             if first is None:
                 first=batch['end'];anchor=time.monotonic();wire.send(dict(kind='ready'))
+                if playback is not None:
+                    playback.start(first);anchor=playback.anchor
             if args.rate>0:
                 wait=0. if args.live else (batch['end']-first)/args.rate-(time.monotonic()-anchor)
                 if wait>0:time.sleep(wait)
@@ -104,6 +120,8 @@ def main():
                 producer_complete_mono=time.monotonic(),rgb_stamp=batch['rgb_stamp'],rgb_stamp_ns=batch['rgb_stamp_ns'],rgb_frame=batch['rgb_frame'],camera_info=batch['camera_info'],
                 frontend_timing={k:front[k] for k in ('processing_ms','matching_ms','map_update_ms')},frontend_acceleration=acceleration,
                 frontend_valid=front['valid'],backend_valid=None if match is None else match['valid']))
+            if playback is not None:playback.last=batch['end']
+        if playback is not None and not stop.is_set():playback.boundary(wire.send,stop,ended=True)
         while pending:release()
         wire.send(dict(kind='draining'))
         if args.map_output:session.save(args.map_output)
@@ -115,7 +133,8 @@ def main():
     except Exception as error:
         wire.send(dict(kind='error',error=type(error).__name__+': '+str(error)));raise
     finally:
-        session.close()
+        if session is not None:session.close()
+        if playback is not None:playback.close()
         association_channel.close()
         metrics.write_trace()
         for ref in pending.values():pool.release(ref,'gpu')

@@ -12,7 +12,7 @@ from .interaction import Console
 
 def run_simulation(args):
     from ..adapters.simulation import SimulationNavigation
-    catalog = Catalog.load(args.catalog)
+    catalog = Catalog.load(args.catalog,condition=args.map_condition)
     if catalog.value['scope'] != 'simulation':
         raise ValueError('Simulation requires a synthetic catalog; no API request sent')
     out = Path(args.output)

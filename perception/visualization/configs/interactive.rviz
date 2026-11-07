@@ -1,0 +1,116 @@
+Panels:
+  - Class: rviz/Displays
+    Name: Displays
+  - Class: rviz/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Background Color: 38; 42; 48
+    Fixed Frame: map
+    Frame Rate: 20
+  Displays:
+    - Class: rviz/MarkerArray
+      Name: Session instructions and localization status
+      Enabled: true
+      Marker Topic: /social_nav_interactive/session_markers
+      Queue Size: 1
+    - Class: rviz/MarkerArray
+      Name: Accepted goal intent (not execution)
+      Enabled: true
+      Marker Topic: /social_nav_interactive/accepted_goal
+      Queue Size: 1
+    - Class: rviz/PointCloud2
+      Name: Selected static map (terrain height)
+      Enabled: true
+      Topic: /social_nav_interactive/ground_map
+      Style: Squares
+      Size (m): 0.1
+      Color Transformer: RGB8
+      Alpha: 0.35
+    - Class: rviz/Map
+      Name: Selected static map (XY diagnostic)
+      Enabled: false
+      Topic: /social_nav_interactive/map
+      Alpha: 0.5
+      Color Scheme: map
+    - Class: rviz/PointCloud2
+      Name: Current scan
+      Enabled: true
+      Topic: /social_nav_runtime_view/scan
+      Queue Size: 1
+      Style: Points
+      Size (Pixels): 2
+      Color Transformer: AxisColor
+      Axis: Z
+    - Class: rviz/PointCloud2
+      Name: Current navigation map
+      Enabled: true
+      Topic: /social_nav_runtime_view/ground_map
+      Style: Squares
+      Size (m): 0.1
+      Color Transformer: RGB8
+      Alpha: 0.6
+    - Class: rviz/MarkerArray
+      Name: Current reference, DWA and wheelchair
+      Enabled: true
+      Marker Topic: /social_nav_runtime_view/navigation
+      Queue Size: 1
+    - Class: rviz/MarkerArray
+      Name: People
+      Enabled: true
+      Marker Topic: /social_nav_runtime_view/people
+      Queue Size: 1
+    - Class: rviz/MarkerArray
+      Name: Frozen terrain paths (preview only)
+      Enabled: true
+      Marker Topic: /social_nav_interactive/preview_paths
+      Queue Size: 1
+    - Class: rviz/Path
+      Name: Frozen reference (continuous prefix diagnostic)
+      Enabled: false
+      Topic: /social_nav_interactive/preview_reference
+      Color: 245; 245; 245
+      Line Style: Billboards
+      Line Width: 0.06
+    - Class: rviz/Path
+      Name: Frozen DWA (continuous prefix diagnostic)
+      Enabled: false
+      Topic: /social_nav_interactive/preview_trajectory
+      Color: 70; 220; 255
+      Line Style: Billboards
+      Line Width: 0.08
+    - Class: rviz/Marker
+      Name: Frozen planning status
+      Enabled: true
+      Marker Topic: /social_nav_interactive/preview_status
+    - Class: rviz/Image
+      Name: RGB
+      Enabled: true
+      Image Topic: /social_nav_runtime_view/rgb
+      Queue Size: 1
+  Tools:
+    - Class: rviz/MoveCamera
+    - Class: rviz/Interact
+    - Class: social_nav_rviz/GroundInitialPose
+      Topic: /initialpose
+      Ground topic: /social_nav_interactive/ground_map
+      Cell size: 0.1
+    - Class: social_nav_rviz/GroundGoal
+      Topic: /move_base_simple/goal
+      Ground topic: /social_nav_interactive/ground_map
+      Cell size: 0.1
+    - Class: rviz/PublishPoint
+      Topic: /clicked_point
+      Single click: true
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Target Frame: <Fixed Frame>
+      Distance: 18
+      Pitch: 0.85
+      Yaw: 0
+      Focal Point: {X: 4, Y: 10, Z: 0}
+Window Geometry:
+  Width: 1440
+  Height: 960

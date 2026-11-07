@@ -8,6 +8,11 @@ local_replanning:
   enabled: true
   lookahead_m: 2.0
   reuse_free_reference: true
+route_goals:
+  step_m: 0.5
+  max_candidates: 6
+  max_detour_ratio: 1.25
+  max_detour_extra_m: 0.5
 pose_search:
   enabled: true
   cache_heuristic: true

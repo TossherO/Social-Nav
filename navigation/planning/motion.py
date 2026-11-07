@@ -26,11 +26,12 @@ def load_motion_config(path=None):
         for target,key in names.items():cfg.setdefault(target,profile[key])
         cfg['parameter_provenance']=dict(path=str(source),sha256=content_hash(source),source_image=reference['source_image'],
             status=reference['status'],profile=cfg['performance_profile'])
-    if cfg['model']!='differential' or type(cfg['parameters_assumed']) is not bool or type(cfg['allow_reverse']) is not bool:
+    cfg.setdefault('allow_in_place_rotation',False)
+    if cfg['model']!='differential' or any(type(cfg[k]) is not bool for k in ('parameters_assumed','allow_reverse','allow_in_place_rotation')):
         raise ValueError('Explicit differential model and assumption/reverse flags are required')
     if cfg.get('collision_backend','cpu') not in ('cpu','cuda'):raise ValueError('Unknown collision backend')
     for k,v in cfg.items():
-        if k not in ('model','parameters_assumed','allow_reverse','performance_reference','performance_profile','parameter_provenance','collision_backend','collision_library'):
+        if k not in ('model','parameters_assumed','allow_reverse','allow_in_place_rotation','performance_reference','performance_profile','parameter_provenance','collision_backend','collision_library'):
             if not np.isfinite(v) or v<=0:raise ValueError('Invalid motion setting: '+k)
     if cfg['state_window_s']<cfg['state_max_gap_s']:raise ValueError('Invalid state window')
     if cfg['stationary_min_window_s']>cfg['state_window_s']:raise ValueError('Stationary evidence exceeds pose window')

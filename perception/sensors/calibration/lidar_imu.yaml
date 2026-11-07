@@ -1,28 +1,29 @@
-# Fixed-mount D435i: historical joint spatial calibration, current-session clock refit.
+# Fixed-mount D435i: historical spatial calibration, sensor timestamps by default.
 # p_IMU = R_IL p_LiDAR + t_IL, meters; corrected IMU time = header + offset.
 common:
   time_sync_en: false
-  imu_time_offset: -0.04480758383899385
+  imu_time_offset: 0.0
 mapping:
   extrinsic_est_en: false
   extrinsic_R: [0.034422752833998656, -0.9994010775138369, 0.0035440586213223795, -0.1017201488821126, -0.007031286452225755, -0.9947882047562827, 0.9942173230228543, 0.033882846323895016, -0.10190126263330139]
   extrinsic_T: [0.017050145601790967, -0.1402067782050747, -0.0022317593563983065]
 calibration:
-  status: validated_fixed_mount_spatial_and_session_clock_refit
+  status: validated_fixed_mount_spatial_with_unestimated_time_offset
   current_mounting_revalidated: true
   mounting_scope: after_entire_D435i_refixed_2026_10_19
-  time_offset_validity: continuous_driver_20261020_revalidate_after_sensor_restart
+  time_offset_validity: zero_offset_operational_default_not_independently_calibrated
   lidar_frame: rslidar
   imu_frame: camera_imu_optical_frame
   source_record: outputs/perception/calibration/lidar_imu_combined/report.md
   source_artifact: outputs/perception/calibration/lidar_imu_combined/models.json
   spatial_source_record: outputs/perception/calibration/lidar_imu_joint/optimized.json
   camera_prior: perception/sensors/calibration/front_camera_lidar.yaml
-  method: historical_joint_spatial_with_training_only_grouped_time_refit
+  method: historical_joint_spatial_with_native_sensor_timestamps
   comparison_model: camera_joint
-  timing_policy: retimed
-  deployment_clock_group: continuous_driver_20261020
+  timing_policy: sensor_timestamps
+  time_offset_source_record: outputs/perception/time_offset_comparison/report.md
+  deployment_clock_group: null
   translation_policy: retain_camera_chained_prior
   weak_rotation_policy: retain_camera_prior_about_main_turn_axis
   independent_full_6dof_calibration: false
-  validation_scope: two_development_holdouts_gyro_and_complete_FAST_LIO_replays
+  validation_scope: historical_spatial_holdouts_and_short_zero_offset_comparison_not_independent_clock_calibration

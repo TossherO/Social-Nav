@@ -25,7 +25,7 @@ class Metrics:
         self.trace_count = 0
 
     def trace(self, event, **fields):
-        """Optional scalar timestamps only; no disk or device access in producers."""
+        """Optional bounded diagnostic metadata; no disk or device access in producers."""
         if self.trace_path is None:return
         with self.trace_lock:
             self.trace_rows.append(dict(event=event,monotonic_s=time.monotonic(),**fields))

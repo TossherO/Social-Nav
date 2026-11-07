@@ -12,7 +12,7 @@ def load_config(path=None):
     cfg = yaml.safe_load(Path(path or Path(__file__).with_name('configs')/'planning.yaml').read_text())
     from .motion import load_motion_config
     motion=load_motion_config()
-    cfg['motion_constraints']={k:motion[k] for k in ('min_turning_radius_m','allow_reverse')}
+    cfg['motion_constraints']={k:motion[k] for k in ('min_turning_radius_m','allow_reverse','allow_in_place_rotation')}
     cfg.setdefault('conditional_obstacle_cost',60)
     if type(cfg['conditional_obstacle_cost']) is not int or not 1<=cfg['conditional_obstacle_cost']<=180:
         raise ValueError('Conditional obstacle cost must be an integer in [1,180]')
@@ -37,6 +37,12 @@ def load_config(path=None):
     if any(not np.isfinite(pose[k]) or not 0<pose[k]<=1 for k in ('state_resolution_m','local_state_resolution_m')):
         raise ValueError('Invalid search-state resolution')
     local=cfg['local_replanning']
+    route=cfg.get('route_goals')
+    if route is not None:
+        if (type(route['max_candidates']) is not int or not 1<=route['max_candidates']<=8 or
+                any(type(route[k]) not in (int,float) or not np.isfinite(route[k]) or route[k]<=0
+                    for k in ('step_m','max_detour_ratio','max_detour_extra_m'))):
+            raise ValueError('Invalid bounded route-goal selection')
     if (type(local['enabled']) is not bool or type(local['reuse_free_reference']) is not bool or not np.isfinite(local['lookahead_m'])
             or not 0<local['lookahead_m']<=5.):
         raise ValueError('Local replanning needs a finite lookahead in (0,5] metres')

@@ -19,7 +19,7 @@ def people_boxes(row, stamp, identity, frame, settings, *, clock_domain=None):
             (binding.get('session_id'), binding.get('generation'), binding.get('frame_id')) != (*identity, frame)):
         status['reason'] = 'localization_binding_mismatch'
     else:
-        boxes = []
+        boxes = [];track_ids=[]
         for track in row.get('tracks', []):
             box = np.asarray(track['box'], dtype=float)
             observed_age = stamp-float(track['last_observed_stamp_s'])
@@ -27,7 +27,8 @@ def people_boxes(row, stamp, identity, frame, settings, *, clock_domain=None):
                     and 0 <= observed_age <= settings['max_people_age_s'] and box.shape == (8,)
                     and np.isfinite(box).all() and (box[3:6] > 0).all() and box[7] >= settings['min_score']):
                 boxes.append(box)
-        status.update(status='valid', reason=None, selected_tracks=len(boxes))
+                track_ids.append(str(track['track_id']) if 'track_id' in track else None)
+        status.update(status='valid', reason=None, selected_tracks=len(boxes),track_ids=track_ids)
         return np.asarray(boxes).reshape(-1, 8), status
     return np.empty((0, 8)), status
 

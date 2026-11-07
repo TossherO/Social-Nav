@@ -3,8 +3,13 @@ import numpy as np
 
 
 def turning_residual(velocity,motion):
-    """Nonnegative inside the allowed velocity cone; no near-zero-speed spin."""
+    """Curvature restriction for arc-only vehicles; differential spin has none.
+
+    Speed, angular speed and acceleration limits are checked separately. The
+    independent v/w domain also admits continuous bounded transitions to spin.
+    """
     value=np.asarray(velocity,float)
+    if motion.get('allow_in_place_rotation',False):return np.zeros(value.shape[:-1])
     v=abs(value[...,0]) if motion['allow_reverse'] else value[...,0]
     return v/motion['min_turning_radius_m']-abs(value[...,1])
 
@@ -13,7 +18,7 @@ def bound_target(velocity,motion):
     """Reduce a requested turn without inventing forward motion or reversing."""
     value=np.asarray(velocity,float);v,w=value[...,0],value[...,1]
     v=np.clip(v,-motion['max_reverse_mps'] if motion['allow_reverse'] else 0.,motion['max_forward_mps'])
-    limit=np.minimum(motion['max_angular_rps'],abs(v)/motion['min_turning_radius_m'])
+    limit=motion['max_angular_rps'] if motion.get('allow_in_place_rotation',False) else np.minimum(motion['max_angular_rps'],abs(v)/motion['min_turning_radius_m'])
     return np.stack([v,np.clip(w,-limit,limit)],axis=-1)
 
 

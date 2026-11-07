@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>行人点云归属 · 三维动态审查</title>
+<style>
+:root{color-scheme:light;--ink:#193342;--muted:#647684;--accent:#087e8b;--line:#dce4e8}*{box-sizing:border-box}body{margin:0;background:#f0f4f6;color:var(--ink);font:14px/1.5 system-ui,"Noto Sans CJK SC",sans-serif}header{padding:16px 24px 12px;background:white;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:20px}h1{font-size:22px;margin:0 0 3px}p{margin:0}.sub{color:var(--muted);font-size:12px}.badge{background:#e5f4ef;color:#16624f;border-radius:6px;padding:5px 10px;align-self:center;white-space:nowrap}.toolbar{padding:11px 20px;background:#fff;display:flex;gap:9px;align-items:center;flex-wrap:wrap;border-bottom:1px solid var(--line)}button,select,textarea,input{font:inherit}button,select{border:1px solid #cbd7de;background:#fff;border-radius:6px;padding:6px 10px;color:var(--ink)}button{cursor:pointer}button:hover{background:#eaf2f5}button.primary{background:var(--accent);color:white;border-color:var(--accent)}button.active{background:#d7f0ee;border-color:var(--accent)}button:focus-visible,select:focus-visible{outline:3px solid #e2a54c}.spacer{flex:1}main{display:grid;grid-template-columns:minmax(0,1fr) 318px;gap:14px;padding:14px 20px}.viewer{position:relative;height:calc(100vh - 239px);min-height:430px;background:#101e2b;border-radius:9px;overflow:hidden}canvas{display:block;width:100%;height:100%;touch-action:none;cursor:grab}.over{position:absolute;pointer-events:none;color:#d9e6ef;background:#101e2bd9;border:1px solid #ffffff1f;border-radius:6px;padding:7px 10px;font-size:12px}.top{top:12px;left:12px}.bottom{bottom:12px;left:12px;right:12px;display:flex;justify-content:space-between;gap:12px}.legend{right:12px;top:12px;max-width:260px}.legend div{display:flex;gap:7px;align-items:center}.swatch{display:inline-block;width:9px;height:9px;border-radius:50%}.label{position:absolute;color:#fff;background:#132a39dc;padding:1px 5px;border-radius:4px;font-size:12px;pointer-events:none;white-space:nowrap}.labels{position:absolute;inset:0;pointer-events:none}.timeline{background:white;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:10px}.timeline input{width:100%;accent-color:var(--accent)}.timeline .row{display:flex;justify-content:space-between;font-size:12px;color:var(--muted)}aside{display:flex;flex-direction:column;gap:10px;max-height:calc(100vh - 150px);overflow:auto}.card{background:#fff;border:1px solid var(--line);border-radius:8px;padding:12px}.card h2{margin:0 0 9px;font-size:14px}.card .line{display:flex;justify-content:space-between;gap:8px;margin:4px 0}.card img{display:block;width:100%;border-radius:5px;background:#e7edf1}.control{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}.control input[type=range]{width:95px;accent-color:var(--accent)}label{cursor:pointer}textarea{display:block;width:100%;height:64px;border:1px solid #cbd7de;border-radius:5px;padding:7px;resize:vertical;margin:8px 0}.hint{color:var(--muted);font-size:12px}.warning{color:#9c6010}.stats{font-variant-numeric:tabular-nums}#point{overflow-wrap:anywhere}#error{display:none;position:absolute;inset:20px;color:white;background:#243645;padding:20px;z-index:10}#assessment{width:100%}footer{font-size:12px;color:var(--muted);padding:0 22px 12px}.person-list{display:flex;gap:5px;flex-wrap:wrap}.person-list button{font-size:12px;padding:4px 7px}details summary{cursor:pointer;color:var(--muted)}@media(max-width:950px){main{grid-template-columns:1fr;padding:10px}.viewer{height:60vh;min-height:380px}aside{max-height:none;display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.toolbar{padding:8px}header{padding:12px}.legend{max-width:190px}.sub{max-width:630px}}@media(max-width:560px){aside{display:flex}.badge{display:none}.bottom{font-size:10px}.legend{font-size:10px}}
+</style>
+<header><div><h1>行人点云归属 · 三维动态审查</h1><p class="sub">2026-10-29-15-59-09.bag · 两段连续实测输入 · 当前算法重新分点，旧掩码来自原记录</p></div><span class="badge">离线可用 · 全部捕获点</span></header>
+<div class="toolbar">
+ <select id="clip" aria-label="选择片段"></select>
+ <button id="prev" title="上一帧（←）">←</button><button id="play" class="primary">播放</button><button id="next" title="下一帧（→）">→</button>
+ <select id="speed" aria-label="播放速度"><option value="0.25">0.25×</option><option value="0.5" selected>0.5×</option><option value="1">1×</option><option value="2">2×</option></select>
+ <select id="mode" aria-label="点云显示方式"><option value="current">当前人物归属</option><option value="difference">新旧归属差异</option><option value="old">原算法掩码</option><option value="raw">原始输入点云</option><option value="background">去除人物后</option></select>
+ <span class="spacer"></span><button id="oblique">斜视</button><button id="top">俯视</button><button id="front">平视</button><button id="reset">重置视角</button>
+</div>
+<main><section>
+ <div class="viewer" id="viewer"><canvas id="canvas" aria-label="可旋转三维点云"></canvas><div class="labels" id="labels"></div>
+  <div class="over top"><b id="time"></b><br><span id="frameInfo"></span></div><div class="over legend" id="legend"></div>
+  <div class="over bottom"><span>左键拖动旋转 · 右键 / Shift拖动平移 · 滚轮缩放<br>Shift单击选点 · 空格播放 · ← →逐帧</span><span id="viewInfo"></span></div>
+  <div id="error"></div>
+ </div>
+ <div class="timeline"><input type="range" id="seek" min="0" value="0" aria-label="帧时间轴"><div class="row"><span id="rangeStart"></span><span id="playState">逐帧查看，不插值、不跨片段跳播</span><span id="rangeEnd"></span></div></div>
+</section><aside>
+ <div class="card"><h2>相机画面 · 辨认场景</h2><img id="rgb" alt="该点云时刻之前最近的相机画面"><p id="rgbTime" class="hint"></p></div>
+ <div class="card"><h2>检查对象</h2><div class="control"><select id="person" aria-label="选择人物"><option value="0">全部人物</option></select><button id="focus">靠近所选人物</button></div><div class="person-list" id="personList"></div>
+  <div class="control"><label><input id="follow" type="checkbox">跟随所选人物</label><label><input id="roi" type="checkbox">只看人物附近</label></div>
+  <div class="control"><label><input id="boxes" type="checkbox" checked>检测框</label><label><input id="circles" type="checkbox" checked>当前导航圆</label><label><input id="amber" type="checkbox" checked>框内未归属点</label></div>
+  <div class="control"><label><input id="background" type="checkbox" checked>环境点</label><label><input id="grid" type="checkbox" checked>米制网格</label></div>
+  <div class="control">点大小<input id="size" type="range" min="1" max="7" value="3" step=".5">环境亮度<input id="brightness" type="range" min=".12" max=".8" value=".38" step=".02"></div>
+  <p class="hint">人物编号仅用于本页，随原跟踪身份保持一致。橙点可能是背景或漏分点，需人工判断。白色十字为雷达位置，短线指向雷达 +X。</p>
+ </div>
+ <div class="card stats"><h2>本帧证据</h2><div id="stats"></div><p id="status" class="hint"></p><div id="point" class="hint">Shift单击点云可查看原始点编号及归属。</div></div>
+ <div class="card"><h2>记录审查意见</h2><select id="assessment" aria-label="本帧评价"><option value="unreviewed">未审查</option><option value="reasonable">基本合理</option><option value="missed_person">疑似漏分人物</option><option value="removed_background">疑似误分背景</option><option value="missing_detection">疑似人物检测或确认缺失</option><option value="uncertain">难以判断</option></select>
+  <textarea id="comment" placeholder="例如：P3腿部灰点疑似漏分；圈内门框被染成人物颜色。"></textarea><button id="export" class="primary">导出审查意见 JSON</button><p id="saved" class="hint"></p>
+ </div>
+</aside></main>
+<footer><details><summary>数据来源与检查范围</summary><p>这里展示的是已捕获的环境建图输入点，不是雷达全部原始回波。本页未额外降采样；新旧分类使用同一批点。当前结果重新调用正式人物点归属函数，没有重跑检测、跟踪或地图历史。两个片段之间约37秒未捕获，不做补帧。画面和点簇用于人工审查，没有逐点真值；去除人物后的背景点也不代表导航空闲格。网格仅辅助判断方位，缺少跟踪地面时采用雷达下方0.85米的显示平面，不向分点算法提供地面证据。</p><p id="provenance"></p></details></footer>
+<script id="review-data" type="application/json">/*__DATA__*/</script>
+<script>
+'use strict';
+const DATA=JSON.parse(document.getElementById('review-data').textContent),$=id=>document.getElementById(id);
+const palette=['#38d9bb','#fc83b4','#79acff','#f4cd60','#c9a0ff','#ff9969','#84d77d','#62d4ec'];
+const color=pid=>palette[(pid-1)%palette.length],rgb=hex=>[1,3,5].map(i=>parseInt(hex.slice(i,i+2),16)/255);
+const decoded=new Map();let index=0,playing=false,timer=null,chosenPoint=null,selected=0,followPosition=null;
+let camera={target:[0,0,0],yaw:-1.05,elevation:.68,distance:15},matrix=null,rendered=[],drawCount=0;
+const storeKey='social-nav-person-review:'+DATA.fingerprint;let notes={},storage=true;
+try{notes=JSON.parse(localStorage.getItem(storeKey)||'{}')}catch(e){storage=false}
+function typed(text,Type){const b=Uint8Array.from(atob(text),c=>c.charCodeAt(0));return new Type(b.buffer)}
+function frame(){const f=DATA.frames[index];if(!decoded.has(index))decoded.set(index,{xyz:typed(f.xyz,Float32Array),owner:typed(f.owner,Uint16Array),old:typed(f.old,Uint8Array),inside:typed(f.inside,Uint8Array)});return {...f,...decoded.get(index)}}
+function track(){return frame().tracks.find(t=>t.pid===selected)}
+function floor(x,y,f=frame()){return f.plane?f.plane[0]*x+f.plane[1]*y+f.plane[2]:f.sensor[2]-.85}
+const sub=(a,b)=>a.map((v,i)=>v-b[i]),add=(a,b)=>a.map((v,i)=>v+b[i]),scale=(a,s)=>a.map(v=>v*s),dot=(a,b)=>a.reduce((v,x,i)=>v+x*b[i],0);
+const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]],norm=a=>scale(a,1/(Math.hypot(...a)||1));
+function matrices(aspect){const c=camera,eye=add(c.target,scale([Math.cos(c.elevation)*Math.cos(c.yaw),Math.cos(c.elevation)*Math.sin(c.yaw),Math.sin(c.elevation)],c.distance));
+ const forward=norm(sub(c.target,eye)),right=norm(cross(forward,[0,0,1])),up=cross(right,forward);
+ const v=[right[0],up[0],-forward[0],0,right[1],up[1],-forward[1],0,right[2],up[2],-forward[2],0,-dot(right,eye),-dot(up,eye),dot(forward,eye),1];
+ const k=1/Math.tan(Math.PI/8),near=.03,far=250,p=[k/aspect,0,0,0,0,k,0,0,0,0,(far+near)/(near-far),-1,0,0,2*far*near/(near-far),0],out=new Float32Array(16);
+ for(let col=0;col<4;col++)for(let row=0;row<4;row++)for(let j=0;j<4;j++)out[col*4+row]+=p[j*4+row]*v[col*4+j];
+ return {matrix:out,right,up};}
+const canvas=$('canvas');let gl,program,pos,colorAttribute,mvp,pointSize,roundPoint,buffer;
+function initGL(){gl=canvas.getContext('webgl',{antialias:true,preserveDrawingBuffer:true});if(!gl)throw Error('浏览器未启用WebGL。请使用开启硬件加速的Chrome、Edge或Firefox重新打开。');
+ const shader=(type,source)=>{const s=gl.createShader(type);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));return s};
+ program=gl.createProgram();gl.attachShader(program,shader(gl.VERTEX_SHADER,'attribute vec3 a; attribute vec3 c; uniform mat4 m; uniform float size; varying vec3 v; void main(){gl_Position=m*vec4(a,1.0);gl_PointSize=size;v=c;}'));
+ gl.attachShader(program,shader(gl.FRAGMENT_SHADER,'precision mediump float; varying vec3 v; uniform bool roundPoint; void main(){if(roundPoint && distance(gl_PointCoord,vec2(.5))>.5)discard;gl_FragColor=vec4(v,1.0);}'));
+ gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));gl.useProgram(program);
+ pos=gl.getAttribLocation(program,'a');colorAttribute=gl.getAttribLocation(program,'c');mvp=gl.getUniformLocation(program,'m');pointSize=gl.getUniformLocation(program,'size');roundPoint=gl.getUniformLocation(program,'roundPoint');buffer=gl.createBuffer();gl.enable(gl.DEPTH_TEST);gl.clearColor(.045,.085,.13,1);}
+function draw(values,mode,size){if(!values.length)return;gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(values),gl.DYNAMIC_DRAW);gl.enableVertexAttribArray(pos);gl.enableVertexAttribArray(colorAttribute);gl.vertexAttribPointer(pos,3,gl.FLOAT,false,24,0);gl.vertexAttribPointer(colorAttribute,3,gl.FLOAT,false,24,12);gl.uniform1f(pointSize,size);gl.uniform1i(roundPoint,mode===gl.POINTS);gl.drawArrays(mode,0,values.length/6)}
+function project(p){if(!matrix)return null;const q=[...p,1],r=[0,0,0,0];for(let i=0;i<4;i++)for(let j=0;j<4;j++)r[i]+=matrix[j*4+i]*q[j];if(r[3]<=0||Math.abs(r[2]/r[3])>1)return null;return [(r[0]/r[3]+1)*canvas.clientWidth/2,(1-r[1]/r[3])*canvas.clientHeight/2,r[2]/r[3]]}
+function render(){if(!gl)return;const f=frame(),mode=$('mode').value,dpr=Math.min(window.devicePixelRatio||1,2),w=Math.round(canvas.clientWidth*dpr),h=Math.round(canvas.clientHeight*dpr);
+ if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h}gl.viewport(0,0,w,h);matrix=matrices(w/h).matrix;gl.uniformMatrix4fv(mvp,false,matrix);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+ const vertices=[],lines=[],b=+$('brightness').value,person=track(),near=person?[person]:f.tracks;rendered=[];
+ for(let i=0;i<f.count;i++){const p=Array.from(f.xyz.subarray(i*3,i*3+3)),id=f.owner[i],old=!!f.old[i],owned=id>0;
+  if($('roi').checked&&!near.some(t=>Math.hypot(p[0]-t.box[0],p[1]-t.box[1])<1.5&&Math.abs(p[2]-t.box[2])<2))continue;
+  if(mode==='background'&&owned)continue;if(!$('background').checked&&!(mode==='old'?old:owned))continue;
+  let c=[b*.75,b*.91,b];if(mode==='current'&&owned)c=rgb(color(id));
+  else if(mode==='difference'){if(old&&owned)c=rgb('#38d9bb');else if(owned)c=rgb('#8ede62');else if(old)c=rgb('#fc83b4')}
+  else if(mode==='old'&&old)c=rgb('#c9a0ff');
+  if(mode==='current'&&!owned&&f.inside[i]&&$('amber').checked)c=rgb('#ffad50');
+  if(selected&&id&&id!==selected)c=scale(c,.35);
+  vertices.push(...p,...c);rendered.push(i);
+ }
+ const line=(a,b,c)=>lines.push(...a,...c,...b,...c),ground=floor(camera.target[0],camera.target[1]);
+ if($('grid').checked){const x=Math.floor(camera.target[0]),y=Math.floor(camera.target[1]);for(let k=-12;k<=12;k++){line([x+k,y-12,ground],[x+k,y+12,ground],[.14,.22,.28]);line([x-12,y+k,ground],[x+12,y+k,ground],[.14,.22,.28])}}
+ for(const t of f.tracks){const box=t.box,c=rgb(color(t.pid));if(selected&&t.pid!==selected&&$('roi').checked)continue;
+  if($('boxes').checked){const corners=[];for(let z of [-1,1])for(let y of [-1,1])for(let x of [-1,1]){const X=x*box[3]/2,Y=y*box[4]/2;corners.push([box[0]+Math.cos(box[6])*X-Math.sin(box[6])*Y,box[1]+Math.sin(box[6])*X+Math.cos(box[6])*Y,box[2]+z*box[5]/2])}for(let i=0;i<8;i++)for(const bit of [1,2,4])if((i^bit)>i)line(corners[i],corners[i^bit],c)}
+  if($('circles').checked&&t.radius_m){const z=floor(box[0],box[1])+0.025;for(let i=0;i<64;i++){const a=i*Math.PI/32,b=(i+1)*Math.PI/32;line([box[0]+Math.cos(a)*t.radius_m,box[1]+Math.sin(a)*t.radius_m,z],[box[0]+Math.cos(b)*t.radius_m,box[1]+Math.sin(b)*t.radius_m,z],c)}}
+ }
+ const s=f.sensor;line(add(s,[-.18,0,0]),add(s,[.18,0,0]),[1,1,1]);line(add(s,[0,-.18,0]),add(s,[0,.18,0]),[1,1,1]);line(s,add(s,scale(f.forward,.8)),[1,1,1]);
+ draw(lines,gl.LINES,1);draw(vertices,gl.POINTS,+$('size').value*dpr);
+ if(chosenPoint!==null)draw([...f.xyz.subarray(chosenPoint*3,chosenPoint*3+3),1,1,1],gl.POINTS,11*dpr);
+ $('labels').replaceChildren();for(const t of f.tracks){const p=project([t.box[0],t.box[1],t.box[2]+t.box[5]/2+.13]);if(!p||p[0]<0||p[1]<0||p[0]>canvas.clientWidth||p[1]>canvas.clientHeight)continue;
+  const el=document.createElement('span');el.className='label';el.textContent=`P${t.pid} · ${t.points}点${t.radius_m?' · r '+t.radius_m.toFixed(2):''}`;el.style.left=p[0]+'px';el.style.top=p[1]+'px';el.style.borderLeft='3px solid '+color(t.pid);$('labels').append(el)}
+ $('viewInfo').textContent=`显示 ${rendered.length.toLocaleString()} / ${f.count.toLocaleString()} 点 · 网格1m`;drawCount++;
+}
+function legend(){const items=$('mode').value==='difference'?[['#38d9bb','新旧共同归属'],['#8ede62','仅当前归属'],['#fc83b4','仅原算法归属'],['#607b8c','两者均未归属']]:$('mode').value==='old'?[['#c9a0ff','原记录人物掩码'],['#607b8c','未归属点']]:$('mode').value==='current'?[['#38d9bb','人物点：按身份着色'],['#ffad50','框内未归属：待人工判断'],['#607b8c','保留环境点']]:[['#607b8c',$('mode').value==='raw'?'全部输入点':'当前未归属点']];$('legend').innerHTML=items.map(([c,t])=>`<div><i class="swatch" style="background:${c}"></i>${t}</div>`).join('')}
+function reset(){const f=frame(),tracks=f.tracks,near=tracks.filter(t=>Math.hypot(t.box[0]-f.sensor[0],t.box[1]-f.sensor[1])<9);camera.target=near.length?[near.reduce((s,t)=>s+t.box[0],0)/(near.length+1)+f.sensor[0]/(near.length+1),near.reduce((s,t)=>s+t.box[1],0)/(near.length+1)+f.sensor[1]/(near.length+1),floor(f.sensor[0],f.sensor[1])+.7]:[f.sensor[0],f.sensor[1],floor(f.sensor[0],f.sensor[1])+.7];camera.distance=14;camera.yaw=-1.05;camera.elevation=.68;render()}
+function focus(){const t=track();if(!t){reset();return}camera.target=t.box.slice(0,3);camera.distance=4.5;followPosition=t.box.slice(0,3);render()}
+function showPoint(){const f=frame();if(chosenPoint===null){$('point').textContent='Shift单击点云可查看原始点编号及归属。';return}const p=Array.from(f.xyz.subarray(3*chosenPoint,3*chosenPoint+3));$('point').textContent=`点 #${chosenPoint} · [${p.map(x=>x.toFixed(3)).join(', ')}] m · 当前 ${f.owner[chosenPoint]?'P'+f.owner[chosenPoint]:'未归属'} · 原算法 ${f.old[chosenPoint]?'人物':'未归属'}`}
+function saveNote(){const f=frame(),value=$('assessment').value,comment=$('comment').value;notes[f.id]={frame_id:f.id,stamp_s:f.stamp_s,offset_s:f.t,selected_person:selected||null,point_index:chosenPoint,assessment:value,comment,camera:JSON.parse(JSON.stringify(camera))};try{localStorage.setItem(storeKey,JSON.stringify(notes))}catch(e){storage=false}noteStatus()}
+function noteStatus(){const count=Object.values(notes).filter(n=>n.assessment!=='unreviewed'||n.comment).length;$('saved').textContent=`已记录 ${count} 帧。${storage?'本浏览器自动保存；完成后请导出。':'浏览器存储不可用，请及时导出。'}`}
+function changeFrame(i){index=Math.max(0,Math.min(DATA.frames.length-1,i));chosenPoint=null;const f=frame(),clip=DATA.clips[f.clip];$('clip').value=f.clip;$('seek').min=clip.start;$('seek').max=clip.end;$('seek').value=index;$('time').textContent=f.t.toFixed(2)+' s';$('frameInfo').textContent=`本段第 ${index-clip.start+1} / ${clip.end-clip.start+1} 帧 · 约5Hz`;$('rangeStart').textContent=clip.start_s.toFixed(2)+' s';$('rangeEnd').textContent=clip.end_s.toFixed(2)+' s';
+ if(f.rgb){$('rgb').src='data:image/jpeg;base64,'+f.rgb.image;$('rgb').hidden=false;$('rgbTime').textContent=`相机早于点云 ${(f.rgb.age_s*1000).toFixed(0)} ms · 仅辅助理解场景`}else{$('rgb').hidden=true;$('rgbTime').textContent='无匹配相机画面'}
+ $('stats').innerHTML=[['有效人物框',f.tracks.length],['当前归属点',f.counts.current],['原算法归属点',f.counts.previous],['当前新增 / 不再归属',`${f.counts.added} / ${f.counts.removed}`]].map(([a,b])=>`<div class="line"><span>${a}</span><b>${b}</b></div>`).join('');
+ $('status').textContent=f.tracks.length?`高度依据：${f.plane?'已跟踪局部地面':'检测框高度范围'}。框仅用于候选范围，不等于框内都是人。`:'本帧没有通过有效性检查的人物框，当前没有人物点移交。';
+ $('personList').replaceChildren();for(const t of f.tracks){const b=document.createElement('button');b.textContent=`P${t.pid} · ${t.points}点`;b.style.borderColor=color(t.pid);b.onclick=()=>{selected=t.pid;$('person').value=selected;focus()};$('personList').append(b)}
+ const t=track();if(selected&&!t)$('status').textContent+=` P${selected}本帧不在有效框中，未外推其位置。`;if($('follow').checked&&t){if(followPosition)camera.target=add(camera.target,sub(t.box.slice(0,3),followPosition));followPosition=t.box.slice(0,3)}else followPosition=null;
+ const note=notes[f.id]||{};$('assessment').value=note.assessment||'unreviewed';$('comment').value=note.comment||'';showPoint();noteStatus();legend();render();}
+function pause(){playing=false;clearTimeout(timer);$('play').textContent='播放';$('playState').textContent='逐帧查看，不插值、不跨片段跳播'}
+function schedule(){if(!playing)return;const f=frame(),clip=DATA.clips[f.clip];if(index>=clip.end){pause();$('playState').textContent='本段播放完毕，可切换片段或回到开头';return}timer=setTimeout(()=>{changeFrame(index+1);schedule()},(DATA.frames[index+1].t-f.t)*1000/+$('speed').value)}
+function toggle(){if(playing){pause();return}const c=DATA.clips[frame().clip];if(index===c.end)changeFrame(c.start);playing=true;$('play').textContent='暂停';$('playState').textContent='按原采样间隔播放，视角可继续旋转';schedule()}
+let drag=null;canvas.addEventListener('pointerdown',e=>{canvas.setPointerCapture(e.pointerId);drag={x:e.clientX,y:e.clientY,total:0,pan:e.button===2||e.shiftKey,pick:e.shiftKey};canvas.style.cursor='grabbing'});
+canvas.addEventListener('pointermove',e=>{if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;drag.total+=Math.abs(dx)+Math.abs(dy);if(drag.pan){const axes=matrices(canvas.clientWidth/canvas.clientHeight),s=camera.distance/canvas.clientHeight*.83;camera.target=add(camera.target,add(scale(axes.right,-dx*s),scale(axes.up,dy*s)))}else{camera.yaw-=dx*.007;camera.elevation=Math.max(-1.45,Math.min(1.54,camera.elevation+dy*.006))}drag.x=e.clientX;drag.y=e.clientY;render()});
+canvas.addEventListener('pointerup',e=>{if(drag&&drag.pick&&drag.total<5){const r=canvas.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top,f=frame();let best=100;chosenPoint=null;for(const i of rendered){const p=project(f.xyz.subarray(i*3,i*3+3));if(!p)continue;const d=(p[0]-x)**2+(p[1]-y)**2;if(d<best){best=d;chosenPoint=i}}showPoint();render()}drag=null;canvas.style.cursor='grab'});
+canvas.addEventListener('pointercancel',()=>{drag=null;canvas.style.cursor='grab'});canvas.addEventListener('contextmenu',e=>e.preventDefault());
+canvas.addEventListener('wheel',e=>{e.preventDefault();camera.distance=Math.max(.35,Math.min(100,camera.distance*Math.exp(e.deltaY*.001)));render()},{passive:false});
+for(let i=0;i<DATA.clips.length;i++){const c=DATA.clips[i],o=document.createElement('option');o.value=i;o.textContent=`片段${i+1} · ${c.start_s.toFixed(2)}–${c.end_s.toFixed(2)} s${i===0?' · 启动多人':' · 后续行人及门口'}`;$('clip').append(o)}
+const ids=[...new Set(DATA.frames.flatMap(f=>f.tracks.map(t=>t.pid)))].sort((a,b)=>a-b);for(const id of ids){const o=document.createElement('option');o.value=id;o.textContent='P'+id;$('person').append(o)}
+$('clip').onchange=()=>{pause();changeFrame(DATA.clips[+$('clip').value].start);reset()};$('play').onclick=toggle;
+$('prev').onclick=()=>{pause();changeFrame(Math.max(DATA.clips[frame().clip].start,index-1))};$('next').onclick=()=>{pause();changeFrame(Math.min(DATA.clips[frame().clip].end,index+1))};$('seek').oninput=()=>{pause();changeFrame(+$('seek').value)};
+$('speed').onchange=()=>{clearTimeout(timer);schedule()};$('mode').onchange=()=>{legend();render()};$('reset').onclick=reset;$('focus').onclick=focus;
+$('person').onchange=()=>{selected=+$('person').value;followPosition=null;focus()};$('follow').onchange=()=>{const t=track();followPosition=t?t.box.slice(0,3):null};
+$('top').onclick=()=>{camera.elevation=1.54;render()};$('front').onclick=()=>{camera.elevation=.04;render()};$('oblique').onclick=()=>{camera.elevation=.68;render()};
+for(const id of ['boxes','circles','amber','background','grid','roi','size','brightness'])$(id).oninput=render;
+$('assessment').onchange=saveNote;$('comment').oninput=saveNote;
+$('export').onclick=()=>{const reviews=Object.values(notes).filter(n=>n.assessment!=='unreviewed'||n.comment);const content={schema:'person_point_review',source_fingerprint:DATA.fingerprint,source:DATA.source,scope:'human review comments, not point-level ground truth',reviews};const url=URL.createObjectURL(new Blob([JSON.stringify(content,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='person_segmentation_review_answers.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),2000)};
+document.addEventListener('keydown',e=>{if(['INPUT','SELECT','TEXTAREA'].includes(document.activeElement.tagName))return;if(e.code==='Space'){e.preventDefault();toggle()}else if(e.code==='ArrowLeft')$('prev').click();else if(e.code==='ArrowRight')$('next').click()});
+window.addEventListener('resize',render);document.addEventListener('visibilitychange',()=>{if(document.hidden)pause()});
+$('provenance').textContent=`来源指纹 ${DATA.fingerprint.slice(0,16)} · ${DATA.frames.length} 帧 · ${DATA.frames.reduce((s,f)=>s+f.count,0).toLocaleString()} 点 · 导出意见保留帧、人物与点编号。`;
+try{initGL();changeFrame(0);reset();window.personReview={getState:()=>({index,playing,drawCount,displayed:rendered.length,camera:JSON.parse(JSON.stringify(camera)),webglError:gl.getError()}),projectPoint:i=>project(frame().xyz.subarray(i*3,i*3+3))};document.body.dataset.ready='true'}catch(e){$('error').style.display='block';$('error').textContent=e.message;document.body.dataset.ready='error';console.error(e)}
+</script></html>

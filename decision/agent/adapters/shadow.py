@@ -48,6 +48,24 @@ class SavedShadowNavigation:
     def observe(self):
         return self.current
 
+    def spatial_inputs(self):
+        from perception.environment.scene import SceneInputs
+        from perception.environment.storage import StaticEnvironmentMap
+        from navigation.planning.footprint import VehicleGeometry
+        r = self.current.record
+        origin = mapped_origin(self.catalog, r)
+        if (r['localization_status'] != 'valid' or origin['origin_pose'] is None or
+                origin['origin_frame_id'] != self.catalog.value['frame_id']):
+            raise ValueError('Current observation is not localized in the annotated map')
+        if self._asset is None:
+            self._asset = StaticEnvironmentMap(ROOT/self.catalog.value['map_asset'])
+        scene = SceneInputs.load(ROOT/self.current.record['source']['scene'])
+        if scene.record['input_fingerprint'] != self.current.record['scene_binding']:
+            raise ValueError('Saved scene changed after observation binding')
+        return dict(global_grid=self._asset.snapshot,scene=scene,pose=r['map_base_pose'],local_pose=r['base_pose'],
+                    stamp_s=r['stamp_s'],clock_domain=r['clock_domain'],
+                    geometry=VehicleGeometry.historical(ROOT/'configs/wheelchair_geometry_reference.json'))
+
     def check_route(self, place):
         from perception.environment.scene import SceneInputs
         from perception.environment.storage import StaticEnvironmentMap
@@ -56,11 +74,11 @@ class SavedShadowNavigation:
         from navigation.planning.planner import Planner
         from navigation.planning.footprint import VehicleGeometry
         from navigation.planning.motion import load_motion_config
-        if self._asset is None:
+        if self._planner is None:
             self._asset = StaticEnvironmentMap(ROOT/self.catalog.value['map_asset'])
             cfg = planning_config(load_config())
             motion = load_motion_config()
-            cfg['motion_constraints'] = {k: motion[k] for k in ('min_turning_radius_m', 'allow_reverse')}
+            cfg['motion_constraints'] = {k: motion[k] for k in ('min_turning_radius_m', 'allow_reverse', 'allow_in_place_rotation')}
             geom = VehicleGeometry.historical(ROOT/'configs/wheelchair_geometry_reference.json')
             self._planner = Planner(cfg, geom, require_actual_start=True)
         path = ROOT/self.current.record['source']['scene']
@@ -68,7 +86,7 @@ class SavedShadowNavigation:
         if scene.record['input_fingerprint'] != self.current.record['scene_binding']:
             raise ValueError('Saved geometry changed after Agent observation binding')
         request = dict(request_id='agent-shadow-preflight', task_id='agent-shadow-preflight', goal_revision=1,
-                       mode='mapped', frame_id='map', target_reference='base_link', goal=place['pose'], goal_behavior='stop',
+                       mode='mapped', frame_id=self.catalog.value['frame_id'], target_reference='base_link', goal=place['pose'], goal_behavior='stop',
                        map_snapshot_id=self._asset.manifest['snapshot_id'])
         result = self._planner.query(request, scene=scene, asset=self._asset, now=self.current.record['stamp_s'], clock_domain=self.clock_domain)
         return dict(status=result['status'], reason=result['reason'], reference_found=result['status'] == 'path_found',
@@ -102,6 +120,25 @@ class RuntimeShadowNavigation:
         self.connected = True
         self.t = 0.
         self.first_stamp = self.value['control']['stamp_s']
+        self._asset = None
+
+    def spatial_inputs(self):
+        from perception.environment.storage import StaticEnvironmentMap
+        from navigation.planning.footprint import VehicleGeometry
+        if self._asset is None:
+            self._asset = StaticEnvironmentMap(ROOT/self.catalog.value['map_asset'])
+        record = self.value.get('observation') or {}
+        state = self.snapshot()
+        origin = mapped_origin(self.catalog, record)
+        current = (not state['input_stale'] and state['localization_status']=='valid' and
+                   origin['origin_pose'] is not None and origin['origin_frame_id']==self.catalog.value['frame_id'] and
+                   record.get('local_identity')==[state.get(k) for k in ('session_id','generation','frame_id')] and
+                   record.get('clock_domain')==self.clock_domain and
+                   record.get('map_binding')==state.get('map_binding') and
+                   0 <= state['stamp_s']-record.get('stamp_s',-float('inf')) <= 3.)
+        return dict(global_grid=self._asset.snapshot,scene=None,pose=record.get('map_base_pose') if current else None,
+                    stamp_s=record.get('stamp_s') if current else None,clock_domain=self.clock_domain,
+                    geometry=VehicleGeometry.historical(ROOT/'configs/wheelchair_geometry_reference.json'))
 
     def snapshot(self):
         p = self.value['control']
@@ -163,7 +200,7 @@ class RuntimeShadowNavigation:
 
     def start(self, place, handle):
         request = dict(request_id=handle['call_id'], task_id=handle['task_id'], goal_revision=handle['goal_revision'],
-                       mode='mapped', frame_id='map', target_reference='base_link', goal=place['pose'], goal_behavior='stop',
+                       mode='mapped', frame_id=self.catalog.value['frame_id'], target_reference='base_link', goal=place['pose'], goal_behavior='stop',
                        map_snapshot_id=self.catalog.value['map_snapshot_id'])
         self.handle, self.request, self.cancel_requested = copy.deepcopy(handle), request, False
         ack = self.client.exchange('goal', request)

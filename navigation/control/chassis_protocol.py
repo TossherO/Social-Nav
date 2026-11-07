@@ -28,6 +28,13 @@ def encode_command(linear_mps,angular_rps,*,mode,velocity_limit_mm_s=1500,error=
         if type(value) not in (int,float) or not math.isfinite(value):raise ValueError('Velocity must be finite')
         if not -32.768<=value<=32.767:raise ValueError('Velocity overflows the signed wire field')
         velocities.append(int(value*1000.))
+    return encode_command_units(*velocities,mode=mode,velocity_limit_mm_s=velocity_limit_mm_s,error=error,led=led)
+
+
+def encode_command_units(linear_mm_s,angular_mrad_s,*,mode,velocity_limit_mm_s=1500,error=0,led=0):
+    """Encode the exact integer target already checked by independent safety."""
+    velocities=[_integer(linear_mm_s,-32768,32767,'linear velocity'),
+                _integer(angular_mrad_s,-32768,32767,'angular velocity')]
     mode=_integer(mode,0,255,'raw mode byte')
     limit=_integer(velocity_limit_mm_s,0,32767,'velocity limit')
     error=_integer(error,0,255,'error byte');led=_integer(led,0,255,'LED byte')

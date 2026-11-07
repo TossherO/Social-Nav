@@ -9,6 +9,37 @@ from runtime.metrics import Metrics
 
 class DeviceBoundaryTests(unittest.TestCase):
 
+    def test_unmatched_person_circle_is_preserved_in_gpu_fallback(self):
+        import torch
+        if not torch.cuda.is_available():self.skipTest('CUDA unavailable')
+        from tests.test_person_objects import object_scene
+        from tests.test_navigation_prediction import track
+        from tests.test_navigation_dwa import DwaTests
+        from perception.environment.scene import assemble_scene,people_observation
+        from perception.environment.device import DeviceGridSnapshot
+        from navigation.control.device import DeviceDwaBatch
+        from navigation.control.dwa import DwaController
+        from navigation.planning.planner import Planner
+        from navigation.planning.continuity import reference_envelope
+        fixture=DwaTests();fixture.setUp();current=object_scene([track(4,4)])
+        data=people_observation(current);data['input_fingerprint']='different-source'
+        current=assemble_scene(current.geometry,clock_domain='synthetic',settings=load_config()['scene'],people=data)
+        result=Planner(fixture.cfg,fixture.geometry).query(fixture.req,scene=current,now=10.,clock_domain='synthetic')
+        reference=reference_envelope(result,fixture.req,current,None)
+        metrics=Metrics();batch=DeviceDwaBatch(metrics=metrics)
+        batch.bind(DeviceGridSnapshot.seal(current.geometry.metadata,
+            {k:torch.tensor(v,device='cuda') for k,v in current.geometry.layers.items()}))
+        cpu=DwaController(fixture.cfg,fixture.motion,fixture.geometry)
+        motion=dict(fixture.motion,collision_backend='cuda',collision_library=str(Path(__file__).resolve().parents[1]/'outputs/runtime/build/planning/libsocial_nav_collision_cuda.so'))
+        gpu=DwaController(fixture.cfg,motion,fixture.geometry,device_batch=batch)
+        a=cpu.command(fixture.req,current,fixture.feedback,reference,now=10.,clock_domain='synthetic')
+        b=gpu.command(fixture.req,current,fixture.feedback,reference,now=10.,clock_domain='synthetic')
+        self.assertEqual(a['status'],'candidate',a);self.assertEqual(b['status'],a['status'],b)
+        np.testing.assert_allclose(a['velocity'],b['velocity'],atol=1e-10)
+        self.assertEqual(batch.navigation_occupancy[40,40].item(),100)
+        self.assertEqual(current.geometry.layers['occupancy'][40,40],0)
+        self.assertGreater(metrics.summary()['transfer_bytes']['h2d:dwa_person_fallback_grid'],0)
+
     def test_runtime_environment_library_uses_the_fixed_integer_height_projection(self):
         import torch
         if not torch.cuda.is_available(): self.skipTest('CUDA unavailable')
@@ -37,7 +68,6 @@ class DeviceBoundaryTests(unittest.TestCase):
         fixture=DwaTests();fixture.setUp();prior=prior_asset()
         cells=np.zeros((60,60),np.int8);cells[18:23,18:23]=-1
         config=load_config();fusion=NavigationSupport(config);device_fusion=NavigationSupport(config)
-        fusion.ground.settings['ground_min_observations']=device_fusion.ground.settings['ground_min_observations']=1
         raw=observation(cells);fused=fusion.apply(raw,prior,observation=points(raw));current=scene(fused)
         original=DeviceGridSnapshot.seal(raw.metadata,{k:torch.tensor(v,device='cuda') for k,v in raw.layers.items()})
         derived=device_fusion.apply(original,prior,observation=points(raw))

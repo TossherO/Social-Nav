@@ -18,7 +18,6 @@ def points(raw,xyz=(),moving=()):
 class SupportTests(unittest.TestCase):
     def setUp(self):
         self.config=load_config();self.support=NavigationSupport(self.config);self.prior=prior_asset()
-        self.support.ground.settings['ground_min_observations']=1
 
     def raw(self,stamp=10.):return observation(np.full((60,60),-1,np.int8),stamp=stamp)
 
@@ -82,6 +81,23 @@ class SupportTests(unittest.TestCase):
         self.apply(self.raw(10.2),[[2.05,2.05,-.3]],[0]);self.support.reset()
         self.assertEqual(self.apply(self.raw(10.3)).layers['navigation_occupancy'][20,20],0)
 
+    def test_optional_trace_records_confirmation_and_reset_without_changing_maps(self):
+        from runtime.metrics import Metrics
+        import json
+        traced=NavigationSupport(self.config)
+        metrics=Metrics(trace_path='unused_trace_path_no_write')
+        for stamp,valid in ((10.,True),(10.2,True),(10.4,False)):
+            raw=self.raw(stamp);raw.metadata['association']['valid']=valid
+            expected=self.support.apply(raw,self.prior,observation=points(raw))
+            actual=traced.apply(raw,self.prior,observation=points(raw),metrics=metrics)
+            self.assertEqual(actual.metadata,expected.metadata)
+            self.assertEqual(actual.layers.keys(),expected.layers.keys())
+            for key in actual.layers:np.testing.assert_equal(actual.layers[key],expected.layers[key])
+        rows=list(metrics.trace_rows);json.dumps(rows,allow_nan=False)
+        self.assertEqual(len(rows),3);self.assertEqual(rows[0]['measurement_stamp_s'],10.)
+        self.assertEqual(rows[0]['diagnostics']['floor_source'],'selected_static_map')
+        self.assertEqual(rows[-1]['diagnostics']['reset_reason'],'association_unavailable')
+
 
 class SupportCudaTests(unittest.TestCase):
     def test_native_integer_columns_and_ordinary_hit_survive_later_person(self):
@@ -120,7 +136,6 @@ class SupportCudaTests(unittest.TestCase):
         prior.snapshot.layers['occupancy'][25:27,30:33]=-1
         for angles in ((0,0,0),(.02,-.015,.31)):
             host=NavigationSupport(config);gpu=NavigationSupport(config)
-            host.ground.settings['ground_min_observations']=gpu.ground.settings['ground_min_observations']=1
             transform=np.eye(4);transform[:3,:3]=Rotation.from_euler('xyz',angles).as_matrix()
             stream=torch.cuda.Stream()
             for j in range(6):

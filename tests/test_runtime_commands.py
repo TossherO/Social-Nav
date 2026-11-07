@@ -13,6 +13,7 @@ class RuntimeCommandTests(unittest.TestCase):
     def test_external_intent_cannot_be_overwritten_by_recorded_route(self):
         sent=[];inbox=object.__new__(CommandInbox)
         inbox.lock=threading.Lock();inbox.pending=deque();inbox.route_preempted=False
+        inbox.session=None
         inbox.safety=SimpleNamespace(command=lambda *v:sent.append(v))
         cancel=dict(task_id='route',goal_revision=1)
         self.assertTrue(inbox.route_command('cancel',cancel))

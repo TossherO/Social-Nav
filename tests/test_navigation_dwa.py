@@ -12,7 +12,7 @@ from navigation.planning.continuity import reference_envelope
 from navigation.planning.footprint import VehicleGeometry
 from navigation.planning.reference import ReferenceRuntime
 from tests.test_navigation_planning import bundle,request
-from tests.test_navigation_runtime import FakeWorker,scene_at
+from tests.navigation_fixtures import FakeWorker,scene_at
 
 
 class DwaTests(unittest.TestCase):
@@ -49,6 +49,19 @@ class DwaTests(unittest.TestCase):
         self.assertEqual(packet['proposal']['status'],'candidate',packet)
         self.assertGreater(packet['proposal']['velocity'][0],0.)
         self.assertLessEqual(packet['proposal']['velocity'][0],self.motion['max_acceleration_mps2']*.05+1e-9)
+
+    def test_trial_profile_can_start_and_obeys_its_lower_speed_and_acceleration(self):
+        motion=load_motion_config('navigation/planning/configs/motion_trial.yaml')
+        controller=DwaController(self.cfg,motion,self.geometry)
+        for speed in (0.,.095):
+            result=controller.command(self.req,self.scene,dict(self.feedback,velocity=[speed,0.]),
+                                      self.reference,now=10.,clock_domain='synthetic')
+            self.assertEqual(result['status'],'candidate',result)
+            self.assertGreater(result['velocity'][0],0.)
+            self.assertLessEqual(result['velocity'][0],motion['max_forward_mps'])
+            self.assertLessEqual(result['velocity'][0],speed+motion['max_acceleration_mps2']*.1+1e-9)
+            self.assertLessEqual(abs(result['velocity'][1]),motion['max_angular_rps'])
+            self.assertFalse(result['executable'])
 
     def test_new_thin_wall_forces_deceleration_and_never_uses_reference_as_free_space(self):
         cells=np.zeros((60,60),np.int8);cells[:,29]=100;current=bundle(cells)

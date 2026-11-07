@@ -49,6 +49,10 @@ class RuntimeDisplay:
         from nav_msgs.msg import Path,OccupancyGrid
         from visualization_msgs.msg import MarkerArray
         self.rospy=rospy;rospy.init_node('social_nav_runtime_display',disable_signals=True)
+        self.map_tf=None
+        if asset is not None:
+            from tf2_msgs.msg import TFMessage
+            self.map_tf=rospy.Publisher('/tf',TFMessage,queue_size=4)
         self.Image,self.Path,self.OccupancyGrid=Image,Path,OccupancyGrid
         self.publishers={name:rospy.Publisher('/social_nav_runtime_view/'+name,kind,queue_size=1,latch=name in ('path','occupancy'))
             for name,kind in [('scan',PointCloud2),('ground_map',PointCloud2),('rgb',Image),('path',Path),('lidar_path',Path),('reference',Path),('trajectory',Path),('navigation',MarkerArray),('occupancy',OccupancyGrid),('raw_occupancy',OccupancyGrid),('people',MarkerArray)]}
@@ -94,6 +98,23 @@ class RuntimeDisplay:
         message.header.frame_id=frame;message.header.stamp=self.rospy.Time.from_sec(stamp)
         return message
 
+    def _publish_map_transform(self,row):
+        if getattr(self,'map_tf',None) is None or row['health']!=0 or not row.get('has_map_pose'):return
+        from geometry_msgs.msg import TransformStamped
+        from tf2_msgs.msg import TFMessage
+        from perception.mapping_localization.context import pose_matrix
+        from perception.mapping_localization.runtime import quaternion
+        pose=pose_matrix(row['position'],row['quaternion_xyzw'])
+        transform=pose_matrix(row['map_position'],row['map_quaternion_xyzw'])@np.linalg.inv(pose)
+        message=self._header(TransformStamped(),row['map_frame'],row['stamp_s'])
+        message.child_frame_id=row['frame_id']
+        message.transform.translation.x,message.transform.translation.y,message.transform.translation.z=map(float,transform[:3,3])
+        q=quaternion(transform[:3,:3])
+        message.transform.rotation.x,message.transform.rotation.y,message.transform.rotation.z,message.transform.rotation.w=map(float,q)
+        # Use the same measured pose as this display, including newer control poses.
+        # This never creates an association or changes a measurement timestamp.
+        self.map_tf.publish(TFMessage(transforms=[message]))
+
     def _publish(self,group,item):
         if group=='scan':
             from .scans import pointcloud_message
@@ -101,6 +122,7 @@ class RuntimeDisplay:
             points,row=item;valid=row['health']==0
             if valid:
                 pose=pose_matrix(row['position'],row['quaternion_xyzw']);points=points@pose[:3,:3].T+pose[:3,3]
+                self._publish_map_transform(row)
             else:points=np.empty((0,3))
             frame=row['frame_id']
             self.publishers['scan'].publish(pointcloud_message(points,frame,row['stamp_s']))
@@ -135,6 +157,7 @@ class RuntimeDisplay:
         from geometry_msgs.msg import PoseStamped,Point
         from visualization_msgs.msg import Marker,MarkerArray
         from .surface import line_segments
+        self._publish_map_transform(view['localization_row'])
         frame,stamp=view['frame_id'],view['stamp_s']
         for name in ('path','lidar_path','reference','trajectory'):
             if self.publishers[name].get_num_connections()==0:continue
@@ -161,7 +184,7 @@ class RuntimeDisplay:
             self.publishers[name].publish(path)
         if self.publishers['navigation'].get_num_connections()==0:
             self.last_view=view;return
-        markers=MarkerArray();clear=Marker();clear.action=Marker.DELETEALL;markers.markers.append(clear)
+        markers=MarkerArray();clear=self._header(Marker(),frame,stamp);clear.action=Marker.DELETEALL;markers.markers.append(clear)
         def marker(kind,number,color):
             m=self._header(Marker(),frame,stamp);m.ns='navigation';m.id=number;m.type=kind;m.action=Marker.ADD
             m.pose.orientation.w=1.;m.color.r,m.color.g,m.color.b,m.color.a=color;markers.markers.append(m);return m
@@ -169,13 +192,16 @@ class RuntimeDisplay:
             data=None if name=='history' else view.get(name)
             points=np.array([[p[0],p[1],height] for _,p,height in view['history']]) if name=='history' else (
                 np.empty((0,3)) if data is None else np.c_[data['display_poses'][:,:2],data['heights']])
+            segments=line_segments(points)
+            if not len(segments):continue
             line=marker(Marker.LINE_LIST,number,color);line.ns=name;line.scale.x=width
             if data is not None:line.header.stamp=self.rospy.Time.from_sec(data['stamp_s'])
-            line.points=[Point(*map(float,p)) for p in line_segments(points)]
+            line.points=[Point(*map(float,p)) for p in segments]
         pose=view['pose']
-        if pose is not None:
+        body_segments=line_segments(view['footprint']) if pose is not None else []
+        if len(body_segments):
             body=marker(Marker.LINE_LIST,0,(1.,.63,.16,1.));body.ns='vehicle';body.scale.x=.04
-            body.points=[Point(*map(float,p)) for p in line_segments(view['footprint'])]
+            body.points=[Point(*map(float,p)) for p in body_segments]
         if pose is not None and np.isfinite(view['heading']).all():
             arrow=marker(Marker.ARROW,1,(1.,.63,.16,1.));arrow.ns='vehicle';arrow.scale.x=.09;arrow.scale.y=.16;arrow.scale.z=.2
             arrow.points=[Point(*map(float,p)) for p in view['heading']]

@@ -4,12 +4,15 @@ model: differential
 parameters_assumed: true
 collision_backend: cpu
 collision_library: outputs/navigation/build/libsocial_nav_collision_cuda.so
-# User-selected wheel_nav:v1 TEB radius; still an assumed hardware limit.
+# User-selected wheel_nav:v1 radius for moving search arcs. With spin enabled,
+# this is not a hard curvature constraint on differential velocity commands.
 min_turning_radius_m: 1.05
 performance_reference: configs/wheelchair_motion_reference.json
 performance_profile: teb
 # Reverse capability confirmed by the user; numeric speed/braking limits remain assumed.
 allow_reverse: true
+# In-place rotation confirmed by the user; angular limits remain assumed.
+allow_in_place_rotation: true
 reverse_tolerance_mps: 0.005
 max_initial_lateral_mps: 0.08
 max_initial_profile_ratio: 2.0

@@ -23,7 +23,7 @@ from perception.environment.scene import assemble_scene
 from runtime.agent_state import AgentState
 from runtime.command import CommandInbox
 from tests.test_environment_consumers import snapshot
-from tests.test_agent import ScriptedFeedback, action
+from tests.test_agent import ScriptedFeedback, reply, navigate, action
 
 
 class ObservationLoopTests(unittest.TestCase):
@@ -153,23 +153,23 @@ class ObservationLoopTests(unittest.TestCase):
 
     def test_one_loop_observes_then_uses_real_image_to_ask_user(self):
         received = []
-        def work(payload, observation):
+        def work(payload, observation, spatial_view=None):
             received.append((payload, observation))
-            return action('observe_scene') if observation is None else action('ask_user', question='请确认入口。')
+            return reply('observe_scene') if observation is None else reply('ask_user', question='请确认入口。')
         actor = self.run_two_actions(work)
         try:
             self.assertEqual(actor.requests, 2)
             self.assertEqual(self.tools.state['status'], 'needs_clarification')
             self.assertIsNone(received[0][1])
             self.assertEqual(received[1][1].image, self.observation.image)
-            self.assertEqual(received[1][0]['history'][-1]['value']['call']['tool'], 'observe_scene')
+            self.assertEqual(received[1][0]['messages'][-2]['tool_calls'][0]['function']['name'], 'observe_scene')
             self.assertEqual(self.tools.memory.snapshot()[0]['semantic']['kind'], 'historical_model_tool_choice')
         finally:
             actor.close()
 
     def test_user_cancel_does_not_wait_for_model_or_apply_late_tool(self):
         gate = threading.Event()
-        actor = AgentLoop(self.tools, lambda *_: (gate.wait(1), action('navigate', place_id='elevator'))[1])
+        actor = AgentLoop(self.tools, lambda *_: (gate.wait(1), reply('navigate', goal_id='elevator', pose=[5,4,0], view_id='not_applied', orientation_source='autonomous'))[1])
         try:
             actor.tick()
             actor.event('cancel')
@@ -204,8 +204,8 @@ class ObservationLoopTests(unittest.TestCase):
 
     def test_waiting_for_observation_does_not_poll_the_model(self):
         from perception.environment.context import fingerprint
-        def work(payload, observation):
-            return action('observe_scene') if observation is None else action('wait_for_event', event='observation')
+        def work(payload, observation, spatial_view=None):
+            return reply('observe_scene') if observation is None else reply('wait_for_event', event='observation')
         actor = self.run_two_actions(work)
         try:
             self.assertEqual(self.tools.state['status'], 'waiting_observation')
@@ -237,7 +237,7 @@ class ObservationLoopTests(unittest.TestCase):
 
     def test_idle_map_change_prevents_model_request(self):
         self.nav.state['map_binding'] = dict(valid=False)
-        actor = AgentLoop(self.tools, lambda *_: action('observe_scene'))
+        actor = AgentLoop(self.tools, lambda *_: reply('observe_scene'))
         try:
             actor.tick()
             self.assertEqual(actor.requests, 0)
@@ -259,7 +259,7 @@ class ObservationLoopTests(unittest.TestCase):
 
     def test_run_console_can_cancel_while_model_is_pending(self):
         gate = threading.Event()
-        actor = AgentLoop(self.tools, lambda *_: (gate.wait(2), action('navigate', place_id='elevator'))[1])
+        actor = AgentLoop(self.tools, lambda *_: (gate.wait(2), reply('navigate', goal_id='elevator', pose=[5,4,0], view_id='not_applied', orientation_source='autonomous'))[1])
         def poll(actor, emit):
             if actor.model.busy:
                 actor.event('cancel')
@@ -278,7 +278,7 @@ class ObservationLoopTests(unittest.TestCase):
 
     def test_run_wall_budget_invalidates_pending_work_without_retry(self):
         gate = threading.Event()
-        actor = AgentLoop(self.tools, lambda *_: (gate.wait(2), action('navigate', place_id='elevator'))[1])
+        actor = AgentLoop(self.tools, lambda *_: (gate.wait(2), reply('navigate', goal_id='elevator', pose=[5,4,0], view_id='not_applied', orientation_source='autonomous'))[1])
         try:
             state = actor.run(timeout_s=.03)
             self.assertEqual(actor.exit_reason, 'wall_time_limit')
@@ -293,14 +293,14 @@ class ObservationLoopTests(unittest.TestCase):
             actor.close()
 
     def test_run_error_cancels_and_confirms_an_active_navigation(self):
-        self.tools.call('navigate', place_id='elevator')
+        navigate(self.tools, 'elevator')
         original_tick = self.nav.tick
         def tick():
             if self.nav.state['status'] == 'stopping':
                 self.nav.stopped()
             return original_tick()
         self.nav.tick = tick
-        actor = AgentLoop(self.tools, lambda *_: action('wait_for_event', event='navigation'))
+        actor = AgentLoop(self.tools, lambda *_: reply('wait_for_event', event='navigation'))
         def fail(actor):
             raise RuntimeError('explicit driver failure')
         try:
@@ -317,7 +317,7 @@ class ObservationLoopTests(unittest.TestCase):
 
     def test_run_simulation_limit_is_supplied_by_driver(self):
         self.nav.t = 50.
-        actor = AgentLoop(self.tools, lambda *_: action('wait_for_event', event='observation'))
+        actor = AgentLoop(self.tools, lambda *_: reply('wait_for_event', event='observation'))
         try:
             actor.run(driver=SimulationDriver(self.nav, max_s=.3, fast=True), timeout_s=1.)
             self.assertEqual(actor.exit_reason, 'simulation_time_limit')
@@ -326,7 +326,7 @@ class ObservationLoopTests(unittest.TestCase):
             actor.close()
 
     def test_shutdown_retains_unconfirmed_cancel_without_resending(self):
-        self.tools.call('navigate', place_id='elevator')
+        navigate(self.tools, 'elevator')
         calls = []
         cancel = self.nav.cancel
         def tracked_cancel(handle):
@@ -335,7 +335,7 @@ class ObservationLoopTests(unittest.TestCase):
         self.nav.cancel = tracked_cancel
         self.tools.event('cancel')
         self.nav.tick = lambda: (_ for _ in ()).throw(ConnectionError('offline'))
-        actor = AgentLoop(self.tools, lambda *_: action('observe_scene'))
+        actor = AgentLoop(self.tools, lambda *_: reply('observe_scene'))
         try:
             actor.stop(timeout_s=.01)
             self.assertEqual(len(calls), 1)
@@ -360,10 +360,10 @@ class ObservationLoopTests(unittest.TestCase):
         def read(sequence):
             reads.append(sequence)
             return fresh
-        def work(payload, observation):
+        def work(payload, observation, spatial_view=None):
             calls.append(self.nav.current.record['observation_id'])
-            return (action('wait_for_event', event='observation') if len(calls) == 1 else
-                    action('ask_user', question='已读取下一观察。'))
+            return (reply('wait_for_event', event='observation') if len(calls) == 1 else
+                    reply('ask_user', question='已读取下一观察。'))
         actor = AgentLoop(self.tools, work)
         def inspect(actor):
             if actor.requests == 1:
@@ -378,7 +378,7 @@ class ObservationLoopTests(unittest.TestCase):
             actor.close()
 
     def test_saved_input_exhaustion_does_not_reissue_model_request(self):
-        actor = AgentLoop(self.tools, lambda *_: action('wait_for_event', event='observation'))
+        actor = AgentLoop(self.tools, lambda *_: reply('wait_for_event', event='observation'))
         try:
             driver = SavedObservationDriver(self.nav, SimpleNamespace(), [1])
             state = actor.run(driver=driver, timeout_s=1.)

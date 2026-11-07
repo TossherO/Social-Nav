@@ -8,7 +8,7 @@ from navigation.planning.motion import load_motion_config
 from navigation.planning.footprint import VehicleGeometry
 from navigation.planning.reference import ReferenceRuntime,load_config as reference_config
 from navigation.planning.online import PlanningBridge,goal_request
-from tests.test_navigation_runtime import FakeWorker,scene_at
+from tests.navigation_fixtures import FakeWorker,scene_at
 from tests.test_navigation_planning import request
 
 

@@ -1,0 +1,8 @@
+<library path="lib/libsocial_nav_rviz_tools">
+  <class name="social_nav_rviz/GroundGoal" type="social_nav_rviz::GroundGoalTool" base_class_type="rviz::Tool">
+    <description>Select XY on supported map terrain, then drag to set goal heading.</description>
+  </class>
+  <class name="social_nav_rviz/GroundInitialPose" type="social_nav_rviz::GroundInitialPoseTool" base_class_type="rviz::Tool">
+    <description>Select the LiDAR XY on supported terrain, then drag to set initial heading.</description>
+  </class>
+</library>

@@ -84,4 +84,6 @@ class StaticEnvironmentMap:
         return dict(entity_type='map',map_type='static_environment_map',
             snapshot_id=self.manifest['snapshot_id'], frame_id=self.manifest['frame_id'],
             geometry_status=self.snapshot.metadata['geometry_status'],
+            ground_estimator=self.snapshot.metadata.get('ground_estimator'),
+            free_recovery_policy=self.snapshot.metadata.get('dynamic_filter', {}).get('geometric_free_recovery_policy'),
             time_scope=self.manifest['time_scope'], source=self.manifest['source'])

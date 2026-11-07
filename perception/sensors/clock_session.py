@@ -79,7 +79,7 @@ def time_calibration_report(config, *, bag=None, group=None, session_file=None, 
                 origin = 'source_run'
     matched = None if selected is None or calibrated is None else selected == calibrated
     issues = []
-    if matched is None:
+    if matched is None and offset != 0.:
         issues.append('Sensor clock session applicability is unconfirmed; no driver continuity is inferred.')
     if 'imu_time_offset' not in common:
         issues.append('No IMU time offset is configured; the input reader uses its zero default.')
@@ -90,6 +90,7 @@ def time_calibration_report(config, *, bag=None, group=None, session_file=None, 
         source_path = Path(source_file).expanduser().resolve()
         source = dict(path=str(source_path), sha256=hashlib.sha256(source_path.read_bytes()).hexdigest())
     return dict(offset_s=offset, offset_configured='imu_time_offset' in common, heuristic_sync_requested=heuristic,
+                offset_policy='sensor_timestamps' if offset == 0. else 'configured_offset',
                 calibration_clock_group=calibrated, input_clock_group=selected,
                 input_clock_group_source=origin, input_bag_fingerprint=fingerprint,
                 session_record=None if session is None else dict(path=str(path.resolve()),

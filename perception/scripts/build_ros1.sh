@@ -8,8 +8,9 @@ case "$PROFILE" in
   mapping) PACKAGES='social_nav_localization;social_nav_people;fast_lio;roll';;
   environment) PACKAGES='social_nav_localization;social_nav_people;social_nav_environment;fast_lio;roll';;
   sensors) PACKAGES='wheelchair_sensors;rslidar_sdk;realsense2_camera;realsense2_description';;
+  visualization) PACKAGES='social_nav_rviz';;
   all) PACKAGES='';;
-  *) echo 'Usage: build_ros1.sh interfaces|mapping|environment|sensors|all'; exit 2;;
+  *) echo 'Usage: build_ros1.sh interfaces|mapping|environment|sensors|visualization|all'; exit 2;;
 esac
 # An explicit system toolchain also avoids accidentally linking Conda libstdc++/Python.
 unset PYTHONPATH CMAKE_PREFIX_PATH LD_LIBRARY_PATH

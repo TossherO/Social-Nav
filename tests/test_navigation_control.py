@@ -106,6 +106,8 @@ class ControlTests(unittest.TestCase):
         with self.assertRaises(ValueError):LocalSafety(self.geometry,self.motion,.05)
 
     def test_safety_independently_rejects_spin_and_near_spin_proposals(self):
+        self.motion['allow_in_place_rotation']=False
+        self.guard=LocalSafety(self.geometry,self.motion,.05,simulation=True)
         for v in (0.,.001):
             r=self.gate(self.proposal([v,.2]))
             self.assertEqual(r['reason'],'turning_radius_violation')

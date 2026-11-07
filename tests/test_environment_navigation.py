@@ -44,7 +44,6 @@ class NavigationConsumerTests(unittest.TestCase):
     def setUp(self):
         from perception.environment.support import NavigationSupport
         self.support = NavigationSupport(load_config())
-        self.support.ground.settings['ground_min_observations'] = 1
         self.prior = prior_asset()
 
     def apply(self, raw, prior):
@@ -150,7 +149,7 @@ class NavigationConsumerTests(unittest.TestCase):
         from navigation.planning.reference import ReferenceRuntime
         from navigation.control.dwa import DwaController
         from navigation.safety.guard import LocalSafety
-        from tests.test_navigation_runtime import FakeWorker
+        from tests.navigation_fixtures import FakeWorker
         cfg = planning_config(); cfg['algorithm'] = 'hybrid_astar'
         cfg['local_replanning']['enabled'] = False
         motion = load_motion_config()

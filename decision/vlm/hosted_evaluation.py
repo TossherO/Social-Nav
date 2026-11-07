@@ -46,7 +46,7 @@ def transport_schema(task,schema,mode):
             if isinstance(value,list):return [remove_unique(v) for v in value]
             return value
         return remove_unique(schema)
-    # Like Agent's tool envelope, use a flat object on the wire. Cross-field
+    # Use a flat object for this explicit schema comparison. Cross-field
     # constraints are still checked against the original oneOf after receipt.
     branches=schema['oneOf'];properties={}
     for branch in branches:

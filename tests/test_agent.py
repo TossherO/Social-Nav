@@ -6,16 +6,46 @@ import tempfile
 import unittest
 import httpx
 import jsonschema
+import numpy as np
 from decision.agent import ROOT
 from decision.agent.tools.places import Catalog
 from decision.agent.core.model import ApiError, Model
 from decision.agent.core.store import Budget, Store
 from decision.agent.core.session import AgentSession
-from decision.agent.tools.framework import validate_call
+from decision.agent.tools.framework import Reply, validate_call
 
 
 def action(tool, **arguments):
     return dict(tool=tool, arguments=arguments)
+
+
+def reply(tool, **arguments):
+    return Reply.fixture(action(tool,**arguments))
+
+
+def point_goal(target):
+    return dict(goal_id=target,kind='point',target_id=target,description='Synthetic task requirement: '+target)
+
+
+def query_map(session):
+    """Explicit synthetic map input, unrelated to any real navigation result."""
+    from perception.environment.layers import GridSnapshot
+    if not hasattr(session.navigation,'spatial_inputs'):
+        session.navigation.spatial_inputs=lambda:dict(global_grid=GridSnapshot(
+            dict(frame_id=session.catalog.value['frame_id'],shape=[100,140],resolution=.1,origin_xy=[0.,0.],snapshot_id='unit-static'),
+            dict(occupancy=np.zeros((100,140),np.int8))),scene=None,
+            stamp_s=session.navigation.snapshot()['stamp_s'],clock_domain=session.navigation.clock_domain)
+    session.call('query_map')
+    return session.spatial_view.record['view_id']
+
+
+def navigate(session, target):
+    """Explicit unit-fixture decisions using the production continuous-pose API."""
+    if not session.task_goals.goals:
+        session.call('record_task',goals=[point_goal(target)])
+    query_map(session)
+    return session.call('navigate',goal_id=target,pose=session.catalog.places[target]['pose'],
+                        view_id=session.spatial_view.record['view_id'],orientation_source='autonomous')
 
 
 class ScriptedFeedback:
@@ -26,7 +56,7 @@ class ScriptedFeedback:
         self.t = 0.
         self.state = dict(status='idle', handle=None, stamp_s=10., scope=self.scope, clock_domain=self.clock_domain,
                           session_id='unit', generation=0, frame_id='sim_odom', stopped=True, collision=False,
-                          source='synthetic_differential_drive_plant', execution_feedback=True)
+                          pose=[4.,4.,0.],source='synthetic_differential_drive_plant', execution_feedback=True)
 
     def snapshot(self):
         return copy.deepcopy(self.state)
@@ -40,6 +70,7 @@ class ScriptedFeedback:
         return dict(reference_found=True, status='path_found', reason=None)
 
     def start(self, place, handle):
+        self.target_pose = copy.deepcopy(place['pose'])
         self.state.update(status='running', handle=copy.deepcopy(handle), stopped=False)
         return dict(accepted=True, handle=copy.deepcopy(handle), execution_feedback=False)
 
@@ -50,7 +81,7 @@ class ScriptedFeedback:
 
     def arrive(self):
         handle = self.state['handle']
-        self.state.update(status='arrived', stopped=True, goal=dict(task_completed=True,
+        self.state.update(status='arrived', pose=copy.deepcopy(self.target_pose), stopped=True, goal=dict(task_completed=True,
                           task_id=handle['task_id'], goal_revision=handle['goal_revision']))
 
     def stopped(self):
@@ -78,27 +109,28 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(validate_call(action('lookup_places', name='')), action('lookup_places', name=''))
 
     def test_ack_is_not_arrival_and_cannot_finish(self):
-        ack = self.tools.call('navigate', place_id='elevator')
+        ack = navigate(self.tools, 'elevator')
         self.assertEqual(ack['status'], 'accepted')
         self.tools.tick()
         self.assertEqual(self.tools.skill.record['completed'], [])
         self.assertEqual(self.tools.call('finish_task', status='succeeded', evidence='ACK received')['status'], 'refused')
 
     def test_navigation_wait_and_explicit_finish_require_bound_feedback(self):
-        self.tools.call('navigate', place_id='elevator')
+        navigate(self.tools, 'elevator')
         self.tools.call('wait_for_event', event='navigation')
         self.tools.tick()
         self.assertEqual(self.tools.state['status'], 'waiting_navigation')
         with self.assertRaises(ValueError):
-            self.tools.call('navigate', place_id='lobby_center')
+            navigate(self.tools, 'lobby_center')
         self.nav.arrive()
         self.tools.tick()
         self.assertEqual(self.tools.state['status'], 'ready')
         self.assertEqual(self.tools.skill.record['completed'][0]['place_id'], 'elevator')
+        self.assertEqual(self.tools.call('check_goal',goal_id='elevator')['status'],'completed')
         self.assertEqual(self.tools.call('finish_task', status='succeeded', evidence='到达停稳')['status'], 'succeeded')
 
     def test_wrong_task_and_old_call_cannot_supply_arrival(self):
-        self.tools.call('navigate', place_id='elevator')
+        navigate(self.tools, 'elevator')
         real = copy.deepcopy(self.nav.state['handle'])
         self.nav.arrive()
         self.nav.state['goal']['task_id'] = 'foreign'
@@ -114,7 +146,7 @@ class AgentTests(unittest.TestCase):
             with self.subTest(goal_published_in_feedback=published):
                 nav = ScriptedFeedback()
                 tools = AgentSession('health test', self.catalog, nav, self.store)
-                tools.call('navigate', place_id='elevator')
+                navigate(tools, 'elevator')
                 tools.call('wait_for_event', event='navigation')
                 nav.state['localization_status'] = 'invalid'
                 if not published:
@@ -127,7 +159,7 @@ class AgentTests(unittest.TestCase):
 
     def test_cancel_and_replacement_wait_for_stop(self):
         original = self.tools.state['instruction']
-        self.tools.call('navigate', place_id='elevator')
+        navigate(self.tools, 'elevator')
         self.tools.event('replace', '改去大厅中央')
         self.tools.tick()
         self.assertEqual((self.tools.state['status'], self.tools.state['instruction']), ('stopping', original))
@@ -138,14 +170,14 @@ class AgentTests(unittest.TestCase):
         self.assertIsNone(self.tools.skill.record['handle'])
 
     def test_pause_resume_new_call_and_cancel(self):
-        self.tools.call('navigate', place_id='elevator')
+        navigate(self.tools, 'elevator')
         previous = copy.deepcopy(self.tools.skill.record['handle'])
         self.tools.event('pause')
         self.nav.stopped()
         self.tools.tick()
         self.assertEqual(self.tools.state['status'], 'paused')
         self.tools.event('resume')
-        self.tools.call('navigate', place_id='elevator')
+        navigate(self.tools, 'elevator')
         self.assertGreater(self.tools.skill.record['handle']['goal_revision'], previous['goal_revision'])
         self.tools.event('cancel')
         self.tools.tick()
@@ -163,15 +195,16 @@ class AgentTests(unittest.TestCase):
         old = self.tools.state['instruction']
         self.tools.event('answer', '大厅玻璃门内侧')
         self.assertEqual(self.tools.state['instruction'], old)
-        self.assertEqual(self.tools.prompt()['clarifications'][0]['answer'], '大厅玻璃门内侧')
+        self.assertEqual(self.tools.prompt()['current_state']['clarifications'][0]['answer'], '大厅玻璃门内侧')
 
     def test_failed_or_unknown_goal_is_not_erased_by_earlier_success(self):
-        self.tools.call('navigate', place_id='elevator')
+        self.tools.call('record_task',goals=[point_goal('elevator'),point_goal('lobby_entrance')])
+        navigate(self.tools, 'elevator')
         self.nav.arrive(); self.tools.tick()
-        self.tools.call('navigate', place_id='unknown')
+        self.tools.call('check_goal',goal_id='elevator')
         result = self.tools.call('finish_task', status='succeeded', evidence='只完成一个站点')
         self.assertEqual(result['status'], 'refused')
-        self.assertIn('unknown', result['uncompleted_places'])
+        self.assertIn('lobby_entrance', result['uncompleted_goals'])
 
     def test_shadow_cannot_finish_with_recorded_arrival(self):
         value = copy.deepcopy(self.catalog.value)
@@ -181,7 +214,7 @@ class AgentTests(unittest.TestCase):
         self.nav.scope = 'shadow'
         self.nav.state['scope'] = 'shadow'
         tools = AgentSession('shadow', Catalog(value), self.nav, self.store)
-        tools.call('navigate', place_id='elevator')
+        navigate(tools, 'elevator')
         self.nav.arrive(); tools.tick()
         self.assertEqual(tools.skill.record['completed'], [])
         self.assertEqual(tools.call('finish_task', status='succeeded', evidence='recorded pose')['status'], 'refused')
@@ -227,27 +260,29 @@ class AgentTests(unittest.TestCase):
 
     def test_streamed_tool_call_preserves_content_and_records_usage(self):
         output = action('lookup_places', name='')
-        chunks = [dict(model='qwen3.8-flash', choices=[dict(delta=dict(content=json.dumps(output)), finish_reason='stop')]),
+        native = reply('lookup_places',name='').message['tool_calls'][0]
+        chunks = [dict(model='qwen3.8-flash', choices=[dict(delta=dict(tool_calls=[dict(native,index=0)]), finish_reason='tool_calls')]),
                   dict(choices=[], usage=dict(prompt_tokens=100, completion_tokens=50))]
         wire = ''.join('data: '+json.dumps(v)+'\n\n' for v in chunks)+'data: [DONE]\n\n'
         client, budget = self.client(lambda request: httpx.Response(200, text=wire))
         try:
-            self.assertEqual(client.decide(self.tools.prompt()), output)
+            self.assertEqual(client.decide(self.tools.prompt()).action, output)
             self.assertAlmostEqual(budget.summary()['accounted_rmb'], .00032)
         finally:
             budget.close()
 
-    def test_bad_array_or_tool_arguments_remain_raw_without_unwrapping(self):
-        for output in ([action('observe_scene')], action('navigate', question='wrong argument')):
-            with self.subTest(output=output):
-                chunk = dict(model='qwen3.8-flash', choices=[dict(delta=dict(content=json.dumps(output)), finish_reason='stop')],
+    def test_bad_native_tool_arguments_remain_raw_without_unwrapping(self):
+        for arguments in ([{}],dict(question='wrong argument')):
+            with self.subTest(arguments=arguments):
+                native = dict(index=0,id='invalid-call',type='function',function=dict(name='navigate',arguments=json.dumps(arguments)))
+                chunk = dict(model='qwen3.8-flash', choices=[dict(delta=dict(tool_calls=[native]), finish_reason='tool_calls')],
                              usage=dict(prompt_tokens=10, completion_tokens=10))
                 client, budget = self.client(lambda request: httpx.Response(200,text='data: '+json.dumps(chunk)+'\n\ndata: [DONE]\n\n'))
                 try:
                     with self.assertRaises(ApiError):
                         client.decide(self.tools.prompt())
                     saved = json.loads(self.store.db.execute("SELECT value FROM events WHERE kind='api_response' ORDER BY seq DESC LIMIT 1").fetchone()[0])
-                    self.assertEqual(json.loads(saved['content']), output)
+                    self.assertEqual(json.loads(saved['tool_calls'][0]['function']['arguments']), arguments)
                 finally:
                     budget.close()
 

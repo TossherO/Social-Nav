@@ -38,6 +38,9 @@ def _policy_inputs(tree, policy, metadata, config, stamp):
 
     pose = np.ascontiguousarray(metadata['world_from_lidar'], np.float64)
     value = policy.prepare_plane(metadata.get('ground_tracking', {}), pose)
+    suspend = tree.lib.sn_occupancy_suspend_free_history
+    suspend.argtypes = [C.c_void_p, C.c_int]
+    suspend(tree.ptr, int(policy.history_suspended))
     plane = None if value is None else np.ascontiguousarray(value, np.float64)
     settings = policy.settings
     native = np.array([

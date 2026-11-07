@@ -1,5 +1,5 @@
 {
-  "scope":"development_prior", "floor_id":"floor1", "frame_id":"map",
+  "scope":"development_prior", "map_condition":"complete", "floor_id":"floor1", "frame_id":"map",
   "asset":"data/maps/wheelchair/agent_floor1/catalog.json",
   "source":"User semantic designation 2026-11-01; coordinates require review against current map and base_link",
   "access":{"room_interiors":"excluded", "corridor_parking":"must_preserve_passage"},

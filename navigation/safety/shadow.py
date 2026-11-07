@@ -63,9 +63,11 @@ class ObservationInbox:
         return key,selected[0]
 
 class ShadowSafety:
-    def __init__(self,planning,motion,geometry,*,clock_domain,settings=None,asset=None,scene_settings=None):
+    def __init__(self,planning,motion,geometry,*,clock_domain,settings=None,asset=None,scene_settings=None,execution=False):
+        if execution and clock_domain!='runtime_live':raise ValueError('Hardware safety requires live measurements')
+        self.execution=execution
         self.settings=settings or load_config();self.clock_domain=clock_domain;self.motion=motion;self.geometry=geometry
-        self.guard=LocalSafety(geometry,motion,planning['safety_margin_m'],people_settings=planning['people'],shadow=True,asset=asset)
+        self.guard=LocalSafety(geometry,motion,planning['safety_margin_m'],people_settings=planning['people'],shadow=not execution,execution=execution,asset=asset)
         self.lock=threading.RLock();self.inbox=ObservationInbox(self.settings['inbox_size']);self.rows=deque(maxlen=256)
         self.packet=None;self.packet_received=self.grid_received=None;self.active_goal=None;self.cancelled={}
         self.manual=False;self.emergency=False;self.sequence=0;self.last_packet=None;self.barrier=None
@@ -199,6 +201,10 @@ class ShadowSafety:
                 if context_binding(request,source_scene,self.asset)!=context_binding(request,scene,self.asset):raise ValueError('shadow_context_changed')
                 out['timing_ms']['observation_join']=out['timing_ms'].get('observation_join',0.)+(time.perf_counter()-t)*1000
                 proposal=copy.deepcopy(original)
+                if self.execution and proposal.get('status')=='candidate':
+                    # Check the exact quantized wire target, retaining original packet provenance.
+                    out['wire_velocity_units']=[int(float(x)*1000.) for x in proposal['velocity']]
+                    proposal['velocity']=[x/1000. for x in out['wire_velocity_units']]
                 proposal['gate_input_scene_binding']=proposal['scene_binding'];proposal['scene_binding']=scene.record['input_fingerprint']
                 t=time.perf_counter();feedback=observed_feedback(rows,scene,self.geometry,self.motion,now=check_now)
                 out['timing_ms']['feedback']=out['timing_ms'].get('feedback',0.)+(time.perf_counter()-t)*1000
@@ -235,6 +241,10 @@ class ShadowSafety:
                 if not 0<=final_now-scene.record['as_of']<=self.guard.settings['max_input_age_s']:
                     raise ValueError('geometry_expired_during_gate')
                 out['remaining_trajectory_validity_s']=self.guard.settings['max_input_age_s']-(final_now-proposal['trajectory_as_of'])
+                out['remaining_validity_s']=min(out['remaining_trajectory_validity_s'],
+                    self.guard.settings['feedback_max_age_s']-(final_now-feedback['stamp_s']),
+                    self.guard.settings['max_input_age_s']-(final_now-scene.record['as_of']),
+                    self.settings['packet_timeout_s']-(final_now-packet['stamp_s']))
                 out['completion_freshness_checked']=True
             if time.perf_counter()-began>self.settings['period_s']:raise ValueError('gate_deadline_exceeded')
         except (ValueError,KeyError,TypeError,RuntimeError) as error:

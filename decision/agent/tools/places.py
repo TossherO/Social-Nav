@@ -13,6 +13,35 @@ class Catalog:
         self.value = copy.deepcopy(value)
         self.fingerprint = hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
         self.places = {p['place_id']: p for p in value['places']}
+        self.condition = value.get('map_condition', 'complete')
+        if self.condition not in ('complete', 'simple', 'none'):
+            raise ValueError('Unknown map condition')
+        if self.condition == 'complete':
+            if not isinstance(value.get('frame_id'),str) or not value['frame_id']:
+                raise ValueError('Complete map requires a coordinate frame')
+            units = value.get('units',{})
+            if units.get('position','metres')!='metres' or units.get('angle','radians')!='radians':
+                raise ValueError('Complete-map annotations use metres and radians')
+        self.regions = {p['region_id']: p for p in value.get('regions', [])}
+        self.landmarks = {p['landmark_id']: p for p in value.get('landmarks', [])}
+        if len(self.regions)!=len(value.get('regions',[])) or len(self.landmarks)!=len(value.get('landmarks',[])):
+            raise ValueError('Duplicate map annotation identity')
+        ids = [*self.places, *self.regions, *self.landmarks]
+        if len(ids) != len(set(ids)):
+            raise ValueError('Map annotation identities must be unique')
+        if any(p.get('frame_id',value['frame_id'])!=value['frame_id'] for p in
+               [*self.places.values(),*self.regions.values(),*self.landmarks.values()]):
+            raise ValueError('Annotations must use the catalog coordinate frame')
+        for region in self.regions.values():
+            polygon = region['polygon']
+            if len(polygon) < 3 or any(len(p) != 2 or not all(math.isfinite(v) for v in p) for p in polygon):
+                raise ValueError('Region requires a finite XY polygon')
+            area = sum(a[0]*b[1]-b[0]*a[1] for a,b in zip(polygon,polygon[1:]+polygon[:1]))
+            if abs(area) <= 1e-10:
+                raise ValueError('Region has zero signed area')
+        for landmark in self.landmarks.values():
+            if len(landmark['position']) != 2 or not all(math.isfinite(v) for v in landmark['position']):
+                raise ValueError('Landmark requires a finite XY position')
         if len(self.places) != len(value['places']):
             raise ValueError('Duplicate place identity')
         for p in self.places.values():
@@ -23,18 +52,40 @@ class Catalog:
                 raise ValueError('Destination must reference base_link')
 
     @classmethod
-    def load(cls, path):
+    def load(cls, path, *, condition=None):
         value = json.loads(Path(path).read_text())
-        if value.get('asset'):
+        selected = condition or value.get('map_condition', 'complete')
+        if selected == 'complete' and value.get('asset'):
             asset = ROOT/value['asset']
             if asset.exists():
                 bound = json.loads(asset.read_text())
                 if {p['place_id'] for p in bound['places']} != {p['place_id'] for p in value['places']}:
                     raise ValueError('Semantic asset does not match registered place identities')
+                for key in ('regions','landmarks'):
+                    if key in value:
+                        bound[key] = copy.deepcopy(value[key])
                 value = bound
+        value['map_condition'] = selected
+        if selected == 'none':
+            value = dict(scope=value['scope'], floor_id=None, frame_id=None, map_condition='none',
+                         places=[], regions=[], landmarks=[], access={})
         return cls(value)
 
+    def require_complete(self):
+        if self.condition != 'complete':
+            raise ValueError('map_condition_not_implemented:'+self.condition)
+
+    def annotations(self):
+        if self.condition != 'complete':
+            return dict(points=[], regions=[], landmarks=[])
+        fields = ('place_id', 'name', 'aliases', 'pose', 'reference', 'status')
+        return dict(points=[dict({k:p[k] for k in fields if k in p}, display_id='P'+str(i+1)) for i,p in enumerate(self.places.values())],
+                    regions=[dict(copy.deepcopy(p),display_id='R'+str(i+1)) for i,p in enumerate(self.regions.values())],
+                    landmarks=[dict(copy.deepcopy(p),display_id='L'+str(i+1)) for i,p in enumerate(self.landmarks.values())])
+
     def lookup(self, name=''):
+        if self.condition != 'complete':
+            return []
         return [copy.deepcopy(p) for p in self.places.values()
                 if not name or name == p['place_id'] or name in [p['name'], *p.get('aliases', [])]]
 
@@ -72,6 +123,9 @@ class Catalog:
         return copy.deepcopy(p)
 
     def prompt(self):
-        return dict(scope=self.value['scope'], floor_id=self.value['floor_id'],
-                    places=[{k: p[k] for k in ('place_id', 'name', 'aliases', 'status')}
-                            for p in self.places.values()], access=self.value['access'])
+        metric = self.condition == 'complete'
+        return dict(scope=self.value['scope'], map_condition=self.condition, floor_id=self.value['floor_id'],
+                    frame_id=self.value['frame_id'] if metric else None,
+                    units=dict(position='metres' if metric else 'unspecified', angle='radians'),
+                    execution_supported=metric, annotations=self.annotations(),
+                    access=self.value['access'])

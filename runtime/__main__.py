@@ -1,4 +1,4 @@
-"""Direct sensor -> native localization -> GPU perception/map -> shadow navigation."""
+"""Direct perception/navigation; shadow by default, explicitly armed live tests optional."""
 import argparse
 from collections import deque
 import json
@@ -42,7 +42,13 @@ def parser():
     p.add_argument('--agent-observations',action='store_true',help='Bounded optional Agent RGB/scene outlet; no YOLO, API or chassis output')
     p.add_argument('--no-image',action='store_true',help='Compatibility flag: the core never loads YOLO; disallows optional VLM image preparation')
     p.add_argument('--runtime-config',default=str(ROOT/'configs/runtime.yaml'))
+    p.add_argument('--motion-config',help='Explicit motion YAML shared by reference planning, DWA and independent safety')
     p.add_argument('--display',action='store_true',help='Publish optional RViz display topics; no core subscribes to them')
+    p.add_argument('--interactive-session',action='store_true',help='Enable session status and bag pause/preview commands')
+    p.add_argument('--pause-at',type=float,help='Pause an interactive bag after this many source seconds; hold at bag end')
+    p.add_argument('--vehicle-profile',help='Explicit measured vehicle geometry, limits and protocol')
+    p.add_argument('--execute',action='store_true',help='Enable supervised live hardware output; separate operator arming required')
+    p.add_argument('--chassis-port',help='Exclusive serial device, only with --execute')
     p.add_argument('--commands',help='Explicit timed goal/cancel/override list for causal shadow replay')
     p.add_argument('--route',help='Source-bound recorded demonstration route JSON; bag shadow replay only')
     p.add_argument('--route-floor',help='Explicit floor selection within --route; never inferred from the elevator')
@@ -53,6 +59,9 @@ def parser():
 
 def main():
     args=parser().parse_args()
+    if args.execute and (not args.live or not args.interactive_session or not args.vehicle_profile or not args.chassis_port):
+        raise ValueError('--execute requires --live --interactive-session --vehicle-profile and --chassis-port')
+    if args.chassis_port and not args.execute:raise ValueError('--chassis-port requires --execute')
     if args.record_decision_inputs and args.no_image:
         raise ValueError('--record-decision-inputs explicitly enables VLM image preparation; remove --no-image')
     if args.gpu is not None:os.environ['CUDA_VISIBLE_DEVICES']=str(args.gpu)
@@ -68,6 +77,10 @@ def main():
     if args.live and (args.start or args.rate!=1. or args.pose_file):raise ValueError('Live input uses ROS time; bag offset/rate/pose file are not applicable')
     if args.live and mode=='localization' and args.pose is None:raise ValueError('Live map localization requires an explicit current --pose')
     if args.live and args.bag:raise ValueError('Select either bag or live input')
+    if args.pause_at is not None and (not args.interactive_session or args.live or not np.isfinite(args.pause_at) or args.pause_at<0):
+        raise ValueError('--pause-at requires an interactive bag and a finite nonnegative offset')
+    if args.interactive_session and (args.route or args.commands):
+        raise ValueError('Interactive goals cannot share a recorded route or scheduled commands')
     if not args.live and not args.bag and not run.get('bag'):raise ValueError('Select --bag, --live or a source run with an original bag')
     if args.route and (args.live or not args.route_floor or args.goal is not None or args.commands):
         raise ValueError('--route needs a bag and --route-floor, without --goal or --commands')
@@ -91,7 +104,6 @@ def main():
     calibration_source=Path(args.lidar_imu_calibration) if args.lidar_imu_calibration else source/'run.json' if source else DEFAULT_CALIBRATION
     timing=check_time_calibration(config,bag=bag,group=args.sensor_clock_group,session_file=args.sensor_session,
         previous=run.get('imu_time_calibration'),source_file=calibration_source)
-    # Reject a known clock-session mismatch before touching CUDA or model weights.
     import torch
     if not torch.cuda.is_available():raise RuntimeError('Selected CUDA device unavailable; check device access before changing dependencies')
     torch.cuda.set_device(0)
@@ -138,7 +150,13 @@ def main():
         from .decision import DecisionRecorder
         decision_recorder=DecisionRecorder(output/'decision_inputs',metrics=metrics,
             image_policy=det_cfg['image_association'],camera_calibration=args.camera_calibration)
-    planning=planning_config();motion=load_motion_config();geometry=VehicleGeometry.historical(ROOT/planning['geometry_reference'])
+    motion_path=Path(args.motion_config or ROOT/'navigation/planning/configs/motion.yaml').expanduser().resolve()
+    motion_source=dict(path=str(motion_path),fingerprint=file_fingerprint(motion_path))
+    planning=planning_config();motion=load_motion_config(motion_path);geometry=VehicleGeometry.historical(ROOT/planning['geometry_reference'])
+    if args.vehicle_profile:
+        from navigation.control.vehicle import load_vehicle_profile
+        geometry,motion,_=load_vehicle_profile(args.vehicle_profile,motion,require_execution=args.execute)
+    planning['motion_constraints']={k:motion[k] for k in ('min_turning_radius_m','allow_reverse','allow_in_place_rotation')}
     planning['pose_search']['native_library']=str(ROOT/'outputs/runtime/build/planning/libsocial_nav_pose_search.so')
     motion.update(collision_backend='cuda',collision_library=str(ROOT/settings['collision_library']))
     asset=StaticEnvironmentMap(args.static_map) if args.static_map else None
@@ -168,12 +186,17 @@ def main():
             reference_max_age_s=reference.settings['max_age_s'],
             trajectory_max_age_s=controller.controller.safety_settings['max_input_age_s'],metrics=metrics)
     state_parent,state_input=socket.socketpair();safety=SafetyProcess(state_parent,planning,motion,geometry,clock_domain=clock_domain,asset=asset,
-        slots=settings['shared_safety_slots'],slot_bytes=settings['shared_safety_slot_bytes'],settings=shadow)
+        slots=settings['shared_safety_slots'],slot_bytes=settings['shared_safety_slot_bytes'],settings=shadow,
+        chassis_port=args.chassis_port,chassis_output=output/'chassis')
     main_pose,pose_input=socket.socketpair(socket.AF_UNIX,socket.SOCK_DGRAM);main_pose.setblocking(False)
     from .association import AssociationInbox
     association_socket,association_input=socket.socketpair(socket.AF_UNIX,socket.SOCK_DGRAM)
     associations=AssociationInbox(association_socket,metrics)
-    commands=CommandInbox(output/'commands.sock',safety)
+    interactive=None
+    if args.interactive_session:
+        from .session import InteractiveSession
+        interactive=InteractiveSession(live=args.live,safety=safety,output=output,execute=args.execute)
+    commands=CommandInbox(output/'commands.sock',safety,session=interactive)
     agent_observer=None
     if args.agent_observations:
         from decision.agent.adapters.runtime import ObservationWorker
@@ -231,7 +254,7 @@ def main():
                 if time.monotonic()>deadline:raise RuntimeError('CPU worker startup exceeded its budget')
                 time.sleep(.01)
             safety_telemetry=SafetyTelemetry(safety,record)
-            control_loop=ControlLoop(reference,controller,batch,safety,main_pose,commands,settings,env_config['scene'],metrics,record,asset=asset,initial_goal=initial_goal,clock_domain=clock_domain,display=display,route_replay=route_replay,planning_recorder=planning_recorder)
+            control_loop=ControlLoop(reference,controller,batch,safety,main_pose,commands,settings,env_config['scene'],metrics,record,asset=asset,initial_goal=initial_goal,clock_domain=clock_domain,display=display,route_replay=route_replay,planning_recorder=planning_recorder,session=interactive)
             # Archives retain every selected scan and its matching optional
             # inputs. Normal navigation bounds map work independently of the
             # detector; the native tree has exactly one owning worker.
@@ -251,10 +274,16 @@ def main():
             if args.duration:command+=['--duration',str(args.duration)]
             if args.coverage:command+=['--coverage',str(Path(args.coverage).resolve())]
             if mode=='mapping':command+=['--map-output',str(output/'map')]
+            pass_fds=(child.fileno(),state_input.fileno(),pose_input.fileno(),association_input.fileno())
+            if interactive is not None and interactive.child is not None:
+                command+=['--playback-fd',str(interactive.child.fileno())]
+                pass_fds+= (interactive.child.fileno(),)
+                if args.pause_at is not None:command+=['--pause-at',str(args.pause_at)]
             child_env=dict(os.environ,PYTHONNOUSERSITE='1',PYTHONPATH=str(ROOT)+':/opt/ros/noetic/lib/python3/dist-packages')
             child_env['LD_LIBRARY_PATH']='/opt/ros/noetic/lib:'+str(ROOT/'outputs/perception/dependencies/gtsam/lib')+':'+child_env.get('LD_LIBRARY_PATH','')
             worker_log=(output/'input.log').open('x')
-            worker=subprocess.Popen(command,cwd=ROOT,env=child_env,pass_fds=(child.fileno(),state_input.fileno(),pose_input.fileno(),association_input.fileno()),stdout=worker_log,stderr=subprocess.STDOUT,start_new_session=True)
+            worker=subprocess.Popen(command,cwd=ROOT,env=child_env,pass_fds=pass_fds,stdout=worker_log,stderr=subprocess.STDOUT,start_new_session=True)
+            if interactive is not None and interactive.child is not None:interactive.child.close()
             def request_stop(*_):
                 nonlocal stop_requested
                 if stop_requested:raise KeyboardInterrupt
@@ -280,6 +309,12 @@ def main():
                 if packet['kind']=='end':source_metrics=packet['metrics'];break
                 if packet['kind']=='draining':parent.settimeout(settings['finalization_timeout_s']);continue
                 if packet['kind']=='error':raise RuntimeError(packet['error'])
+                if packet['kind']=='playback':
+                    if interactive is None:raise RuntimeError('Unexpected playback event')
+                    if packet['paused'] and not interactive.paused and map_worker is not None:map_worker.flush()
+                    interactive.update_playback(packet)
+                    if control_loop.error:raise RuntimeError(control_loop.error)
+                    continue
                 ref=frame_ref(packet['buffer']);arrays=reader.arrays(ref);began=time.monotonic()
                 try:
                     row=dict(packet['state'],clock_domain=clock_domain);stamp=packet['stamp_s'];counts['scans']+=1
@@ -382,6 +417,7 @@ def main():
                            ('planning_recorder',None if planning_recorder is None else planning_recorder.close),
                            ('associations',associations.close),
                            ('decision_inputs',None if decision_recorder is None else decision_recorder.close),
+                           ('interactive_session',None if interactive is None else interactive.close),
                            ('display',None if display is None else display.close)]:
             if close is None:continue
             try:
@@ -404,7 +440,8 @@ def main():
         report=dict(success=failure is None,error=failure,counts=counts,metrics=metrics.summary(),source_metrics=source_metrics,imu_time_calibration=timing,
             source_bag=None if bag is None else str(bag),configuration_source=str(source/'run.json') if source else 'current_module_configs',mode=mode,rate=args.rate,
             internal_ros_transport=False,native_localization=True,gpu_device=str(torch.cuda.get_device_name(0)),
-            scope='nonexecuting_shadow; bag motion is observed input, never navigation execution feedback',
+            scope='supervised_live_navigation; inspect chassis events for transmitted targets; not physical acceptance' if args.execute else
+                'nonexecuting_shadow; bag motion is observed input, never navigation execution feedback',
             detector=detector.metadata,environment_config=env_config,runtime_config=settings,scene_export=export_report,display=display_report,
             decision_inputs=decision_report,planning_record=planning_report,association_delivery=association_report,
             map_scheduling=dict(policy='synchronous_archive') if map_worker is None else dict(map_worker.counts,policy='one_active_one_latest_pending'),
@@ -418,11 +455,15 @@ def main():
             map=str(output/'map') if mode=='mapping' else str(Path(config['roll']['saveKeyframeMapDirectory']).parent) if mode=='localization' else None,
             playback=dict(records='localization.jsonl',bag_fingerprint=None if bag is None else file_fingerprint(bag),start_offset_s=args.start),
             people=dict(configuration=det_cfg,detector=detector.metadata),
+            navigation_motion=dict(source=motion_source,parameters=motion),
             runtime=dict(summary='summary.json',internal_ros_transport=False,core_image_association=False,
                 rgb_requested=with_rgb))
         manifest['termination']=report['termination']
         manifest['start']=args.start;manifest['duration']=args.duration
         manifest['association_coverage']=args.coverage
+        manifest['interactive']=dict(enabled=args.interactive_session,execution_requested=args.execute,
+            vehicle_source=motion.get('vehicle_source'),chassis_port=args.chassis_port,
+            physical_acceptance=False,task_completed=False)
         if route_replay is not None:manifest['route_replay']=route_replay.summary()
         if decision_report is not None:manifest['decision_inputs']=dict(directory='decision_inputs',**decision_report)
         if mode in ('mapping','localization'):

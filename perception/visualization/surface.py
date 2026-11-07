@@ -25,10 +25,14 @@ def navigation_grid(raw,asset=None):
     from perception.environment.layers import GridSnapshot
     from perception.environment.navigation import association_reason,prior_floor
     from perception.environment.support import METHOD
+    from perception.environment.person_objects import observed_objects,circle_view
     m,l=raw.metadata,raw.layers;proof=m.get('navigation_fusion')
     if proof is None:
         if 'navigation_occupancy' in l:raise ValueError('Display navigation cells lack provenance')
-        return raw
+        objects=observed_objects(raw)
+        if not objects:return raw
+        cells=circle_view(raw,objects).layers['occupancy']
+        return GridSnapshot(dict(m,display_only=True,display_occupancy='navigation'),dict(l,occupancy=cells))
     if proof.get('method')!=METHOD:raise ValueError('Unsupported display navigation derivation')
     cells=l['navigation_occupancy'];layers=dict(l,occupancy=cells)
     ground=l.get('ground_z',np.full(cells.shape,np.nan))
@@ -47,7 +51,28 @@ def navigation_grid(raw,asset=None):
     if ground is not l.get('ground_z'):ground.flags.writeable=False
     supported.flags.writeable=False;sources.flags.writeable=False
     layers.update(ground_z=ground,ground_support=supported,display_ground_source=sources)
+    layers['occupancy']=circle_view(GridSnapshot(m,layers),observed_objects(raw)).layers['occupancy']
     return GridSnapshot(dict(m,display_only=True,display_occupancy='navigation'),layers)
+
+
+def sample_ground(grid,xy,offset=0.):
+    """Sample supported cell heights only, in this grid's own coordinate frame."""
+    xy=np.asarray(xy,float).reshape(-1,2);z=np.full(len(xy),np.nan);source=np.zeros(len(xy),np.uint8)
+    meta,layers=grid.metadata,grid.layers
+    if 'ground_z' not in layers or 'ground_support' not in layers:return z,source
+    ij=np.floor((xy-meta['origin_xy'])/meta['resolution']).astype(int);h,w=layers['ground_z'].shape
+    inside=(ij[:,0]>=0)&(ij[:,0]<w)&(ij[:,1]>=0)&(ij[:,1]<h)
+    indices=np.flatnonzero(inside);x,y=ij[indices].T
+    good=layers['ground_support'][y,x]&np.isfinite(layers['ground_z'][y,x])
+    take=indices[good];z[take]=layers['ground_z'][y[good],x[good]]+offset
+    source[take]=layers['display_ground_source'][y[good],x[good]] if 'display_ground_source' in layers else 1
+    return z,source
+
+
+def annotation_height(grid,xy,fallback):
+    """A label anchor, never evidence for a terrain cell or a navigable path."""
+    z=sample_ground(grid,[xy])[0][0]
+    return float(z) if np.isfinite(z) else float(fallback)
 
 
 class DisplaySurface:
@@ -65,14 +90,8 @@ class DisplaySurface:
         xy=np.asarray(xy,float).reshape(-1,2);z=np.full(len(xy),np.nan);source=np.zeros(len(xy),np.uint8)
         if self.mode=='plane':return np.full(len(xy),self.offset),np.full(len(xy),3,np.uint8)
         if self.grid is None:return z,source
-        meta,layers=self.grid.metadata,self.grid.layers
-        if 'ground_z' in layers and 'ground_support' in layers:
-            ij=np.floor((xy-meta['origin_xy'])/meta['resolution']).astype(int);h,w=layers['ground_z'].shape
-            inside=(ij[:,0]>=0)&(ij[:,0]<w)&(ij[:,1]>=0)&(ij[:,1]<h)
-            indices=np.flatnonzero(inside);x,y=ij[indices].T
-            good=layers['ground_support'][y,x]&np.isfinite(layers['ground_z'][y,x])
-            take=indices[good];z[take]=layers['ground_z'][y[good],x[good]]+self.offset
-            source[take]=layers['display_ground_source'][y[good],x[good]] if 'display_ground_source' in layers else 1
+        meta=self.grid.metadata
+        z,source=sample_ground(self.grid,xy,self.offset)
         # The sensor blind spot can lack a cell. Only extend the current measured
         # floor fit close to the sensor, explicitly marked as a fitted height.
         ground=meta.get('ground_tracking',{});plane=np.asarray(ground.get('plane_world',[]),float)

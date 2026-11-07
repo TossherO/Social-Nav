@@ -18,31 +18,42 @@ class NavigationSkill:
         self.initial = navigation.snapshot()
         self.context = spatial_context(self.initial)
         self.record = dict(status='idle', handle=None, place_id=None, reason=None, context_lost=False,
-                           connected=True, completed=[], attempts=[], goal_revision=0)
+                           connected=True, completed=[], attempts=[], goal_revision=0, goal_id=None, selected_pose=None)
         self.last_stamp = None
 
     def _emit(self, event):
         self.emit(event, copy.deepcopy(self.record))
 
-    def start(self, place_id, revision):
+    def start(self, destination, revision):
         r = self.record
+        self.catalog.require_complete()
+        goal_id = destination['goal_id']
+        place_id = destination['place_id']
         state = self.navigation.snapshot()
         if r['context_lost'] or not r['connected'] or state.get('input_stale') or state.get('localization_status', 'valid') != 'valid':
             return dict(status='refused', reason='navigation_context_unavailable')
         if r['handle'] is not None:
             return dict(status='refused', reason='cancel_and_confirm_existing_call_first')
-        attempt = dict(place_id=place_id, revision=revision, status='refused')
+        attempt = dict(goal_id=goal_id, place_id=place_id, revision=revision, status='refused')
         r['attempts'].append(attempt)
-        if place_id not in self.catalog.places or self.catalog.places[place_id].get('pose') is None:
-            return dict(status='refused', reason='destination_not_bound')
-        place = self.catalog.destination(place_id, self.navigation.scope)
+        if ((self.navigation.scope == 'simulation') != (self.catalog.value['scope'] == 'simulation') or
+                self.navigation.scope == 'shadow' and self.catalog.value['scope'] != 'development_prior' or
+                destination['frame_id'] != self.catalog.value['frame_id']):
+            return dict(status='refused', reason='destination_scope_or_frame_mismatch')
+        requirement = destination['requirement']
+        if requirement['kind'] == 'point' and requirement['target_id']:
+            # Retain the named-point access policy without borrowing its pose.
+            self.catalog.destination(requirement['target_id'], self.navigation.scope)
+        place = copy.deepcopy(destination)
         route = self.navigation.check_route(place)
         if not route['reference_found'] and not (self.navigation.scope == 'shadow' and route.get('proposal_allowed')):
             return dict(status='refused', reason=route.get('reason') or route['status'], route=route)
         r['goal_revision'] += 1
         handle = dict(task_id=self.task_id, plan_revision=revision, goal_revision=r['goal_revision'],
-                      call_id=uuid.uuid4().hex, catalog_fingerprint=self.catalog.fingerprint)
-        r.update(status='submitting', handle=handle, place_id=place_id, reason=None)
+                      call_id=uuid.uuid4().hex, catalog_fingerprint=self.catalog.fingerprint,
+                      goal_id=goal_id, task_goal_binding=destination['task_goal_binding'], view_id=destination['view_id'])
+        r.update(status='submitting', handle=handle, place_id=place_id, goal_id=goal_id,
+                 selected_pose=copy.deepcopy(destination['pose']),reason=None)
         attempt.update(status='active', call_id=handle['call_id'])
         self.last_stamp = None
         self._emit('navigation_intent')
@@ -126,8 +137,9 @@ class NavigationSkill:
                 feedback.get('execution_feedback') is True and feedback.get('stopped') and
                 goal.get('task_completed') and goal.get('task_id') == self.task_id and
                 goal.get('goal_revision') == handle['goal_revision']):
-            proof = dict(place_id=r['place_id'], handle=copy.deepcopy(handle), stamp_s=stamp,
+            proof = dict(goal_id=r['goal_id'], place_id=r['place_id'], handle=copy.deepcopy(handle), stamp_s=stamp,
                          scope=self.navigation.scope, source=feedback['source'], context=current,
+                         pose=copy.deepcopy(feedback.get('pose')),frame_id=feedback.get('frame_id'),
                          execution_feedback=True, stopped=True)
             r['completed'].append(proof)
             r.update(status='succeeded', handle=None)

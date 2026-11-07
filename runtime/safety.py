@@ -1,4 +1,4 @@
-"""Independent CPU shadow safety with a direct localization input channel."""
+"""Independent CPU safety with direct localization and optional live authorization."""
 import copy
 import multiprocessing as mp
 from multiprocessing.connection import wait
@@ -14,7 +14,7 @@ from .buffers import SharedArrayReader
 from .scenes import ScenePool,read_scene
 
 
-def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,motion,geometry,clock_domain,asset_path,shadow_settings):
+def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,motion,geometry,clock_domain,asset_path,shadow_settings,chassis_fd=None):
     signal.signal(signal.SIGINT,signal.SIG_IGN)
     os.environ['CUDA_VISIBLE_DEVICES']=''
     from navigation.safety.shadow import ShadowSafety
@@ -23,7 +23,10 @@ def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,mot
     pose=Connection(socket.socket(fileno=pose_fd.detach()));output=socket.socket(fileno=output_fd.detach());output.setblocking(False)
     settings=copy.deepcopy(motion);settings['collision_backend']='cpu';settings['collision_library']=None
     asset=None if asset_path is None else StaticEnvironmentMap(asset_path)
-    engine=ShadowSafety(planning,settings,geometry,clock_domain=clock_domain,asset=asset,settings=shadow_settings)
+    chassis=None if chassis_fd is None else socket.socket(fileno=chassis_fd.detach())
+    if chassis is not None:chassis.setblocking(False)
+    arm=dict(enabled=False,revision=0)
+    engine=ShadowSafety(planning,settings,geometry,clock_domain=clock_domain,asset=asset,settings=shadow_settings,execution=chassis is not None)
     leases={};clock={};stopping=threading.Event();cpu_start=time.process_time()
     def receive():
         pose_alive=control_alive=True
@@ -56,7 +59,15 @@ def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,mot
                                 people=people_observation(scene)
                                 if people is not None:engine.push_people(people)
                             elif message['kind']=='packet':engine.push_packet(message['packet'])
-                            elif message['kind']=='command':engine.command(message['command'],message['value'])
+                            elif message['kind']=='command':
+                                if message['command']=='arm':
+                                    if chassis is None or type(message['value'].get('enabled')) is not bool:
+                                        raise ValueError('No live chassis or invalid arming request')
+                                    arm.update(enabled=message['value']['enabled'],revision=arm['revision']+1)
+                                else:
+                                    engine.command(message['command'],message['value'])
+                                    if message['command'] in ('cancel','override'):
+                                        arm.update(enabled=False,revision=arm['revision']+1)
                     except (ValueError,KeyError,TypeError) as error:
                         with engine.lock:engine.barrier='input_rejected:'+str(error);engine.wake.set()
         except Exception as error:
@@ -72,6 +83,7 @@ def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,mot
             if stopping.is_set():break
             mono=time.monotonic()
             with engine.lock:source=dict(clock)
+            result=None
             if source:
                 # Freeze this conversion for one check; source measurements may
                 # update concurrently and are revalidated by ShadowSafety.
@@ -79,8 +91,30 @@ def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,mot
                 result=engine.tick(now(),mono=mono,clock_now=now)
                 result.update(scope='runtime_CPU_shadow',telemetry_dropped=dropped,process_cpu_s=time.process_time()-cpu_start,
                     decision_complete_mono=time.monotonic())
+                if chassis is not None:result['scope']='runtime_CPU_execution_check'
                 try:output.send(json.dumps(result,allow_nan=False,separators=(',',':')).encode())
                 except (BlockingIOError,BrokenPipeError,ConnectionResetError):dropped+=1
+            if chassis is not None:
+                with engine.lock:
+                    allowed=bool(result and result['state']=='allowed' and result.get('completion_freshness_checked'))
+                    units=[] if result is None else result.get('wire_velocity_units',[])
+                    # A clipped/changed target needs its own exact wire check.
+                    allowed=allowed and len(units)==2 and [x/1000. for x in units]==result['velocity']
+                    if engine.emergency or engine.manual or engine.active_goal is None:allowed=False
+                    if result is not None and result.get('request')!=engine.active_goal:allowed=False
+                    completed=time.monotonic() if result is None else result['decision_complete_mono']
+                    packet=dict(mono=time.monotonic(),arm=arm['enabled'],arm_revision=arm['revision'],
+                        allowed=allowed,units=units,expires_mono=completed+min(.15,(result or {}).get('remaining_validity_s',0.)))
+                    feedback=(result or {}).get('feedback') or {}
+                    packet['diagnostics']=dict(reason=(result or {}).get('reason'),
+                        safety_sequence=(result or {}).get('sequence_id'), decision_complete_mono=completed,
+                        decision_stamp_s=(result or {}).get('stamp_s'),
+                        trajectory_binding=(result or {}).get('trajectory_binding'),
+                        trajectory_as_of=(result or {}).get('trajectory_as_of'),
+                        clock_domain=clock_domain,
+                        pose_velocity_estimate={key:feedback.get(key) for key in ('source','stamp_s','velocity')})
+                    try:chassis.send(json.dumps(packet,allow_nan=False).encode())
+                    except (BlockingIOError,BrokenPipeError,ConnectionResetError):pass
             next_tick=mono+engine.settings['period_s']
             # Only release after a full check, never while its local variables
             # still reference a snapshot removed by the receiver on a reset.
@@ -98,15 +132,23 @@ def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,mot
         stopping.set();receiver.join(timeout=1)
         if receiver.is_alive():raise RuntimeError('Safety receiver did not stop')
         engine=None;scene=None;grid=None;leases.clear();reader.close();pose.close();output.close();control.close()
+        if chassis is not None:chassis.close()
 
 
 class SafetyProcess:
-    def __init__(self,pose_socket,planning,motion,geometry,*,clock_domain,asset=None,slots=16,slot_bytes=256*1024,settings=None):
+    def __init__(self,pose_socket,planning,motion,geometry,*,clock_domain,asset=None,slots=16,slot_bytes=256*1024,settings=None,chassis_port=None,chassis_output=None):
+        self.chassis=None
+        if chassis_port is not None:
+            if clock_domain!='runtime_live' or geometry.assumed or motion.get('parameters_assumed',True):
+                raise ValueError('Chassis output requires confirmed live vehicle parameters')
+            from navigation.control.chassis import ChassisProcess
+            self.chassis=ChassisProcess(chassis_port,chassis_output,motion)
         self.scenes=ScenePool(slots,slot_bytes);pool=self.scenes.pool
         self.out,child_out=socket.socketpair(socket.AF_UNIX,socket.SOCK_DGRAM);self.out.setblocking(False)
         context=mp.get_context('spawn');self.connection,child=context.Pipe()
         self.process=context.Process(target=_run,args=(child,DupFd(pose_socket.fileno()),DupFd(child_out.fileno()),DupFd(pool.fd),
-            pool.owner,pool.slots,pool.slot_bytes,planning,motion,geometry,clock_domain,None if asset is None else str(asset.directory),settings),daemon=True)
+            pool.owner,pool.slots,pool.slot_bytes,planning,motion,geometry,clock_domain,None if asset is None else str(asset.directory),settings,
+            None if self.chassis is None else DupFd(self.chassis.channel.fileno())),daemon=True)
         self.process.start();child.close();child_out.close();self.ready=False;self.pending={}
         self.send_lock=threading.Lock()
 
@@ -114,6 +156,8 @@ class SafetyProcess:
         with self.send_lock:self.connection.send(message)
 
     def _poll_control(self):
+        if self.chassis is not None and not self.chassis.process.is_alive():
+            raise RuntimeError('Chassis process stopped; inspect chassis/status.json')
         while self.connection.poll():
             message=self.connection.recv()
             if message.get('ready'):self.ready=True
@@ -147,6 +191,7 @@ class SafetyProcess:
         if self.process.is_alive():self.process.kill();self.process.join(timeout=1)
         for ref in self.pending:self.scenes.pool.release(ref,'safety')
         self.pending.clear();self.scenes.close();self.connection.close();self.out.close()
+        if self.chassis is not None:self.chassis.close()
 
 
 class SafetyTelemetry:

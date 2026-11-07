@@ -32,7 +32,7 @@ def unpack(archive, destination, expected=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--profile', choices=('interfaces', 'mapping', 'environment', 'sensors', 'all'), default='all')
+    parser.add_argument('--profile', choices=('interfaces', 'mapping', 'environment', 'sensors', 'visualization', 'all'), default='all')
     args = parser.parse_args()
     if ROOT not in OUTPUT.resolve().parents:
         raise ValueError('Build output must resolve inside the project before writing dependencies')
@@ -75,6 +75,7 @@ def main():
         'social_nav_localization': 'perception/mapping_localization/ros',
         'social_nav_people': 'perception/detection_tracking/ros',
         'social_nav_environment': 'perception/environment/ros',
+        'social_nav_rviz': 'perception/visualization/ros',
         'roll': 'perception/mapping_localization/backends/roll_fast_lio/roll',
         'fast_lio': 'perception/mapping_localization/backends/roll_fast_lio/fastlio-loc',
         'rslidar_sdk': 'perception/sensors/drivers/rslidar_sdk',

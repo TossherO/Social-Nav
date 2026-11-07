@@ -49,15 +49,17 @@ __global__ void evaluate(const double* targets,int count,const double* path,cons
     for(int i=0;i<=n;++i)if(!coarse(load(prediction,i),grid,h,w,q[21],q[22],q[23],fp,vertices)){scores[j]=INFINITY;return;}
     for(int i=0;i<k;++i)if(!coarse(load(stop,i),grid,h,w,q[21],q[22],q[23],fp,vertices)){scores[j]=INFINITY;return;}
     double sum=0,end_offset=0,end_progress=0;
+    const bool rotating=arc[paths-1]<=1e-7;
     for(int i=0;i<=n;++i){Pose x=load(prediction,i);double best=INFINITY,progress=0;
+        if(rotating)best=hypot(x.x-path[0],x.y-path[1]);
         for(int a=0;a<paths-1;++a){double dx=path[3*(a+1)]-path[3*a],dy=path[3*(a+1)+1]-path[3*a+1];
             double length=arc[a+1]-arc[a];if(length<=1e-7)continue;
             double f=clip(((x.x-path[3*a])*dx+(x.y-path[3*a+1])*dy)/(length*length),0.,1.);
             double d=hypot(x.x-path[3*a]-f*dx,x.y-path[3*a+1]-f*dy);
             if(d<best){best=d;progress=arc[a]+f*length;}}
         sum+=best;if(i==n){end_offset=best;end_progress=progress;}}
-    Pose end=load(prediction,n);double yaw=path[2];
-    for(int a=0;a<paths-1;++a){double next=yaw+wrap(path[3*(a+1)+2]-yaw);
+    Pose end=load(prediction,n);double yaw=rotating?path[3*(paths-1)+2]:path[2];
+    for(int a=0;!rotating&&a<paths-1;++a){double next=yaw+wrap(path[3*(a+1)+2]-yaw);
         if(end_progress<=arc[a+1]){double f=clip((end_progress-arc[a])/(arc[a+1]-arc[a]),0.,1.);yaw+=f*(next-yaw);break;}yaw=next;}
     double score=q[27]*(sum/(n+1)+end_offset)-q[28]*(end_progress-q[24])+q[29]*fabs(wrap(yaw-end.a))+
         q[30]*hypot(target.v-q[25],target.w-q[26]);
@@ -89,3 +91,4 @@ extern "C" int sn_dwa_evaluate(const double* targets,int count,const double* pat
         people,people_count,pairs,pair_count,social,poses,brakes,brake_counts,scores,steps,brake_capacity);
     return int(cudaGetLastError());
 }
+extern "C" int sn_dwa_supports_rotation(){return 1;}

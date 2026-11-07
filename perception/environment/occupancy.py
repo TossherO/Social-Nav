@@ -16,6 +16,8 @@ class OccupancyTree:
         if not path.is_file():
             raise RuntimeError('Build the environment library first: '+str(path))
         self.lib = lib = C.CDLL(str(path))
+        if backend=='cuda' and not hasattr(lib,'sn_occupancy_suspend_free_history'):
+            raise RuntimeError('Rebuild the CUDA environment library for ground-history suspension')
         fp, dp = C.POINTER(C.c_float), C.POINTER(C.c_double)
         lib.sn_occupancy_new.argtypes, lib.sn_occupancy_new.restype = [C.c_double], C.c_void_p
         lib.sn_occupancy_free.argtypes = [C.c_void_p]

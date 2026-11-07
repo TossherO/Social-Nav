@@ -83,6 +83,42 @@ class RuntimeDisplayTests(unittest.TestCase):
         self.assertEqual(buffer.take(timeout=0),('idle',None))
         buffer.close();self.assertIsNone(buffer.take(timeout=0))
 
+    def test_navigation_transform_and_empty_paths_use_valid_ros_messages(self):
+        try:
+            import rospy
+            from visualization_msgs.msg import Marker
+        except ImportError:
+            self.skipTest('source perception/scripts/ros1_env.sh to check ROS display messages')
+        from navigation.planning.footprint import VehicleGeometry
+        from navigation.planning.inputs import load_config
+        from perception.visualization.navigation import NavigationView
+        geometry=VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],np.eye(4),source='synthetic')
+        row=dict(session_id='test',generation=0,frame_id='odom',health=0,stamp_s=10.1,
+            position=[2.,2.,0.],quaternion_xyzw=[0,0,0,1],has_map_pose=True,
+            map_frame='map',map_position=[5.,6.,0.],map_quaternion_xyzw=[0,0,0,1])
+        view=NavigationView(geometry,load_config(),height_mode='plane').update(row,None,mono=0.)
+        transforms=[];markers=[];display=object.__new__(RuntimeDisplay);display.rospy=rospy
+        display.map_tf=SimpleNamespace(publish=transforms.append)
+        display.publishers={name:SimpleNamespace(get_num_connections=lambda:0)
+            for name in ('path','lidar_path','reference','trajectory')}
+        display.publishers['navigation']=SimpleNamespace(get_num_connections=lambda:1,publish=markers.append)
+        display._publish_navigation(view)
+        transform=transforms[0].transforms[0]
+        self.assertEqual(transform.header.stamp,rospy.Time.from_sec(row['stamp_s']))
+        self.assertEqual((transform.header.frame_id,transform.child_frame_id),('map','odom'))
+        self.assertEqual((transform.transform.translation.x,transform.transform.translation.y),(3.,4.))
+        clear=markers[0].markers[0]
+        self.assertEqual(clear.action,Marker.DELETEALL)
+        self.assertEqual(clear.header.frame_id,'odom')
+        self.assertEqual(clear.header.stamp,rospy.Time.from_sec(row['stamp_s']))
+        added=[m for m in markers[0].markers if m.action==Marker.ADD]
+        self.assertTrue(added)
+        self.assertFalse(any(m.ns in ('history','reference','trajectory') for m in added))
+        self.assertTrue(all(m.points for m in added if m.type==Marker.LINE_LIST))
+        display._publish_map_transform(dict(row,has_map_pose=False))
+        display._publish_map_transform(dict(row,health=1))
+        self.assertEqual(len(transforms),1)
+
     def test_map_topics_use_navigation_cells_and_keep_raw_diagnostic(self):
         from perception.visualization.surface import DisplayGrids
         from tests.test_navigation_display import navigation_display_fixture

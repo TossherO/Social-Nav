@@ -1,6 +1,5 @@
 """Current static-support geometry and independent navigation consumption checks."""
 import copy
-from collections import deque
 import numpy as np
 
 from .context import fingerprint
@@ -11,8 +10,7 @@ from perception.detection_tracking.inference.geometry import validate_transform
 NAVIGATION_DTYPES = dict(navigation_occupancy=np.int8, navigation_source=np.uint8,
                          navigation_source_stamp=np.float64)
 CAPSULE_FIELDS = ('occupancy', 'person_background_free', *NAVIGATION_DTYPES)
-GROUND_DEFAULTS = dict(ground_tolerance_m=.15, ground_history_s=1.,
-    ground_history_observations=5, ground_min_observations=3, ground_innovation_m=.07)
+STATIC_GROUND_TOLERANCE_M = .15
 
 
 def transform_plane(plane, transform):
@@ -22,49 +20,29 @@ def transform_plane(plane, transform):
     return -normal[[0, 1, 3]]/normal[2]
 
 
-def ground_model(samples, anchor, radius):
-    """Median height and slopes in one map frame; bound current-plane deviation."""
-    planes = np.asarray([s['map_plane'] for s in samples], float)
-    slope = np.median(planes[:, :2], axis=0)
-    height = np.median(planes[:, :2]@anchor+planes[:, 2])
-    plane = np.r_[slope, height-anchor@slope]
-    delta = planes[-1]-plane
-    deviation = abs(anchor@delta[:2]+delta[2])+radius*np.linalg.norm(delta[:2])
-    return plane, float(deviation)
+def static_floor_reference(snapshot, prior, transform, radius, sensor_height_band):
+    """Seed height lookup from the selected static map, without observing it again.
 
-
-class NavigationGround:
-    """Short observed-plane history, reset across invalid association or jumps."""
-    def __init__(self, settings):
-        self.settings = settings
-        self.samples = deque(maxlen=settings['ground_history_observations'])
-        self.identity = None
-
-    def reset(self):
-        self.samples.clear(); self.identity = None
-
-    def update(self, snapshot, transform, radius):
-        m = snapshot.metadata; a = m['association']; ground = m['ground_tracking']
-        identity = (a['map_id'], a['map_frame'], a.get('association_session'), a.get('association_generation'))
-        if identity != self.identity or ground.get('clear_ground_history'):
-            self.reset(); self.identity = identity
-        stamp = m['stamp_s']
-        while self.samples and stamp-self.samples[0]['stamp_s'] > self.settings['ground_history_s']:
-            self.samples.popleft()
-        plane = transform_plane(np.asarray(ground['plane_world'], float), transform)
-        sensor = transform@np.r_[np.asarray(m['world_from_lidar'])[:3, 3], 1.]
-        sample = dict(stamp_s=stamp, snapshot_id=m['snapshot_id'], map_plane=plane.tolist())
-        proposed = (list(self.samples)+[sample])[-self.settings['ground_history_observations']:]
-        _, deviation = ground_model(proposed, sensor[:2], radius)
-        jump = deviation > self.settings['ground_innovation_m']
-        if jump: self.samples.clear()
-        self.samples.append(sample)
-        filtered, deviation = ground_model(list(self.samples), sensor[:2], radius)
-        ready = len(self.samples) >= self.settings['ground_min_observations'] and not jump
-        proof = dict(status='tracked' if ready else 'warming', reason='ground_model_jump' if jump else None,
-            samples=copy.deepcopy(list(self.samples)), map_plane=filtered.tolist(),
-            anchor_map_xy=sensor[:2].tolist(), radius_m=radius, current_deviation_m=deviation)
-        return (transform_plane(filtered, np.linalg.inv(transform)) if ready else None), proof
+    The seed only locates static cells. Their individual elevations and complete
+    collision-column overlaps are still checked by prior_floor/static_support.
+    """
+    m,pm=snapshot.metadata,prior.metadata
+    sensor=transform@np.r_[np.asarray(m['world_from_lidar'])[:3,3],1.]
+    resolution=pm['resolution'];origin=np.asarray(pm['origin_xy'])
+    lo=np.maximum(0,np.floor((sensor[:2]-radius-.5-origin)/resolution).astype(int))
+    hi=np.minimum(np.asarray(pm['shape'][::-1]),np.ceil((sensor[:2]+radius+.5-origin)/resolution).astype(int))
+    if np.any(hi<=lo):return None
+    region=np.s_[lo[1]:hi[1],lo[0]:hi[0]];layers=prior.layers
+    if any(k not in layers for k in ('ground_z','ground_support','last_observed')):return None
+    height=layers['ground_z'][region];times=layers['last_observed'][region]
+    valid=(layers['occupancy'][region]==0)&layers['ground_support'][region]&np.isfinite(height)&np.isfinite(times)&(times<=m['stamp_s'])
+    clearance=sensor[2]-height
+    valid&=(clearance>=sensor_height_band[0])&(clearance<=sensor_height_band[1])
+    if not valid.any():return None
+    a=m['association']
+    return dict(source='selected_static_map',map_plane=[0.,0.,float(np.median(height[valid]))],
+        stamp_s=m['stamp_s'],source_stamp_s=float(times[valid].min()),
+        association_identity=[a['map_id'],a['map_frame'],a.get('association_session'),a.get('association_generation'),a.get('map_revision')])
 
 
 def association_reason(snapshot, asset, max_age, *, now=None):
@@ -176,7 +154,15 @@ def prior_floor(snapshot, prior, transform, map_plane, *, selected=None):
     return output
 
 
-def navigation_geometry(scene, *, now=None, asset=None, check_asset=False, _layer_binding=None):
+def navigation_geometry(scene, *, now=None, asset=None, check_asset=False, _layer_binding=None, include_people=True):
+    """Default consumers retain current contact, even without a people packet."""
+    from .person_objects import observed_objects,circle_view
+    objects=observed_objects(scene.geometry)
+    grid=_background_geometry(scene,now=now,asset=asset,check_asset=check_asset,_layer_binding=_layer_binding)
+    return circle_view(grid,objects) if include_people else grid
+
+
+def _background_geometry(scene, *, now=None, asset=None, check_asset=False, _layer_binding=None):
     """Reuse spatial checks only while actual source and asset bytes still match.
 
     Each reconstructed scene owns its small cache, including in independent

@@ -106,12 +106,27 @@ class DwaController:
             if request['mode']=='mapped':
                 world=np.asarray(scene.record['localization']['world_from_lidar'])
                 path=transform_poses(path,se2(self.geometry.pose(world))@np.linalg.inv(se2(self.geometry.pose(np.asarray(scene.record['prior']['map_from_local'])@world))))
-            path=path[np.r_[True,np.linalg.norm(np.diff(path[:,:2],axis=0),axis=1)>1e-7]]
+            path=path[np.r_[True,(np.linalg.norm(np.diff(path[:,:2],axis=0),axis=1)>1e-7)|
+                (abs(wrap(np.diff(path[:,2])))>1e-7)]]
             if len(path)<2:raise ValueError('empty_reference')
             yaw=path[:-1,2]+wrap(np.diff(path[:,2]))/2
             direction=np.where(np.sum(np.diff(path[:,:2],axis=0)*np.c_[np.cos(yaw),np.sin(yaw)],axis=1)<0,-1,1)
-            if not self.motion['allow_reverse'] and (direction<0).any():raise ValueError('reference_requires_reverse')
+            rotating=np.linalg.norm(np.diff(path[:,:2],axis=0),axis=1)<=1e-7
+            if rotating.any() and not self.motion.get('allow_in_place_rotation',False):raise ValueError('reference_requires_rotation')
+            direction=np.where(rotating,np.where(wrap(np.diff(path[:,2]))>0,2,-2),direction)
+            if not self.motion['allow_reverse'] and (direction==-1).any():raise ValueError('reference_requires_reverse')
             cuts=np.r_[0,1+np.flatnonzero(np.diff(direction)),len(direction)]
+            # Keep long rotations in their certified direction rather than
+            # replacing a 270-degree route by an obstructed -90-degree turn.
+            extra=[]
+            for lo,hi in zip(cuts[:-1],cuts[1:]):
+                if abs(direction[lo])!=2:continue
+                accumulated=0.
+                for j in range(lo,hi):
+                    angle=abs(wrap(path[j+1,2]-path[j,2]))
+                    if accumulated+angle>np.pi/2 and j>lo:extra.append(j);accumulated=0.
+                    accumulated+=angle
+            cuts=np.unique(np.r_[cuts,extra]).astype(int)
             key=reference['binding']
             if key!=self._path_key:self._progress=0.;self._section=0;self._path_key=key
             # A cusp is a stop-and-change-direction point, not a lookahead
@@ -123,58 +138,80 @@ class DwaController:
                         abs(velocity[0])>self.goal_settings['stopped_linear_mps'] or
                         abs(velocity[1])>self.goal_settings['stopped_angular_rps']):break
                 self._section+=1;self._progress=0.
-            lo,hi=cuts[self._section:self._section+2];gear=int(direction[lo]);cusp_stop=hi<len(direction)
+            lo,hi=cuts[self._section:self._section+2];rotation_mode=abs(direction[lo])==2
+            gear=0 if rotation_mode else int(direction[lo]);cusp_stop=hi<len(direction)
             path=path[lo:hi+1]
             out['reference_motion']=dict(direction=gear,section=self._section,stop_at_cusp=bool(cusp_stop))
+            if rotation_mode:out['reference_motion']['rotation']=True
             prepared=segments(path)
-            if not len(prepared[2]):raise ValueError('empty_reference')
-            a,delta,length,arc=prepared
-            fraction=np.clip(np.sum((start[:2]-a)*delta,axis=1)/length**2,0,1)
-            distance=np.linalg.norm(a+fraction[:,None]*delta-start[:2],axis=1)
-            candidates=(arc[:-1]<=self._progress+self.settings['path_window_m'])&(arc[1:]>=self._progress-.2)
-            reference_yaw=path[:-1,2]+fraction*wrap(np.diff(path[:,2]))
-            match=int(np.argmin(np.where(candidates,distance+.02*abs(wrap(reference_yaw-start[2])),np.inf)))
-            progress=float(arc[match]+fraction[match]*length[match]);self._progress=max(self._progress,progress)
+            if not rotation_mode and not len(prepared[2]):raise ValueError('empty_reference')
             goal=local_goal(request,scene,self.geometry,self.asset,self.planning)
-            target_s=min(arc[-1],progress+self.settings['lookahead_m'])
-            target=np.array([np.interp(target_s,arc,path[:,k]) for k in range(2)])
-            if len(goal)==3 and not cusp_stop:
-                target+=gear*max(0.,progress+self.settings['lookahead_m']-arc[-1])*np.array([np.cos(goal[2]),np.sin(goal[2])])
-            error=target-start[:2];bearing=wrap(np.arctan2(error[1],error[0])-start[2])
-            curvature=np.clip(2*np.sin(bearing)/max(.2,np.linalg.norm(error)),-1/self.motion['min_turning_radius_m'],1/self.motion['min_turning_radius_m'])
-            speed_limit=self.motion['max_forward_mps'] if gear>0 else self.motion['max_reverse_mps']
-            speed=min(speed_limit,self.motion['max_angular_rps']/max(abs(curvature),1e-9))
-            speed_limits=dict(pursuit=float(speed))
             stop=request.get('goal_behavior','pass_through')=='stop'
-            remaining=max(0.,arc[-1]-progress-self.goal_settings['goal_position_tolerance_m']/2)
-            if stop or cusp_stop:
-                brake=self.motion['max_acceleration_mps2']*self.motion['brake_deceleration_scale']
+            if rotation_mode:
+                if np.linalg.norm(start[:2]-path[0,:2])>self.goal_settings['goal_position_tolerance_m']:
+                    raise ValueError('rotation_anchor_not_reached')
+                progress=0.;arc=np.zeros(len(path));speed=0.
+                error=wrap(path[-1,2]-start[2])
+                brake=self.motion['max_angular_acceleration_rps2']*self.motion['brake_deceleration_scale']
                 delay=self.safety_settings['reaction_s']+self.safety_settings['actuator_delay_s']+age
-                speed=min(speed,np.sqrt((brake*delay)**2+2*brake*remaining)-brake*delay)
-                speed_limits['stopping']=float(speed)
-            curve=abs(wrap(np.diff(path[:,2])))/np.maximum(np.linalg.norm(np.diff(path[:,:2],axis=0),axis=1),1e-9)
-            if len(curve)==len(length):
-                curve_speed=np.minimum(speed_limit,self.motion['max_angular_rps']*.8/np.maximum(curve,1e-9))
-                distance=np.maximum(0.,arc[:-1]-progress-abs(initial[0])*.4)
-                cap=np.sqrt(curve_speed**2+2*self.motion['max_acceleration_mps2']*self.motion['brake_deceleration_scale']*distance)
-                speed=min(speed,float(np.min(np.where(arc[1:]>=progress,cap,np.inf))))
-                speed_limits['path_curvature']=float(speed)
-            acceleration=self.motion['max_acceleration_mps2'];deceleration=acceleration*self.motion['brake_deceleration_scale']
-            low=np.maximum([0. if gear>0 else -speed,-self.motion['max_angular_rps']],initial-np.array([
-                acceleration if initial[0]<0 else deceleration,self.motion['max_angular_acceleration_rps2']])*dt)
-            high=np.minimum([speed if gear>0 else 0.,self.motion['max_angular_rps']],initial+np.array([
-                deceleration if initial[0]<0 else acceleration,self.motion['max_angular_acceleration_rps2']])*dt)
-            # A zero target is a braking action, not an instantaneous zero state.
-            choices=[np.zeros(2)]
-            if initial[0]*gear>=0 and np.all(high>=low):
-                choices.extend([np.array([v,w]) for v in np.linspace(low[0],high[0],self.settings['linear_samples'])
-                    for w in np.linspace(low[1],high[1],self.settings['angular_samples'])])
-                choices.extend([np.clip([gear*speed,gear*speed*curvature],low,high),np.clip(initial if self.previous is None else self.previous,low,high)])
-            elif initial[0]*gear>speed:
-                # A bounded actuator target for speed recovery. The measured
-                # overspeed is never clipped or replaced by this target state.
-                choices.append(np.array([gear*speed,np.clip(initial[1],-min(self.motion['max_angular_rps'],speed/self.motion['min_turning_radius_m']),
-                    min(self.motion['max_angular_rps'],speed/self.motion['min_turning_radius_m']))]))
+                remaining=max(0.,abs(error)-self.goal_settings['goal_yaw_tolerance_rad']/2)
+                limit=min(self.motion['max_angular_rps'],np.sqrt((brake*delay)**2+2*brake*remaining)-brake*delay)
+                target_w=np.sign(error)*limit
+                dw=self.motion['max_angular_acceleration_rps2']*dt
+                low=np.array([0.,max(-limit,initial[1]-dw)])
+                high=np.array([0.,min(limit,initial[1]+dw)])
+                choices=[np.zeros(2)];speed_limits=dict(angular_stopping=float(limit))
+                # Arrive at the pivot and brake translation before rotating.
+                if abs(initial[0])<=self.goal_settings['stopped_linear_mps']:
+                    if high[1]>=low[1]:
+                        choices.extend(np.array([0.,w]) for w in np.linspace(low[1],high[1],self.settings['angular_samples']))
+                        choices.append(np.array([0.,np.clip(target_w,low[1],high[1])]))
+            else:
+                a,delta,length,arc=prepared
+                fraction=np.clip(np.sum((start[:2]-a)*delta,axis=1)/length**2,0,1)
+                distance=np.linalg.norm(a+fraction[:,None]*delta-start[:2],axis=1)
+                candidates=(arc[:-1]<=self._progress+self.settings['path_window_m'])&(arc[1:]>=self._progress-.2)
+                reference_yaw=path[:-1,2]+fraction*wrap(np.diff(path[:,2]))
+                match=int(np.argmin(np.where(candidates,distance+.02*abs(wrap(reference_yaw-start[2])),np.inf)))
+                progress=float(arc[match]+fraction[match]*length[match]);self._progress=max(self._progress,progress)
+                target_s=min(arc[-1],progress+self.settings['lookahead_m'])
+                target=np.array([np.interp(target_s,arc,path[:,k]) for k in range(2)])
+                if len(goal)==3 and not cusp_stop:
+                    target+=gear*max(0.,progress+self.settings['lookahead_m']-arc[-1])*np.array([np.cos(goal[2]),np.sin(goal[2])])
+                error=target-start[:2];bearing=wrap(np.arctan2(error[1],error[0])-start[2])
+                curvature=np.clip(2*np.sin(bearing)/max(.2,np.linalg.norm(error)),-1/self.motion['min_turning_radius_m'],1/self.motion['min_turning_radius_m'])
+                speed_limit=self.motion['max_forward_mps'] if gear>0 else self.motion['max_reverse_mps']
+                speed=min(speed_limit,self.motion['max_angular_rps']/max(abs(curvature),1e-9))
+                speed_limits=dict(pursuit=float(speed))
+                remaining=max(0.,arc[-1]-progress-self.goal_settings['goal_position_tolerance_m']/2)
+                if stop or cusp_stop:
+                    brake=self.motion['max_acceleration_mps2']*self.motion['brake_deceleration_scale']
+                    delay=self.safety_settings['reaction_s']+self.safety_settings['actuator_delay_s']+age
+                    speed=min(speed,np.sqrt((brake*delay)**2+2*brake*remaining)-brake*delay)
+                    speed_limits['stopping']=float(speed)
+                curve=abs(wrap(np.diff(path[:,2])))/np.maximum(np.linalg.norm(np.diff(path[:,:2],axis=0),axis=1),1e-9)
+                if len(curve)==len(length):
+                    curve_speed=np.minimum(speed_limit,self.motion['max_angular_rps']*.8/np.maximum(curve,1e-9))
+                    distance=np.maximum(0.,arc[:-1]-progress-abs(initial[0])*.4)
+                    cap=np.sqrt(curve_speed**2+2*self.motion['max_acceleration_mps2']*self.motion['brake_deceleration_scale']*distance)
+                    speed=min(speed,float(np.min(np.where(arc[1:]>=progress,cap,np.inf))))
+                    speed_limits['path_curvature']=float(speed)
+                acceleration=self.motion['max_acceleration_mps2'];deceleration=acceleration*self.motion['brake_deceleration_scale']
+                low=np.maximum([0. if gear>0 else -speed,-self.motion['max_angular_rps']],initial-np.array([
+                    acceleration if initial[0]<0 else deceleration,self.motion['max_angular_acceleration_rps2']])*dt)
+                high=np.minimum([speed if gear>0 else 0.,self.motion['max_angular_rps']],initial+np.array([
+                    deceleration if initial[0]<0 else acceleration,self.motion['max_angular_acceleration_rps2']])*dt)
+                # A zero target is a braking action, not an instantaneous zero state.
+                choices=[np.zeros(2)]
+                if initial[0]*gear>=0 and np.all(high>=low):
+                    choices.extend([np.array([v,w]) for v in np.linspace(low[0],high[0],self.settings['linear_samples'])
+                        for w in np.linspace(low[1],high[1],self.settings['angular_samples'])])
+                    choices.extend([np.clip([gear*speed,gear*speed*curvature],low,high),np.clip(initial if self.previous is None else self.previous,low,high)])
+                elif initial[0]*gear>speed:
+                    # A bounded actuator target for speed recovery. The measured
+                    # overspeed is never clipped or replaced by this target state.
+                    choices.append(np.array([gear*speed,np.clip(initial[1],-min(self.motion['max_angular_rps'],speed/self.motion['min_turning_radius_m']),
+                        min(self.motion['max_angular_rps'],speed/self.motion['min_turning_radius_m']))]))
             choices=np.unique(np.round(choices,12),axis=0)
             choices=choices[np.asarray(turning_residual(choices,self.motion))>=-1e-9]
             if self.diagnostics:
@@ -204,9 +241,11 @@ class DwaController:
                     reason=None if self._coarse_clear(points,grid) and self._coarse_clear(brakes[j],grid) else 'coarse_obstacle_or_unknown'
                     if reason:
                         rejects[reason]=rejects.get(reason,0)+1;continue
-                    projected,offset,total=project_progress(points[:,1:3],path,prepared)
+                    if rotation_mode:
+                        projected=np.zeros(len(points));offset=np.linalg.norm(points[:,1:3]-path[0,:2],axis=1)
+                    else:projected,offset,total=project_progress(points[:,1:3],path,prepared)
                     end=points[-1,1:]
-                    ref_yaw=np.interp(projected[-1],arc,np.unwrap(path[:,2]))
+                    ref_yaw=path[-1,2] if rotation_mode else np.interp(projected[-1],arc,np.unwrap(path[:,2]))
                     heading=wrap(ref_yaw-end[2])
                     score=(self.settings['path_weight']*float(np.mean(offset)+offset[-1])-
                         self.settings['progress_weight']*float(projected[-1]-progress)+self.settings['heading_weight']*abs(heading)+

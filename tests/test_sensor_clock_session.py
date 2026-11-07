@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
@@ -17,6 +18,17 @@ from runtime.config import algorithm_config, ROOT
 
 
 class ClockSessionTests(unittest.TestCase):
+    def test_partial_new_calibration_cannot_inherit_old_session_offset(self):
+        source=self.root/'source';source.mkdir()
+        (source/'run.json').write_text(json.dumps(dict(algorithm_parameters=self.config)))
+        partial=copy.deepcopy(self.config);partial['common'].pop('imu_time_offset')
+        partial['calibration']['deployment_clock_group']='driver_B'
+        self.calibration.write_text(yaml.safe_dump(partial))
+        config,_=algorithm_config(mode='odometry',source_run=source,calibration=self.calibration)
+        self.assertNotIn('imu_time_offset',config['common'])
+        report=time_calibration_report(config,group='driver_B')
+        self.assertFalse(report['offset_configured'])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -43,6 +55,16 @@ class ClockSessionTests(unittest.TestCase):
         self.assertFalse(result['validation_performed'])
         self.assertIn('WARNING', log)
         self.assertIn('unknown', log)
+
+    def test_zero_default_needs_no_clock_declaration_and_claims_no_calibration(self):
+        config,_=algorithm_config(mode='odometry')
+        result,log=self.check(config,bag=self.bag)
+        self.assertEqual(result['offset_s'],0.)
+        self.assertEqual(result['offset_policy'],'sensor_timestamps')
+        self.assertIsNone(result['calibration_clock_group'])
+        self.assertIsNone(result['input_clock_group'])
+        self.assertFalse(result['validation_performed'])
+        self.assertNotIn('WARNING',log)
 
     def test_matching_declarations_do_not_validate_a_candidate_offset(self):
         result, log = self.check(bag=self.bag, group='driver_A')
@@ -181,6 +203,18 @@ class ClockSessionTests(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(ValueError, 'clock group mismatch'):
             main()
         self.assertFalse(output.exists())
+
+    def test_short_bag_and_live_default_reach_device_check_without_clock_initialization(self):
+        from runtime.__main__ import main
+        for source in (['--bag',str(self.bag)],['--live']):
+            output=self.root/'device_unavailable'
+            argv=['runtime',*source,'--mode','odometry','--output',str(output),'--duration','2']
+            no_device=SimpleNamespace(cuda=SimpleNamespace(is_available=lambda:False))
+            with self.subTest(source=source),patch.object(sys,'argv',argv), \
+                    patch.dict(sys.modules,{'torch':no_device}),contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaisesRegex(RuntimeError,'Selected CUDA device unavailable'):
+                main()
+            self.assertFalse(output.exists())
 
     def test_ros_diagnostic_checks_before_launch_and_preserves_report(self):
         from perception.mapping_localization.__main__ import arguments
