@@ -83,6 +83,8 @@ class Observation:
         # their source hashes, but never interpret missing tracks as no people.
         if value['people']['status'] != 'valid':
             value['people']['count'] = None
+        value['rgb'] = {k:copy.deepcopy(self.record['rgb'][k]) for k in
+            ('status','stamp_s','age_s','frame_id','shape','reason') if k in self.record['rgb']}
         return value
 
 

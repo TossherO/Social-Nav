@@ -151,18 +151,17 @@ class ObservationLoopTests(unittest.TestCase):
         actor.tick()
         return actor
 
-    def test_one_loop_observes_then_uses_real_image_to_ask_user(self):
+    def test_first_model_turn_receives_current_rgb_without_redundant_observe_call(self):
         received = []
         def work(payload, observation, spatial_view=None):
             received.append((payload, observation))
             return reply('observe_scene') if observation is None else reply('ask_user', question='请确认入口。')
         actor = self.run_two_actions(work)
         try:
-            self.assertEqual(actor.requests, 2)
+            self.assertEqual(actor.requests, 1)
             self.assertEqual(self.tools.state['status'], 'needs_clarification')
-            self.assertIsNone(received[0][1])
-            self.assertEqual(received[1][1].image, self.observation.image)
-            self.assertEqual(received[1][0]['messages'][-2]['tool_calls'][0]['function']['name'], 'observe_scene')
+            self.assertEqual(received[0][1].image, self.observation.image)
+            self.assertFalse(any(m['role']=='assistant' for m in received[0][0]['messages']))
             self.assertEqual(self.tools.memory.snapshot()[0]['semantic']['kind'], 'historical_model_tool_choice')
         finally:
             actor.close()
@@ -211,14 +210,14 @@ class ObservationLoopTests(unittest.TestCase):
             self.assertEqual(self.tools.state['status'], 'waiting_observation')
             for _ in range(5):
                 actor.tick()
-            self.assertEqual(actor.requests, 2)
+            self.assertEqual(actor.requests, 1)
             record = copy.deepcopy(self.observation.record)
             record['stamp_s'] = 10.05
             record['input_fingerprint'] = fingerprint({k:v for k,v in record.items() if k != 'input_fingerprint'})
             fresh = Observation(record, self.observation.image).verify()
             self.nav.observe = lambda: fresh
             actor.tick()
-            self.assertEqual(actor.requests, 3)
+            self.assertEqual(actor.requests, 2)
         finally:
             actor.close()
 

@@ -70,6 +70,9 @@ class SimulationNavigation:
         return dict(global_grid=global_grid,scene=scene,pose=self.pose.tolist(),local_pose=self.pose.tolist(),
                     stamp_s=10+self.t,clock_domain=self.clock_domain,geometry=self.geometry)
 
+    def reference_grid(self):
+        return self.spatial_inputs()['global_grid']
+
     def check_route(self, place):
         scene = self.world.scene(self.t, self.pose, self.geometry)
         request = dict(request_id='preflight', task_id='preflight', goal_revision=1, mode='local',

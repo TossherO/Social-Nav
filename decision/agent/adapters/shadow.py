@@ -17,7 +17,9 @@ class SavedShadowNavigation:
     scope = 'shadow'
 
     def __init__(self, catalog, observation):
+        from navigation.planning.footprint import VehicleGeometry
         self.catalog = catalog
+        self.geometry = VehicleGeometry.historical(ROOT/'configs/wheelchair_geometry_reference.json')
         self.current = observation.verify()
         self.clock_domain = observation.record['clock_domain']
         self.handle = self.request = None
@@ -64,7 +66,13 @@ class SavedShadowNavigation:
             raise ValueError('Saved scene changed after observation binding')
         return dict(global_grid=self._asset.snapshot,scene=scene,pose=r['map_base_pose'],local_pose=r['base_pose'],
                     stamp_s=r['stamp_s'],clock_domain=r['clock_domain'],
-                    geometry=VehicleGeometry.historical(ROOT/'configs/wheelchair_geometry_reference.json'))
+                    geometry=self.geometry)
+
+    def reference_grid(self):
+        from perception.environment.storage import StaticEnvironmentMap
+        if self._asset is None:
+            self._asset = StaticEnvironmentMap(ROOT/self.catalog.value['map_asset'])
+        return self._asset.snapshot
 
     def check_route(self, place):
         from perception.environment.scene import SceneInputs
@@ -110,7 +118,9 @@ class RuntimeShadowNavigation:
     scope = 'shadow'
 
     def __init__(self, catalog, client):
+        from navigation.planning.footprint import VehicleGeometry
         self.catalog, self.client = catalog, client
+        self.geometry = VehicleGeometry.historical(ROOT/'configs/wheelchair_geometry_reference.json')
         self.value = client.snapshot(with_image=True)
         if self.value['control'] is None:
             raise ValueError('Runtime has not published control state')
@@ -138,7 +148,10 @@ class RuntimeShadowNavigation:
                    0 <= state['stamp_s']-record.get('stamp_s',-float('inf')) <= 3.)
         return dict(global_grid=self._asset.snapshot,scene=None,pose=record.get('map_base_pose') if current else None,
                     stamp_s=record.get('stamp_s') if current else None,clock_domain=self.clock_domain,
-                    geometry=VehicleGeometry.historical(ROOT/'configs/wheelchair_geometry_reference.json'))
+                    geometry=getattr(self,'geometry',None) or VehicleGeometry.historical(ROOT/'configs/wheelchair_geometry_reference.json'))
+
+    def reference_grid(self):
+        return SavedShadowNavigation.reference_grid(self)
 
     def snapshot(self):
         p = self.value['control']

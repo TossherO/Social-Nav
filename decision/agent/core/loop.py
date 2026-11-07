@@ -125,7 +125,8 @@ class AgentLoop:
                         return s
                     value = reply.action
                     output = self.session.call(value['tool'], _context=result['context'], **value['arguments'])
-                    self.session.conversation.commit(reply,output)
+                    keyframe = output.get('keyframe') if value['tool'] in ('save_keyframe','read_keyframe') and output.get('status') in ('saved','available') else None
+                    self.session.conversation.commit(reply,output,keyframe=keyframe)
                     if self.session.memory is not None and 'observation_id' in result['context']:
                         self.session.memory.remember(dict(kind='historical_model_tool_choice', call=value,
                             result_status=output.get('status')), result['context'],
@@ -147,8 +148,8 @@ class AgentLoop:
         if self.session.spatial_view is not None and not self.session.spatial_view.current(now):
             self.session.spatial_view = None
             self.session._save('spatial_view_expired_before_request')
-        context = self.session.context()
         payload = self.session.prompt()
+        context = self.session.context()
         observation = copy.deepcopy(self.session.observation)
         spatial_view = copy.deepcopy(self.session.spatial_view)
         self.model.submit('tool', context, lambda: self.work(payload, observation, spatial_view))

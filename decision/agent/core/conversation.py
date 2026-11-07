@@ -30,7 +30,7 @@ class Conversation:
             if call['id'] in self.call_ids:
                 raise ValueError('Native tool call identity was already consumed')
 
-    def commit(self, reply, result=None):
+    def commit(self, reply, result=None, *, keyframe=None):
         self.validate(reply)
         messages = [reply.message]
         if reply.action is not None:
@@ -39,6 +39,8 @@ class Conversation:
             identity = reply.message['tool_calls'][0]['id']
             messages.append(dict(role='tool', tool_call_id=identity, content=encode(result)))
             self.call_ids.add(identity)
+        if keyframe is not None:
+            messages.append(dict(role='user',content=encode(dict(source='historical_keyframe',keyframe=keyframe))))
         self._append(messages)
 
     def notice(self, source, **value):

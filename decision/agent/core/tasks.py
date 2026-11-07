@@ -94,6 +94,10 @@ class TaskGoals:
         checks = self.geometry(current['requirement'], pose)
         if not all(checks.values()):
             return dict(status='refused', reason='selected_pose_violates_task_requirement', checks=checks)
+        allowed = self.orientation_sources(current['requirement'])
+        if orientation_source not in allowed:
+            return dict(status='refused',reason='orientation_source_disagrees_with_registered_requirement',
+                        allowed_orientation_sources=allowed)
         selected = dict(goal_id=goal_id, task_goal_binding=current['binding'],
                         place_id=current['requirement']['target_id'] or goal_id, pose=list(pose),
                         reference='base_link', frame_id=self.catalog.value['frame_id'],
@@ -101,6 +105,10 @@ class TaskGoals:
                         requirement=copy.deepcopy(current['requirement']))
         current['selected'] = copy.deepcopy(selected)
         return dict(status='selected', destination=selected)
+
+    @staticmethod
+    def orientation_sources(requirement):
+        return ['user'] if 'required_yaw' in requirement else ['semantic','autonomous']
 
     def complete(self, goal_id, proof, checks, semantic):
         current = self.current(goal_id)

@@ -132,7 +132,9 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(referenced['view']['view_id'],view_id)
         self.assertNotIn('annotations',referenced['view'])
         self.assertNotIn('details_in_tool_call_id',full)
-        self.assertEqual(full['view'],original)
+        self.assertEqual(full['view']['view_id'],original['view_id'])
+        self.assertEqual(full['view']['annotation_reference']['reference_map_id'],self.session.reference_map.record['reference_map_id'])
+        self.assertNotIn('annotations',full['view'])
         self.assertEqual(view.record,original)
         self.assertLess(len(json.dumps(referenced)),len(json.dumps(full)))
         for body in seen:
@@ -215,10 +217,12 @@ class ConversationTests(unittest.TestCase):
         def images(body):
             return [part for m in body['messages'] if isinstance(m.get('content'),list)
                     for part in m['content'] if part['type']=='image_url']
-        self.assertEqual(len(images(seen[0])),2)
-        self.assertEqual(images(seen[1]),[])
+        self.assertEqual(len(images(seen[0])),3)
+        self.assertEqual(len(images(seen[1])),3)
+        self.assertEqual(seen[0]['messages'][1],seen[1]['messages'][1])
+        self.assertEqual(sum(p['type']=='image_url' for p in seen[1]['messages'][-1]['content']),2)
         self.assertNotIn('data:image',json.dumps(self.session.conversation.messages()))
-        self.assertIsNone(self.session.spatial_view)
+        self.assertEqual(self.session.spatial_view.record['source_stamp_s'],self.nav.state['stamp_s'])
 
 
 if __name__=='__main__':unittest.main()

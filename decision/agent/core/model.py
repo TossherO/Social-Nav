@@ -1,16 +1,21 @@
 """Native hosted tool calls; no retries, response repair or backend fallback."""
-import base64
 import copy
 import io
 import json
 import os
 from pathlib import Path
 import time
+import base64
+import math
+import hashlib
 from urllib.parse import urlsplit
 import httpx
 import jsonschema
 from .. import ROOT
 from .store import Budget, Store, encode
+from .media import image_part, png_part
+from .context import project_dialogue, view_context, visual_inputs
+from perception.environment.context import fingerprint
 from ..tools.framework import Reply, native_tools
 
 
@@ -18,31 +23,31 @@ class ApiError(RuntimeError):
     pass
 
 
-def image_part(data, size, format):
-    from PIL import Image
-    with Image.open(io.BytesIO(data)) as source:
-        picture = source.convert('RGB')
-        picture.thumbnail((size,size))
-        buffer = io.BytesIO()
-        picture.save(buffer,format=format,**(dict(quality=80) if format=='JPEG' else {}))
-    mime = 'jpeg' if format=='JPEG' else 'png'
-    return dict(type='image_url',image_url=dict(url='data:image/'+mime+';base64,'+
-                base64.b64encode(buffer.getvalue()).decode()))
-
-
 def input_bound(messages, tools):
     """Count text conservatively; never count Base64 as text tokens."""
     material = copy.deepcopy(messages)
-    images = 0
+    from PIL import Image
+    images = visual_bound = 0
     for message in material:
         if isinstance(message.get('content'),list):
             for part in message['content']:
                 if part.get('type')=='image_url':
+                    url = part['image_url']['url']
+                    if not url.startswith(('data:image/png;base64,','data:image/jpeg;base64,')):
+                        raise ValueError('Only source-bound embedded PNG/JPEG images are accepted')
+                    data = base64.b64decode(url.split(',',1)[1],validate=True)
+                    with Image.open(io.BytesIO(data)) as picture:
+                        width,height = picture.size
+                        picture.verify()
+                    if max(width,height)>2048:
+                        raise ValueError('Image exceeds the 2048 pixel development limit')
+                    # Reservation estimate, not a claim about server tokenization.
+                    visual_bound += 1024+2*math.ceil(width/14)*math.ceil(height/14)
                     part['image_url'] = dict(url='[current image]')
                     images += 1
-    if images > 3:
-        raise ValueError('At most global map, local map and current RGB are supported')
-    bound = len(encode(dict(messages=material,tools=tools)).encode())+4096+images*32768
+    if images > 6:
+        raise ValueError('At most a reference map, three current images and two historical RGBs are supported')
+    bound = len(encode(dict(messages=material,tools=tools)).encode())+4096+visual_bound
     if bound > 131072:
         raise ValueError('Request exceeds development input budget')
     return bound
@@ -54,13 +59,15 @@ def cache_messages(system, messages, mode):
     if mode=='implicit':
         return material
     targets = {0}
-    if len(material)>2 and isinstance(material[2].get('content'),str):
+    for index,message in enumerate(material[1:-1],1):
+        content = message.get('content')
         try:
-            catalog = json.loads(material[2]['content'])
-        except ValueError:
-            catalog = None
-        if isinstance(catalog,dict) and catalog.get('source')=='initial_map_catalog':
-            targets.add(2)
+            value = json.loads(content if isinstance(content,str) else content[0]['text'])
+        except (ValueError,TypeError,KeyError,IndexError):
+            continue
+        if isinstance(value,dict) and value.get('source') in ('static_reference_map','initial_map_catalog'):
+            targets.add(index)
+            break
     # The final message is this request's current state and media. The preceding
     # complete history can grow, but its already observed contents stay unchanged.
     if len(material)>4:
@@ -69,6 +76,10 @@ def cache_messages(system, messages, mode):
         content = material[index].get('content')
         if isinstance(content,str):
             material[index]['content'] = [dict(type='text',text=content,cache_control=dict(type='ephemeral'))]
+        elif isinstance(content,list):
+            texts = [p for p in content if p.get('type')=='text']
+            if texts:
+                texts[-1]['cache_control'] = dict(type='ephemeral')
     return material
 
 
@@ -209,46 +220,58 @@ class Model:
             raise ApiError('Native tool request failed or response rejected; see session events, no retry performed') from None
 
     def decide(self, payload, *, observation=None, spatial_view=None):
-        system = ('你是轮椅的单一长程导航Agent。根据原指令、用户补充、工具历史和当前状态，'
-                  '通过原生工具调用每次选择一个工具；可以附带简短进度文字，不输出内部思维链。'
-                  '保持用户要求的站点顺序、等待和返回条件；answer只是补充，只有replace才更换任务。'
-                  '当前优先完整地图的室内点目标、区域目标及顺序串联；simple或none尚未实现，不暗用完整地图。'
-                  '尚未登记任务要求时，先record_task登记整条原指令的有序要求；已经登记后不重复登记。这不是工具执行计划。'
-                  '点目标使用标注点或用户明确位置；required_yaw只填写用户硬性要求，facing填写明确语义对应的标注对象。'
-                  'semantic_conditions列出需要当前RGB判断的要求，不能省略原指令的条件或目标。'
-                  '可以先lookup_places或query_map查询名称与空间；未知对象先查询或澄清，不猜身份。'
-                  '工具不生成候选点或推荐朝向。query_map提供全局图、局部图、标注坐标、自车和足迹；可用bounds请求目标附近细节。'
-                  'P/R/L是图中display_id；工具target_id和facing使用annotations里对应的place_id/region_id/landmark_id。'
-                  '你直接选择完整连续pose=[x,y,yaw]，单位米和弧度，属于图中frame_id，参考base_link。'
-                  'ROBOT箭头是车体前向；未提供相机外参时不假定相机光轴与它相同，视觉条件依据当前RGB。'
-                  '没有用户朝向时也应根据语义、视野、布局和后续任务选择朝向，orientation_source如实标记user/semantic/autonomous。'
-                  '区域位置由你选，点的位置遵守要求；提交navigate必须引用刚读取的view_id与当前goal_id，不从候选集合选ID。'
-                  'navigate的accepted只代表接收；之后可wait_for_event(event=navigation)等结果。'
-                  '到达后调用check_goal，完成这一子任务后才进行下一项。视觉条件要在到达后observe_scene，下一轮依据真实图像提交semantic_result和简短可见证据。'
-                  '语义satisfied/not_satisfied/unknown不是几何或执行证明。几何不满足或语义不确定时保持未完成，依据新信息修改自己选的位姿。'
-                  '影子状态、图像接近目标和ACK不能证明到达；没有实际反馈时不能finish_task(succeeded)。'
-                  '要视觉确认时先observe_scene，下一轮会提供同源图像；证据不足等新观察或询问用户。'
-                  '图像可以不含目标，未看见不等于不存在。历史证据只是过去的事实或模型动作，不证明当前可达。'
-                  '不要反复查相同状态；等用户继续用wait_for_event(event=user_continue)，等新图用observation。'
-                  '活动导航须先取消并等确认，才可改目标或询问用户。任务无法继续时说明失败，不能假报成功。'
-                  '工具失败可依据实际原因选择其他动作，不重放失败API，不换模型。参数只填写所选工具要求的字段。'
-                  '对话里的旧工具结果是历史，当前状态以runtime_current_state为准；图像仅来自本轮明确提供的观察。'
-                  '纯文字回复会等待用户，不会自动判定任务成功。任务结束必须调用finish_task。')
+        system = (ROOT/'decision/agent/configs/system_prompt.txt').read_text().strip()
+        reference = payload.get('reference_map')
+        messages = project_dialogue(payload['messages'],reference)
+        state = copy.deepcopy(payload['current_state'])
+        state['visual_inputs'] = visual_inputs(state,observation,spatial_view,reference,
+            payload.get('keyframes',{}),payload.get('input_status',{}))
         content = [dict(type='text',text=encode(dict(source='runtime_current_state',
-                    state=payload['current_state'])))]
+                    state=state)))]
         if observation is not None:
             observation.verify()
-            content += [dict(type='text',text=encode(observation_context(payload['messages'],
+            content += [dict(type='text',text=encode(observation_context(messages,
                 'current_rgb_observation','observation',observation.prompt()))),
                 image_part(observation.image,768,'JPEG')]
         if spatial_view is not None:
             spatial_view.verify()
-            content.append(dict(type='text',text=encode(observation_context(payload['messages'],
-                'current_spatial_view','view',spatial_view.record))))
+            content.append(dict(type='text',text=encode(observation_context(messages,
+                'current_spatial_view','view',view_context(spatial_view.record,reference)))))
             for role,data in zip(spatial_view.record['image_roles'],spatial_view.images):
                 content += [dict(type='text',text=role+' | view_id='+spatial_view.record['view_id']),
                             image_part(data,1024,'PNG')]
-        messages = [*copy.deepcopy(payload['messages']),dict(role='user',content=content)]
+        keyframes = payload.get('keyframes',{})
+        remaining = set(keyframes)
+        for message in reversed(messages):
+            if message.get('role')!='user' or not isinstance(message.get('content'),str):
+                continue
+            try:
+                value = json.loads(message['content'])
+            except ValueError:
+                continue
+            if isinstance(value,dict) and value.get('source')=='historical_keyframe':
+                identity = value['keyframe']['keyframe_id']
+                if identity in remaining:
+                    record,data = keyframes[identity]
+                    if record != value['keyframe']:
+                        raise ValueError('Historical attachment and saved keyframe disagree')
+                    feedback = payload['current_state']['navigation']['feedback']
+                    if (record['observation']['clock_domain']!=feedback['clock_domain'] or
+                            record['source_stamp_s']>feedback['stamp_s']):
+                        raise ValueError('Historical image is future or belongs to a different clock')
+                    if (hashlib.sha256(data).hexdigest()!=record['image_sha256'] or
+                            fingerprint({k:v for k,v in record.items() if k!='record_fingerprint'})!=record['record_fingerprint']):
+                        raise ValueError('Historical keyframe changed before request')
+                    message['content'] = [dict(type='text',text=message['content']),image_part(data,768,'JPEG')]
+                    remaining.remove(identity)
+        if remaining:
+            raise ValueError('Historical image has no corresponding retained dialogue message')
+        if reference is not None:
+            reference.verify()
+            messages.insert(0,dict(role='user',content=[
+                dict(type='text',text=encode(dict(source='static_reference_map',reference=reference.record))),
+                png_part(reference.image),dict(type='text',text='固定地图和全部固定标注；动态起点、实测轨迹与当前自车在本轮状态中。')]))
+        messages.append(dict(role='user',content=content))
         return self.request(system,messages,observation_id=None if observation is None else observation.record['observation_id'])
 
 

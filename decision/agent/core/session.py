@@ -4,9 +4,12 @@ import uuid
 from .memory import EvidenceMemory
 from .tasks import TaskGoals
 from .conversation import Conversation
+from .keyframes import Keyframes
+from .trajectory import Trajectory
+from .context import robot_context
 from ..tools.framework import TOOL_SPECS, validate_call
 from ..tools.navigation import NavigationSkill, spatial_context
-from ..tools.spatial import SpatialView
+from ..tools.spatial import SpatialView, ReferenceMap, spatial_source_binding
 from perception.environment.context import fingerprint
 
 TERMINAL = {'succeeded', 'failed', 'cancelled'}
@@ -18,9 +21,15 @@ class AgentSession:
         self.memory = EvidenceMemory() if use_memory else None
         self.observation = None
         self.spatial_view = None
+        self.reference_map = None
+        self.reference_catalog = catalog
+        self.trajectory = Trajectory()
+        self.requested_bounds = None
+        self.input_status = dict(rgb='not_provided',maps='not_provided')
         self._applying_context = None
         task_id = uuid.uuid4().hex
         self.catalog = catalog.bind_start(navigation.snapshot(), task_id)
+        self.keyframes = Keyframes(store,task_id)
         if hasattr(navigation, 'catalog'):
             navigation.catalog = self.catalog
         self.task_goals = TaskGoals(self.catalog)
@@ -55,6 +64,7 @@ class AgentSession:
         if self.spatial_view is not None:
             self.spatial_view.verify()
             value['spatial_view_id'] = self.spatial_view.record['view_id']
+        value['reference_map_id'] = None if self.reference_map is None else self.reference_map.record['reference_map_id']
         value['task_requirements'] = fingerprint([g['requirement'] for g in self.task_goals.goals])
         value['conversation_revision'] = self.conversation.revision
         return value
@@ -91,7 +101,12 @@ class AgentSession:
 
     def lookup_places(self, name):
         fields = ('place_id', 'name', 'aliases', 'pose', 'reference', 'status')
-        return dict(status='available', places=[{k: p[k] for k in fields if k in p} for p in self.catalog.lookup(name)])
+        annotations = self.catalog.annotations()
+        def matches(item, key):
+            return not name or name in [item[key],item.get('name'),*item.get('aliases',[])]
+        return dict(status='available',places=[{k:p[k] for k in fields if k in p} for p in self.catalog.lookup(name)],
+                    regions=[r for r in annotations['regions'] if matches(r,'region_id')],
+                    landmarks=[r for r in annotations['landmarks'] if matches(r,'landmark_id')])
 
     def record_task(self, goals):
         if self.skill.record['handle'] is not None:
@@ -102,9 +117,57 @@ class AgentSession:
     def query_map(self, bounds=None):
         self.catalog.require_complete()
         inputs = self.navigation.spatial_inputs()
-        self.spatial_view = SpatialView.build(self.catalog,inputs,bounds)
+        result = self._build_map(inputs,bounds)
+        self.requested_bounds = copy.deepcopy(bounds)
+        return result
+
+    def _build_map(self, inputs, bounds):
+        self.prepare_reference(inputs['global_grid'])
+        now = self.navigation.snapshot()
+        self.trajectory.update(now,self.catalog.value['frame_id'],map_snapshot_id=self.catalog.value.get('map_snapshot_id'))
+        trajectory = [] if inputs['stamp_s'] is None else self.trajectory.snapshot(
+            frame_id=self.catalog.value['frame_id'],clock_domain=inputs['clock_domain'],now=inputs['stamp_s'])
+        self.spatial_view = SpatialView.build(self.catalog,inputs,bounds,trajectory=trajectory)
         self.store.spatial_view(self.spatial_view)
+        self.store.event('trajectory_snapshot',dict(view_id=self.spatial_view.record['view_id'],segments=trajectory))
         return dict(status='available', view=self.spatial_view.record, target_candidates_generated=False)
+
+    def prepare_reference(self, grid=None):
+        if self.reference_map is not None or self.catalog.condition!='complete':
+            return
+        if grid is None:
+            if not hasattr(self.navigation,'reference_grid'):
+                return
+            grid = self.navigation.reference_grid()
+        self.reference_map = ReferenceMap.build(self.reference_catalog,grid)
+        self.store.reference_map(self.reference_map)
+
+    def prepare_current_images(self):
+        if hasattr(self.navigation,'observe'):
+            self.observation = None
+            result = self.observe_scene()
+            self.input_status['rgb'] = result.get('reason')
+        if self.catalog.condition=='complete' and hasattr(self.navigation,'spatial_inputs'):
+            current = self.navigation.snapshot()
+            if (current.get('localization_status','valid')!='valid' or current.get('input_stale') or
+                    self.skill.record['context_lost']):
+                self.spatial_view = None
+                self.input_status['maps'] = 'localization_invalid_or_stale'
+                return
+            # Keep an explicitly requested crop while its source observation is
+            # unchanged; otherwise regenerate both current maps from the source.
+            try:
+                inputs = self.navigation.spatial_inputs()
+                if self.spatial_view is not None:
+                    self.spatial_view.verify()
+                    if self.spatial_view.record.get('input_source_binding')==spatial_source_binding(inputs):
+                        return
+                self._build_map(inputs,self.requested_bounds)
+                self.input_status['maps'] = None
+            except (OSError,ValueError,KeyError) as error:
+                self.spatial_view = None
+                self.input_status['maps'] = 'current_map_source_unavailable'
+                self.store.event('current_maps_unavailable',dict(error_type=type(error).__name__))
 
     def observe_scene(self):
         observation = self.navigation.observe() if hasattr(self.navigation, 'observe') else None
@@ -122,6 +185,24 @@ class AgentSession:
         self.observation = observation
         return dict(status='available', observation=observation.prompt())
 
+    def save_keyframe(self, observation_id, reason):
+        context = self._applying_context
+        if (self.observation is None or context is None or not self.valid_context(context) or
+                observation_id != self.observation.record['observation_id'] or
+                context.get('observation_binding') != self.observation.record['input_fingerprint'] or
+                context.get('input_view_binding') != fingerprint(self.observation.prompt())):
+            return dict(status='refused',reason='save_requires_current_rgb_consumed_in_this_model_request')
+        record = self.keyframes.save(self.observation,self.state['revision'],reason)
+        return dict(status='saved',keyframe=record)
+
+    def read_keyframe(self, keyframe_id):
+        record,_ = self.keyframes.read(keyframe_id,self.state['revision'])
+        current = self.navigation.snapshot()
+        observation = record['observation']
+        if observation['clock_domain'] != current['clock_domain'] or observation['stamp_s'] > current['stamp_s']:
+            return dict(status='refused',reason='historical_keyframe_not_causal_in_current_clock')
+        return dict(status='available',keyframe=record)
+
     def navigate(self, goal_id, pose, view_id, orientation_source):
         self.catalog.require_complete()
         now = self.navigation.snapshot()['stamp_s']
@@ -135,6 +216,7 @@ class AgentSession:
         if result['status'] in ('accepted', 'uncertain'):
             self.task_goals.current(goal_id)['selected']['handle'] = copy.deepcopy(result['handle'])
             self.spatial_view = self.observation = None
+            self.requested_bounds = None
         return result
 
     def check_goal(self, goal_id, observation_id=None, semantic_result=None, evidence=None):
@@ -175,7 +257,7 @@ class AgentSession:
                     scope='simulation', real_robot_success=False)
 
     def get_navigation_state(self):
-        return self.skill.snapshot()
+        return self.navigation_summary()
 
     def cancel_navigation(self):
         result = self.skill.cancel()
@@ -254,8 +336,11 @@ class AgentSession:
             s.update(status='ready', reason=None)
             self._history('user', dict(event='continue', source='user_event'))
         elif name == 'answer' and s['status'] == 'needs_clarification' and text and text.strip() and not self.skill.record['context_lost']:
-            s['clarifications'].append(dict(question=s['reason'], answer=text.strip()))
-            s['clarifications'] = s['clarifications'][-8:]
+            from .store import encode
+            clarifications = [*s['clarifications'],dict(question=s['reason'],answer=text.strip())]
+            if len(encode(clarifications).encode())>16384:
+                raise ValueError('Clarification context exceeds 16384 bytes; replace with a concise complete instruction')
+            s['clarifications'] = clarifications
             s.update(status='ready', reason=None)
             self._history('user', dict(event='answer', text=text.strip()))
         elif name == 'replace' and text and text.strip() and not self.skill.record['context_lost']:
@@ -275,6 +360,7 @@ class AgentSession:
                      status='ready', reason=None, clarifications=[])
             self.observation = None
             self.spatial_view = None
+            self.requested_bounds = None
             self.task_goals = TaskGoals(self.catalog)
             self.conversation = Conversation(s['instruction'],self.catalog.prompt(),self.store.event)
             s['assistant_text'] = None
@@ -283,6 +369,8 @@ class AgentSession:
     def tick(self):
         s = self.state
         changed = self.skill.tick()
+        self.trajectory.update(self.navigation.snapshot(),self.catalog.value.get('frame_id'),
+                               map_snapshot_id=self.catalog.value.get('map_snapshot_id'))
         r = self.skill.record
         if not r['connected'] and s['status'] == 'ready':
             s.update(status='waiting_navigation' if r['handle'] else 'needs_clarification', reason='navigation_connection_lost')
@@ -327,6 +415,8 @@ class AgentSession:
                     last_completion=copy.deepcopy(record['completed'][-1:]))
 
     def prompt(self):
+        self.prepare_reference()
+        self.prepare_current_images()
         s, now = self.state, self.navigation.snapshot()
         goals = self.task_goals.snapshot()
         current = dict(task_id=s['task_id'],revision=s['revision'],status=s['status'],reason=s['reason'],
@@ -336,6 +426,28 @@ class AgentSession:
             navigation=self.navigation_summary(),
             map=dict(condition=self.catalog.condition,frame_id=self.catalog.value['frame_id'],
                      catalog_fingerprint=self.catalog.fingerprint),
-            evidence_memory=[] if self.memory is None else self.memory.recall(
+            recent_model_tool_choices=[] if self.memory is None else self.memory.recall(
                 place_ids=[*self.catalog.places,''],now=now['stamp_s'],clock_domain=now['clock_domain']))
-        return dict(messages=self.conversation.messages(),current_state=current)
+        current['keyframes'] = self.keyframes.index(s['revision'])
+        current['requirements_registered'] = bool(goals)
+        current['robot_context'] = robot_context(self.navigation)
+        current['selected_goal'] = next((dict(goal_id=g['requirement']['goal_id'],
+            allowed_orientation_sources=self.task_goals.orientation_sources(g['requirement']),selection=None if g['selected'] is None else
+            {k:copy.deepcopy(g['selected'][k]) for k in ('pose','orientation_source','view_id')})
+            for g in goals if g['status']!='completed'),None)
+        current['last_tool_feedback'] = None
+        for entry in reversed(s['history']):
+            if entry['kind']=='tool' and entry['revision']==s['revision']:
+                value = entry['value'];result = value['result']
+                current['last_tool_feedback'] = dict(tool=value['call']['tool'],
+                    **{k:copy.deepcopy(result[k]) for k in ('status','reason','error_type','checks','conditions') if k in result})
+                break
+        origin = copy.deepcopy(s['task_start']) if self.catalog.condition=='complete' else None
+        if origin is not None:
+            origin['display_id'] = next(p['display_id'] for p in self.catalog.annotations()['points'] if p['place_id']=='mission_start')
+        current['task_start'] = origin
+        messages = self.conversation.messages()
+        attachments = self.keyframes.attachments(messages,s['revision'])
+        current['visible_keyframe_ids'] = list(attachments)
+        return dict(messages=messages,current_state=current,reference_map=self.reference_map,keyframes=attachments,
+                    input_status=copy.deepcopy(self.input_status))

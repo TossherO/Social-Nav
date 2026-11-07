@@ -18,6 +18,7 @@ class Store:
         self.db.execute('CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, wall_s REAL, kind TEXT, value TEXT)')
         self.db.execute('CREATE TABLE IF NOT EXISTS map_images (view_id TEXT, role TEXT, sha256 TEXT, png BLOB, PRIMARY KEY(view_id,role))')
+        self.db.execute('CREATE TABLE IF NOT EXISTS keyframes (keyframe_id TEXT PRIMARY KEY, task_id TEXT, revision INTEGER, metadata TEXT, image BLOB)')
         self.db.commit()
 
     def save(self, state, kind, value):
@@ -40,6 +41,14 @@ class Store:
             self.db.executemany('INSERT OR IGNORE INTO map_images VALUES (?,?,?,?)',
                 [(record['view_id'],role,digest,image) for role,digest,image in
                  zip(record['image_roles'],record['image_sha256'],view.images)])
+
+    def reference_map(self, reference):
+        reference.verify()
+        r = reference.record
+        with self.db:
+            self.db.execute('INSERT OR IGNORE INTO map_images VALUES (?,?,?,?)',
+                (r['reference_map_id'],r['image_role'],r['image_sha256'],reference.image))
+        self.event('reference_map_prepared',r)
 
     def close(self):
         self.db.close()
