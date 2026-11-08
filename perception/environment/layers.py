@@ -234,6 +234,11 @@ class LocalEnvironmentMap:
         self.snapshots = OrderedDict()
         self.revision = 0
         self.ground_tracker=GroundTracker(self.config.get('ground_tracking',dict(enabled=False)))
+        self.ground_conflicts=None;self.ground_global_suspended=False
+        reach=min(int(np.ceil(self.config['window_m']/self.config['resolution']))-1,
+            int(np.ceil(self.config['ground_support_radius_m']/self.config['resolution'])))
+        y,x=np.mgrid[-reach:reach+1,-reach:reach+1]
+        self.ground_conflict_kernel=(np.hypot(x,y)*self.config['resolution']<=self.config['ground_support_radius_m']).astype(np.uint8)
         self.near_field=self._new_near_field()
         if self.near_field and not self.config.get('ground_tracking',{}).get('enabled'):
             raise ValueError('Near-field history requires tracked plane ground')
@@ -258,6 +263,7 @@ class LocalEnvironmentMap:
         self.last_stamp = self.last_pose = None
         self.identity=None;self.frame=None
         self.ground_tracker=GroundTracker(self.config.get('ground_tracking',dict(enabled=False)))
+        self.ground_conflicts=None;self.ground_global_suspended=False
         self.near_field=self._new_near_field()
 
     def _plane_ground(self,world,sensor,origin,size,stamp):
@@ -265,13 +271,48 @@ class LocalEnvironmentMap:
         if self.origin is None:
             self.ground_z = np.full((size,size), np.nan, dtype=np.float32)
             self.ground_seen = np.full((size,size), -np.inf, dtype=np.float64)
+            self.ground_conflicts=np.zeros((size,size),bool)
+            self.ground_conflict_heights=np.full((size,size),np.nan,np.float32)
         else:
             dx, dy = np.rint((self.origin-origin)/resolution).astype(int)
             self.ground_z = shift_array(self.ground_z,dx,dy,np.nan)
             self.ground_seen = shift_array(self.ground_seen,dx,dy,-np.inf)
+            self.ground_conflicts=shift_array(self.ground_conflicts,dx,dy,False)
+            self.ground_conflict_heights=shift_array(self.ground_conflict_heights,dx,dy,np.nan)
+        was_pending=self.ground_tracker.history_suspended
         plane,status = self.ground_tracker.fit(world,sensor,config)
+        old_floor,old_support=self._ground_support(stamp)
+        compared=0;localized=False
+        for observed,verified in ((self.ground_tracker.observed_ground,True),(self.ground_tracker.floor_samples,False)):
+            if observed is None or not len(observed):continue
+            ij=np.floor((observed[:,:2]-origin)/resolution).astype(int)
+            inside=((ij>=0)&(ij<size)).all(1)
+            ij,observed=ij[inside],observed[inside]
+            x,y=ij.T
+            reference=np.where(self.ground_conflicts[y,x],self.ground_conflict_heights[y,x],old_floor[y,x])
+            known=np.isfinite(reference)
+            if verified:
+                compared=int(known.sum())
+                if compared>=3:
+                    localized=bool(np.ptp(observed[known,:2],axis=0).min()>=config['ground_tracking']['min_span_m'])
+            x,y=x[known],y[known];reference=reference[known];difference=observed[known,2]-reference
+            # Only a new trustworthy observation releases a conflict. A missing
+            # scan, timeout or rejected plane leaves the original mark intact.
+            if verified and plane is not None:
+                same=np.abs(difference)<=config['ground_tolerance_m']
+                self.ground_conflicts[y[same],x[same]]=False
+            lower=difference < -config['ground_tracking']['height_tolerance_m']
+            new=lower&~self.ground_conflicts[y,x]
+            self.ground_conflict_heights[y[new],x[new]]=reference[new]
+            self.ground_conflicts[y[lower],x[lower]]=True
+        pending=bool(status.get('history_suspended'))
+        if pending and not was_pending:self.ground_global_suspended=not localized
+        elif not pending and plane is not None:self.ground_global_suspended=False
         if status.get('clear_ground_history'):
             self.ground_z.fill(np.nan);self.ground_seen.fill(-np.inf)
+            # Confirming another plane does not prove an observed drop became
+            # traversable. Keep its old height until it is actually reobserved.
+            self.ground_global_suspended=False
             if self.near_field:self.near_field.reset()
         indices = np.floor((world[:,:2]-origin)/resolution).astype(int)
         inside = (indices >= 0).all(axis=1) & (indices < size).all(axis=1)
@@ -280,19 +321,31 @@ class LocalEnvironmentMap:
             chosen = np.flatnonzero(ground & inside)
             x,y = indices[chosen].T
             self.ground_z[y,x], self.ground_seen[y,x] = world[chosen,2], stamp
+        floor,support=self._ground_support(stamp) if plane is not None else (old_floor,old_support)
+        if self.ground_global_suspended:
+            blocked=np.ones((size,size),bool)
+        elif self.ground_conflicts.any():
+            blocked=cv2.dilate(self.ground_conflicts.astype(np.uint8),self.ground_conflict_kernel).astype(bool)
+        else:blocked=np.zeros((size,size),bool)
+        support&=~blocked
+        self.ground_conflict_view=blocked
+        status.update(reference_pending=pending,history_suspended=self.ground_global_suspended,
+            history_suspension_scope='global' if self.ground_global_suspended else 'local' if blocked.any() else 'none',
+            ground_conflict_cells=int(blocked.sum()),ground_conflict_seeds=int(self.ground_conflicts.sum()),
+            compared_ground_points=compared)
+        return floor,support,status
+
+    def _ground_support(self,stamp):
+        config=self.config
         supported = (stamp-self.ground_seen <= config['voxel_ttl_s']) & np.isfinite(self.ground_z)
         if supported.any():
             distances, nearest = nearest_support(supported)
-            support = distances*resolution <= config['ground_support_radius_m']
+            support = distances*config['resolution'] <= config['ground_support_radius_m']
             floor = self.ground_z[nearest].copy()
             floor[~support] = np.nan
         else:
-            support, floor = np.zeros((size,size),bool), np.full((size,size),np.nan,np.float32)
-        if status.get('history_suspended'):
-            # Retain the height for obstacle classification, not free certification.
-            # Stored ground values and original observation times remain untouched.
-            support.fill(False)
-        return floor,support,status
+            support, floor = np.zeros(self.ground_z.shape,bool), np.full(self.ground_z.shape,np.nan,np.float32)
+        return floor,support
 
     def update(self, points, transform, stamp, identity, *, frame='odom', association=None,
                scan_duration=None, ray_origins=None, people=None, clock_domain=None, device=None, metrics=None,
@@ -389,7 +442,7 @@ class LocalEnvironmentMap:
         view_mask=masking.get('transient_mask');view_mask=None if view_mask is None else view_mask[remaining]
         layers = self.tree.project(floor,support,origin,config,stamp,endpoints=view_points,
             view_metadata=metadata,near_field=self.near_field if backend=='cuda' else None,
-            transient_mask=view_mask,device=device,metrics=metrics)
+            transient_mask=view_mask,device=device,metrics=metrics,ground_conflict=self.ground_conflict_view)
         if self.near_field and backend=='cuda':
             metadata.update(snapshot_id=metadata['snapshot_id']+':near_field:'+self.near_field.binding,
                             near_field_memory=self.tree.view_metadata)

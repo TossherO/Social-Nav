@@ -82,7 +82,7 @@ def _decode_layers(out, *, policy, people, device):
 
 def native_view(tree, floor, support, origin, config, stamp, endpoints, *, required=None,
                 source_layers=None, metadata=None, policy=None, transient_mask=None,
-                device=None, metrics=None):
+                device=None, metrics=None,ground_conflict=None):
     """Project evidence, decode layers and return the near-field description."""
     people = source_layers is None and policy is not None and transient_mask is not None
     if device is not None:
@@ -101,6 +101,15 @@ def native_view(tree, floor, support, origin, config, stamp, endpoints, *, requi
     original = np.asarray(floor)
     floor = np.ascontiguousarray(original, np.float64)
     support = np.ascontiguousarray(support, np.uint8)
+    if ground_conflict is None and source_layers is not None:
+        ground_conflict=source_layers.get('ground_conflict')
+    if ground_conflict is not None:
+        ground_conflict=np.asarray(ground_conflict)
+        if ground_conflict.dtype!=bool or ground_conflict.shape!=floor.shape:
+            raise ValueError('Ground conflicts must be a boolean projection grid')
+        # Internal C ABI states: 0 missing, 1 supported, 2 conflicting. Public
+        # ground_support remains boolean; no extra native input upload is needed.
+        support=support.copy();support[ground_conflict]=2
     origin = np.ascontiguousarray(origin, np.float64)
     points = np.ascontiguousarray(endpoints, np.float64)
     if (floor.ndim != 2 or support.shape != floor.shape or origin.shape != (2,) or
@@ -178,6 +187,15 @@ def native_view(tree, floor, support, origin, config, stamp, endpoints, *, requi
             metrics.transfer('d2d', out.numel() * out.element_size(), 'environment_owned_device_layers')
 
     layers = _decode_layers(out, policy=policy, people=people, device=device)
+    if ground_conflict is not None:
+        value=ground_conflict.copy()
+        if device is not None:
+            # A blocking copy here would wait for all preceding map-stream
+            # work. Private pinned storage stays leased by the CUDA copy.
+            value=torch.from_numpy(value).pin_memory().to(device,non_blocking=True)
+            if metrics is not None:metrics.transfer('h2d',ground_conflict.nbytes,'ground_conflict_consumer_layer')
+        else:value.flags.writeable=False
+        layers['ground_conflict']=value
     description = None
     if policy is not None:
         state = {

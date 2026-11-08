@@ -36,7 +36,7 @@ def parser():
     p.add_argument('--output',required=True);p.add_argument('--gpu',help='Physical visible-device selection; otherwise preserve CUDA_VISIBLE_DEVICES');p.add_argument('--duration',type=float)
     p.add_argument('--rate',type=float,default=1.);p.add_argument('--static-map');p.add_argument('--goal',nargs='+',type=float)
     p.add_argument('--goal-frame',default='odom');p.add_argument('--coverage');p.add_argument('--record-views',action='store_true')
-    p.add_argument('--record-planning',action='store_true',help='Bounded asynchronous planning evidence and 2 Hz map snapshots; preserves normal map scheduling')
+    p.add_argument('--record-planning',action='store_true',help='Bounded asynchronous planning evidence: 2 Hz maps plus footprint/ground/budget failure snapshots; preserves normal map scheduling')
     p.add_argument('--trace-timing',action='store_true',help='Bounded scalar timing events, flushed at shutdown; no map/image recording or scheduling change')
     p.add_argument('--record-decision-inputs',action='store_true',help='Optional VLM worker: prepare YOLO associations and freeze causal three-frame task windows; no VLM request')
     p.add_argument('--agent-observations',action='store_true',help='Bounded optional Agent RGB/scene outlet; no YOLO, API or chassis output')

@@ -8,10 +8,10 @@ import numpy as np
 @lru_cache(maxsize=1)
 def library(path):
     lib=C.CDLL(str(path))
-    capability=getattr(lib,'sn_navigation_support_local_heights',None)
+    capability=getattr(lib,'sn_occupancy_local_ground_conflicts',None)
     if capability is None or capability()!=1:
-        raise RuntimeError('Rebuild environment CUDA library: local-height support is required')
-    lib.sn_navigation_support.argtypes=[C.c_void_p]*9+[C.c_int,C.c_void_p]+[C.c_int]*6+[C.c_void_p,C.c_int]
+        raise RuntimeError('Rebuild environment CUDA library: local ground conflicts are required')
+    lib.sn_navigation_support_with_ground_conflicts.argtypes=[C.c_void_p]*10+[C.c_int,C.c_void_p]+[C.c_int]*6+[C.c_void_p,C.c_int]
     lib.sn_occupancy_error.restype=C.c_char_p
     return lib
 
@@ -34,10 +34,10 @@ def project(snapshot,layers,asset,prior,plane,proof,observation,previous,origin,
     hits=torch.empty((2,*shape),dtype=torch.float64,device=device)
     output=torch.empty((3,*shape),dtype=torch.float64,device=device)
     allowed=torch.empty(shape,dtype=torch.uint8,device=device)
-    buffers=[layers['occupancy'],layers['last_observed'],prior,previous,hits,output,allowed,points,moving]
+    buffers=[layers['occupancy'],layers['last_observed'],prior,previous,hits,output,allowed,points,moving,layers.get('ground_conflict')]
     stream=torch.cuda.current_stream(device)
     native=library(library_path or Path(__file__).resolve().parents[2]/'outputs/perception/ros1_ws/devel/lib/libsocial_nav_occupancy_cuda.so')
-    result=native.sn_navigation_support(*[None if t is None else t.data_ptr() for t in buffers],len(points),params.ctypes.data,
+    result=native.sn_navigation_support_with_ground_conflicts(*[None if t is None else t.data_ptr() for t in buffers],len(points),params.ctypes.data,
         *shape,*pm['shape'],*np.rint(delta).astype(int),stream.cuda_stream,device.index)
     if result<0:raise RuntimeError(native.sn_occupancy_error().decode())
     for tensor in buffers:

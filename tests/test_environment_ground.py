@@ -114,7 +114,7 @@ class FloorTests(unittest.TestCase):
             plane,status=tracker.fit(table,np.zeros(3),config)
             self.assertIsNone(plane);self.assertAlmostEqual(tracker.reference,.85)
 
-    def test_reference_conflict_withdraws_use_but_retains_ground_history(self):
+    def test_reference_height_alarm_keeps_matching_spatial_ground_history(self):
         config=load_config();config['compute']['backend']='cpu'
         model=LocalEnvironmentMap(config);self.addCleanup(model.close)
         x,y=np.meshgrid(np.linspace(-3,3,40),np.linspace(-3,3,40))
@@ -124,11 +124,79 @@ class FloorTests(unittest.TestCase):
         previous_ground=model.ground_z.copy();previous_times=model.ground_seen.copy()
         model.ground_tracker.reference=.54  # Explicit fault injection, not sensor feedback.
         view=model.update(floor,np.eye(4),1.6,('test',0),scan_duration=.1)
-        self.assertFalse(view.layers['ground_support'].any())
-        self.assertFalse(view.layers['near_field_free'].any())
+        self.assertTrue(view.layers['ground_support'].any())
+        self.assertFalse(view.layers['ground_conflict'].any())
         np.testing.assert_array_equal(model.ground_z,previous_ground)
         np.testing.assert_array_equal(model.ground_seen,previous_times)
-        self.assertTrue(view.metadata['ground_tracking']['history_suspended'])
+        self.assertTrue(view.metadata['ground_tracking']['reference_pending'])
+        self.assertFalse(view.metadata['ground_tracking']['history_suspended'])
+
+    def test_local_drop_withdraws_only_affected_support_and_needs_observed_recovery(self):
+        from unittest.mock import patch
+        config=load_config();config['compute']['backend']='cpu'
+        model=LocalEnvironmentMap(config);self.addCleanup(model.close)
+        x,y=np.meshgrid(np.linspace(-3,3,40),np.linspace(-3,3,40))
+        floor=np.c_[x.ravel(),y.ravel(),np.full(x.size,-.85)]
+        for i in range(5):model.update(floor,np.eye(4),1+i*.1,('test',0),scan_duration=.1)
+        selected=(floor[:,0]>1.5)&(abs(floor[:,1])<1)
+        lower=floor[selected].copy();lower[:,2]-=.25
+        def hypothesis(points,sensor,config):
+            model.ground_tracker.observed_ground=points
+            model.ground_tracker.history_suspended=True
+            return None,dict(status='unavailable',history_suspended=True,reference_height_m=.85)
+        before=model.ground_seen.copy()
+        with patch.object(model.ground_tracker,'fit',side_effect=hypothesis):
+            view=model.update(lower,np.eye(4),1.6,('test',0),scan_duration=.1)
+        blocked=view.layers['ground_conflict']
+        self.assertTrue(blocked.any());self.assertFalse(blocked.all())
+        self.assertTrue(view.layers['ground_support'].any())
+        self.assertFalse(view.layers['ground_support'][blocked].any())
+        self.assertEqual(view.metadata['ground_tracking']['history_suspension_scope'],'local')
+        np.testing.assert_equal(model.ground_seen,before)
+        # A completely missing scan cannot restore the drop, or refresh history.
+        missing=model.update(np.empty((0,3)),np.eye(4),1.8,('test',0),scan_duration=.1)
+        np.testing.assert_equal(missing.layers['ground_conflict'],blocked)
+        np.testing.assert_equal(model.ground_seen,before)
+        restored=model.update(floor,np.eye(4),2.,('test',0),scan_duration=.1)
+        self.assertFalse(restored.layers['ground_conflict'].any())
+        # Localization lifecycle changes reset the spatial mask as well.
+        model.update(np.empty((0,3)),np.eye(4),2.2,('new',0),scan_duration=.1)
+        self.assertFalse(model.ground_conflicts.any())
+
+    def test_unlocated_lower_hypothesis_retains_global_suspension_during_missing_scans(self):
+        from unittest.mock import patch
+        config=load_config();config['compute']['backend']='cpu'
+        model=LocalEnvironmentMap(config);self.addCleanup(model.close)
+        x,y=np.meshgrid(np.linspace(-1,1,25),np.linspace(-1,1,25))
+        floor=np.c_[x.ravel(),y.ravel(),np.full(x.size,-.85)]
+        for i in range(5):model.update(floor,np.eye(4),1+i*.1,('test',0),scan_duration=.1)
+        far=floor.copy();far[:,0]+=4;far[:,2]-=.25
+        def hypothesis(points,sensor,config):
+            model.ground_tracker.observed_ground=points
+            model.ground_tracker.history_suspended=True
+            return None,dict(status='unavailable',history_suspended=True,reference_height_m=.85)
+        with patch.object(model.ground_tracker,'fit',side_effect=hypothesis):
+            view=model.update(far,np.eye(4),1.6,('test',0),scan_duration=.1)
+        self.assertTrue(view.layers['ground_conflict'].all())
+        missing=model.update(np.empty((0,3)),np.eye(4),1.8,('test',0),scan_duration=.1)
+        self.assertTrue(missing.layers['ground_conflict'].all())
+        self.assertFalse(missing.layers['ground_support'].any())
+
+    def test_real_local_drop_survives_missing_scans_and_confirmed_reference_change(self):
+        config=load_config();config['compute']['backend']='cpu'
+        model=LocalEnvironmentMap(config);self.addCleanup(model.close)
+        x,y=np.meshgrid(np.linspace(-3,3,40),np.linspace(-3,3,40))
+        floor=np.c_[x.ravel(),y.ravel(),np.full(x.size,-.85)]
+        for i in range(5):model.update(floor,np.eye(4),1+i*.1,('test',0),scan_duration=.1)
+        changed=floor.copy();changed[changed[:,0]>1.5,2]-=.25
+        view=model.update(changed,np.eye(4),1.6,('test',0),scan_duration=.1)
+        self.assertTrue(view.layers['ground_conflict'].any())
+        self.assertTrue(view.layers['ground_support'].any())
+        for i in range(6):
+            view=model.update(floor-np.array([0,0,.25]),np.eye(4),1.8+i*.2,('test',0),scan_duration=.1)
+        self.assertAlmostEqual(model.ground_tracker.reference,1.10,places=2)
+        self.assertTrue(view.layers['ground_conflict'].any())
+        self.assertFalse((view.layers['ground_conflict']&(view.layers['occupancy']==0)).any())
 
     def test_interrupted_lower_ground_confirmation_needs_observed_recovery(self):
         config=load_config();tracker=GroundTracker(config['ground_tracking'])

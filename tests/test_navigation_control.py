@@ -1,5 +1,6 @@
 """Synthetic feedback and independent stopping/timeout boundaries; no hardware."""
 import unittest
+from unittest.mock import patch
 import numpy as np
 from perception.environment.context import fingerprint
 from navigation.control.tracking import goal_feedback,GoalMonitor,load_config as goal_config
@@ -57,6 +58,17 @@ class ControlTests(unittest.TestCase):
         cells=np.zeros((60,60),np.int8);cells[:,30:]=-1;self.scene=bundle(cells)
         r=self.gate(self.proposal([.8,0.]),dict(self.feedback,velocity=[.8,0.]))
         self.assertEqual(r['reason'],'stopping_sweep_unknown');self.assertEqual(cells[20,30],-1)
+
+    def test_independent_gate_rejects_when_its_own_people_check_finishes_late(self):
+        model=self.guard._people(self.scene);original=model.check;clock=[0.]
+        def late(*args,**kwargs):
+            result=original(*args,**kwargs);clock[0]+=.11;return result
+        with patch('navigation.safety.guard.time.perf_counter',side_effect=lambda:clock[0]), \
+                patch.object(model,'check',side_effect=late):
+            result=self.gate(self.proposal([.05,0.]))
+        self.assertEqual(result['reason'],'stopping_certification_time_budget_exceeded')
+        self.assertEqual(result['state'],'stop_request');self.assertEqual(result['velocity'],[0.,0.])
+        np.testing.assert_array_equal(self.guard.last_target,[0.,0.])
 
     def test_cancel_unavailable_emergency_and_takeover_request_actual_braking(self):
         f=dict(self.feedback,velocity=[.6,.1]);p=self.proposal([.8,.2])

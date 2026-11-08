@@ -198,7 +198,7 @@ __global__ void finish_layers(double* output,const unsigned* free,const uint8_t*
     int i=blockIdx.x*blockDim.x+threadIdx.x,size=p.height*p.width; if(i>=size) return;
     int count=0; for(int z=0;z<p.bins;++z) count+=free[i*p.bins+z];
     output[3*size+i]=float(fmin(1.,double(count)/required[i]));
-    if(output[3*size+i]>=float(p.coverage) && support[i] && output[i]!=100) output[i]=0;
+    if(output[3*size+i]>=float(p.coverage) && support[i]==1 && output[i]!=100) output[i]=0;
 }
 __global__ void read_voxels(const Voxel* voxels,Grid grid,double stamp,float* out,int* count) {
     int i=blockIdx.x*blockDim.x+threadIdx.x; if(i>=grid.size()) return;
@@ -244,16 +244,16 @@ __global__ void person_endpoints(const double* xyz,int n,const uint8_t* moving,c
 #include "support.cuh"
 }
 extern "C" {
-int sn_navigation_support_local_heights() { return 1; }
-int sn_navigation_support(const int8_t* raw,const double* seen,const double* prior,
+int sn_occupancy_local_ground_conflicts() { return 1; }
+int sn_navigation_support_with_ground_conflicts(const int8_t* raw,const double* seen,const double* prior,
     const double* previous,double* hits,double* out,uint8_t* allowed,const double* points,
-    const uint8_t* moving,int count,const double* params,int h,int w,int ph,int pw,int dx,int dy,
+    const uint8_t* moving,const uint8_t* conflicts,int count,const double* params,int h,int w,int ph,int pw,int dx,int dy,
     void* stream,int device) {
     try {
         Guard guard(device);SupportPolicy p{};std::copy(params,params+30,p.v);
         p.h=h;p.w=w;p.ph=ph;p.pw=pw;p.dx=dx;p.dy=dy;
         auto s=static_cast<cudaStream_t>(stream);
-        support_cells<<<blocks(h*w),256,0,s>>>(raw,seen,prior,previous,hits,out,allowed,p);
+        support_cells<<<blocks(h*w),256,0,s>>>(raw,seen,prior,previous,hits,out,allowed,conflicts,p);
         if(count)support_hits<<<blocks(count),256,0,s>>>(points,moving,count,hits,p);
         support_overlay<<<blocks(h*w),256,0,s>>>(raw,allowed,hits,out,p);
         check(cudaGetLastError());return 0;

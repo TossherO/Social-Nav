@@ -91,7 +91,7 @@
           "status": "offline_ready",
           "option": "--decision-project",
           "source": "bag",
-          "documentation": "docs/感知导航操作速查.md#一次完成推理与决策标注准备"
+          "documentation": "docs/感知导航运行手册.md#可选图像与决策输入"
         },
         "joint_image_association": {
           "status": "bag_and_live_ready",

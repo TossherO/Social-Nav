@@ -2,6 +2,11 @@
 linear_samples: 3
 angular_samples: 7
 max_candidates: 24
+# Cooperative deadlines, not a hard real-time guarantee. Geometry queries are
+# shared across every candidate and both prediction/braking sweeps in one call.
+max_compute_s: 0.08
+certification_budget_s: 0.05
+certification_max_checks: 2000
 prediction_s: 1.5
 sample_s: 0.1
 lookahead_m: 0.8

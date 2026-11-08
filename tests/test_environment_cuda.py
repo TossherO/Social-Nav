@@ -65,7 +65,7 @@ class CudaEnvironmentTests(unittest.TestCase):
         self.assertFalse(gpu[1]['person_background_free'][40,45])
         self.assertFalse(gpu[2]['person_background_free'][40,45])
 
-    def test_ground_reference_recovery_withdraws_cached_views_on_both_backends(self):
+    def test_ground_reference_alarm_preserves_matching_views_on_both_backends(self):
         from perception.environment.layers import LocalEnvironmentMap
         maps=[]
         for backend in ['cpu','cuda']:
@@ -80,8 +80,9 @@ class CudaEnvironmentTests(unittest.TestCase):
             for key in views[0].layers:
                 np.testing.assert_allclose(views[0].layers[key],views[1].layers[key],atol=3e-7,rtol=2e-7,err_msg=key)
             if i==5:
-                self.assertFalse(views[1].layers['ground_support'].any())
-                self.assertFalse(views[1].layers['near_field_free'].any())
+                self.assertTrue(views[1].layers['ground_support'].any())
+                self.assertFalse(views[1].layers['ground_conflict'].any())
+                self.assertTrue(views[1].metadata['ground_tracking']['reference_pending'])
         self.assertTrue(views[1].layers['ground_support'].any())
         self.assertAlmostEqual(maps[1].ground_tracker.reference,.85,places=2)
 

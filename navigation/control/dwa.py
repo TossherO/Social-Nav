@@ -13,7 +13,7 @@ from perception.environment.context import fingerprint
 from perception.environment.navigation import navigation_geometry
 from navigation.kinematics import advance,velocity_step,turning_residual,ramp_path
 from navigation.planning.continuity import check_reference,local_goal,context_binding
-from navigation.planning.collision import SweepChecker
+from navigation.planning.collision import SweepChecker,CertificationBudget
 from navigation.planning.footprint import footprint_status,wrap
 from navigation.planning.inputs import scene_status,request_status,validate_grid
 from navigation.planning.motion import interpolate_se2,motion_uncertainty_margin
@@ -28,10 +28,12 @@ def load_config(path=None):
     settings=yaml.safe_load(Path(path or Path(__file__).with_name('dwa.yaml')).read_text())
     if any(type(v) not in (int,float) or not np.isfinite(v) or v<=0 for v in settings.values()):
         raise ValueError('Invalid DWA configuration')
-    if any(type(settings[k]) is not int for k in ('linear_samples','angular_samples','max_candidates')):
+    if any(type(settings[k]) is not int for k in ('linear_samples','angular_samples','max_candidates','certification_max_checks')):
         raise ValueError('DWA sample counts must be integers')
     if settings['linear_samples']*settings['angular_samples']+3>settings['max_candidates'] or settings['max_candidates']>64:
         raise ValueError('DWA candidate budget exceeded')
+    if settings['certification_budget_s']>settings['max_compute_s']:
+        raise ValueError('Certification budget exceeds the whole control computation budget')
     return settings
 
 
@@ -45,7 +47,8 @@ class DwaController:
         self.safety_settings=load_stopping_config(motion)
         self.sweep=SweepChecker(motion.get('collision_backend','cpu'),motion.get('collision_library'))
         self.sweep.metrics=None if device_batch is None else device_batch.metrics
-        sources=[Path(__file__),Path(__file__).parents[1]/'kinematics.py',Path(__file__).parents[1]/'safety/guard.py']
+        sources=[Path(__file__),Path(__file__).parents[1]/'kinematics.py',Path(__file__).parents[1]/'safety/guard.py',
+            Path(__file__).parents[1]/'planning/collision.py',Path(__file__).parents[1]/'planning/footprint.py']
         if self.sweep.backend=='cuda':sources.append(Path(self.sweep.library))
         if device_batch is not None:sources.extend([Path(__file__).with_name('device.py'),Path(device_batch.library)])
         self.backend_binding={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}
@@ -73,7 +76,9 @@ class DwaController:
         return bool((ij>=0).all() and (ij<shape).all() and not np.any(grid.layers['occupancy'][ij[:,:,1],ij[:,:,0]]!=0))
 
     def command(self,request,scene,feedback,reference,*,now,clock_domain,dt=.1,pending=None):
-        began=time.perf_counter();self.result=None;timing={}
+        began=time.perf_counter();self.result=None;timing={};budget=None;certification_start=None
+        certification=dict(prediction_sweep_ms=0.,braking_sweep_ms=0.,people_ms=0.,enclosures_ms=0.,cpu_fallback_ms=0.,
+            cpu_fallbacks=0,reused_segments=0,gpu_refinement_batches=0,gpu_refinement_enclosures=0)
         out=dict(status='unavailable',reason=None,velocity=[0.,0.],control_mode='dwa',executable=False,
             request_binding=fingerprint(request),scene_binding=scene.record['input_fingerprint'])
         try:
@@ -269,26 +274,54 @@ class DwaController:
                 stage=time.perf_counter()
                 if self.sweep.backend=='cuda':self.sweep.bind_device(grid,self.device_batch.navigation_occupancy,binding=binding)
             chosen=None;certified=0
+            certification_start=time.perf_counter()
+            budget=CertificationBudget(min(began+self.settings['max_compute_s'],
+                certification_start+self.settings['certification_budget_s']),self.settings['certification_max_checks'])
+
+            def sweep(poses,margin,phase):
+                started=time.perf_counter()
+                check=self.sweep.check(grid,self.geometry,poses,margin,self.safety_settings['max_sweep_samples'],binding=binding,budget=budget)
+                certification[phase+'_sweep_ms']+=(time.perf_counter()-started)*1000
+                for key,value in check.get('timing_ms',{}).items():certification[key+'_ms']+=value
+                certification['cpu_fallbacks']+=int(check.get('adaptive_fallback',False))
+                certification['reused_segments']+=check.get('reused_segments',0)
+                for key in ('gpu_refinement_batches','gpu_refinement_enclosures'):certification[key]+=check.get(key,0)
+                if not budget.check():raise ValueError(budget.reason)
+                return check
+
+            def people_check(points,margin,start_time,**options):
+                if not budget.check():raise ValueError(budget.reason)
+                started=time.perf_counter()
+                try:result=model.check(points,self.geometry,margin,start_time=start_time,**options)
+                finally:certification['people_ms']+=(time.perf_counter()-started)*1000
+                if not budget.check():raise ValueError(budget.reason)
+                return result
+
+            out.update(candidate_count=len(choices),rejections=rejects,valid_candidates=0,certification_attempts=0)
+            if not budget.check():raise ValueError(budget.reason)
             for item in sorted(results,key=lambda x:x[0]):
+                if not budget.check():raise ValueError(budget.reason)
                 _,j,points=item;certified+=1
+                out['certification_attempts']=certified
                 if points is None:points=self.device_batch.trajectory(j)
                 dense,err=interpolate_se2(points[:,1:],grid.metadata['resolution'],self.safety_settings['max_sweep_samples'])
                 margin=self.planning['safety_margin_m']+err+motion_uncertainty_margin(feedback,self.geometry,self.settings['prediction_s'])
-                check=self.sweep.check(grid,self.geometry,dense,margin,self.safety_settings['max_sweep_samples'],binding=binding)
+                check=sweep(dense,margin,'prediction')
                 reason=None if check['status']=='free' else 'sweep_'+check['status']
                 prediction=None
                 if reason is None:
-                    prediction=model.check(points,self.geometry,margin+dynamic.get('projection_margin_m',0.),start_time=now,
+                    prediction=people_check(points,margin+dynamic.get('projection_margin_m',0.),start_time=now,
                         hard_until=model.config.get('hard_horizon_s'))
                     if not prediction['valid']:reason=prediction['reason']
                 if reason is None:
                     braking=brakes[j] if brakes is not None else self.device_batch.trajectory(j,brake=True)
                     dense,err=interpolate_se2(braking[:,1:],grid.metadata['resolution'],self.safety_settings['max_sweep_samples'])
                     stop_margin=self.planning['safety_margin_m']+err+motion_uncertainty_margin(feedback,self.geometry,float(braking[-1,0]))
-                    certificate=self.sweep.check(grid,self.geometry,dense,stop_margin,self.safety_settings['max_sweep_samples'],binding=binding)
+                    certificate=sweep(dense,stop_margin,'braking')
                     if certificate['status']!='free':reason='braking_'+certificate['status']
-                    elif not model.check(braking,self.geometry,stop_margin+dynamic.get('projection_margin_m',0.),start_time=feedback['stamp_s'])['valid']:
+                    elif not people_check(braking,stop_margin+dynamic.get('projection_margin_m',0.),start_time=feedback['stamp_s'])['valid']:
                         reason='braking_people_conflict'
+                if not budget.check():raise ValueError(budget.reason)
                 if reason:rejects[reason]=rejects.get(reason,0)+1
                 else:chosen=(item[0],j,points,prediction);break
             timing['certification']=(time.perf_counter()-stage)*1000
@@ -306,12 +339,18 @@ class DwaController:
                     candidate_velocity=dict(linear_x_mps=float(desired[0]),angular_z_rps=float(desired[1]),executable=False)),
                 reference_binding=reference['binding'],candidate_count=len(choices),valid_candidates=1,certification_attempts=certified,rejections=rejects,
                 timing_ms=dict(timing),executable=False,task_completed=False)
-            result['result_binding']=fingerprint(result);self.result=result
+            result['certification']=dict(certification,**budget.summary())
+            result['result_binding']=fingerprint(result)
+            if not budget.check():raise ValueError(budget.reason)
+            self.result=result
             out.update(status='candidate',reason=None,velocity=desired.tolist(),trajectory_as_of=feedback['stamp_s'],
                 trajectory_binding=result['result_binding'],source_scene_binding=scene.record['input_fingerprint'],
                 reference_binding=reference['binding'],reference_as_of=reference['as_of'],continuation=False)
         except (ValueError,KeyError,TypeError,RuntimeError) as error:
-            out.update(reason=str(error),velocity=[0.,0.]);self.previous=None
+            out.update(reason=str(error),velocity=[0.,0.],valid_candidates=0);self.previous=None
+        if budget is not None:
+            timing['certification']=(time.perf_counter()-certification_start)*1000
+            out['certification']=dict(certification,**budget.summary())
         out['compute_ms']=(time.perf_counter()-began)*1000
         out['timing_ms']=dict(timing)
         return out

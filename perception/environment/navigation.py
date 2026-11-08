@@ -9,7 +9,7 @@ from perception.detection_tracking.inference.geometry import validate_transform
 
 NAVIGATION_DTYPES = dict(navigation_occupancy=np.int8, navigation_source=np.uint8,
                          navigation_source_stamp=np.float64)
-CAPSULE_FIELDS = ('occupancy', 'person_background_free', *NAVIGATION_DTYPES)
+CAPSULE_FIELDS = ('occupancy', 'person_background_free', 'ground_conflict', *NAVIGATION_DTYPES)
 STATIC_GROUND_TOLERANCE_M = .15
 
 

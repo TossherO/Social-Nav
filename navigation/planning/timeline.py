@@ -91,7 +91,8 @@ def classify(control,reference):
     if reason=='record_missing':return 'unrecorded',reason
     if reason=='waiting_for_background_reference':
         return 'reference',((reference or {}).get('reason') or reason)
-    if reason in ('no_admissible_velocity','current_footprint_not_free'):
+    if reason in ('no_admissible_velocity','current_footprint_not_free',
+                  'certification_time_budget_exceeded','certification_work_budget_exceeded'):
         return 'dwa',reason
     return 'input',reason
 

@@ -126,6 +126,7 @@ class ControlLoop:
                                 command_accepted=accepted if action is not None else None))
                     if self.scene is not None:
                         self.batch.bind(self.device)
+                    status=None
                     if self.request is not None and self.scene is not None:
                         self.reference.update(self.request,self.scene,None,self.asset,now=now,clock_rate=self.clock['clock_rate'])
                         with self.metrics.span('reference_tick'):status=self.reference.tick(now=now,clock_domain=self.clock_domain)
@@ -147,8 +148,15 @@ class ControlLoop:
                     if self.planning_recorder is not None:
                         r=None if self.scene is None else self.scene.record
                         measured=None if r is None else r['prior'].get('measurement_stamp_s')
+                        failure=(packet.get('proposal') or {}).get('reason')
+                        capture_required=bool(status and status.get('reason')=='start_footprint_not_free') or failure in (
+                            'current_footprint_not_free','certification_time_budget_exceeded','certification_work_budget_exceeded')
+                        if self.scene is not None:
+                            ground=self.scene.geometry.metadata.get('ground_tracking',{})
+                            capture_required|=bool(ground.get('history_suspended') or ground.get('reference_pending'))
                         self.planning_recorder.submit(packet,self.scene,self.device,self.reference.reference,
                             self.controller.controller.result,self.reference.worker.job,self.reference.last_reply,dt=dt,
+                            capture_required=capture_required,
                             timing=dict(control_started_mono=mono,scene_offered_mono=offered_mono,
                                 scene_age_s=None if r is None else now-r['as_of'],
                                 association_age_s=None if measured is None else now-measured,

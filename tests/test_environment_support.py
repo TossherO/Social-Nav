@@ -81,6 +81,18 @@ class SupportTests(unittest.TestCase):
         self.apply(self.raw(10.2),[[2.05,2.05,-.3]],[0]);self.support.reset()
         self.assertEqual(self.apply(self.raw(10.3)).layers['navigation_occupancy'][20,20],0)
 
+    def test_local_ground_conflicts_veto_prior_and_survive_independent_capsule_verification(self):
+        from perception.environment.navigation import safety_capsule
+        raw=self.raw();raw.layers['ground_conflict']=np.zeros((60,60),bool)
+        raw.layers['ground_conflict'][20,20]=True;raw.layers['occupancy'][20,21]=100
+        raw.layers['ground_conflict'][20,21]=True
+        result=self.apply(raw);nav=result.layers['navigation_occupancy']
+        self.assertEqual(nav[20,20],-1);self.assertEqual(nav[20,21],100)
+        self.assertEqual(nav[20,22],0)
+        navigation_geometry(scene(safety_capsule(result)),asset=self.prior,check_asset=True,now=10.)
+        lost=copy.deepcopy(result);lost.layers.pop('ground_conflict')
+        with self.assertRaises(ValueError):navigation_geometry(scene(lost),now=10.)
+
     def test_optional_trace_records_confirmation_and_reset_without_changing_maps(self):
         from runtime.metrics import Metrics
         import json
@@ -141,6 +153,8 @@ class SupportCudaTests(unittest.TestCase):
             for j in range(6):
                 raw=observation(np.full((60,60),-1,np.int8),stamp=10.+.2*j,origin=(.1*j,0.))
                 raw.metadata['association']['map_from_local']=transform.tolist()
+                raw.layers['ground_conflict']=np.zeros(raw.layers['occupancy'].shape,bool)
+                raw.layers['ground_conflict'][20:23,20:25]=True
                 xyz=[[2.05,2.05,-.3]] if j<2 else []
                 obs=points(raw,xyz,[j] if xyz else [])
                 expected=host.apply(raw,prior,observation=obs)

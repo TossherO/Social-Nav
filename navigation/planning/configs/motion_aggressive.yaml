@@ -1,7 +1,7 @@
 # Aggressive opt-in profile; normal navigation defaults to motion.yaml.
-# Retained from outputs/navigation/october20_motion_limits/inputs/motion.yaml.
+# Retained from outputs/navigation/history/offline/october20_motion_limits/inputs/motion.yaml.
 # Reference ceiling for gradual tuning, not measured hardware limits.
-# Validation and selection: docs/感知导航操作速查.md, section 选择运动配置.
+# Selection and scope: docs/感知导航运行手册.md, section 选择运动配置.
 max_forward_mps: 1.3
 max_angular_rps: 1.0
 max_acceleration_mps2: 0.8

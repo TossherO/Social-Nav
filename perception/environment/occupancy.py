@@ -16,8 +16,8 @@ class OccupancyTree:
         if not path.is_file():
             raise RuntimeError('Build the environment library first: '+str(path))
         self.lib = lib = C.CDLL(str(path))
-        if backend=='cuda' and not hasattr(lib,'sn_occupancy_suspend_free_history'):
-            raise RuntimeError('Rebuild the CUDA environment library for ground-history suspension')
+        if backend=='cuda' and not hasattr(lib,'sn_occupancy_local_ground_conflicts'):
+            raise RuntimeError('Rebuild the CUDA environment library for local ground conflicts')
         fp, dp = C.POINTER(C.c_float), C.POINTER(C.c_double)
         lib.sn_occupancy_new.argtypes, lib.sn_occupancy_new.restype = [C.c_double], C.c_void_p
         lib.sn_occupancy_free.argtypes = [C.c_void_p]
@@ -128,7 +128,7 @@ class OccupancyTree:
         return votes
 
     def project(self, floor, support, origin, config, stamp, *, endpoints, view_metadata=None,
-                near_field=None, transient_mask=None, device=None, metrics=None):
+                near_field=None, transient_mask=None, device=None, metrics=None,ground_conflict=None):
         """Project resident evidence without exporting the entire 3D voxel map."""
         from .layers import finish_evidence
         if not hasattr(self.lib,'sn_occupancy_project'):
@@ -137,6 +137,10 @@ class OccupancyTree:
         method = self.lib.sn_occupancy_project
         method.argtypes = [C.c_void_p,fp64,u8,i32,C.c_int,C.c_int,fp64,fp64,C.c_double,fp64,C.c_int,fp64]
         original = np.asarray(floor)
+        if ground_conflict is not None:
+            ground_conflict=np.asarray(ground_conflict)
+            if ground_conflict.dtype!=bool or ground_conflict.shape!=original.shape:
+                raise ValueError('Ground conflicts must be a boolean projection grid')
         from .geometry import voxel_height_band
         _, required = voxel_height_band(original, config['resolution'], config['min_obstacle_height_m'], config['max_height_m'])
         required = np.maximum(1, required)
@@ -144,7 +148,7 @@ class OccupancyTree:
             from .cuda_view import native_view
             layers,self.view_metadata=native_view(self,original,support,origin,config,stamp,endpoints,
                 required=required,metadata=view_metadata,policy=near_field,transient_mask=transient_mask,
-                device=device,metrics=metrics)
+                device=device,metrics=metrics,ground_conflict=ground_conflict)
             return layers
         if device is not None:raise ValueError('Device layers require CUDA evidence')
         floor = np.ascontiguousarray(original,np.float64)
@@ -172,5 +176,8 @@ class OccupancyTree:
                     endpoints.ctypes.data_as(fp64),mask.ctypes.data_as(u8),len(endpoints),columns.ctypes.data_as(u8))<0:
                 raise RuntimeError(self.lib.sn_occupancy_error().decode())
             self.person_only=columns.astype(bool)
-        return finish_evidence(out[0].astype(np.int8),out[1].astype(bool),out[2],out[3].astype(np.float32),
+        if ground_conflict is not None:out[0][ground_conflict&(out[0]==0)]=-1
+        layers=finish_evidence(out[0].astype(np.int8),out[1].astype(bool),out[2],out[3].astype(np.float32),
                                bottom,top,floor,support.astype(bool),config['resolution'])
+        if ground_conflict is not None:layers['ground_conflict']=ground_conflict.copy()
+        return layers

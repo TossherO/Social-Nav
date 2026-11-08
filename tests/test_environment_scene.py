@@ -105,6 +105,8 @@ class SceneTests(unittest.TestCase):
         memory.update(sample(1,state=0),np.empty((0,3)))
         current=memory.update(sample(10),np.empty((0,3)))
         current.layers['person_background_free']=np.zeros(current.layers['occupancy'].shape,bool)
+        current.layers['ground_conflict']=np.zeros(current.layers['occupancy'].shape,bool)
+        current.layers['ground_conflict'][0,0]=True
         current.metadata['dynamic_navigation']=dict(policy='exclusive_person_on_certified_historical_free')
         message=EnvironmentGrid();meta=current.metadata
         message.snapshot_id=meta['snapshot_id'];message.session_id=meta['session_id'];message.generation=meta['generation']

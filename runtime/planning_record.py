@@ -13,13 +13,14 @@ class PlanningRecorder:
         self.next_capture=float('-inf');self.worker=threading.Thread(target=self._work,name='planning-record',daemon=True)
         self.worker.start()
 
-    def submit(self,packet,scene,device,reference,trajectory,job,reply,*,dt,timing):
+    def submit(self,packet,scene,device,reference,trajectory,job,reply,*,dt,timing,capture_required=False):
         if self.error:return False
-        capture=scene is not None and packet['stamp_s']>=self.next_capture
+        periodic=scene is not None and packet['stamp_s']>=self.next_capture
+        capture=scene is not None and (periodic or capture_required)
         item=(packet,scene,device if capture else None,reference,trajectory,job,reply,dt,dict(timing),capture)
         try:self.queue.put_nowait(item)
         except queue.Full:self.dropped+=1;return False
-        if capture:self.next_capture=packet['stamp_s']+.5
+        if periodic:self.next_capture=packet['stamp_s']+.5
         return True
 
     def _save_scene(self,scene):

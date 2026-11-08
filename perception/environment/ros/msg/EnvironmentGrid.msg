@@ -8,6 +8,8 @@ nav_msgs/MapMetaData info
 int8[] occupancy
 float32[] ground_z
 uint8[] ground_support
+# Optional local ground conflicts. A marked cell cannot use historical free support.
+uint8[] ground_conflict
 uint8[] observed
 float64[] last_observed
 float32[] coverage

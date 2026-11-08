@@ -13,6 +13,7 @@ from .geometry import shift_array
 HISTORY_DTYPES=dict(near_field_free=bool,near_field_free_classified_at=np.float64,
     near_field_obstacle=bool,near_field_obstacle_stamp=np.float64,near_field_obstacle_expires_at=np.float64)
 DYNAMIC_DTYPES=dict(person_background_free=bool)
+GROUND_DTYPES=dict(ground_conflict=bool)
 
 
 def ground_blind_zone(snapshot, plane, settings):
@@ -132,7 +133,8 @@ class NearFieldFreeMemory:
                 self.ordinary_stamp=shift_array(self.ordinary_stamp,dx,dy,-np.inf)
         self.origin=origin.copy();self.stamp=stamp
         self.prepare_plane(m.get('ground_tracking',{}),m['world_from_lidar'])
-        measured_ground=raw['ground_support']&np.isfinite(raw['ground_z'])&(not self.history_suspended)
+        paused=np.asarray(raw.get('ground_conflict',np.zeros(shape,bool)))|self.history_suspended
+        measured_ground=raw['ground_support']&np.isfinite(raw['ground_z'])&~paused
         self.ground_cache[measured_ground]=raw['ground_z'][measured_ground]
         blind,ring=ground_blind_zone(snapshot,self.plane,self.settings)
         valid=np.isfinite(self.confirmed)
@@ -175,7 +177,7 @@ class NearFieldFreeMemory:
                 self.hit_expires[touched]=np.maximum(stamp+ttl[touched],self.ordinary_stamp[touched]+self.config['obstacle_ttl_s'])
         invalidated=int((valid&hit).sum())
         certified=(raw['occupancy']==0)&raw['ground_support']&(
-            raw['coverage']>=self.config['free_vertical_coverage'])&~hit&(not self.history_suspended)
+            raw['coverage']>=self.config['free_vertical_coverage'])&~hit&~paused
         retained=valid if self.settings['remember_outside_ring'] else valid&blind
         blocked=np.zeros(shape,bool) if self.settings['temporary_obstacle_overlay'] else hit
         valid=(retained|certified)&~blocked&~conflict
@@ -189,13 +191,12 @@ class NearFieldFreeMemory:
         self.ordinary_stamp[certified]=-np.inf
         possible=np.isfinite(self.ground_cache)&blind&np.isfinite(self.hit_stamp)&np.isfinite(self.hit_expires)
         active=np.zeros(shape,bool);active[possible]=stamp<=self.hit_expires[possible]
-        restored=valid&blind&(raw['occupancy']==-1)&~active&(not self.history_suspended)
+        restored=valid&blind&(raw['occupancy']==-1)&~active&~paused
         layers=dict(raw)
-        if restored.any() or active.any() or self.history_suspended:
+        if restored.any() or active.any() or paused.any():
             layers={k:v.copy() for k,v in raw.items()}
-            if self.history_suspended:
-                layers['occupancy'][layers['occupancy']==0]=-1
-                layers['ground_support'].fill(False)
+            layers['occupancy'][paused&(layers['occupancy']==0)]=-1
+            layers['ground_support'][paused]=False
             for k,v in self.fields.items():layers[k][restored]=v[restored]
             layers['occupancy'][restored]=0
             layers['ground_support'][restored]=True
@@ -221,7 +222,7 @@ class NearFieldFreeMemory:
         if person_only is not None:
             person_only=np.asarray(person_only)
             if person_only.dtype!=bool or person_only.shape!=shape:raise ValueError('Invalid exclusive person columns')
-            layers['person_background_free']=valid&person_only&(layers['occupancy']==100)&(not self.history_suspended)
+            layers['person_background_free']=valid&person_only&(layers['occupancy']==100)&~paused
         metadata=dict(m,snapshot_id=m['snapshot_id']+':near_field:'+self.binding,
             near_field_memory=self.describe(m['snapshot_id'],[valid.sum(),
                 0 if self.settings['temporary_obstacle_overlay'] else invalidated,conflict.sum(),

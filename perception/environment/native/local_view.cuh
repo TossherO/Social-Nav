@@ -5,8 +5,8 @@
 __global__ void view_base(const double* raw,const double* floor,const uint8_t* support,int size,double* out,bool suspended) {
     int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=size)return;
     for(int k=0;k<6;++k)out[k*size+i]=raw[k*size+i];
-    out[6*size+i]=float(floor[i]);out[7*size+i]=support[i];
-    if(suspended) {if(out[i]==0)out[i]=-1;out[7*size+i]=0;}
+    out[6*size+i]=float(floor[i]);out[7*size+i]=support[i]==1;
+    if(suspended || support[i]==2) {if(out[i]==0)out[i]=-1;out[7*size+i]=0;}
     for(int k=8;k<16;++k)out[k*size+i]=(k==10 || k==11 || k==13)?0.:NAN;
 }
 __global__ void scan_ring(NearPolicy p, double* ring) {
@@ -97,10 +97,11 @@ __global__ void memory_prepare(const NearCell* before,NearCell* after,unsigned* 
     int x=i%p.width,y=i/p.width,ox=x-dx,oy=y-dy;
     NearCell c{NAN,NAN,NAN,NAN,INFINITY,-INFINITY,NAN,0,NAN};
     if(initialized && ox>=0 && ox<p.width && oy>=0 && oy<p.height)c=before[oy*p.width+ox];
-    bool valid=isfinite(c.classified),ground=!p.history_suspended && support[i] && isfinite(floor[i]);
+    bool paused=p.history_suspended || support[i]==2;
+    bool valid=isfinite(c.classified),ground=!paused && support[i]==1 && isfinite(floor[i]);
     bool conflict=valid && ground && fabs(floor[i]-c.free_ground)>p.settings[5];
     if(ground)c.ground=float(floor[i]);after[i]=c;
-    flags[i]=(raw[i]==100?1:0)|(conflict?8:0)|(in_ring(x,y,p,ring)?16:0);
+    flags[i]=(raw[i]==100?1:0)|(conflict?8:0)|(in_ring(x,y,p,ring)?16:0)|(paused?32:0);
     hit_bounds[i]=INFINITY;hit_bounds[size+i]=-INFINITY;
 }
 __global__ void memory_hits(const double* xyz,int n,const uint8_t* moving,NearCell* cells,unsigned* flags,
@@ -118,7 +119,8 @@ __global__ void memory_finish(NearCell* cells,const unsigned* flags,const double
     double* out,int* counts) {
     int i=blockIdx.x*blockDim.x+threadIdx.x,size=p.height*p.width;if(i>=size)return;
     auto& c=cells[i];unsigned f=flags[i];bool hit=f&3,conflict=f&8,blind=f&16;
-    bool valid=isfinite(c.classified),certified=out[i]==0 && out[7*size+i] && out[3*size+i]>=p.coverage && !hit;
+    bool paused=f&32;
+    bool valid=isfinite(c.classified),certified=!paused && out[i]==0 && out[7*size+i] && out[3*size+i]>=p.coverage && !hit;
     if(valid && hit)atomicAdd(counts+3,1);
     if(valid && hit && !p.settings[7])atomicAdd(counts+1,1);
     if(conflict)atomicAdd(counts+2,1);
@@ -135,7 +137,7 @@ __global__ void memory_finish(NearCell* cells,const unsigned* flags,const double
         c.hit_stamp=NAN;c.expires=NAN;c.ordinary_stamp=-INFINITY;
     }
     bool active=isfinite(c.ground) && blind && isfinite(c.hit_stamp) && p.stamp<=c.expires;
-    bool restored=!p.history_suspended && valid && blind && out[i]==-1 && !active;
+    bool restored=!paused && valid && blind && out[i]==-1 && !active;
     if(valid)atomicAdd(counts,1);
     if(restored) {
         atomicAdd(counts+4,1);out[i]=0;out[size+i]=1;out[2*size+i]=c.free_seen;out[3*size+i]=c.free_coverage;
@@ -171,9 +173,9 @@ __global__ void distance_columns(double* grid,int h,int w,double resolution,cons
     grid[10*size+i]=(x>0 && y>0 && x<w-1 && y<h-1 && grid[i]==0 &&
         (grid[i-1]==-1 || grid[i+1]==-1 || grid[i-w]==-1 || grid[i+w]==-1))?1.:0.;
 }
-__global__ void person_background(const unsigned* tags,const NearCell* memory,int size,double* view,bool suspended) {
+__global__ void person_background(const unsigned* tags,const NearCell* memory,const uint8_t* support,int size,double* view,bool suspended) {
     int i=blockIdx.x*blockDim.x+threadIdx.x;if(i>=size)return;
-    view[16*size+i]=!suspended && view[i]==100 && tags[i]==1 && isfinite(memory[i].classified)?1.:0.;
+    view[16*size+i]=!suspended && support[i]!=2 && view[i]==100 && tags[i]==1 && isfinite(memory[i].classified)?1.:0.;
 }
 void local_view(Tree& t,int h,int w,const double* origin,const double* params,double stamp,const double* pose,
     const double* plane,const double* settings,const uint8_t* moving,int n,double* output,int* counts,double* ring_info,bool people=false,bool device_output=false) {
@@ -212,7 +214,7 @@ void local_view(Tree& t,int h,int w,const double* origin,const double* params,do
             Projection q{h,w,0,origin[0],origin[1],params[0],params[1],params[2],params[3],params[4],params[5],params[6]!=0};
             if(t.initialized)person_voxels<<<blocks(t.grid.dim.x*t.grid.dim.y*t.grid.dim.z),256>>>(t.voxels.data,t.grid,t.floor.data,q,t.person_columns.data,stamp,t.obstacle_ttl);
             if(n)person_endpoints<<<blocks(n),256>>>(t.endpoints.data,n,moving?t.view_transient.data:nullptr,t.floor.data,q,t.person_columns.data);
-            person_background<<<blocks(size),256>>>(t.person_columns.data,t.memory_a.data,size,view,suspended);
+            person_background<<<blocks(size),256>>>(t.person_columns.data,t.memory_a.data,t.support.data,size,view,suspended);
         }
         check(cudaMemcpy(host_counts,t.memory_counts.data,6*sizeof(int),cudaMemcpyDeviceToHost));
         check(cudaMemcpy(host_ring,t.ring.data+724,4*sizeof(double),cudaMemcpyDeviceToHost));

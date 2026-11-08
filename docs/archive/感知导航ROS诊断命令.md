@@ -408,16 +408,7 @@ rostopic pub -1 /navigation/planning/cancel std_msgs/String \
   'data: "{\"task_id\":\"manual\",\"goal_revision\":1}"'
 ```
 
-```bash
-# 旧ROS全负载诊断，内部感知重新推理；核数等限制按实验目的设置。
-RESULT=outputs/perception/previous_run
-OUT=outputs/navigation/ros_probe_new
-GOAL_X=3
-GOAL_Y=1
-python -B -m navigation.planning.integration --source-run "$RESULT" \
-  --static-map "$STATIC_MAP" --goal "$GOAL_X" "$GOAL_Y" --duration 276 --local-at 140 \
-  --shadow --cpu-cores 24 --collision-backend cuda --output "$OUT/ros_probe"
-```
+旧`navigation.planning.integration`曾用于ROS话题链的全负载与故障注入诊断，已在转入实机阶段时移出活跃源码。原脚本保存在`outputs/navigation/history/live_transition/source_records.zip`，仅供追溯；当前带目标测试使用`runtime`或RViz交互入口，不继续维护该旧命令。
 
 
 </details>

@@ -8,6 +8,27 @@ from tests import test_navigation_dwa as fixtures
 
 
 class PlanningRecordTests(unittest.TestCase):
+    def test_failure_capture_keeps_exact_scene_without_delaying_periodic_capture(self):
+        from tests.navigation_fixtures import scene_at
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)/'planning';recorder=PlanningRecorder(root)
+            bindings=[]
+            for i,(stamp,required) in enumerate([(10.,False),(10.1,True),(10.5,False)],1):
+                scene=scene_at(stamp);bindings.append(scene.record['input_fingerprint'])
+                packet=dict(sequence_id=i,stamp_s=stamp,packet_binding=str(i),scene_binding=bindings[-1])
+                self.assertTrue(recorder.submit(packet,scene,None,None,None,None,None,
+                    dt=.1,timing={},capture_required=required))
+            result=recorder.close();self.assertTrue(result['complete'],result)
+            rows=[json.loads(x) for x in (root/'cycles.jsonl').read_text().splitlines()]
+            self.assertEqual([x['saved_scene'] for x in rows],bindings)
+            self.assertEqual(result['scenes'],3)
+
+    def test_certification_budget_exit_is_a_dwa_failure_in_review(self):
+        from navigation.planning.timeline import classify
+        for reason in ('certification_time_budget_exceeded','certification_work_budget_exceeded'):
+            packet=dict(request={'task_id':'synthetic'},proposal=dict(status='unavailable',reason=reason))
+            self.assertEqual(classify(packet,None),('dwa',reason))
+
     def test_saved_scene_and_reference_keep_original_bindings(self):
         f=fixtures.DwaTests();f.setUp()
         from perception.environment.scene import SceneInputs

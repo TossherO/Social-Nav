@@ -1,4 +1,5 @@
 """Independent simulation/shadow gate with current geometry and stopping sweep."""
+import time
 import numpy as np
 from perception.environment.context import fingerprint
 from navigation.kinematics import ramp_path,braking_path,turning_residual,advance,velocity_step
@@ -91,6 +92,7 @@ class LocalSafety:
         return cached[2]
 
     def gate(self,proposal,request,scene,feedback,*,now,clock_domain,dt,emergency_stop=False,manual_override=False):
+        began=time.perf_counter()
         result=dict(velocity=[0.,0.],state='braking',reason=None,executable=False,scope='execution_check' if self.execution else 'shadow_safety' if self.shadow else 'simulation_safety',
             request_binding=fingerprint(request),scene_binding=scene.record['input_fingerprint'])
         # Deliberately independent of the controller's validity function.
@@ -165,9 +167,13 @@ class LocalSafety:
         dense,error=interpolate_se2(points[:,1:],scene.geometry.metadata['resolution'],self.settings['max_sweep_samples'])
         uncertainty=motion_uncertainty_margin(feedback,self.geometry,float(points[-1,0]))
         result['motion_uncertainty_margin_m']=uncertainty
-        check=self.sweep.check(grid,self.geometry,dense,self.margin+error+uncertainty,self.settings['max_sweep_samples'],binding=grid_binding)
+        from navigation.planning.collision import CertificationBudget
+        budget=CertificationBudget(began+dt,self.settings['max_sweep_samples'])
+        check=self.sweep.check(grid,self.geometry,dense,self.margin+error+uncertainty,self.settings['max_sweep_samples'],binding=grid_binding,budget=budget)
         reason='stopping_sweep_'+check['status'] if check['status']!='free' else None
         prediction=None if reason else people.check(points,self.geometry,self.margin+uncertainty+dynamic.get('projection_margin_m',0.),start_time=prediction_start)
+        if not budget.check():reason='stopping_'+budget.reason
+        result['certification']=budget.summary()
         if prediction is not None and not prediction['valid']:reason=prediction['reason']
         attempts.append(dict(scale=1.,reason=reason,minimum_clearance_m=None if prediction is None else prediction.get('minimum_clearance_m')))
         result.update(check=check,people_check=prediction,velocity_filter=dict(requested_velocity=requested.tolist(),

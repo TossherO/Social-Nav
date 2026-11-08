@@ -120,6 +120,7 @@ class NavigationSupport:
         nav=cells.copy();source=np.where(cells==0,1,np.where(cells==100,2,0)).astype(np.uint8)
         times=np.where(cells!=-1,l['last_observed'],np.nan)
         selected=region(m,proof['radius_m'])
+        if 'ground_conflict' in l:selected&=~l['ground_conflict']
         transform=np.asarray(m['association']['map_from_local'])
         floor=prior_floor(snapshot,asset.snapshot,transform,self.reference['map_plane'],selected=selected)
         selected&=np.isfinite(floor)
@@ -169,6 +170,8 @@ def finalize(snapshot):
     if proof.get('method')!=METHOD:return snapshot
     metadata=copy.deepcopy(snapshot.metadata)
     metadata['navigation_fusion']['raw_occupancy_sha256']=hashlib.sha256(snapshot.layers['occupancy'].tobytes()).hexdigest()
+    if 'ground_conflict' in snapshot.layers:
+        metadata['navigation_fusion']['ground_conflict_sha256']=hashlib.sha256(snapshot.layers['ground_conflict'].tobytes()).hexdigest()
     return GridSnapshot(metadata,snapshot.layers)
 
 
@@ -181,6 +184,12 @@ def verify(scene, *, now=None, asset=None, check_asset=False):
             p['raw_occupancy_sha256']!=hashlib.sha256(cells.tobytes()).hexdigest()):
         raise ValueError('Navigation support source mismatch')
     nav,source,times=(l[k] for k in NAVIGATION_DTYPES)
+    if 'ground_conflict_sha256' in p:
+        conflicts=l.get('ground_conflict')
+        if (conflicts is None or conflicts.dtype!=bool or conflicts.shape!=cells.shape or
+                hashlib.sha256(conflicts.tobytes()).hexdigest()!=p['ground_conflict_sha256'] or
+                np.any(conflicts&(nav==0))):
+            raise ValueError('Navigation support violates local ground conflicts')
     extra=source==10;historical=source==3
     if (not np.isin(source,[0,1,2,3,10]).all() or not np.isin(nav,[-1,0,100]).all() or
             np.any((cells==100)&((nav!=100)|(source!=2))) or

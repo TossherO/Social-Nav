@@ -184,24 +184,33 @@ def compact_poses(poses):
     return poses[np.r_[True,~(straight&same[:-1]&same[1:]),True]]
 
 
-def swept_check(snapshot, geometry, poses, margin, max_samples, *, prefix=True):
+def swept_check(snapshot, geometry, poses, margin, max_samples, *, prefix=True, certified=None, budget=None):
     """Certify whole translation sweeps; subdivide only blocked or uncertain intervals."""
     from scipy.spatial import ConvexHull
     poses=np.asarray(poses,dtype=float)
     checked = 1; distance = 0.; last = None
-    status=footprint_status(snapshot,geometry,poses[0],margin)
+    if budget is not None and not budget.check():
+        return dict(status='budget_exceeded',checked_samples=0,valid_distance_m=0.,last_valid_pose=None)
+    if certified is not None and np.shape(certified)!=(len(poses),):raise ValueError('Invalid sweep interval certificates')
+    if certified is not None and certified[0]:status='free'
+    elif budget is not None and not budget.check(1):status='budget_exceeded'
+    else:status=footprint_status(snapshot,geometry,poses[0],margin)
     if status!='free':return dict(status=status,checked_samples=checked,valid_distance_m=0.,failed_segment=0,
                                   failed_pose=poses[0].tolist(),last_valid_pose=None)
     last=poses[0].tolist()
     for index, (a, b) in enumerate(zip(poses[:-1], poses[1:])):
         delta = b[:2]-a[:2]; turn = wrap(b[2]-a[2])
         motion=float(np.linalg.norm(delta))+geometry.radius*abs(turn)
+        if budget is not None and not budget.check():
+            return dict(status='budget_exceeded',checked_samples=checked,valid_distance_m=distance,last_valid_pose=last)
+        if certified is not None and certified[index+1]:
+            distance+=float(np.linalg.norm(delta));last=b.tolist();continue
         pending=[(0.,1.)]
         verified_t=0.;known_failure=None
         while pending:
             low,high=pending.pop();t=(low+high)/2
             pose=np.r_[a[:2]+delta*t,a[2]+turn*t]
-            if checked>=max_samples:
+            if checked>=max_samples or budget is not None and not budget.check(1):
                 status='budget_exceeded'
             else:
                 enclosure=motion*(high-low)/2
@@ -219,19 +228,23 @@ def swept_check(snapshot, geometry, poses, margin, max_samples, *, prefix=True):
                     return dict(status=status,checked_samples=checked,valid_distance_m=distance,
                         failed_segment=index,failed_pose=None,last_valid_pose=last,failure_location='convex_translation_sweep')
                 actual='free'
-                if checked<max_samples:
+                if checked<max_samples and (budget is None or budget.check(1)):
                     actual=footprint_status(snapshot,geometry,pose,margin);checked+=1
                     if actual!='free':known_failure=(actual,pose.copy())
                     if actual!='free' and not prefix:
                         return dict(status=actual,checked_samples=checked,valid_distance_m=distance,
                             failed_segment=index,failed_pose=pose.tolist(),last_valid_pose=last)
-                if enclosure>1e-4 and checked<max_samples:
+                if budget is not None and not budget.check():status='budget_exceeded'
+                elif enclosure>1e-4 and checked<max_samples:
                     pending.extend([(t,high),(low,t)]);continue
-                status=actual if actual!='free' else 'uncertified_clearance'
-                if status=='uncertified_clearance' and known_failure is not None:
-                    status,pose=known_failure
+                else:
+                    status=actual if actual!='free' else 'uncertified_clearance'
+                    if status=='uncertified_clearance' and known_failure is not None:
+                        status,pose=known_failure
             return dict(status=status,checked_samples=checked,
                 valid_distance_m=distance+float(np.linalg.norm(delta))*verified_t,
                 failed_segment=index,failed_pose=pose.tolist(),last_valid_pose=last)
         distance += float(np.linalg.norm(delta))
+    if budget is not None and not budget.check():
+        return dict(status='budget_exceeded',checked_samples=checked,valid_distance_m=distance,last_valid_pose=last)
     return dict(status='free', checked_samples=checked, valid_distance_m=distance, last_valid_pose=last)

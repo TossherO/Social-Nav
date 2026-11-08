@@ -38,6 +38,7 @@ class ReferenceRuntime:
         self.cancelled={};self.last_sent=-np.inf;self.next_retry=-np.inf;self.blocked=False;self.need_replan=False
         self.diagnostics=False;self.last_reply=None;self.start_evidence=None
         self.failure=None
+        self.retry_after_observation=None
 
     def __enter__(self):return self
     def __exit__(self,*args):self.close()
@@ -52,6 +53,7 @@ class ReferenceRuntime:
         self.epoch+=1;self.latest=self.current=self.reference=None;self.context=None
         self.reason=reason;self.blocked=False;self.need_replan=False;self.last_sent=self.next_retry=-np.inf
         self.failure=None
+        self.retry_after_observation=None
         if self.worker.job is not None:self.worker.restart()
         self._event('invalidated',reason=reason)
 
@@ -93,6 +95,7 @@ class ReferenceRuntime:
         mono=time.monotonic();response=self.worker.poll()
         if response is not None:
             job,reply=response
+            transient_input=False
             if self.diagnostics:self.last_reply=response
             fields=dict(role='reference',job_id=job['job_id'],as_of=job['scene'].record['as_of'],
                 elapsed_ms=(mono-job['sent_mono'])*1000,compute_ms=reply['compute_s']*1000)
@@ -107,14 +110,20 @@ class ReferenceRuntime:
                 if self.latest is None or job['epoch']!=self.epoch or job['context']!=self.context:raise ValueError('superseded_context')
                 check_reference(reply['result'],self.latest['request'],self.latest['scene'],self.latest['asset'],self.settings['max_age_s'],require_path=False)
                 if result['status']!='path_found' or len(result.get('path',[]))<2:
+                    if result.get('reason') in ('navigation_prior_future_or_stale','geometry_future_or_stale'):
+                        transient_input=True;self.failure=None
+                        raise ValueError(result['reason'])
                     self.failure=dict(request_binding=fingerprint(job['request']),reason=result['reason'],
                         as_of=job['scene'].record['as_of'],job_id=job['job_id'])
                     raise ValueError('reference_has_no_path')
-                self.reference=self.current=reply['result'];self.need_replan=False;self.failure=None
+                self.reference=self.current=reply['result'];self.need_replan=False;self.failure=None;self.retry_after_observation=None
                 self._event('reference_ready',**fields)
             except (ValueError,KeyError,TypeError) as error:
-                self.reason=str(error);self.next_retry=mono+self.settings['failure_retry_s']
-                self._event('discarded',reason=str(error),retry_after_s=self.settings['failure_retry_s'],**fields)
+                self.reason=str(error)
+                self.retry_after_observation=job['scene'].record['as_of'] if transient_input else None
+                self.next_retry=mono if transient_input else mono+self.settings['failure_retry_s']
+                self._event('discarded',reason=str(error),transient_input=transient_input,
+                    retry_after_s=max(0.,max(self.next_retry,self.last_sent+self.settings['retry_s'])-mono),**fields)
         if self.worker.job is not None and mono-self.worker.job['sent_mono']>self.settings['timeout_s']:
             self.worker.restart();self._event('timeout',role='reference');self.reason='reference_timeout'
             self.next_retry=mono+self.settings['failure_retry_s']
@@ -137,11 +146,12 @@ class ReferenceRuntime:
                 self.current=None;self.reason=str(error)
         expired=self.current is None or r['as_of']-self.current['as_of']>=self.settings['revalidate_s']
         if (not self.blocked and self.worker.ready and self.worker.job is None and (expired or self.need_replan)
-                and mono-self.last_sent>=self.settings['retry_s'] and mono>=self.next_retry):
+                and mono-self.last_sent>=self.settings['retry_s'] and mono>=self.next_retry
+                and (self.retry_after_observation is None or r['as_of']>self.retry_after_observation)):
             self.sequence+=1
             job=dict(job_id=self.sequence,epoch=self.epoch,context=self.context,request=item['request'],scene=scene,
                 asset=item['asset'],sent_mono=mono,now=now,clock_rate=item['clock_rate'])
-            self.worker.send(job);self.last_sent=mono
+            self.worker.send(job);self.last_sent=mono;self.retry_after_observation=None
             self._event('submitted',role='reference',job_id=self.sequence,as_of=r['as_of'])
         return self.status(now=now,clock_domain=clock_domain)
 

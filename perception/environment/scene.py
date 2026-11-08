@@ -7,7 +7,7 @@ import numpy as np
 
 from perception.detection_tracking.inference.geometry import validate_transform
 from .context import fingerprint, layer_binding
-from .near_field import HISTORY_DTYPES,DYNAMIC_DTYPES
+from .near_field import HISTORY_DTYPES,DYNAMIC_DTYPES,GROUND_DTYPES
 
 
 def latest_past(rows, stamp):
@@ -200,7 +200,7 @@ def assemble_scene(snapshot, *, clock_domain, rgb=None, people=None, settings):
 def assign_grid_layers(message, layers):
     """Both regular genpy and numpy_msg accept these optional empty array values."""
     from .navigation import NAVIGATION_DTYPES
-    for name,dtype in dict(HISTORY_DTYPES,**DYNAMIC_DTYPES,**NAVIGATION_DTYPES).items():
+    for name,dtype in dict(HISTORY_DTYPES,**DYNAMIC_DTYPES,**GROUND_DTYPES,**NAVIGATION_DTYPES).items():
         if hasattr(message,name):setattr(message,name,b'' if dtype in (bool,np.uint8) else np.empty(0,dtype))
     for name,values in layers.items():
         if not hasattr(message,name):raise ValueError('Grid message cannot preserve layer '+name)
@@ -232,7 +232,7 @@ def snapshot_from_message(message):
         array.flags.writeable = False
         layers[name] = array
     from .navigation import NAVIGATION_DTYPES
-    extra=dict(HISTORY_DTYPES,**DYNAMIC_DTYPES,**NAVIGATION_DTYPES)
+    extra=dict(HISTORY_DTYPES,**DYNAMIC_DTYPES,**GROUND_DTYPES,**NAVIGATION_DTYPES)
     for name,dtype in extra.items():
         values=getattr(message,name,())
         if not len(values):continue  # Older bags keep their original message definition.

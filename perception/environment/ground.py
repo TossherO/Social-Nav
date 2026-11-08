@@ -60,8 +60,12 @@ class GroundTracker:
         self.pending=deque(maxlen=self.settings['reacquire_observations'])
         self.reference=None;self.slope=np.zeros(2)
         self.history_suspended=False
+        self.observed_ground=None
+        self.floor_samples=None
 
     def fit(self, points, sensor, config):
+        self.observed_ground=None
+        self.floor_samples=None
         settings=self.settings
         if not settings.get('enabled',True):
             return ground_plane(points,sensor,config),dict(status='disabled')
@@ -69,6 +73,7 @@ class GroundTracker:
                   no_missing_cells_filled=True,clear_ground_history=False,
                   history_suspended=self.history_suspended)
         support,seeds=spatial_floor_points(points,sensor,config,settings)
+        self.floor_samples=seeds
         if len(seeds)<config['ground_min_points']:
             self.pending.clear()
             if self.reference is None:self.heights.clear()
@@ -105,6 +110,9 @@ class GroundTracker:
             self.pending.clear()
             if self.reference is None:self.heights.clear()
             return None,dict(info,reason='ground_fit_or_extrapolation_uncertain')
+        # Actual inlier locations, rather than the plane extrapolated under the
+        # sensor, let the map compare this hypothesis with its local history.
+        self.observed_ground=support[np.abs(coordinates[0]@plane-support[:,2])<=tolerance]
         changed=False
         if self.reference is not None and abs(height-self.reference)>settings['height_tolerance_m']:
             # A table above a known floor cannot become ground by waiting.

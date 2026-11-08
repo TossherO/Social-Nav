@@ -94,6 +94,43 @@ class NearFieldTests(unittest.TestCase):
     def model(self):
         return NearFieldFreeMemory(dict(load_config(),hit_invalidates_free=True))
 
+    def test_local_ground_conflict_blocks_only_its_cached_column_and_preserves_obstacles(self):
+        config=load_config();memory=NearFieldFreeMemory(config,{k:v for k,v in config['near_field'].items() if k!='enabled'})
+        seed=sample(1.,state=0)
+        for name,value in (('occupancy',0),('ground_support',True),('coverage',1.),('last_observed',1.)):
+            seed.layers[name][40,55]=value
+        memory.update(seed,np.empty((0,3)))
+        alarm=sample(2.);alarm.layers['ground_conflict']=np.zeros((80,80),bool)
+        alarm.layers['ground_conflict'][40,45]=True
+        result=memory.update(alarm,np.empty((0,3)))
+        self.assertEqual(result.layers['occupancy'][40,45],-1)
+        self.assertEqual(result.layers['occupancy'][40,55],0)
+        self.assertTrue(np.isfinite(memory.confirmed[40,45]))
+        recovered=memory.update(sample(2.2),np.empty((0,3)))
+        self.assertEqual(recovered.layers['occupancy'][40,45],0)
+        # The conflict field is supplied by the causal ground model. This memory
+        # neither expires nor clears it; it continues classifying new obstacles.
+        alarm=sample(2.4);alarm.layers['ground_conflict']=np.zeros((80,80),bool)
+        alarm.layers['ground_conflict'][40,45]=True
+        occupied=memory.update(alarm,np.array([[.55,.05,.5]]))
+        self.assertEqual(occupied.layers['occupancy'][40,45],100)
+
+    def test_cuda_local_ground_conflicts_match_cpu_cached_free_and_person_background(self):
+        import torch
+        from perception.environment.cuda_view import native_view
+        if not torch.cuda.is_available():self.skipTest('CUDA unavailable')
+        config=load_config();tree=OccupancyTree(.1,backend='cuda');self.addCleanup(tree.close)
+        cpu=self.model();gpu=self.model()
+        for i,paused in enumerate((False,True,True,False)):
+            raw=sample(1.+i*.2,state=0 if i==0 else -1)
+            raw.layers['ground_conflict']=np.zeros((80,80),bool)
+            raw.layers['ground_conflict'][40,45]=paused
+            expected=cpu.update(raw,np.empty((0,3)))
+            actual,_=native_view(tree,raw.layers['ground_z'],raw.layers['ground_support'],[-4,-4],config,
+                raw.metadata['stamp_s'],np.empty((0,3)),source_layers=raw.layers,metadata=raw.metadata,policy=gpu)
+            for name in ('occupancy','ground_support','ground_conflict','near_field_free','last_observed'):
+                np.testing.assert_equal(actual[name],expected.layers[name],err_msg=name)
+
     def test_ground_suspension_retains_times_and_obstacles_without_new_free(self):
         views=suspended_history_sequence('cpu')
         self.assertEqual([int(v['occupancy'][40,45]) for v,_ in views],[0,-1,100,100,100,0])

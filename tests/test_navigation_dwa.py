@@ -1,6 +1,7 @@
 """Direct-control causality, bounded actions, real braking and reference lifecycle."""
 import copy
 import unittest
+from unittest.mock import patch
 import numpy as np
 from perception.environment.context import fingerprint
 from navigation.control.dwa import DwaController
@@ -39,6 +40,37 @@ class DwaTests(unittest.TestCase):
         self.assertTrue(content_valid(self.controller.result))
         again=self.controller.command(self.req,self.scene,self.feedback,self.reference,now=10.,clock_domain='synthetic')
         self.assertLessEqual(again['velocity'][0],self.motion['max_acceleration_mps2']*.1+1e-9)
+
+    def test_expired_computation_clears_the_previous_proposal(self):
+        first=self.controller.command(self.req,self.scene,self.feedback,self.reference,now=10.,clock_domain='synthetic')
+        self.assertEqual(first['status'],'candidate',first)
+        self.controller.settings['max_compute_s']=1e-12
+        result=self.controller.command(self.req,self.scene,self.feedback,self.reference,now=10.,clock_domain='synthetic')
+        self.assertEqual(result['reason'],'certification_time_budget_exceeded')
+        self.assertEqual(result['velocity'],[0.,0.]);self.assertIsNone(self.controller.result)
+        self.assertIsNone(self.controller.previous);self.assertEqual(result['certification_attempts'],0)
+
+    def test_exact_work_allowance_is_shared_across_candidates(self):
+        self.controller.settings['certification_max_checks']=3
+        def uncertain(*args,**kwargs):
+            status='unknown' if kwargs['budget'].check(2) else 'budget_exceeded'
+            return dict(status=status)
+        with patch.object(self.controller.sweep,'check',side_effect=uncertain):
+            result=self.controller.command(self.req,self.scene,self.feedback,self.reference,now=10.,clock_domain='synthetic')
+        self.assertEqual(result['reason'],'certification_work_budget_exceeded')
+        self.assertEqual(result['certification']['exact_checks'],2)
+        self.assertEqual(result['certification_attempts'],2);self.assertIsNone(self.controller.result)
+
+    def test_late_people_check_cannot_publish_a_previously_free_candidate(self):
+        model=self.controller._model(self.scene);original=model.check;clock=[0.]
+        def late(*args,**kwargs):
+            result=original(*args,**kwargs);clock[0]+=.1;return result
+        with patch('navigation.control.dwa.time.perf_counter',side_effect=lambda:clock[0]), \
+                patch.object(model,'check',side_effect=late):
+            result=self.controller.command(self.req,self.scene,self.feedback,self.reference,now=10.,clock_domain='synthetic')
+        self.assertEqual(result['reason'],'certification_time_budget_exceeded')
+        self.assertIsNone(self.controller.result);self.assertEqual(result['velocity'],[0.,0.])
+        self.assertGreaterEqual(result['certification']['people_ms'],100.)
 
     def test_measurement_triggered_shadow_uses_actual_short_control_interval(self):
         from navigation.control.shadow import DwaShadowController
@@ -135,6 +167,34 @@ class DwaTests(unittest.TestCase):
             runtime.tick(now=10.1,clock_domain='synthetic')
             self.assertIsNotNone(runtime.worker.job)
         runtime.close()
+
+    def test_expired_query_input_waits_for_new_measurement_without_geometric_backoff(self):
+        failed=copy.deepcopy(self.reference['result']);failed.update(status='unavailable',reason='navigation_prior_future_or_stale',path=[])
+        failed.pop('result_binding');failed['result_binding']=fingerprint(failed)
+        with ReferenceRuntime(self.cfg,self.motion,self.geometry,worker_factory=FakeWorker) as runtime:
+            with patch('navigation.planning.reference.time.monotonic',return_value=100.):
+                runtime.update(self.req,self.scene,None,now=10.);runtime.tick(now=10.,clock_domain='synthetic')
+            runtime.worker.reply(reference_envelope(failed,self.req,self.scene,None))
+            with patch('navigation.planning.reference.time.monotonic',return_value=100.1):
+                runtime.tick(now=10.,clock_domain='synthetic')
+            self.assertIsNone(runtime.failure);self.assertIsNone(runtime.current)
+            with patch('navigation.planning.reference.time.monotonic',return_value=101.1):
+                runtime.update(self.req,self.scene,None,now=10.);runtime.tick(now=10.,clock_domain='synthetic')
+                self.assertIsNone(runtime.worker.job,'same measurement must not be retried')
+                newer=scene_at(10.2);runtime.update(self.req,newer,None,now=10.2)
+                runtime.tick(now=10.2,clock_domain='synthetic')
+            self.assertIsNotNone(runtime.worker.job)
+            self.assertEqual(runtime.worker.job['scene'].record['as_of'],10.2)
+
+    def test_untrusted_temporal_failure_cannot_bypass_failure_backoff(self):
+        failed=copy.deepcopy(self.reference);failed['result']['reason']='navigation_prior_future_or_stale'
+        with ReferenceRuntime(self.cfg,self.motion,self.geometry,worker_factory=FakeWorker) as runtime:
+            with patch('navigation.planning.reference.time.monotonic',return_value=100.):
+                runtime.update(self.req,self.scene,None,now=10.);runtime.tick(now=10.,clock_domain='synthetic')
+            runtime.worker.reply(failed)
+            with patch('navigation.planning.reference.time.monotonic',return_value=100.1):
+                runtime.tick(now=10.,clock_domain='synthetic')
+            self.assertGreater(runtime.next_retry,103.);self.assertIsNone(runtime.retry_after_observation)
 
     def test_stale_feedback_corruption_and_changed_goal_are_not_reused(self):
         for feedback,ref,req,now in [(self.feedback,self.reference,self.req,10.16),
