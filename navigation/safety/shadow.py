@@ -15,6 +15,24 @@ from navigation.planning.online import planning_scene
 from .guard import LocalSafety
 
 
+def _association_remaining(scene, now):
+    """Bound authorization by the original association when static support is used."""
+    proof=scene.geometry.metadata.get('navigation_fusion')
+    if proof is None:
+        return None
+    source=scene.geometry.layers['navigation_source']
+    if not ((source==3)|(source==10)).any():return None
+    measured=scene.record['prior'].get('measurement_stamp_s')
+    limit=proof['max_association_age_s']
+    if measured is None or not np.isfinite(measured) or not np.isfinite(limit):
+        raise ValueError('association_expired_during_gate')
+    age=now-measured
+    remaining=limit-age
+    if age<0 or remaining<=0:
+        raise ValueError('association_expired_during_gate')
+    return remaining
+
+
 class ObservationInbox:
     def __init__(self,limit):
         self.limit=limit;self.grids=OrderedDict();self.records=OrderedDict();self.latest=None;self.cached=None
@@ -91,10 +109,18 @@ class ShadowSafety:
 
     def push_state(self,row):
         with self.lock:
+            previous=self.rows[-1] if self.rows else None
+            changed=(previous is None or row['stamp_s']!=previous['stamp_s'] or
+                any(row.get(k)!=previous.get(k) for k in ('health','status','has_map_pose','map_frame','map_revision')) or
+                any(row[k]!=previous[k] for k in ('session_id','generation','frame_id')))
             if self.rows and (row['stamp_s']<self.rows[-1]['stamp_s'] or
                     [row[k] for k in ('session_id','generation','frame_id')]!=[self.rows[-1][k] for k in ('session_id','generation','frame_id')]):
                 self.rows.clear();self.active_goal=None;self.barrier='localization_reset'
             self.rows.append(copy.deepcopy(row))
+            # Live execution must recertify promptly when a new pose arrives,
+            # without changing the age limit or refreshing its source timestamp.
+            if self.execution and changed and (self.active_goal is not None or self.barrier):
+                self.wake.set()
 
     def _source_scene(self,binding):
         with self.lock:
@@ -218,7 +244,8 @@ class ShadowSafety:
                 out.update(velocity=gate['velocity'],state=gate['state'],reason=gate['reason'],
                     check=gate.get('check'),people_check=gate.get('people_check'),
                     motion_uncertainty_margin_m=gate.get('motion_uncertainty_margin_m'),stopping_sweep=gate.get('stopping_sweep'),
-                    velocity_filter=gate.get('velocity_filter'),dynamic_geometry=gate.get('dynamic_geometry'))
+                    velocity_filter=gate.get('velocity_filter'),dynamic_geometry=gate.get('dynamic_geometry'),
+                    response_envelope=gate.get('response_envelope'))
                 with self.lock:
                     if self.emergency:raise ValueError('emergency_stop')
                     if self.manual:raise ValueError('manual_override')
@@ -240,11 +267,15 @@ class ShadowSafety:
                     raise ValueError('feedback_expired_during_gate')
                 if not 0<=final_now-scene.record['as_of']<=self.guard.settings['max_input_age_s']:
                     raise ValueError('geometry_expired_during_gate')
+                association_remaining=_association_remaining(scene,final_now)
                 out['remaining_trajectory_validity_s']=self.guard.settings['max_input_age_s']-(final_now-proposal['trajectory_as_of'])
                 out['remaining_validity_s']=min(out['remaining_trajectory_validity_s'],
                     self.guard.settings['feedback_max_age_s']-(final_now-feedback['stamp_s']),
                     self.guard.settings['max_input_age_s']-(final_now-scene.record['as_of']),
                     self.settings['packet_timeout_s']-(final_now-packet['stamp_s']))
+                if association_remaining is not None:
+                    out['remaining_association_validity_s']=association_remaining
+                    out['remaining_validity_s']=min(out['remaining_validity_s'],association_remaining)
                 out['completion_freshness_checked']=True
             if time.perf_counter()-began>self.settings['period_s']:raise ValueError('gate_deadline_exceeded')
         except (ValueError,KeyError,TypeError,RuntimeError) as error:

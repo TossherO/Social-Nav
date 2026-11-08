@@ -46,6 +46,7 @@ class AssociationRefreshTests(unittest.TestCase):
             with patch('perception.mapping_localization.runtime.NativeFrontend',Frontend),patch('perception.mapping_localization.runtime.NativeRoll',Matcher):
                 session=LocalizationSession(config,mode='mapping',allow_local_only=True,association_ready=publish)
                 try:
+                    self.assertEqual(session.context.max_map_age, .5)
                     for stamp in (1.,1.1,1.2):
                         ready.clear()
                         session.step(dict(imu=None,points=None,begin=stamp-.1,end=stamp,sensor_frame='lidar'))

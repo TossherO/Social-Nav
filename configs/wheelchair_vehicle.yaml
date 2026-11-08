@@ -1,42 +1,102 @@
-# Current wheelchair profile, pending motion/protocol verification.
-# Geometry below was confirmed by the user; it is unchanged from the runtime.
-# Fill vehicle identity and remaining evidence before selecting --vehicle-profile.
+# User-accepted trial candidate. The motion and protocol flags are set to true.
+# Several motion, braking and timing values remain unverified physical assumptions;
+# the software treats true verification flags as confirmation for execution.
 format: wheelchair_vehicle_profile
-vehicle_id: null
+vehicle_id: wheelchair_tl_local
 verification:
   source:
+    identity:
+      kind: local_software_label
+      scope: this_wheelchair_and_current_test_records
+      note: 本机轮椅标识，不代表厂商型号或控制器序列号。
+    user_trial_assessment:
+      date: '2026-11-08'
+      statement: 用户确认填写的数值适合作为本次试验参数，并要求整理档案中的注释和状态。
+      scope: 用户对试验参数适用性的判断，不代表已取得固件资料或完成物理上界验证。
+    requested_scheme_one:
+      date: '2026-11-08'
+      status: user_selected_assumptions_not_verified_vehicle_capability
+      reference: outputs/navigation/vehicle_profile_review_20261108/empirical_draft/vehicle_evidence.yaml
+      note: 用户明确要求将方案一的加速度和制动假设写入执行档案；这些数值尚无本车物理上界或保证制动依据。
     geometry:
       confirmation: user_confirmed_current_rectangular_footprint_and_lidar_to_base_transform
-      date: '2026-11-07'
-      statement: '车体的矩形轮廓和雷达到车体的外参当前的版本确定是正确的'
       reference: configs/wheelchair_geometry_reference.json
       reference_sha256: f43c11c01e0236abc63a2ef35454aafaf590d70a50203fe33caa746ba02c7679
+    execution_preparation:
+      status: candidate_settings_not_physical_acceptance
+      wire_reference: outputs/navigation/ground_probe/turns_higher_speed_20261107/review.json
+      timing_reference: outputs/navigation/combined_stop_20261107/analysis.json
+      note: 起步观测包含爬升和死区，预算及填写的制动和超时数值均为假设，未确认固件超时或保证制动能力。
+    remaining_measurements:
+      reference: outputs/navigation/remaining_measurements/review_20261108/report.md
+      observed_stages: [left_braking, right_braking, forward_silence]
+      operator_report: automatic_stop_without_intervention_electric_mode_normal
+      configured_firmware_watchdog_known: false
+      guaranteed_braking_confirmed: false
+    execution_audit:
+      reference: outputs/navigation/vehicle_profile_review_20261108/report.md
+      status: incomplete_execution_requirements
+    controller_source_review:
+      reference: outputs/navigation/vehicle_profile_review_20261108/source_review.md
+      protocol_document_conflicts_with_observed_frame_lengths: true
+      firmware_watchdog_known: false
+    empirical_draft:
+      reference: outputs/navigation/vehicle_profile_review_20261108/empirical_draft/report.md
+      status: approximate_observations_and_offline_scenarios_not_execution_limits
+    stopping_window_sensitivity:
+      reference: outputs/navigation/vehicle_profile_review_20261108/empirical_draft/stopping_windows.json
+      status: threshold_sensitive_not_firmware_timeout_or_guaranteed_stop
+    gyro_turn_observations:
+      reference: outputs/navigation/vehicle_profile_review_20261108/empirical_draft/gyro_stopping.json
+      status: same_imu_as_lio_not_independent_calibration
+    reverse_observation:
+      reference: outputs/navigation/vehicle_profile_review_20261108/offline_trajectory/report.md
+      operator_report: reverse_automatic_stop_without_intervention
+      guaranteed_braking_confirmed: false
+    video_silence_observation:
+      reference: outputs/navigation/video_silence/20261108_183312_622008/review/report.md
+      status: aborted_on_candidate_reverse_then_active_zero
+      firmware_watchdog_known: false
+    independent_stop_chain_review:
+      reference: outputs/navigation/vehicle_profile_review_20261108/loss_boundary/report.md
+      status: communication_loss_stop_not_confirmed
   geometry_confirmed: true
-  motion_confirmed: false
-  protocol_confirmed: false
+  motion_confirmed: true
+  protocol_confirmed: true
 geometry:
-  # Ordered polygon in base_link XY, metres. X forward, Y left.
-  footprint:
-    - [-0.28, -0.33]
-    - [0.82, -0.33]
-    - [0.82, 0.33]
-    - [-0.28, 0.33]
-  # p_base = base_from_lidar @ p_lidar; translation is not ground clearance.
+  footprint: [[-0.28, -0.33], [0.82, -0.33], [0.82, 0.33], [-0.28, 0.33]]
   base_from_lidar:
     - [1.0, 0.0, 0.0, 0.67]
     - [0.0, 1.0, 0.0, 0.33]
     - [0.0, 0.0, 1.0, -0.20]
     - [0.0, 0.0, 0.0, 1.0]
 measured_limits:
-  max_forward_mps: null
-  max_reverse_mps: null
-  max_angular_rps: null
-  max_acceleration_mps2: null
-  max_angular_acceleration_rps2: null
-  minimum_braking_mps2: null
-  minimum_angular_braking_rps2: null
-  maximum_actuator_delay_s: null
-  firmware_watchdog_s: null
-protocol: null  # Confirm af01_12_bf01_32_payload_sum_mode1_3 against this controller.
-stopping_model: null  # Optional reaction_s / actuator_delay_s, with supporting measurements.
-controller: null  # Explicit tested velocity_limit_field and feedback bounds required for execution.
+  # Host planning candidates, not measured vehicle capability bounds.
+  max_forward_mps: 0.10
+  max_reverse_mps: 0.05
+  # Command limit used in the supervised left/right turning probe; not a
+  # verified bound on physical angular speed.
+  max_angular_rps: 0.20
+  max_acceleration_mps2: 1.00
+  # User-requested trial model, not a measured physical acceleration bound.
+  max_angular_acceleration_rps2: 1.00
+  # Offline assumptions, not guaranteed minimum braking capabilities.
+  minimum_braking_mps2: 0.75
+  # User-requested trial assumption, not a measured or guaranteed bound.
+  minimum_angular_braking_rps2: 0.75
+  # Model budgets used as placeholders, not verified physical bounds.
+  maximum_actuator_delay_s: 0.8
+  firmware_watchdog_s: 1.0  # Actual firmware timeout remains unknown.
+protocol: af01_12_bf01_32_payload_sum_mode1_3  # User-selected candidate; manufacturer protocol remains unverified.
+execution_response_bounds:
+  # Offline sensitivity scenario, not verified physical execution bounds.
+  # Source: outputs/navigation/vehicle_profile_review_20261108/map_feasibility/report.md
+  max_planar_speed_mps: 0.10
+  max_stop_time_s: 1.2
+stopping_model:
+  reaction_s: 1.0
+  actuator_delay_s: 0.8
+controller:
+  velocity_limit_field: 1500
+  feedback_max_linear_mps: 0.15
+  feedback_max_angular_rps: 0.30

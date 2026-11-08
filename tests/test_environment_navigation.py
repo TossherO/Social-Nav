@@ -109,8 +109,13 @@ class NavigationConsumerTests(unittest.TestCase):
 
 
     def test_association_ages_at_consumption_and_safety_rechecks_its_asset(self):
+        from navigation.safety.shadow import _association_remaining
         current = scene(self.apply(observation(self.unknown()), self.prior))
-        self.assertEqual(scene_status(current, 10.35, 'synthetic', dict(max_geometry_age_s=.5)),
+        self.assertIsNone(scene_status(current, 10.35, 'synthetic', dict(max_geometry_age_s=.5)))
+        self.assertAlmostEqual(_association_remaining(current, 10.35), .05)
+        with self.assertRaisesRegex(ValueError, 'association_expired_during_gate'):
+            _association_remaining(current, 10.41)
+        self.assertEqual(scene_status(current, 10.41, 'synthetic', dict(max_geometry_age_s=.5)),
                          'navigation_prior_future_or_stale')
         other = prior_asset(); other.manifest['layers_sha256'] = 'different'
         with self.assertRaisesRegex(ValueError, 'asset mismatch'):
@@ -138,6 +143,21 @@ class NavigationConsumerTests(unittest.TestCase):
         bad.layers['navigation_source'][20, 20] = 1
         with self.assertRaisesRegex(ValueError, 'obstacle/source policy'):
             scene(bad).verify()
+
+    def test_invalid_grid_and_navigation_codes_remain_rejected(self):
+        from navigation.planning.inputs import validate_grid
+        from perception.environment.support import verify
+        invalid = observation()
+        invalid.layers['occupancy'][0, 0] = 1
+        with self.assertRaisesRegex(ValueError, 'Invalid environment grid'):
+            validate_grid(invalid)
+        current = scene(self.apply(observation(self.unknown()), self.prior))
+        for name, value in (('navigation_source', 4), ('navigation_occupancy', 1)):
+            bad = copy.deepcopy(current)
+            bad.geometry.layers[name].flags.writeable = True
+            bad.geometry.layers[name][0, 0] = value
+            with self.subTest(layer=name), self.assertRaisesRegex(ValueError, 'obstacle/source policy'):
+                verify(bad)
 
 
     def test_planner_reference_dwa_and_cpu_safety_share_the_fused_geometry(self):

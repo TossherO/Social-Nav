@@ -42,6 +42,8 @@ def parser():
     p.add_argument('--agent-observations',action='store_true',help='Bounded optional Agent RGB/scene outlet; no YOLO, API or chassis output')
     p.add_argument('--no-image',action='store_true',help='Compatibility flag: the core never loads YOLO; disallows optional VLM image preparation')
     p.add_argument('--runtime-config',default=str(ROOT/'configs/runtime.yaml'))
+    p.add_argument('--environment-update-hz',type=float,help='Override the environment update rate without changing observation age limits')
+    p.add_argument('--environment-window-m',type=float,help='Override the square local environment window in metres')
     p.add_argument('--motion-config',help='Explicit motion YAML shared by reference planning, DWA and independent safety')
     p.add_argument('--display',action='store_true',help='Publish optional RViz display topics; no core subscribes to them')
     p.add_argument('--interactive-session',action='store_true',help='Enable session status and bag pause/preview commands')
@@ -92,7 +94,20 @@ def main():
         roll_backend=args.roll_backend,deskew_backend=args.deskew_backend,linearization_backend=args.linearization_backend)
     if args.rate<=0:raise ValueError('Integrated timing/independent safety requires positive real-time replay rate')
     if args.goal is not None and len(args.goal) not in (2,3):raise ValueError('Goal requires x y [yaw]')
+    if args.environment_update_hz is not None and (not np.isfinite(args.environment_update_hz) or not 0<args.environment_update_hz<=10):
+        raise ValueError('Environment update rate must be finite and in (0,10] Hz')
+    if args.environment_window_m is not None and (not np.isfinite(args.environment_window_m) or not 0<args.environment_window_m<=60):
+        raise ValueError('Environment window must be finite and in (0,60] metres')
     settings=runtime_settings(args.runtime_config)
+    from perception.environment.layers import load_config as environment_config
+    env_config=environment_config();env_config['compute'].update(backend='cuda',device=0)
+    if args.environment_update_hz is not None:env_config['update_hz']=args.environment_update_hz
+    if args.environment_window_m is not None:
+        support=env_config.get('navigation_support',{})
+        minimum=2*max(env_config['ground_fit_radius_m'],support.get('radius_m',0.) if support.get('enabled') else 0.)
+        if args.environment_window_m<minimum or args.environment_window_m/env_config['resolution']>600:
+            raise ValueError('Environment window must cover configured ground fitting and navigation support radii')
+        env_config['window_m']=args.environment_window_m
     with_rgb=bool((args.display and settings['display']['rgb_hz']>0) or args.record_views or
         args.record_decision_inputs or args.agent_observations)
     if (not np.isfinite([args.start,args.rate]).all() or args.start<0 or
@@ -110,7 +125,7 @@ def main():
     from perception.detection_tracking.inference.config import load_config as detection_config
     from perception.detection_tracking.inference.detector import SimpleDet3dDetector
     from perception.detection_tracking.inference.pipeline import PerceptionPipeline,Frame
-    from perception.environment.layers import LocalEnvironmentMap,load_config as environment_config
+    from perception.environment.layers import LocalEnvironmentMap
     from perception.environment.occupancy import OccupancyTree
     from perception.environment.scene import assemble_scene,people_observation
     from perception.environment.storage import StaticEnvironmentMap
@@ -135,7 +150,6 @@ def main():
     if args.camera_calibration:
         from decision.vlm.image_inputs import camera_calibration
         camera_record=camera_calibration(args.camera_calibration)
-    env_config=environment_config();env_config['compute'].update(backend='cuda',device=0)
     support_enabled=env_config.get('navigation_support',{}).get('enabled',False)
     factory=lambda resolution:OccupancyTree(resolution,library=ROOT/settings['environment_library'],backend='cuda',device=0)
     environment=LocalEnvironmentMap(env_config,tree_factory=factory)

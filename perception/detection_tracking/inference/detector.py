@@ -212,12 +212,13 @@ class SimpleDet3dDetector:
             float(cfg.get('INTENSITY_NORMALIZATION', 1)), bool(cfg.get('ZERO_INTENSITY', False)))
         return points
 
-    def predict_device(self, frame):
-        """Keep detections on the selected device; host export is an explicit boundary."""
+    def _predict_device_with_labels(self, frame):
+        """Return device boxes and their class labels without a host synchronization."""
         points = self.prepare_frame(frame)
         data = self.dataset.prepare_data({'points': points, 'frame_id': frame.observation_id})
         if not len(data['points']):
-            return self.torch.empty((0,8),device=next(self.model.parameters()).device)
+            device=next(self.model.parameters()).device
+            return self.torch.empty((0,8),device=device),self.torch.empty((0,),device=device,dtype=self.torch.int64)
         batch = self.dataset.collate_batch([data])
         if self.metrics is not None:
             excluded={'frame_id','metadata','calib','image_paths','ori_shape','img_process_infos','images'}
@@ -227,13 +228,24 @@ class SimpleDet3dDetector:
         with self.torch.no_grad(), self.autocast(self.precision):
             predictions, _ = self.model(batch)
         prediction = predictions[0]
-        if not self.torch.all(prediction['pred_labels'] == 1):
-            raise RuntimeError('Unexpected detector class ID')
         boxes = prediction['pred_boxes'].detach().float()
         scores = prediction['pred_scores'].detach().float()
-        return self.torch.cat((boxes[:,:7],scores[:,None]),dim=1)
+        return self.torch.cat((boxes[:,:7],scores[:,None]),dim=1),prediction['pred_labels'].detach()
+
+    def predict_device(self, frame):
+        """Keep detections on the selected device; host export is an explicit boundary."""
+        boxes,labels=self._predict_device_with_labels(frame)
+        if not self.torch.all(labels == 1):
+            raise RuntimeError('Unexpected detector class ID')
+        return boxes
 
     def predict(self, frame):
-        result=self.predict_device(frame).cpu().numpy()
-        if self.metrics is not None:self.metrics.transfer('d2h',result.nbytes+1,'detection_boxes_and_class_guard')
+        boxes,labels=self._predict_device_with_labels(frame)
+        # The online tracker immediately consumes host boxes. Copy the class
+        # guard in the same transfer instead of synchronizing the device once
+        # for a scalar class check and again for the boxes.
+        combined=self.torch.cat((boxes,(labels != 1)[:,None]),dim=1).cpu().numpy()
+        if self.metrics is not None:self.metrics.transfer('d2h',combined.nbytes,'detection_boxes_and_class_guard')
+        if combined[:,8].any():raise RuntimeError('Unexpected detector class ID')
+        result=combined[:,:8]
         return validate_boxes(result)

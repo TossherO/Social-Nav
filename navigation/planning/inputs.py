@@ -71,7 +71,7 @@ def validate_grid(grid):
     if (cells.ndim != 2 or list(cells.shape) != m['shape'] or not cells.size or
             not np.isfinite(m['resolution']) or m['resolution'] <= 0 or
             np.shape(m['origin_xy']) != (2,) or not np.isfinite(m['origin_xy']).all() or
-            not m.get('frame_id') or not np.isin(cells, [-1, 0, 100]).all()):
+            not m.get('frame_id') or not ((cells == -1) | (cells == 0) | (cells == 100)).all()):
         raise ValueError('Invalid environment grid')
 
 

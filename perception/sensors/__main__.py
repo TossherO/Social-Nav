@@ -27,8 +27,12 @@ def main():
                'serial_a:=' + front, 'serial_b:=' + rear,
                'camera_a:=' + str(not args.lidar_only).lower(),
                'camera_b:=' + str(args.rear).lower(), 'fps:=' + str(args.fps)]
+    from .imu_sampling import select_policy, supervise
+    policy = select_policy(device, front, lidar_only=args.lidar_only)
+    if policy is not None:
+        return supervise(command, policy, root)
     os.execvp(command[0], command)
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

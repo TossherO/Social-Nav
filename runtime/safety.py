@@ -114,7 +114,9 @@ def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,mot
                         clock_domain=clock_domain,
                         pose_velocity_estimate={key:feedback.get(key) for key in ('source','stamp_s','velocity')})
                     try:chassis.send(json.dumps(packet,allow_nan=False).encode())
-                    except (BlockingIOError,BrokenPipeError,ConnectionResetError):pass
+                    except BlockingIOError:pass
+                    except (BrokenPipeError,ConnectionResetError,ConnectionRefusedError) as error:
+                        raise RuntimeError('Chassis authorization channel disconnected') from error
             next_tick=mono+engine.settings['period_s']
             # Only release after a full check, never while its local variables
             # still reference a snapshot removed by the receiver on a reset.

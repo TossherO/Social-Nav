@@ -22,6 +22,11 @@ measured_limits:
 # 19200 baud; zero/mode3 -> zero/mode1 -> targets; zero/mode3 to disarm.
 # Confirm feedback payload-byte checksum and both joystick neutral fields as well.
 protocol: null  # af01_12_bf01_32_payload_sum_mode1_3
+# Physical bounds for all operating conditions of the selected trial:
+# planar speed includes sideways motion of the base reference point;
+# stop time bounds both active-zero and communication-loss stops from
+# the last nonzero command or first zero, including controller response.
+execution_response_bounds: null  # {max_planar_speed_mps: ..., max_stop_time_s: ...}
 # Optional per-vehicle stopping budgets. Only these two model times can be
 # increased; input freshness and the independent process watchdog stay fixed.
 stopping_model: null  # {reaction_s: ..., actuator_delay_s: ...}

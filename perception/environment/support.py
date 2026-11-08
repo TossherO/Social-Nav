@@ -191,7 +191,8 @@ def verify(scene, *, now=None, asset=None, check_asset=False):
                 np.any(conflicts&(nav==0))):
             raise ValueError('Navigation support violates local ground conflicts')
     extra=source==10;historical=source==3
-    if (not np.isin(source,[0,1,2,3,10]).all() or not np.isin(nav,[-1,0,100]).all() or
+    if (not ((source==0)|(source==1)|(source==2)|(source==3)|(source==10)).all() or
+            not ((nav==-1)|(nav==0)|(nav==100)).all() or
             np.any((cells==100)&((nav!=100)|(source!=2))) or
             np.any((source==0)&((nav!=-1)|(cells!=-1))) or
             np.any((source==1)&((nav!=0)|(cells!=0))) or

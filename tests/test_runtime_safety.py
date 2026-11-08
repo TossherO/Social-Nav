@@ -25,6 +25,78 @@ def delayed_gate_run(*arguments):
 
 
 class SafetyIsolationTests(unittest.TestCase):
+    def test_fresh_live_pose_promptly_rechecks_without_extending_its_lifetime(self):
+        import copy
+        import json
+        from unittest.mock import patch
+        from tests.test_navigation_shadow import ShadowTests
+        from perception.environment.scene import assemble_scene
+        from navigation.control.shadow import DwaShadowController
+        from navigation.planning.planner import Planner
+        from navigation.planning.continuity import reference_envelope
+
+        class Alive:
+            def is_alive(self):return True
+
+        class FakeChassis:
+            def __init__(self,*_):
+                self.channel,self.remote=socket.socketpair(socket.AF_UNIX,socket.SOCK_DGRAM)
+                self.remote.setblocking(False);self.process=Alive()
+            def close(self):self.channel.close();self.remote.close()
+
+        fixture=ShadowTests();fixture.setUp();fixture.geometry.assumed=False
+        motion=dict(fixture.motion,parameters_assumed=False,
+            execution_response_bounds=dict(max_planar_speed_mps=fixture.motion['max_forward_mps'],max_stop_time_s=.1),
+            execution_max_angular_rps=fixture.motion['max_angular_rps'])
+        scene=assemble_scene(fixture.scene.geometry,clock_domain='runtime_live',settings=fixture.safety.scene_settings)
+        planner=Planner(fixture.config,fixture.geometry,require_actual_start=True)
+        reference=reference_envelope(planner.query(fixture.req,scene=scene,now=10.,clock_domain='runtime_live'),fixture.req,scene,None)
+        packet=DwaShadowController(fixture.config,motion,fixture.geometry).step(
+            fixture.req,scene,fixture.rows,reference,now=10.,clock_domain='runtime_live',mono=0.)
+        settings=dict(fixture.safety.settings,period_s=.2)
+        incoming,producer=socket.socketpair();sender=Connection(producer)
+        with patch('navigation.control.chassis.ChassisProcess',FakeChassis):
+            safety=SafetyProcess(incoming,fixture.config,motion,fixture.geometry,
+                clock_domain='runtime_live',settings=settings,chassis_port='synthetic-only',chassis_output='unused')
+        incoming.close()
+        try:
+            deadline=time.monotonic()+10.
+            while not safety.ready:
+                safety.poll()
+                if time.monotonic()>deadline:self.fail('Safety startup timed out')
+                time.sleep(.005)
+            safety.command('goal',fixture.req);safety.command('arm',dict(enabled=True));safety.scene(scene)
+            origin=time.monotonic()
+            for row in fixture.rows:
+                sender.send(dict(kind='state',state=row,clock_s=10.,clock_mono=origin,clock_rate=1.))
+            safety.packet(packet)
+            def next_authorization(predicate,timeout):
+                deadline=time.monotonic()+timeout
+                while time.monotonic()<deadline:
+                    try:
+                        item=json.loads(safety.chassis.remote.recv(65536))
+                        if predicate(item):return item
+                    except BlockingIOError:time.sleep(.001)
+                self.fail('Expected authorization was not observed')
+            first=next_authorization(lambda x:x.get('allowed'),1.)
+            time.sleep(.02)
+            # Empty any earlier datagrams before sending a genuinely new pose.
+            try:
+                while True:safety.chassis.remote.recv(65536)
+            except BlockingIOError:pass
+            receipt=time.monotonic();stamp=10.+receipt-origin
+            sender.send(dict(kind='state',state=dict(fixture.rows[-1],stamp_s=stamp),
+                             clock_s=stamp,clock_mono=receipt,clock_rate=1.))
+            fresh=next_authorization(lambda x:x.get('allowed') and
+                (x.get('diagnostics') or {}).get('pose_velocity_estimate',{}).get('stamp_s')==stamp,.14)
+            self.assertLess(fresh['mono']-receipt,.14)
+            self.assertLessEqual(fresh['expires_mono'],receipt+.15+.005)
+            # The source pose then stops: the previous authorization cannot be
+            # kept alive by heartbeats or by the scheduler wake.
+            stale=next_authorization(lambda x:not x.get('allowed') and x['mono']>fresh['expires_mono'],.5)
+            self.assertFalse(stale['allowed'])
+        finally:sender.close();safety.close()
+
     def test_map_received_during_gate_is_rechecked_before_emitting_a_velocity(self):
         import tempfile
         from pathlib import Path

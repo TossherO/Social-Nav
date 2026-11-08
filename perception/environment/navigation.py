@@ -186,7 +186,8 @@ def _background_geometry(scene, *, now=None, asset=None, check_asset=False, _lay
         if cache is not None:
             if len(cache) >= 2:
                 cache.clear()
-            cache[key] = bool(np.isin(raw.layers['navigation_source'], [3, 10]).any())
+            source = raw.layers['navigation_source']
+            cache[key] = bool(((source == 3) | (source == 10)).any())
         return grid
     if cache[key]:
         stamp = scene.record['as_of']

@@ -26,6 +26,7 @@ PROFILE=dict(linear_mps=.03,angular_rps=0.,pulse_s=.3,acceleration_mps2=.24,
     max_average_linear_mps=.11,startup_turn_grace_s=1.,
     turn_warning_rps=.05,feedback_average_window_s=.4,feedback_average_min_frames=5,
     spin_reverse_min_span_s=.2,spin_reverse_min_frames=3,
+    spin_translation_min_span_s=.2,spin_translation_min_frames=3,spin_translation_hard_mps=.06,
     silence_reverse_min_span_s=.2,silence_reverse_min_frames=3,silence_reverse_hard_mps=.03)
 # Development test boundaries, not measured hardware capability or safe travel.
 LIMITS=dict(min_linear_mps=.001,max_linear_mps=.1,min_pulse_s=.1,max_pulse_s=3.,
@@ -108,6 +109,7 @@ class PulseWindow:
         self.duration=self.profile['pulse_s'];self.last_feedback=-math.inf;self.stage='startup'
         self.silence=silence
         self.spin_reverse_since=None;self.spin_reverse_frames=0
+        self.spin_translation_since=None;self.spin_translation_frames=0
         self.silence_reverse_since=None;self.silence_reverse_frames=0;self.silence_reverse_total_frames=0
         args=(self.profile['feedback_average_window_s'],self.profile['feedback_average_min_frames'],self.profile['feedback_timeout_s'])
         self.all_window=ReceiptWindow(*args);self.steady_window=ReceiptWindow(*args)
@@ -116,6 +118,7 @@ class PulseWindow:
         return dict(stage=self.stage,clock_basis='host_monotonic_receipt_not_measurement',
             all_window=self.all_window.average(),steady_window=self.steady_window.average(),reason=self.reason,
             spin_reverse_since_mono=self.spin_reverse_since,spin_reverse_frames=self.spin_reverse_frames,
+            spin_translation_since_mono=self.spin_translation_since,spin_translation_frames=self.spin_translation_frames,
             silence_reverse_since_mono=self.silence_reverse_since,silence_reverse_frames=self.silence_reverse_frames,
             silence_reverse_total_frames=self.silence_reverse_total_frames)
 
@@ -135,12 +138,22 @@ class PulseWindow:
                     abs(velocity[1])>self.profile['max_observed_angular_rps']):reason='unexpected_velocity'
             elif any(feedback.get('joystick_axes_raw',[])) or any(feedback.get('joystick_mps_rps',[])):reason='joystick_takeover'
             elif self.expect_inhibited and (abs(velocity[0])>.005 or abs(velocity[1])>.01):reason='motion_while_inhibited'
-            elif not self.expect_inhibited and self.profile['angular_rps'] and abs(velocity[0])>.03:reason='unexpected_translation_during_spin'
+            elif (not self.expect_inhibited and self.profile['angular_rps'] and
+                    abs(velocity[0])>self.profile['spin_translation_hard_mps']):reason='unexpected_translation_during_spin'
             elif (not self.expect_inhibited and not self.profile['angular_rps'] and
                     velocity[0]*self.profile['linear_direction']<-.005 and
                     (not self.silence or velocity[0]<-self.profile['silence_reverse_hard_mps'])):reason='unexpected_motion_direction'
             elif not self.expect_inhibited and feedback_at>=self.start and feedback_at>self.last_feedback:
                 if self.profile['angular_rps']:
+                    if abs(velocity[0])>.03:
+                        if self.spin_translation_since is None or feedback_at-self.last_feedback>self.profile['feedback_timeout_s']:
+                            self.spin_translation_since=feedback_at;self.spin_translation_frames=0
+                        self.spin_translation_frames+=1
+                        if (self.spin_translation_frames>=self.profile['spin_translation_min_frames'] and
+                                feedback_at-self.spin_translation_since+1e-9>=self.profile['spin_translation_min_span_s']):
+                            reason='unexpected_translation_during_spin'
+                    else:
+                        self.spin_translation_since=None;self.spin_translation_frames=0
                     if velocity[1]*self.profile['angular_direction']<-.01:
                         if self.spin_reverse_since is None or feedback_at-self.last_feedback>self.profile['feedback_timeout_s']:
                             self.spin_reverse_since=feedback_at;self.spin_reverse_frames=0

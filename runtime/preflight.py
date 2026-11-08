@@ -117,6 +117,8 @@ def inspect(config_path, *, motion_path=None, vehicle_profile=None, chassis_port
         from navigation.safety.config import load_stopping_config
         return dict(vehicle_id=profile['vehicle_id'], geometry_assumed=geometry.assumed,
                     stopping_model=load_stopping_config(selected),controller=controller_settings(selected),
+                    execution_response_bounds=selected.get('execution_response_bounds'),
+                    execution_max_angular_rps=selected.get('execution_max_angular_rps'),
                     scope='declared_measurements_checked_against_selected_limits_not_physical_verification')
     if vehicle_profile or execution:
         check('measured_vehicle_profile', vehicle)
@@ -135,7 +137,8 @@ def inspect(config_path, *, motion_path=None, vehicle_profile=None, chassis_port
     if settings is not None:
         specs = {
             'environment': (settings['environment_library'], ['sn_occupancy_new_cuda', 'sn_occupancy_suspend_free_history',
-                                                             'sn_navigation_support_local_heights']),
+                                                             'sn_occupancy_local_ground_conflicts',
+                                                             'sn_navigation_support_with_ground_conflicts']),
             'dwa': (settings['dwa_library'], ['sn_dwa_evaluate']),
             'collision': (settings['collision_library'], ['sn_collision_batch_stream']),
             'lio': ('outputs/runtime/build/localization/libsocial_nav_lio.so', ['sn_lio_create', 'sn_lio_step']),
@@ -153,7 +156,9 @@ def inspect(config_path, *, motion_path=None, vehicle_profile=None, chassis_port
         check('system_ros_python', lambda: probe(settings['input_python'],
             'import rosbag,rospy,sensor_msgs.msg; print("ROS native imports available; no master started")'))
     check('project_ros_messages', lambda: probe(sys.executable,
-        'import rospy,sensor_msgs.msg,social_nav_environment.msg; print("runtime ROS imports available")'))
+        'import rospy,sensor_msgs.msg; from social_nav_environment.msg import EnvironmentGrid; '
+        'assert "ground_conflict" in EnvironmentGrid.__slots__, "Rebuild ROS environment messages for local ground conflicts"; '
+        'print("runtime ROS imports and local ground conflict field available")'))
 
     def detector_config():
         from perception.detection_tracking.inference.config import load_config

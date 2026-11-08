@@ -9,6 +9,7 @@ from navigation.planning.inputs import request_status
 from navigation.planning.collision import SweepChecker
 from navigation.planning.footprint import footprint_status
 from perception.environment.navigation import navigation_geometry
+from .response import execution_response_enclosure, execution_enclosure_geometry, validate_execution_motion
 
 
 def stopping_trajectory(feedback,desired,motion,settings,dt,*,pending=None,braking_motion=None,observation_age_s=0.):
@@ -61,6 +62,8 @@ class LocalSafety:
         if sum(map(bool,(simulation,shadow,execution)))!=1:raise ValueError('Choose one explicit safety mode')
         if execution and (geometry.assumed or motion.get('parameters_assumed',True)):
             raise ValueError('Execution requires measured vehicle geometry and motion')
+        if execution:
+            validate_execution_motion(motion)
         self.execution=execution
         self.shadow=shadow
         self.asset=asset
@@ -116,6 +119,10 @@ class LocalSafety:
                 turning_residual(velocity,self.motion)<-1e-7):
             self.last_target=np.zeros(2)
             return dict(result,reason='feedback_outside_motion_model',state='stop_request')
+        if self.execution and (abs(velocity[0])>self.motion['execution_response_bounds']['max_planar_speed_mps'] or
+                abs(velocity[1])>self.motion['execution_max_angular_rps']):
+            self.last_target=np.zeros(2)
+            return dict(result,reason='feedback_exceeds_execution_response_bound',state='stop_request')
         reason=None;desired=np.zeros(2)
         if emergency_stop:reason='emergency_stop'
         elif manual_override:reason='manual_override'
@@ -172,9 +179,25 @@ class LocalSafety:
         check=self.sweep.check(grid,self.geometry,dense,self.margin+error+uncertainty,self.settings['max_sweep_samples'],binding=grid_binding,budget=budget)
         reason='stopping_sweep_'+check['status'] if check['status']!='free' else None
         prediction=None if reason else people.check(points,self.geometry,self.margin+uncertainty+dynamic.get('projection_margin_m',0.),start_time=prediction_start)
+        if prediction is not None and not prediction['valid']:reason=prediction['reason']
+        if self.execution and reason is None:
+            envelope=execution_response_enclosure(feedback,self.geometry,self.motion,self.settings,dt,now-feedback['stamp_s'])
+            # A single inflated footprint encloses the complete uncertain
+            # spatial sweep. The stationary time path tests people over the
+            # entire interval with the same conservative expansion.
+            envelope_geometry=execution_enclosure_geometry(self.geometry,envelope)
+            envelope_uncertainty=motion_uncertainty_margin(feedback,self.geometry,envelope['duration_s'])
+            expanded=self.margin+max(uncertainty,envelope_uncertainty)+envelope['additional_margin_m']
+            enclosure_check=self.sweep.check(grid,envelope_geometry,envelope['points'][:,1:],expanded,
+                self.settings['max_sweep_samples'],binding=grid_binding,budget=budget)
+            reason='response_envelope_'+enclosure_check['status'] if enclosure_check['status']!='free' else None
+            enclosure_people=None if reason else people.check(envelope['points'],envelope_geometry,
+                expanded+dynamic.get('projection_margin_m',0.),start_time=prediction_start)
+            if enclosure_people is not None and not enclosure_people['valid']:reason=enclosure_people['reason']
+            result['response_envelope']={k:v for k,v in envelope.items() if k!='points'}
+            result['response_envelope'].update(check=enclosure_check,people_check=enclosure_people)
         if not budget.check():reason='stopping_'+budget.reason
         result['certification']=budget.summary()
-        if prediction is not None and not prediction['valid']:reason=prediction['reason']
         attempts.append(dict(scale=1.,reason=reason,minimum_clearance_m=None if prediction is None else prediction.get('minimum_clearance_m')))
         result.update(check=check,people_check=prediction,velocity_filter=dict(requested_velocity=requested.tolist(),
             selected_scale=1. if reason is None else None,attempts=attempts))

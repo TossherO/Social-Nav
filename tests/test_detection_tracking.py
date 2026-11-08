@@ -17,7 +17,7 @@ from perception.detection_tracking.inference.config import DEFAULT, load_config,
 from perception.detection_tracking.inference.geometry import (
     corners_xyz, similarity, transform_boxes, validate_boxes, validate_transform,
 )
-from perception.detection_tracking.inference.detector import CausalSweeps, prepare_single_frame
+from perception.detection_tracking.inference.detector import CausalSweeps, SimpleDet3dDetector, prepare_single_frame
 from perception.detection_tracking.inference.dataset import WheelchairSource, ManifestSource, CachedDetector
 from perception.detection_tracking.inference.pipeline import Frame, PerceptionPipeline, to_snapshot
 from perception.detection_tracking.inference.tracker import SimpleTrack
@@ -36,6 +36,21 @@ class Detector:
 
     def predict(self, _):
         return self.boxes.copy()
+
+
+class DetectorExportTests(unittest.TestCase):
+    def test_class_guard_and_empty_boxes_survive_combined_host_export(self):
+        import torch
+        detector=SimpleDet3dDetector.__new__(SimpleDet3dDetector)
+        detector.torch=torch;detector.metrics=None
+        boxes=torch.tensor(np.array([box()]),dtype=torch.float32)
+        detector._predict_device_with_labels=lambda _: (boxes,torch.tensor([1]))
+        np.testing.assert_allclose(detector.predict(None),boxes.numpy())
+        detector._predict_device_with_labels=lambda _: (boxes,torch.tensor([2]))
+        with self.assertRaisesRegex(RuntimeError,'class ID'):detector.predict(None)
+        with self.assertRaisesRegex(RuntimeError,'class ID'):detector.predict_device(None)
+        detector._predict_device_with_labels=lambda _: (torch.empty((0,8)),torch.empty((0,),dtype=torch.int64))
+        self.assertEqual(detector.predict(None).shape,(0,8))
 
 
 def frame(stamp=1, pose=None, source='dataset_pose', sequence='fixture'):

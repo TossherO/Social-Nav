@@ -1,0 +1,5 @@
+map: outputs/perception/lab_floor2_20261107/mapping_compensated/map
+static_map: outputs/perception/lab_floor2_20261107/static_environment_compensated_20cm
+coverage: navigation/commissioning/coverage_observation.yaml
+initial_pose_hint: navigation/commissioning/height_hint.json
+motion_config: navigation/planning/configs/motion_trial.yaml

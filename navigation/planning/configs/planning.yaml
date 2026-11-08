@@ -48,7 +48,7 @@ people:
 max_cells: 4000000
 max_path_samples: 200000
 max_geometry_age_s: 0.5
-max_association_age_s: 0.4
+max_association_age_s: 0.5
 native_library: outputs/navigation/build/libsocial_nav_global_planner.so
 # Explicitly selected historical geometry, never current hardware confirmation.
 geometry_reference: configs/wheelchair_geometry_reference.json

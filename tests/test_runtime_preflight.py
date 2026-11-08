@@ -21,7 +21,11 @@ class TrialConfigTests(unittest.TestCase):
         self.assertTrue(trial['parameters_assumed'])
         self.assertEqual(trial['max_forward_mps'],.1)
         self.assertEqual(trial['max_reverse_mps'],.05)
-        for key in ('max_forward_mps','max_angular_rps','max_acceleration_mps2','max_angular_acceleration_rps2'):
+        self.assertEqual(trial['max_angular_rps'],.2)
+        self.assertEqual(trial['max_acceleration_mps2'],1.)
+        self.assertEqual(trial['max_angular_acceleration_rps2'],1.)
+        self.assertEqual(trial['brake_deceleration_scale'],.75)
+        for key in ('max_forward_mps','max_angular_rps'):
             self.assertLess(trial[key],normal[key])
         self.assertEqual(trial['state_max_age_s'],normal['state_max_age_s'])
         with self.assertRaises(ValueError):
@@ -33,10 +37,11 @@ class PreflightTests(unittest.TestCase):
     def test_interactive_forwards_the_same_selected_trial_and_runtime_configs(self):
         from runtime.interactive import parser, runtime_command
         args=parser().parse_args(['--live','--output','unused','--motion-config','navigation/planning/configs/motion_trial.yaml',
-                                 '--runtime-config','configs/runtime.yaml'])
+                                 '--runtime-config','configs/runtime.yaml','--environment-update-hz','7.5'])
         command=runtime_command(args,dict(map='map',static_map='static',coverage='coverage',motion_config='normal'),[0.]*6)
         self.assertEqual(Path(command[command.index('--motion-config')+1]).name,'motion_trial.yaml')
         self.assertEqual(Path(command[command.index('--runtime-config')+1]).name,'runtime.yaml')
+        self.assertEqual(command[command.index('--environment-update-hz')+1], '7.5')
         self.assertNotIn('--execute',command)
 
     def test_serial_query_does_not_open_device_and_rejects_busy_or_unknown(self):

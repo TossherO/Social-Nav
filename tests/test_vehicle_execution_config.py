@@ -18,6 +18,11 @@ from tests.test_ground_probe import frame
 class VehicleExecutionConfigTests(unittest.TestCase):
     def setUp(self):
         self.motion=load_motion_config('navigation/planning/configs/motion_trial.yaml')
+        # These tests exercise a synthetic 0.1 m/s² braking boundary, independent
+        # of the current wheelchair trial acceleration setting.
+        self.motion['max_acceleration_mps2']=.1
+        self.motion['max_angular_acceleration_rps2']=.15
+        self.motion['brake_deceleration_scale']=.75
 
     def profile(self):
         p=yaml.safe_load(Path('navigation/control/vehicle.example.yaml').read_text())
@@ -31,6 +36,7 @@ class VehicleExecutionConfigTests(unittest.TestCase):
             maximum_actuator_delay_s=.7,firmware_watchdog_s=.8)
         p['stopping_model']=dict(reaction_s=1.,actuator_delay_s=.8)
         p['controller']=dict(velocity_limit_field=1500,feedback_max_linear_mps=.15,feedback_max_angular_rps=.3)
+        p['execution_response_bounds']=dict(max_planar_speed_mps=.10,max_stop_time_s=1.2)
         return p
 
     def load(self,p):
@@ -56,6 +62,17 @@ class VehicleExecutionConfigTests(unittest.TestCase):
             p=self.profile();p['stopping_model'][key]=value
             with self.subTest(key=key),self.assertRaises(ValueError):self.load(p)
 
+    def test_exact_decimal_braking_boundary_passes_and_lower_limits_are_rejected(self):
+        p=self.profile()
+        p['measured_limits'].update(minimum_braking_mps2=.075,minimum_angular_braking_rps2=.1125)
+        self.load(p)
+        for key,value in (('minimum_braking_mps2',.07499999999999999),
+                          ('minimum_angular_braking_rps2',.11249999999999999)):
+            candidate=self.profile()
+            candidate['measured_limits'][key]=value
+            with self.subTest(key=key),self.assertRaisesRegex(ValueError,'Stopping model exceeds guaranteed braking'):
+                self.load(candidate)
+
     def test_model_override_cannot_change_freshness_or_reduce_defaults(self):
         default=load_stopping_config()
         for override in ({'reaction_s':.1},{'actuator_delay_s':float('nan')},
@@ -77,6 +94,16 @@ class VehicleExecutionConfigTests(unittest.TestCase):
                 dict(velocity_limit_field=1500,feedback_max_linear_mps=.01,feedback_max_angular_rps=.3)):
             p=self.profile();p['controller']=value
             with self.subTest(value=value),self.assertRaises(ValueError):self.load(p)
+
+    def test_execution_requires_independent_valid_response_bounds(self):
+        for bounds in (None, {}, dict(max_planar_speed_mps=.09,max_stop_time_s=1.),
+                dict(max_planar_speed_mps=.1,max_stop_time_s=0.),
+                dict(max_planar_speed_mps=.1,max_stop_time_s=float('nan')),
+                dict(max_planar_speed_mps=.1,max_stop_time_s=True)):
+            p=self.profile();p['execution_response_bounds']=bounds
+            with self.subTest(bounds=bounds),self.assertRaises(ValueError):self.load(p)
+        p=self.profile();p['measured_limits']['max_forward_mps']=.15
+        with self.assertRaisesRegex(ValueError,'declared measured vehicle speed'):self.load(p)
 
     def test_wire_limit_is_distinct_from_host_cap_and_watchdog_is_unchanged(self):
         _,motion,_=self.load(self.profile())

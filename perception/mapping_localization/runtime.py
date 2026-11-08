@@ -37,8 +37,12 @@ class LocalizationSession:
         if coverage:
             from .coverage import PriorCoverage
             coverage=PriorCoverage.load(coverage,asset_fingerprint=self.asset_fingerprint)
+        from perception.environment.layers import load_config as environment_config
+        association_config=environment_config()
         self.context=LocalizationContext('fast_lio' if mode=='odometry' else 'roll_fast_lio',
-            requires_map=mode=='localization',allow_local_only=allow_local_only,coverage=coverage)
+            requires_map=mode=='localization',allow_local_only=allow_local_only,coverage=coverage,
+            max_map_age=association_config['association_max_age_s'],
+            confirm_matches=association_config['association_confirm_matches'])
         self.context_lock=threading.Lock();self.association_ready=association_ready
         self.jobs=queue.Queue(64);self.completed=queue.Queue(64);self.error=None;self.worker=None
         if self.matcher is not None:

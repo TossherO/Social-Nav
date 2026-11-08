@@ -1,0 +1,44 @@
+{
+  "format": "map_height_attitude_hint",
+  "source": {
+    "kind": "derived_from_offline_registered_navigation_first_scan",
+    "path": "outputs/perception/lab_floor2_20261107/navigation_preparation/initial_pose.json",
+    "sha256": "97a57a3cb1219735b4e73dc3ad571016195f22bc0d9bee33eb2876e1076a537e"
+  },
+  "map": {
+    "path": "outputs/perception/lab_floor2_20261107/mapping_compensated/map",
+    "frame_id": "map",
+    "fingerprint": {
+      "manifest.yaml": {
+        "kind": "size_and_edge_sha256",
+        "size": 104,
+        "sha256": "814e857ffc43d3fc857ba39211491ad5d0e2ffa9c05a7ae7d2232ba7a511b818"
+      },
+      "keyframes/poses.txt": {
+        "kind": "size_and_edge_sha256",
+        "size": 81800,
+        "sha256": "8a42db840a861ac59e7c98680f1f2f00eeaeec7835412faeac335c6259918ce8"
+      },
+      "GlobalMap.pcd": {
+        "kind": "size_and_edge_sha256",
+        "size": 4091534,
+        "sha256": "82df35ef432a3d25171185d623819ddeb3e102264b58d1b932d373cac42321fe"
+      }
+    }
+  },
+  "pose": {
+    "position_m": [
+      -0.7989860106360727,
+      -1.8378191003054651,
+      -0.20456010710556927
+    ],
+    "quaternion_xyzw": [
+      0.025247407940439903,
+      0.008029665700547996,
+      0.9996489844174714,
+      -2.8533215700484563e-05
+    ]
+  },
+  "registration_verified": false,
+  "live_usage": "Only roll, pitch and map Z seed; operator must select current LiDAR XY and heading in RViz."
+}

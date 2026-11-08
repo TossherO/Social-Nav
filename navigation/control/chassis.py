@@ -13,6 +13,24 @@ from .chassis_protocol import FeedbackFrames, encode_command_units
 from .telemetry import ChassisTelemetry
 from .vehicle import controller_settings
 
+COMMAND_PERIOD_S = .05
+
+
+def _command_due(now, next_write, last_write, command):
+    urgent_stop = (last_write is not None and not command[0] and not command[1] and
+        (last_write[0] or last_write[1] or (command[2] == 3 and last_write[2] != 3)))
+    return now >= next_write or bool(urgent_stop)
+
+
+def _read_available(fd):
+    try:
+        data = os.read(fd, 4096)
+    except BlockingIOError:
+        return None
+    if not data:
+        raise RuntimeError('Serial input disconnected')
+    return data
+
 
 class DriveState:
     """Bounded arming handshake and short-lived CPU safety authorizations."""
@@ -114,6 +132,7 @@ def _owner(channel_fd, port, output, motion):
     recorder = ChassisTelemetry(output)
     last_status = last_write = None
     status_at = 0.
+    next_write = 0.
     limit = state.controller['velocity_limit_field']
 
     def write(command):
@@ -154,7 +173,7 @@ def _owner(channel_fd, port, output, motion):
         termios.tcsetattr(fd, termios.TCSANOW, attributes)
         while not stopping[0]:
             now = time.monotonic()
-            ready = select.select([fd, channel], [], [], .02)[0]
+            ready = select.select([fd, channel], [], [], min(.02, max(0., next_write-now)))[0]
             if channel in ready:
                 while True:
                     try: packet = json.loads(channel.recv(4096))
@@ -164,15 +183,22 @@ def _owner(channel_fd, port, output, motion):
                     state.receive(packet, received)
                     recorder.emit('authorization', mono=received, packet=packet)
             if fd in ready:
-                data = os.read(fd, 4096)
-                if not data: raise RuntimeError('Serial input disconnected')
-                received = time.monotonic()
-                for row in parser.feed(data):
-                    state.observe(row, received)
-                    recorder.emit('feedback', mono=received, feedback=row,
-                                  timestamp_source='host_receive_monotonic',
-                                  device_measurement_stamp_s=None)
-            write(state.command(time.monotonic())); status()
+                data = _read_available(fd)
+                if data is not None:
+                    received = time.monotonic()
+                    for row in parser.feed(data):
+                        state.observe(row, received)
+                        recorder.emit('feedback', mono=received, feedback=row,
+                                      timestamp_source='host_receive_monotonic',
+                                      device_measurement_stamp_s=None)
+            now = time.monotonic()
+            command = state.command(now)
+            # Send stops immediately, even between periodic commands. A readable
+            # serial fd or a burst of feedback must not accelerate normal writes.
+            if _command_due(now, next_write, last_write, command):
+                write(command)
+                next_write = time.monotonic()+COMMAND_PERIOD_S
+            status()
             # No IPC, GPU operation or telemetry write grants additional validity.
             if state.heartbeat is not None and time.monotonic()-state.heartbeat > 1.:
                 raise RuntimeError('Safety process disconnected')

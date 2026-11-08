@@ -22,6 +22,14 @@ from tests.test_ground_probe import frame
 
 
 class PlaybackTests(unittest.TestCase):
+    def test_local_window_override_reaches_runtime(self):
+        from runtime.interactive import parser,runtime_command
+        args=parser().parse_args(['--live','--output','/tmp/example','--environment-window-m','12'])
+        config=dict(map='map',static_map='prior',coverage='coverage',motion_config='motion')
+        command=runtime_command(args,config,[0.,0.,0.,0.,0.,0.])
+        index=command.index('--environment-window-m')
+        self.assertEqual(command[index+1],'12.0')
+
     def test_display_goal_follows_processed_intent_and_clears_on_cancel_or_replay_change(self):
         session=InteractiveSession(live=True,safety=None,output=Path('/tmp'))
         goal=dict(request_id='g',frame_id='map',goal=[1.,2.,.3])
@@ -194,6 +202,7 @@ class DriverTests(unittest.TestCase):
         profile=yaml.safe_load(Path('navigation/control/vehicle.example.yaml').read_text())
         profile.update(vehicle_id='synthetic_fixture',protocol='af01_12_bf01_32_payload_sum_mode1_3')
         profile['controller']=dict(velocity_limit_field=1500,feedback_max_linear_mps=1.5,feedback_max_angular_rps=1.5)
+        profile['execution_response_bounds']=dict(max_planar_speed_mps=2.,max_stop_time_s=1.)
         profile['verification']=dict(source='synthetic unit test, not a real vehicle',geometry_confirmed=True,motion_confirmed=True,protocol_confirmed=True)
         profile['geometry']=dict(footprint=[[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],base_from_lidar=np.eye(4).tolist())
         limits=profile['measured_limits']
@@ -217,7 +226,9 @@ class DriverTests(unittest.TestCase):
         from navigation.control.shadow import DwaShadowController
         from navigation.safety.shadow import ShadowSafety
         fixture=ShadowTests();fixture.setUp()
-        fixture.geometry.assumed=False;motion=dict(fixture.motion,parameters_assumed=False)
+        fixture.geometry.assumed=False;motion=dict(fixture.motion,parameters_assumed=False,
+            execution_response_bounds=dict(max_planar_speed_mps=fixture.motion['max_forward_mps'],max_stop_time_s=.1),
+            execution_max_angular_rps=fixture.motion['max_angular_rps'])
         scene=assemble_scene(fixture.scene.geometry,clock_domain='runtime_live',settings=load_config()['scene'])
         result=Planner(fixture.config,fixture.geometry,require_actual_start=True).query(fixture.req,scene=scene,now=10.,clock_domain='runtime_live')
         controller=DwaShadowController(fixture.config,motion,fixture.geometry)
@@ -229,6 +240,8 @@ class DriverTests(unittest.TestCase):
         safety.push_packet(packet,mono=0.)
         result=safety.tick(10.,mono=0.,clock_now=lambda:10.)
         self.assertEqual(result['state'],'allowed',result)
+        self.assertEqual(result['response_envelope']['check']['status'],'free')
+        self.assertGreater(result['response_envelope']['additional_margin_m'],0.)
         self.assertEqual([x/1000 for x in result['wire_velocity_units']],result['velocity'])
         self.assertLessEqual(result['remaining_validity_s'],.15)
         self.assertEqual(packet,original)

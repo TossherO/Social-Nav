@@ -188,9 +188,74 @@ class ShadowTests(unittest.TestCase):
         self.safety.push_packet(packet,mono=.1)
         self.assertFalse(self.safety.wake.is_set());self.assertEqual(self.safety.packet_received,.1)
 
+    def test_live_pose_change_wakes_recheck_without_refreshing_source_time(self):
+        self.safety.execution=True  # Exercise live wake scheduling without hardware.
+        self.safety.wake.clear()
+        self.safety.push_state(copy.deepcopy(self.rows[-1]))
+        self.assertFalse(self.safety.wake.is_set())
+        fresh=dict(self.rows[-1],stamp_s=10.1)
+        self.safety.push_state(fresh)
+        self.assertTrue(self.safety.wake.is_set())
+        self.assertEqual(self.safety.rows[-1]['stamp_s'],10.1)
+        self.safety.wake.clear()
+        self.safety.push_state(dict(fresh,health=2))
+        self.assertTrue(self.safety.wake.is_set())
+        self.safety.wake.clear()
+        self.safety.push_state(dict(fresh,health=2,has_map_pose=True))
+        self.assertTrue(self.safety.wake.is_set())
+        self.safety.wake.clear()
+        self.safety.push_state(dict(fresh,stamp_s=9.))
+        self.assertTrue(self.safety.wake.is_set())
+        self.assertEqual(self.safety.barrier,'localization_reset')
+
+    def test_live_pose_rechecks_cover_nominal_cadence_but_not_stale_feedback(self):
+        from perception.environment.scene import assemble_scene
+        self.geometry.assumed=False
+        motion=dict(self.motion,parameters_assumed=False,
+            execution_response_bounds=dict(max_planar_speed_mps=self.motion['max_forward_mps'],max_stop_time_s=.1),
+            execution_max_angular_rps=self.motion['max_angular_rps'])
+        scene=assemble_scene(self.scene.geometry,clock_domain='runtime_live',settings=self.safety.scene_settings)
+        planner=Planner(self.config,self.geometry,require_actual_start=True)
+        reference=reference_envelope(planner.query(self.req,scene=scene,now=10.,clock_domain='runtime_live'),self.req,scene,None)
+        controller=DwaShadowController(self.config,motion,self.geometry)
+        packet=controller.step(self.req,scene,self.rows,reference,now=10.,clock_domain='runtime_live',mono=0.)
+        safety=ShadowSafety(self.config,motion,self.geometry,clock_domain='runtime_live',execution=True)
+        safety.command('goal',self.req);safety.push_grid(scene.geometry,mono=0.);safety.push_record(scene.record)
+        for row in self.rows:safety.push_state(row)
+        for i in range(4):
+            stamp=10.+i*.1;mono=i*.1
+            if i:
+                safety.wake.clear()
+                safety.push_state(dict(self.rows[-1],stamp_s=stamp))
+                self.assertTrue(safety.wake.is_set())
+            current=copy.deepcopy(packet);current.update(sequence_id=packet['sequence_id']+i,stamp_s=stamp)
+            current['packet_binding']=fingerprint({k:v for k,v in current.items() if k!='packet_binding'})
+            safety.push_packet(current,mono=mono)
+            now=stamp+.02
+            result=safety.tick(now,mono=mono+.02,clock_now=lambda:now)
+            self.assertEqual(result['state'],'allowed',result)
+            self.assertGreater(result['remaining_validity_s'],.1)
+            self.assertAlmostEqual(result['feedback']['stamp_s'],stamp)
+        # No new source observation: its age, rather than the wake or packet,
+        # must prevent further authorization.
+        result=safety.tick(10.47,mono=.47,clock_now=lambda:10.47)
+        self.assertEqual(result['state'],'stop_request',result)
+        self.assertEqual(result['velocity'],[0.,0.])
+
     def test_feedback_cannot_age_past_its_limit_while_the_proposal_is_still_valid(self):
         clock=iter([10.,10.16]);result=self.safety.tick(10.,mono=0.,clock_now=lambda:next(clock))
         self.assertEqual(result['reason'],'feedback_expired_during_gate');self.assertEqual(result['velocity'],[0.,0.])
+
+    def test_association_lifetime_limits_authorization_and_expiry_stops(self):
+        with patch('navigation.safety.shadow._association_remaining',return_value=.02):
+            result=self.safety.tick(10.,mono=0.,clock_now=lambda:10.)
+        self.assertEqual(result['state'],'allowed',result)
+        self.assertAlmostEqual(result['remaining_association_validity_s'],.02)
+        self.assertAlmostEqual(result['remaining_validity_s'],.02)
+        with patch('navigation.safety.shadow._association_remaining',side_effect=ValueError('association_expired_during_gate')):
+            result=self.safety.tick(10.,mono=.01,clock_now=lambda:10.)
+        self.assertEqual(result['reason'],'association_expired_during_gate')
+        self.assertEqual(result['velocity'],[0.,0.])
 
     def test_scene_join_does_not_block_pose_callbacks_or_hide_new_observations(self):
         import threading

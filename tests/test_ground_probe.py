@@ -157,7 +157,7 @@ class PulseGuardTests(unittest.TestCase):
 
     def test_spin_rejects_translation_and_cannot_be_silence_mode(self):
         window=PulseWindow(10.,expect_inhibited=False,maneuver='spin_left')
-        self.assertEqual(self.ask(window,10.1,feedback=decode_feedback(frame(velocity=.04,angular=.1))),0.)
+        self.assertEqual(self.ask(window,10.1,feedback=decode_feedback(frame(velocity=.061,angular=.1))),0.)
         self.assertEqual(window.reason,'unexpected_translation_during_spin');self.assertEqual(window.angular_command(10.1),0.)
         with self.assertRaises(ValueError):PulseWindow(10.,silence=True,maneuver='reverse')
         for kind in ('reverse','spin_left','spin_right'):
@@ -192,6 +192,33 @@ class PulseGuardTests(unittest.TestCase):
         self.ask(window,10.467,feedback=decode_feedback(frame(velocity=.018,angular=.058)))
         self.assertIsNone(window.reason);self.assertEqual(window.spin_reverse_frames,0)
         self.assertEqual(window.angular_command(12.),0.)
+
+    def test_spin_single_small_translation_does_not_abort_but_recovery_resets_it(self):
+        window=PulseWindow(10.,expect_inhibited=False,duration=2.,maneuver='spin_right',angular_speed=.2)
+        self.ask(window,10.1,feedback=decode_feedback(frame(velocity=-.036,angular=-.116)))
+        self.assertIsNone(window.reason);self.assertEqual(window.spin_translation_frames,1)
+        self.ask(window,10.15,feedback=decode_feedback(frame(velocity=0.,angular=-.116)))
+        self.assertIsNone(window.reason);self.assertEqual(window.spin_translation_frames,0)
+
+    def test_spin_sustained_small_translation_still_aborts(self):
+        for sign in (-1,1):
+            window=PulseWindow(10.,expect_inhibited=False,duration=2.,maneuver='spin_left',angular_speed=.2)
+            for now in (10.1,10.15,10.2,10.25):
+                self.ask(window,now,feedback=decode_feedback(frame(velocity=sign*.04,angular=.1)))
+                self.assertIsNone(window.reason)
+            self.ask(window,10.3,feedback=decode_feedback(frame(velocity=sign*.04,angular=.1)))
+            self.assertEqual(window.reason,'unexpected_translation_during_spin')
+            self.assertEqual(window.angular_command(10.3),0.)
+
+    def test_spin_translation_requires_fresh_spanning_frames_and_resets_on_gap(self):
+        window=PulseWindow(10.,expect_inhibited=False,duration=2.,maneuver='spin_left',angular_speed=.2)
+        moving=decode_feedback(frame(velocity=.04,angular=.1))
+        for now in (10.1,10.15,10.2,10.25,10.3):self.ask(window,now,feedback_at=10.1,feedback=moving)
+        self.assertIsNone(window.reason);self.assertEqual(window.spin_translation_frames,1)
+        self.ask(window,10.4,feedback=moving)
+        self.assertIsNone(window.reason);self.assertEqual(window.spin_translation_frames,1)
+        for now in (10.45,10.5,10.55,10.6):self.ask(window,now,feedback=moving)
+        self.assertEqual(window.reason,'unexpected_translation_during_spin')
 
     def test_spin_sustained_reverse_still_aborts_both_directions(self):
         for kind,sign in [('spin_left',1),('spin_right',-1)]:

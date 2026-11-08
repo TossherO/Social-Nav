@@ -1,10 +1,12 @@
 """Explicit measured vehicle profile; historical geometry is never executable."""
 import hashlib
 import math
+from decimal import Decimal, localcontext
 from pathlib import Path
 import yaml
 from navigation.planning.footprint import VehicleGeometry
 from navigation.safety.config import load_stopping_config
+from navigation.safety.response import validate_response_bounds
 
 
 def controller_settings(motion):
@@ -57,8 +59,14 @@ def load_vehicle_profile(path, motion, *, require_execution=False):
             raise ValueError('Selected motion exceeds measured limit: '+name)
     for name, measured in (('max_acceleration_mps2', 'minimum_braking_mps2'),
                            ('max_angular_acceleration_rps2', 'minimum_angular_braking_rps2')):
-        if motion[name]*motion['brake_deceleration_scale'] > limits[measured]:
-            raise ValueError('Stopping model exceeds guaranteed braking: '+measured)
+        # Compare the decimal configuration values without a binary-float
+        # multiplication artefact making a mathematically equal limit fail.
+        with localcontext() as context:
+            context.prec = 50
+            required = Decimal(str(motion[name])) * Decimal(str(motion['brake_deceleration_scale']))
+            declared = Decimal(str(limits[measured]))
+            if required > declared:
+                raise ValueError('Stopping model exceeds guaranteed braking: '+measured)
     selected=dict(motion,parameters_assumed=False,vehicle_source=source)
     for key in ('stopping_model','controller'):
         if profile.get(key) is not None:selected[key]=profile[key]
@@ -71,5 +79,10 @@ def load_vehicle_profile(path, motion, *, require_execution=False):
         raise ValueError('Confirm the exact tested serial protocol before execution')
     if require_execution and profile.get('controller') is None:
         raise ValueError('Execution requires explicit tested controller wire and feedback fields')
+    if require_execution:
+        selected['execution_response_bounds'] = validate_response_bounds(profile.get('execution_response_bounds'), motion)
+        if selected['execution_response_bounds']['max_planar_speed_mps'] < max(limits['max_forward_mps'], limits['max_reverse_mps']):
+            raise ValueError('Planar-speed bound is below declared measured vehicle speed')
+        selected['execution_max_angular_rps'] = limits['max_angular_rps']
     controller_settings(selected)
     return geometry, selected, profile

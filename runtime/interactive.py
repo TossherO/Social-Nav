@@ -112,6 +112,10 @@ def runtime_command(args, config, pose):
         command += ['--gpu', args.gpu]
     if args.runtime_config:
         command += ['--runtime-config', str(resolve(args.runtime_config))]
+    if args.environment_update_hz is not None:
+        command += ['--environment-update-hz', str(args.environment_update_hz)]
+    if args.environment_window_m is not None:
+        command += ['--environment-window-m', str(args.environment_window_m)]
     if args.vehicle_profile:
         command += ['--vehicle-profile', str(resolve(args.vehicle_profile))]
     if args.execute:
@@ -134,6 +138,8 @@ def parser():
     p.add_argument('--pose-file', help='Explicit saved LiDAR start, validated against this bag, map and --start; skips mouse initialization')
     p.add_argument('--motion-config')
     p.add_argument('--runtime-config', help='Same machine scheduling override inspected by runtime.preflight')
+    p.add_argument('--environment-update-hz', type=float, help='Override environment update rate (at most 10 Hz)')
+    p.add_argument('--environment-window-m', type=float, help='Override the square local environment window in metres')
     p.add_argument('--vehicle-profile')
     p.add_argument('--execute', action='store_true', help='Enable supervised live hardware output; separate arming is still required')
     p.add_argument('--chassis-port')
@@ -145,6 +151,10 @@ def main(argv=None):
     p = parser(); args = p.parse_args(argv)
     if not math.isfinite(args.start) or args.start < 0 or not math.isfinite(args.rate) or args.rate <= 0:
         p.error('Bag start/rate must be finite and nonnegative/positive')
+    if args.environment_update_hz is not None and (not math.isfinite(args.environment_update_hz) or not 0 < args.environment_update_hz <= 10):
+        p.error('Environment update rate must be finite and in (0,10] Hz')
+    if args.environment_window_m is not None and (not math.isfinite(args.environment_window_m) or not 0 < args.environment_window_m <= 60):
+        p.error('Environment window must be finite and in (0,60] metres')
     if args.live and (args.start != 0 or args.rate != 1 or args.pause_at is not None):
         p.error('Live input does not accept bag playback options')
     if args.pause_at is not None and (not math.isfinite(args.pause_at) or args.pause_at < 0):
