@@ -155,7 +155,9 @@ class Planner:
         measured_grid=grid
         if mode in ('static','mapped'):
             grid=reference_grid(grid,geometry_only=True)
-        out['reference_policy']=grid.metadata.get('reference_policy','observed_free_only')
+        out['unobserved_free_assumed']=grid.metadata.get('free_assumption')=='no_filtered_endpoint_in_cell'
+        out['reference_policy']=grid.metadata.get('reference_policy',
+            'unobserved_cells_assumed_free' if out['unobserved_free_assumed'] else 'observed_free_only')
         if r['frame_id'] != grid.metadata['frame_id']: raise ValueError('Goal frame does not match planning frame')
         if mode in ('static', 'mapped') and r.get('map_snapshot_id') != asset.manifest['snapshot_id']:
             raise ValueError('Goal static map identity mismatch')
@@ -274,6 +276,8 @@ class Planner:
                        reason='returned_path_'+check['status']); return
         out.update(status='path_found', reason=None, path=poses.tolist(), current_path_valid=True,
                    path_length_m=float(np.linalg.norm(np.diff(poses[:,:2],axis=0),axis=1).sum()))
+        if mode=='static' and out['unobserved_free_assumed']:
+            out.update(current_path_valid=False,global_reference_only=True,needs_observation=True)
         if selection is not None and selection['max_path_length_m'] is not None and out['path_length_m']>selection['max_path_length_m']:
             out.update(status='no_path',reason='route_candidate_detour',path=[],current_path_valid=False)
             return

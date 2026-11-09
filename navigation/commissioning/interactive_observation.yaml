@@ -1,0 +1,7 @@
+# 只供本车非执行观察入口使用；实机执行使用 interactive.yaml。
+map: outputs/perception/lab_floor2_20261107/mapping_compensated/map
+static_map: outputs/perception/lab_floor2_20261107/static_environment_compensated_20cm
+coverage: navigation/commissioning/coverage_observation_extended.yaml
+initial_pose_hint: navigation/commissioning/height_hint.json
+motion_config: navigation/planning/configs/motion.yaml
+motion_profile: trial

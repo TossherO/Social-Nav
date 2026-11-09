@@ -35,6 +35,20 @@ Visualization Manager:
       Alpha: 0.5
       Color Scheme: map
     - Class: rviz/PointCloud2
+      Name: Unverified initial scan preview (cyan)
+      Enabled: true
+      Topic: /social_nav_interactive/initial_scan_preview
+      Queue Size: 1
+      Style: Points
+      Size (Pixels): 3
+      Color Transformer: FlatColor
+      Color: 0; 255; 255
+    - Class: rviz/MarkerArray
+      Name: Unverified initial pose preview
+      Enabled: true
+      Marker Topic: /social_nav_interactive/initial_pose_preview
+      Queue Size: 1
+    - Class: rviz/PointCloud2
       Name: Current scan
       Enabled: true
       Topic: /social_nav_runtime_view/scan
@@ -93,9 +107,10 @@ Visualization Manager:
     - Class: rviz/MoveCamera
     - Class: rviz/Interact
     - Class: social_nav_rviz/GroundInitialPose
-      Topic: /initialpose
+      Topic: /social_nav_interactive/initial_pose_candidate
       Ground topic: /social_nav_interactive/ground_map
       Cell size: 0.1
+    - Class: social_nav_rviz/ConfirmInitialPose
     - Class: social_nav_rviz/GroundGoal
       Topic: /move_base_simple/goal
       Ground topic: /social_nav_interactive/ground_map

@@ -88,8 +88,9 @@ def export_environment(run_directory, output, *, config=None, bag=None, export_p
                          ['not_navigation_reachability', 'final_map_is_not_causal_input_to_its_own_mapping_run'])
 
 
-def export_endpoint_environment(map_path, output, *, config=None, bounds=None, export_pgm=False):
-    """Import an older localization map without inventing missing ray/free evidence."""
+def export_endpoint_environment(map_path, output, *, config=None, bounds=None, export_pgm=False,
+                                projection_strategy='observed_endpoints', projection_settings=None):
+    """Import a localization map with an explicit endpoint projection strategy."""
     map_path, output = Path(map_path), Path(output)
     if output.exists():
         raise FileExistsError('Select a new environment output directory')
@@ -105,12 +106,25 @@ def export_endpoint_environment(map_path, output, *, config=None, bounds=None, e
         raise ValueError('Invalid localization-map keyframe poses')
     points = read_pcd(map_path/'GlobalMap.pcd', config['static']['max_points'], strict=True)
     map_id = 'roll:'+hashlib.sha256(encoded(digest).encode()).hexdigest()
-    snapshot = static_geometry(points, keys[:, 1:4], config, map_id=map_id, frame=frame,
-                               stamp=keys[-1, 0], bounds=bounds)
+    if projection_strategy=='observed_endpoints':
+        if projection_settings is not None:raise ValueError('Projection settings require an assumed-free strategy')
+        snapshot = static_geometry(points, keys[:, 1:4], config, map_id=map_id, frame=frame,
+                                   stamp=keys[-1, 0], bounds=bounds)
+    elif projection_strategy in ('docker_assume_free', 'ground_relative_assume_free'):
+        from .projection import docker_projection, ground_relative_projection
+        project = ground_relative_projection if projection_strategy == 'ground_relative_assume_free' else docker_projection
+        snapshot = project(points,keys[:,1:4],config,map_id=map_id,frame=frame,
+                                     stamp=keys[-1,0],bounds=bounds,**(projection_settings or {}))
+    else:
+        raise ValueError('Unknown endpoint projection strategy')
     source = dict(map=asset_reference(map_path), map_fingerprint=digest, input_kind='localization_map_endpoints')
+    limitations=['not_navigation_reachability', 'no_recorded_rays_or_free_space',
+                 'source_point_observation_times_unavailable']
+    if projection_strategy in ('docker_assume_free', 'ground_relative_assume_free'):
+        source['projection_strategy']=projection_strategy
+        limitations.append('unobserved_cells_assumed_free_not_measured')
     return _save_package(snapshot, output, source, config, frame, 0, export_pgm,
-                         ['not_navigation_reachability', 'no_recorded_rays_or_free_space',
-                          'source_point_observation_times_unavailable'])
+                         limitations)
 
 
 def export_registered_environment(map_path, evidence_run, reference_run, output, *, config=None,

@@ -43,6 +43,14 @@ class SupportTests(unittest.TestCase):
         self.prior.snapshot.layers['occupancy'][20,20]=100
         with self.assertRaises(ValueError):navigation_geometry(scene(result),asset=self.prior,check_asset=True,now=10.)
 
+    def test_assumed_free_without_observation_times_never_supports_safety(self):
+        self.prior.snapshot.layers['occupancy'][:]=0
+        self.prior.snapshot.layers['last_observed'][:]=np.nan
+        self.prior.snapshot.layers['assumed_free']=np.ones_like(self.prior.snapshot.layers['occupancy'],bool)
+        result=self.apply()
+        self.assertNotIn('navigation_occupancy',result.layers)
+        self.assertTrue((result.layers['occupancy']==-1).all())
+
     def test_no_prior_unknown_prior_wrong_floor_and_boundary_remain_unknown(self):
         raw=self.raw();empty=self.support.apply(raw,None)
         self.assertNotIn('navigation_occupancy',empty.layers)

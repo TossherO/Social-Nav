@@ -79,6 +79,13 @@ class VehicleExecutionConfigTests(unittest.TestCase):
             p=self.profile();p['stopping_model'][key]=value
             with self.subTest(key=key),self.assertRaises(ValueError):self.load(p)
 
+    def test_wheelchair_trial_profile_covers_declared_delays(self):
+        trial=load_motion_config(profile='trial')
+        _,selected,profile=load_vehicle_profile('configs/wheelchair_vehicle.yaml',trial,require_execution=True)
+        stopping=load_stopping_config(selected)
+        self.assertGreaterEqual(stopping['actuator_delay_s'],profile['measured_limits']['maximum_actuator_delay_s'])
+        self.assertGreaterEqual(stopping['reaction_s'],profile['measured_limits']['firmware_watchdog_s'])
+
     def test_exact_decimal_braking_boundary_passes_and_lower_limits_are_rejected(self):
         p=self.profile()
         p['measured_limits'].update(minimum_braking_mps2=.075,minimum_angular_braking_rps2=.1125)

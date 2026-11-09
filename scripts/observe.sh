@@ -23,7 +23,7 @@ source perception/scripts/ros1_env.sh
 source navigation/commissioning/performance.env
 SOCIAL_NAV_SESSION_DIR="$SOCIAL_NAV_LOCAL_ROOT/outputs/navigation/live_observation/$(date +%Y%m%d_%H%M%S_%N)"
 SOCIAL_NAV_OBSERVE_COMMAND=(taskset -c "$SOCIAL_NAV_COMMISSIONING_CPU_LIST" /home/tl/miniconda3/envs/social-nav-runtime/bin/python -B -m runtime.interactive \
-  --live --gpu "${GPU_ID:-0}" --config "$SOCIAL_NAV_LOCAL_ROOT/navigation/commissioning/interactive.yaml" \
+  --live --gpu "${GPU_ID:-0}" --config "$SOCIAL_NAV_LOCAL_ROOT/navigation/commissioning/interactive_observation.yaml" \
   --motion-profile trial \
   --environment-update-hz "$SOCIAL_NAV_COMMISSIONING_ENVIRONMENT_HZ" --environment-window-m "$SOCIAL_NAV_COMMISSIONING_WINDOW_M" \
   --vehicle-profile "$SOCIAL_NAV_LOCAL_ROOT/configs/wheelchair_vehicle.yaml" \
@@ -49,6 +49,6 @@ if simulated:
     raise SystemExit('当前master启用了/use_sim_time，请使用真实传感器会话后再启动在线观察。')
 PY
 printf '%s\n' "本次观察记录：$SOCIAL_NAV_SESSION_DIR" \
-  '请在RViz选择轮椅当前雷达位置与朝向；关联范围见 navigation/commissioning/coverage_observation.yaml。' \
+  '请在RViz选择轮椅当前雷达位置与朝向；观察关联范围见 navigation/commissioning/coverage_observation_extended.yaml。' \
   '本入口仅记录规划建议；终端输入 q 并回车退出。'
 exec "${SOCIAL_NAV_OBSERVE_COMMAND[@]}"

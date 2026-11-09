@@ -1,0 +1,13 @@
+# 固定地图关联范围；新增的局部区域只供本车有看护的试验。
+frame_id: map
+source:
+  kind: operator_requested_live_trial_with_local_alignment_check
+  reviewed_source: live_observations_20261109_operator_confirmed_local_alignment_at_three_positions
+  field_verified: false
+  free_space_assertion: false
+  limitation: The added regions surround three stationary live associations; their full extents and map accuracy are not independently surveyed. They do not assert free or traversable space.
+map_asset_fingerprint: b0616d535d7fce135a7da46a0bde8f254e01f2a3659d76228bd94f1727c3bda8
+regions_xy:
+  - [[-12.0, -4.0], [1.0, -4.0], [1.0, 0.5], [-12.0, 0.5]]
+  - [[-2.3, 7.7], [-0.3, 7.7], [-0.3, 9.7], [-2.3, 9.7]]
+  - [[-3.0, 13.5], [-1.0, 13.5], [-1.0, 16.7], [-3.0, 16.7]]

@@ -1,0 +1,13 @@
+# 仅用于非执行观察的候选地图关联区域；不表示自由空间或完整定位验收。
+frame_id: map
+source:
+  kind: developer_and_operator_selected_live_shadow_candidate_regions
+  reviewed_source: selected_static_grid_and_offline_first_scan_registration_and_live_operator_position
+  field_verified: false
+  free_space_assertion: false
+  execution_accepted: false
+  limitation: Candidate map-association domains for shadow observation only; map alignment and full region accuracy remain unverified.
+map_asset_fingerprint: b0616d535d7fce135a7da46a0bde8f254e01f2a3659d76228bd94f1727c3bda8
+regions_xy:
+  - [[-12.0, -4.0], [1.0, -4.0], [1.0, 0.5], [-12.0, 0.5]]
+  - [[-4.5, 5.5], [0.5, 5.5], [0.5, 10.5], [-4.5, 10.5]]

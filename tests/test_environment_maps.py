@@ -3,11 +3,12 @@ from pathlib import Path
 import tempfile
 import json
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import yaml
 
-from perception.environment.layers import load_config
+from perception.environment.layers import GridSnapshot, load_config
 from perception.environment.maps import static_geometry
 from perception.environment.poses import PoseTimeline
 from perception.environment.export import export_environment, export_endpoint_environment
@@ -51,6 +52,60 @@ class PoseTimelineTests(unittest.TestCase):
 
 
 class StaticMapTests(unittest.TestCase):
+    def test_ground_relative_projection_filters_height_and_keeps_unsupported_points(self):
+        from perception.environment.projection import ground_relative_projection
+        config = load_config()
+        config.update(resolution=.1, min_obstacle_height_m=.12, max_height_m=1.8)
+        # Each pair survives the 3-D neighbor filter. The last column has no
+        # reliable ground estimate and must retain its endpoint as occupied.
+        cloud = np.array([[.05,.05,0], [.051,.05,0], [.15,.05,.5], [.151,.05,.5],
+                          [.25,.05,2.8], [.251,.05,2.8], [.35,.05,2.8], [.351,.05,2.8]], np.float32)
+        floor = np.array([[0., 0., 0., np.nan, 0.]], np.float32)
+        base = GridSnapshot(dict(shape=[1,5], origin_xy=[0.,0.], resolution=.1, snapshot_id='base'),
+            dict(ground_z=floor, ground_support=np.isfinite(floor),
+                 obstacle_min_z=np.full((1,5),np.nan), obstacle_max_z=np.full((1,5),np.nan)))
+        with patch('perception.environment.projection.static_geometry', return_value=base):
+            result = ground_relative_projection(cloud, [[0,0,1]], config, map_id='test', frame='map',
+                                                stamp=1., radius=.02, min_neighbors=1)
+        np.testing.assert_array_equal(result.layers['occupancy'], [[0,100,0,100,0]])
+        np.testing.assert_array_equal(result.layers['assumed_free'], result.layers['occupancy']==0)
+        self.assertEqual(result.metadata['projection_counts']['missing_ground_points'], 2)
+        self.assertEqual(result.metadata['projection_counts']['height_band_points'], 2)
+        self.assertTrue(np.isnan(result.layers['last_observed']).all())
+        self.assertFalse(result.metadata['free_space_supported'])
+        with self.assertRaises(ValueError):
+            ground_relative_projection(cloud, [[0,0,1]], config, map_id='test', frame='map',
+                                       stamp=1., height_min=.9, height_max=.2)
+
+    def test_docker_projection_assumes_free_but_preserves_no_ray_evidence(self):
+        from perception.environment.projection import docker_projection
+        config=load_config()
+        cloud=np.array([[0,0,0],[.01,0,0],[0,.01,0],[.01,.01,0],[.005,.005,0],
+                        [1,1,0],[1.01,1,0],[1,1.01,0],[1.01,1.01,0],[1.005,1.005,0],
+                        [.5,.5,0],[0,0,20]],dtype=np.float32)
+        snapshot=docker_projection(cloud,[[0,0,1]],config,map_id='test',frame='map',stamp=10.)
+        cells=snapshot.layers['occupancy'];assumed=snapshot.layers['assumed_free']
+        self.assertEqual(snapshot.metadata['projection_counts']['radius_filtered_points'],10)
+        self.assertEqual(snapshot.metadata['projection_strategy'],'docker_assume_free')
+        self.assertEqual(snapshot.metadata['free_assumption'],'no_filtered_endpoint_in_cell')
+        self.assertFalse(snapshot.metadata['free_space_supported'])
+        self.assertTrue((cells==0).any());self.assertTrue((cells==100).any())
+        np.testing.assert_array_equal(assumed,cells==0)
+        edge=np.floor((cloud[8,:2]-snapshot.metadata['origin_xy'])/snapshot.metadata['resolution']).astype(int)
+        self.assertEqual(cells[edge[1],edge[0]],100)  # The final boundary is not silently dropped.
+        self.assertTrue(np.isnan(snapshot.layers['last_observed']).all())
+        self.assertFalse(snapshot.layers['coverage'].any())
+        from perception.environment.context import query_geometry
+        y,x=np.argwhere(assumed)[0]
+        xy=np.asarray(snapshot.metadata['origin_xy'])+(np.array([x,y])+.5)*snapshot.metadata['resolution']
+        result=query_geometry(snapshot,[xy],frame='map')[0]
+        self.assertEqual(result['state'],'free')
+        self.assertTrue(result['assumed_free'])
+        self.assertEqual(result['free_source'],'assumed_no_endpoint')
+        self.assertIsNone(result['last_observed_s'])
+        with self.assertRaises(ValueError):
+            docker_projection(cloud,[[0,0,1]],config,map_id='test',frame='map',stamp=10.,radius=0.)
+
     def test_ground_cell_uses_unique_point_median_instead_of_last_point(self):
         config=load_config();axis=np.arange(-2.,2.,.15);x,y=np.meshgrid(axis,axis)
         floor=np.c_[x.ravel(),y.ravel(),np.full(x.size,-1.)]
@@ -168,6 +223,41 @@ class StaticMapTests(unittest.TestCase):
             self.assertEqual(imported['configuration']['compute']['backend'],'cpu')
             self.assertFalse((package.snapshot.layers['occupancy']==0).any())
             self.assertIn('no_recorded_rays_or_free_space',imported['limitations'])
+            docker=path/'docker_projection'
+            projected=export_endpoint_environment(mapping,docker,export_pgm=True,
+                projection_strategy='docker_assume_free',
+                projection_settings=dict(radius=.25,min_neighbors=2))
+            loaded=StaticEnvironmentMap(docker).snapshot
+            self.assertIn('unobserved_cells_assumed_free_not_measured',projected['limitations'])
+            np.testing.assert_array_equal(loaded.layers['assumed_free'],loaded.layers['occupancy']==0)
+            self.assertTrue(np.isnan(loaded.layers['last_observed']).all())
+            self.assertTrue((loaded.layers['occupancy']==0).any())
+            relative=path/'ground_relative_projection'
+            relative_manifest=export_endpoint_environment(mapping,relative,export_pgm=True,
+                projection_strategy='ground_relative_assume_free',
+                projection_settings=dict(radius=.25,min_neighbors=2))
+            relative_loaded=StaticEnvironmentMap(relative).snapshot
+            self.assertEqual(relative_loaded.metadata['projection_strategy'],'ground_relative_assume_free')
+            self.assertIn('unobserved_cells_assumed_free_not_measured',relative_manifest['limitations'])
+            np.testing.assert_array_equal(relative_loaded.layers['assumed_free'],relative_loaded.layers['occupancy']==0)
+            self.assertTrue(np.isnan(relative_loaded.layers['last_observed']).all())
+            bad_relative=path/'bad_relative_projection';bad_relative.mkdir()
+            bad_relative_layers={name:value.copy() for name,value in relative_loaded.layers.items()}
+            bad_relative_layers['last_observed'][bad_relative_layers['assumed_free']]=1.
+            GridSnapshot(dict(relative_loaded.metadata),bad_relative_layers).save(bad_relative/'layers.npz')
+            bad_relative_manifest=dict(relative_manifest,layers_sha256=content_hash(bad_relative/'layers.npz'))
+            (bad_relative/'manifest.yaml').write_text(yaml.safe_dump(bad_relative_manifest))
+            with self.assertRaisesRegex(ValueError,'absence of observation times'):
+                StaticEnvironmentMap(bad_relative)
+            # A matching package hash cannot turn assumed space into measured time.
+            bad=path/'bad_projection';bad.mkdir()
+            bad_layers={name:value.copy() for name,value in loaded.layers.items()}
+            bad_layers['last_observed'][bad_layers['assumed_free']]=1.
+            GridSnapshot(dict(loaded.metadata),bad_layers).save(bad/'layers.npz')
+            bad_manifest=dict(projected,layers_sha256=content_hash(bad/'layers.npz'))
+            (bad/'manifest.yaml').write_text(yaml.safe_dump(bad_manifest))
+            with self.assertRaisesRegex(ValueError,'absence of observation times'):
+                StaticEnvironmentMap(bad)
 
 
 if __name__ == '__main__':

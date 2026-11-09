@@ -36,9 +36,10 @@ def plot_environment(snapshot):
     figure,axes = plt.subplots(1,3,figsize=(15,5),constrained_layout=True)
     categories = np.where(layers['occupancy']==-1,0,np.where(layers['occupancy']==0,1,2))
     if 'conditional_obstacle' in layers: categories[layers['conditional_obstacle']]=3
-    axes[0].imshow(categories,origin='lower',extent=extent,vmin=0,vmax=3,
-                   cmap=ListedColormap(['#b8c4cf','#ffffff','#263b4d','#e7a343']),interpolation='nearest')
-    axes[0].set_title('Gray unknown / white free / dark occupied\nOrange conditional prior (still measured occupied)')
+    if 'assumed_free' in layers:categories[layers['assumed_free']]=4
+    axes[0].imshow(categories,origin='lower',extent=extent,vmin=0,vmax=4,
+                   cmap=ListedColormap(['#b8c4cf','#ffffff','#263b4d','#e7a343','#f7e8a4']),interpolation='nearest')
+    axes[0].set_title('Gray unknown / white observed free / dark occupied\nYellow: assumed free; orange: conditional occupied')
     for name,color in [('near_field_free','#138a67'),('near_field_obstacle','#b34a24')]:
         if name in layers and layers[name].any():
             axes[0].contour(x+(np.arange(width)+.5)*r,y+(np.arange(height)+.5)*r,layers[name],

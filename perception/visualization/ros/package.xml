@@ -11,5 +11,6 @@
   <depend>pluginlib</depend>
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
   <export><rviz plugin="${prefix}/plugins.xml"/></export>
 </package>

@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import uuid
 
 import numpy as np
@@ -76,9 +77,11 @@ def require_rviz_tools():
         raise RuntimeError('RViz ground pose tools are not built. Run: bash perception/scripts/build_ros1.sh visualization')
 
 
-def session_notice(status, *, selected=False):
+def session_notice(status, *, selected=False, candidate=False):
     """Operator-visible state independent of the missing map-to-local transform."""
     if not selected:
+        if candidate:
+            return ('initial_pose_preview', 'PREVIEW ONLY: compare cyan scan with map.\nReselect as needed, then Confirm Initial Pose or c + Enter.', False)
         return ('waiting_for_initial_pose', 'Use Ground Pose Estimate to select\nthe actual LiDAR XY and heading on the ground.', False)
     observation = (status or {}).get('observation') or {}
     row = observation.get('localization') or {}
@@ -199,7 +202,7 @@ def main(argv=None):
     from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, PointStamped, Point
     from nav_msgs.msg import OccupancyGrid, Path as RosPath
     from sensor_msgs.msg import PointCloud2
-    from std_msgs.msg import String
+    from std_msgs.msg import Empty, String
     from std_srvs.srv import SetBool, SetBoolResponse, Trigger, TriggerResponse
     from visualization_msgs.msg import Marker, MarkerArray
     import rosgraph
@@ -220,6 +223,8 @@ def main(argv=None):
     session_pub = rospy.Publisher('/social_nav_interactive/session_markers', MarkerArray, queue_size=1, latch=True)
     curves_pub = rospy.Publisher('/social_nav_interactive/preview_paths', MarkerArray, queue_size=1, latch=True)
     goal_pub = rospy.Publisher('/social_nav_interactive/accepted_goal', MarkerArray, queue_size=1, latch=True)
+    initial_scan_pub = rospy.Publisher('/social_nav_interactive/initial_scan_preview', PointCloud2, queue_size=1, latch=True)
+    initial_marker_pub = rospy.Publisher('/social_nav_interactive/initial_pose_preview', MarkerArray, queue_size=1, latch=True)
     message = OccupancyGrid(); grid = asset.snapshot
     message.header.frame_id = grid.metadata['frame_id']; message.header.stamp = rospy.Time.from_sec(grid.metadata['stamp_s'])
     message.info.resolution = grid.metadata['resolution']; message.info.height, message.info.width = grid.layers['occupancy'].shape
@@ -228,6 +233,12 @@ def main(argv=None):
     from perception.visualization.surface import ground_cloud,annotation_height
     terrain_pub.publish(ground_cloud(grid,offset=-.015))
     runtime = rviz = log = None
+    from .initial_preview import PreviewState, preview_points
+    from perception.visualization.scans import pointcloud_message
+    from perception.detection_tracking.inference.config import load_config as detection_config
+    sensor_settings = detection_config()['ros']
+    initial_preview = PreviewState()
+    preview_visible = False
     socket_path = output/'run/commands.sock'
     # Instructions live in map itself, so they remain visible when localization fails.
     anchor = hint['pose']['position_m'][:2]
@@ -236,7 +247,7 @@ def main(argv=None):
 
     def show_notice(status=None):
         nonlocal last_notice
-        state,text,error = session_notice(status,selected=bool(selection))
+        state,text,error = session_notice(status,selected=bool(selection),candidate=args.live and initial_preview.pose is not None)
         key=(state,text)
         if key==last_notice:return
         last_notice=key
@@ -288,6 +299,21 @@ def main(argv=None):
         state_pub.publish(String(data=json.dumps(result, ensure_ascii=False, allow_nan=False)))
         return result
 
+    def show_initial_candidate(pose, error=None):
+        marker=Marker();marker.header.frame_id=asset.manifest['frame_id']
+        marker.ns='initial_candidate';marker.id=0;marker.action=Marker.ADD;marker.type=Marker.ARROW
+        marker.pose.position=Point(*pose[3:]);marker.pose.orientation.z=math.sin(pose[2]/2)
+        marker.pose.orientation.w=math.cos(pose[2]/2)
+        marker.scale.x,marker.scale.y,marker.scale.z=1.,.12,.18
+        marker.color.r,marker.color.g,marker.color.b,marker.color.a=0.,1.,1.,1.
+        label=Marker();label.header.frame_id=marker.header.frame_id;label.ns=marker.ns;label.id=1
+        label.action=Marker.ADD;label.type=Marker.TEXT_VIEW_FACING;label.pose.orientation.w=1.
+        label.pose.position=Point(pose[3],pose[4],pose[5]+1.2);label.scale.z=.25
+        label.color.r,label.color.g,label.color.b,label.color.a=0.,1.,1.,1.
+        label.text=('CONFIRMATION FAILED: '+error if error else
+                    'UNVERIFIED INITIAL GUESS\nCyan: raw scan preview; confirm to start')
+        initial_marker_pub.publish(MarkerArray(markers=[marker,label]))
+
     def initial(message):
         def choose():
             with lock:
@@ -297,12 +323,71 @@ def main(argv=None):
                 value = selected_initial_pose(message.header.frame_id,
                     [pose.position.x, pose.position.y, pose.position.z],
                     [pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w], hint, initial_z=args.initial_z)
+                if args.live:
+                    initial_preview.select(value, message.header.stamp.to_sec())
+                    show_initial_candidate(value)
+                    return dict(accepted=True, state='initial_pose_preview', executable=False,
+                                preview_revision=initial_preview.revision)
                 selection.append(value)
                 (output/'initial_pose.json').write_text(json.dumps(dict(source='rviz_initialpose',
                     reference='rslidar', map=config['map'], pose_rpy_xyz=value,
                     intent_stamp_s=message.header.stamp.to_sec(), registration_verified=False), indent=2))
                 return dict(accepted=True, state='initializing', executable=False)
         report(choose)
+
+    def scan_for_initial_preview(message):
+        if not args.live or message.header.frame_id.lstrip('/') != sensor_settings['localization_child_frame'].lstrip('/'):
+            return
+        with lock:
+            if selection or runtime is not None:
+                return
+            try: initial_preview.scan(message, time.monotonic(), now_source=rospy.Time.now().to_sec())
+            except ValueError as error: rospy.logwarn_throttle(5., 'Initial preview scan: %s', error)
+
+    def draw_initial_preview():
+        nonlocal preview_visible
+        if not args.live: return
+        with lock:
+            now=time.monotonic()
+            if selection or runtime is not None or initial_preview.pose is None or not initial_preview.fresh(now):
+                if preview_visible:
+                    initial_scan_pub.publish(pointcloud_message([], asset.manifest['frame_id']))
+                    preview_visible=False
+                if not initial_preview.fresh(now): initial_preview.rendered=None
+                return
+            try:
+                points=preview_points(initial_preview.cloud, initial_preview.pose, sensor_settings['localization_child_frame'])
+                initial_scan_pub.publish(pointcloud_message(points, asset.manifest['frame_id'],initial_preview.source_stamp))
+                initial_preview.rendered=(initial_preview.revision,initial_preview.source_stamp,initial_preview.received_mono)
+                preview_visible=True
+            except ValueError as error:
+                initial_preview.rendered=None
+                if preview_visible:initial_scan_pub.publish(pointcloud_message([],asset.manifest['frame_id']));preview_visible=False
+                rospy.logwarn_throttle(5., 'Initial preview: %s', error)
+
+    def confirm_initial():
+        with lock:
+            if not args.live or runtime is not None or selection:
+                raise ValueError('Initial pose confirmation is only available before live initialization')
+            if not initial_preview.ready(time.monotonic()):
+                raise ValueError('Select a pose and wait for a fresh LiDAR preview before confirming')
+            (output/'initial_pose.json').write_text(json.dumps(dict(source='confirmed_rviz_initialpose',
+                reference='rslidar', map=config['map'], pose_rpy_xyz=initial_preview.pose,
+                intent_stamp_s=initial_preview.intent_stamp, preview_scan_stamp_s=initial_preview.rendered[1],
+                registration_verified=False), indent=2))
+            selection.append(list(initial_preview.pose))
+            clear=Marker();clear.action=Marker.DELETEALL
+            initial_marker_pub.publish(MarkerArray(markers=[clear]))
+        return dict(accepted=True, state='initializing', executable=False)
+
+    def confirm_initial_service(_):
+        result=report(confirm_initial)
+        return TriggerResponse(success=result.get('accepted',False),message=json.dumps(result,ensure_ascii=False))
+
+    def confirm_initial_topic(_):
+        result=report(confirm_initial)
+        if not result.get('accepted') and initial_preview.pose is not None:
+            show_initial_candidate(initial_preview.pose,result.get('error','try again'))
 
     def goal(message):
         pose = message.pose
@@ -358,16 +443,22 @@ def main(argv=None):
         return TriggerResponse(success=result.get('accepted', result.get('reply', {}).get('accepted', False)), message=json.dumps(result))
 
     subscribers = [rospy.Subscriber('/initialpose', PoseWithCovarianceStamped, initial, queue_size=1),
+                   rospy.Subscriber('/social_nav_interactive/initial_pose_candidate', PoseWithCovarianceStamped, initial, queue_size=1),
                    rospy.Subscriber('/move_base_simple/goal', PoseStamped, goal, queue_size=1),
-                   rospy.Subscriber('/clicked_point', PointStamped, point, queue_size=1)]
+                   rospy.Subscriber('/clicked_point', PointStamped, point, queue_size=1),
+                   rospy.Subscriber('/social_nav_interactive/confirm_initial_pose', Empty, confirm_initial_topic, queue_size=1)]
+    if args.live:
+        subscribers.append(rospy.Subscriber(sensor_settings['pointcloud_topic'], PointCloud2, scan_for_initial_preview, queue_size=1, buff_size=4*1024*1024))
     services = [rospy.Service('/social_nav_interactive/pause', SetBool, pause_service),
                 rospy.Service('/social_nav_interactive/arm', SetBool, arm_service),
-                rospy.Service('/social_nav_interactive/cancel', Trigger, cancel_service)]
+                rospy.Service('/social_nav_interactive/cancel', Trigger, cancel_service),
+                rospy.Service('/social_nav_interactive/confirm_initial_pose', Trigger, confirm_initial_service)]
 
     def keyboard():
         for line in sys.stdin:
             key = line.strip().lower()
             if key == 'q': stopped.set(); return
+            if key == 'c': report(confirm_initial)
             if key == 'p': report(lambda: send('playback', dict(paused=True)))
             elif key == 'r': report(lambda: send('playback', dict(paused=False)))
             elif key == 's': report(cancel)
@@ -392,7 +483,7 @@ def main(argv=None):
             z=annotation_height(grid,xy,anchor_z)
             view['Visualization Manager']['Views']['Current']['Focal Point']=dict(X=float(xy[0]),Y=float(xy[1]),Z=z)
             for tool in view['Visualization Manager']['Tools']:
-                if tool['Class'].startswith('social_nav_rviz/'):
+                if tool['Class'] in ('social_nav_rviz/GroundInitialPose','social_nav_rviz/GroundGoal'):
                     tool['Cell size']=float(grid.metadata['resolution'])
             view_path=output/'view.rviz';view_path.write_text(yaml.safe_dump(view,sort_keys=False))
             rviz = subprocess.Popen(['rviz', '-d', str(view_path)])
@@ -402,8 +493,9 @@ def main(argv=None):
         print(('Saved bag start loaded; wait for map localization. ' if seed is not None else
                'RViz: Ground Pose Estimate selects LiDAR start. ')+
               'Ground Nav Goal selects pose; Publish Point selects XY.', flush=True)
-        print('Terminal: p + Enter pauses; r resumes; s cancels/disarms; a arms explicit live output; q exits.', flush=True)
+        print('Terminal: c + Enter confirms live initial pose; p pauses; r resumes; s cancels/disarms; a arms; q exits.', flush=True)
         while not stopped.is_set() and not rospy.is_shutdown():
+            draw_initial_preview()
             with lock:
                 if runtime is None and selection:
                     command = runtime_command(args, config, selection[0])

@@ -45,6 +45,14 @@ def bundle_main(argv):
     export.add_argument('--people', help='Source-bound environment_people package from this mapping run')
     export.add_argument('--dynamic-filter', choices=STATIC_FILTER_MODES,
                         help='Default: static.dynamic_filter (geometric); sealed scans required, people optional; none allows endpoint-only export')
+    export.add_argument('--projection-strategy',choices=['observed_endpoints','ground_relative_assume_free','docker_assume_free'],
+                        default='observed_endpoints',help='Endpoint projection; assumed-free strategies do not provide ray evidence')
+    export.add_argument('--projection-z-min',type=float,help='Legacy absolute map Z minimum')
+    export.add_argument('--projection-z-max',type=float,help='Legacy absolute map Z maximum')
+    export.add_argument('--projection-height-min',type=float,help='Minimum height above local ground in metres')
+    export.add_argument('--projection-height-max',type=float,help='Maximum height above local ground in metres')
+    export.add_argument('--projection-radius',type=float)
+    export.add_argument('--projection-min-neighbors',type=int)
     export.add_argument('--export-pgm','--navigation',dest='export_pgm',action='store_true',
                         help='Export the occupancy layer as map_server PGM/YAML; does not build a navigation costmap')
     query = commands.add_parser('query', help='Read geometry; never invokes models or robot motion')
@@ -78,6 +86,16 @@ def bundle_main(argv):
         print(json.dumps(dict(out=args.out, scans=result['scans'], valid=result['valid'])))
         return
     if args.command == 'export':
+        projection_options=(args.projection_z_min,args.projection_z_max,args.projection_radius,args.projection_min_neighbors,
+                            args.projection_height_min,args.projection_height_max)
+        if args.projection_strategy=='observed_endpoints' and any(value is not None for value in projection_options):
+            parser.error('Point projection filter options require an assumed-free strategy')
+        if args.projection_strategy!='observed_endpoints' and (not args.localization_map or args.evidence_run or args.reference_run):
+            parser.error('Assumed-free projection requires endpoint-only --localization-map')
+        if args.projection_strategy=='ground_relative_assume_free' and (args.projection_z_min is not None or args.projection_z_max is not None):
+            parser.error('Ground-relative projection uses --projection-height-min/max, not absolute Z')
+        if args.projection_strategy=='docker_assume_free' and (args.projection_height_min is not None or args.projection_height_max is not None):
+            parser.error('Legacy projection uses --projection-z-min/max, not relative heights')
         if args.localization_map:
             if args.evidence_run or args.reference_run:
                 if not (args.evidence_run and args.reference_run) or args.bag or args.people or args.dynamic_filter not in (None,'geometric'):
@@ -86,13 +104,22 @@ def bundle_main(argv):
                     config=load_config(args.config),bounds=args.bounds,export_pgm=args.export_pgm)
             elif args.dynamic_filter != 'none' or args.bag or args.people:
                 parser.error('--localization-map requires --dynamic-filter none and cannot accept --bag or --people')
-            else:data = export_endpoint_environment(args.localization_map,args.out,config=load_config(args.config),
-                                               bounds=args.bounds,export_pgm=args.export_pgm)
+            else:
+                settings=({key:value for key,value in zip(('z_min','z_max','radius','min_neighbors','height_min','height_max'),projection_options)
+                           if value is not None} if args.projection_strategy!='observed_endpoints' else None)
+                data = export_endpoint_environment(args.localization_map,args.out,config=load_config(args.config),
+                    bounds=args.bounds,export_pgm=args.export_pgm,projection_strategy=args.projection_strategy,
+                    projection_settings=settings)
         else:
             if args.evidence_run or args.reference_run:parser.error('Registered rays require --localization-map')
             data = export_environment(args.run,args.out,config=load_config(args.config),bag=args.bag,
                                       export_pgm=args.export_pgm,people=args.people,filter_mode=args.dynamic_filter,bounds=args.bounds)
-        print(json.dumps(dict(out=args.out,entity_type='map',map_type='static_environment_map',snapshot_id=data['snapshot_id']),ensure_ascii=False))
+        result=dict(out=args.out,entity_type='map',map_type='static_environment_map',snapshot_id=data['snapshot_id'])
+        if args.projection_strategy in ('docker_assume_free','ground_relative_assume_free'):
+            result.update(projection_strategy=args.projection_strategy,free_assumption='no_filtered_endpoint_in_cell',
+                          free_space_supported=False)
+            print('WARNING: non-hit cells are assumed free, not observed; PGM does not preserve this distinction.',file=sys.stderr)
+        print(json.dumps(result,ensure_ascii=False))
         return
     package = StaticEnvironmentMap(args.map)
     try:

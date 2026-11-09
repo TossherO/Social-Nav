@@ -1,5 +1,6 @@
 """Changing occupancy must not turn absent observations into free-space truth."""
 import unittest
+from pathlib import Path
 import numpy as np
 
 from perception.environment.changes import PriorRevisions, conditional_obstacles, reference_grid
@@ -106,6 +107,28 @@ class ChangeTests(unittest.TestCase):
         self.assertEqual(result['status'],'path_found',result)
         self.assertTrue(result['conditional_reference'])
         self.assertFalse(result['current_path_valid']);self.assertTrue(result['needs_observation'])
+
+    def test_assumed_free_reference_requires_observation_and_revision_preserves_provenance(self):
+        cells=np.zeros((60,60),np.int8)
+        source=asset(cells)
+        source.snapshot.metadata.update(free_assumption='no_filtered_endpoint_in_cell',
+                                        reference_policy='unobserved_cells_assumed_free')
+        geometry=VehicleGeometry([[-.1,-.1],[.1,-.1],[.1,.1],[-.1,.1]],np.eye(4),source='synthetic')
+        config=planning_config();config['algorithm']='hybrid_astar'
+        config['pose_search']['native_library']=str(Path(__file__).resolve().parents[1]/
+            'outputs/runtime/build/planning/libsocial_nav_pose_search.so')
+        result=Planner(config,geometry).query(request(start=[2.,3.,0],goal=[4.,3.]),asset=source)
+        self.assertEqual(result['status'],'path_found',result)
+        self.assertTrue(result['unobserved_free_assumed'])
+        self.assertEqual(result['reference_policy'],'unobserved_cells_assumed_free')
+        self.assertFalse(result['current_path_valid']);self.assertTrue(result['needs_observation'])
+
+        prior=evidence(cells);prior.layers['assumed_free']=np.ones(cells.shape,bool)
+        current=cells.copy();current[20,20]=100
+        revised=PriorRevisions().apply(prior,evidence(current),self.association,scene_binding='observed')
+        self.assertEqual(revised.layers['occupancy'][20,20],100)
+        self.assertFalse(revised.layers['assumed_free'][20,20])
+        self.assertTrue(revised.layers['assumed_free'][10,10])
 
     def test_distinct_correction_histories_have_distinct_bindings(self):
         cells=np.zeros((60,60),np.int8);cells[20,20]=cells[40,40]=100;prior=evidence(cells)

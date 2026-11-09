@@ -98,6 +98,9 @@ def query_geometry(snapshot, points, *, frame):
                                     ('near_field_obstacle_expires_at','recent_obstacle_expires_at_s')]:
                     if layer in layers:
                         value=float(layers[layer][y,x]);row[field]=value if np.isfinite(value) else None
+            if 'assumed_free' in layers:
+                row['assumed_free']=bool(layers['assumed_free'][y,x])
+                if row['assumed_free']:row['free_source']='assumed_no_endpoint'
         result.append(row)
     return result
 

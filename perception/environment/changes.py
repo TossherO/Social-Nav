@@ -132,6 +132,8 @@ class PriorRevisions:
         layers['occupancy'][cleared] = 0
         layers['occupancy'][current_hit] = 100
         conditional[cleared|current_hit] = False
+        if 'assumed_free' in layers:
+            layers['assumed_free'][cleared|current_hit] = False
         # No temporary occupied observation is written into the persistent ledger.
         # Navigation uses only occupancy/risk and builds its own safety distance
         # field. Do not copy/recompute display and terrain layers it never reads.

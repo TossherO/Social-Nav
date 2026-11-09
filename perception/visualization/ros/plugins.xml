@@ -5,4 +5,7 @@
   <class name="social_nav_rviz/GroundInitialPose" type="social_nav_rviz::GroundInitialPoseTool" base_class_type="rviz::Tool">
     <description>Select the LiDAR XY on supported terrain, then drag to set initial heading.</description>
   </class>
+  <class name="social_nav_rviz/ConfirmInitialPose" type="social_nav_rviz::ConfirmInitialPoseTool" base_class_type="rviz::Tool">
+    <description>Confirm the selected live initial pose after reviewing its scan preview.</description>
+  </class>
 </library>

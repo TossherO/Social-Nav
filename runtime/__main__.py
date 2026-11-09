@@ -7,6 +7,7 @@ from pathlib import Path
 import socket
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import numpy as np
@@ -178,6 +179,9 @@ def main():
     planning['pose_search']['native_library']=str(ROOT/'outputs/runtime/build/planning/libsocial_nav_pose_search.so')
     motion.update(collision_backend='cuda',collision_library=str(ROOT/settings['collision_library']))
     asset=StaticEnvironmentMap(args.static_map) if args.static_map else None
+    if asset is not None and asset.snapshot.metadata.get('projection_strategy') in ('docker_assume_free', 'ground_relative_assume_free'):
+        print('[static map] Non-hit cells are assumed free; measured local safety checks remain required.',
+              file=sys.stderr,flush=True)
     from perception.environment.navigation import CAPSULE_FIELDS, safety_capsule
     from perception.environment.support import NavigationSupport, finalize
     navigation_support=NavigationSupport(env_config,library=ROOT/settings['environment_library'])

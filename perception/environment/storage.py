@@ -64,6 +64,12 @@ class StaticEnvironmentMap:
         if (self.snapshot.metadata['snapshot_id'] != self.manifest['snapshot_id'] or
                 self.snapshot.metadata['frame_id'] != self.manifest['frame_id']):
             raise ValueError('Environment snapshot identity/frame mismatch')
+        if self.snapshot.metadata.get('projection_strategy') in ('docker_assume_free', 'ground_relative_assume_free'):
+            mask=self.snapshot.layers.get('assumed_free');times=self.snapshot.layers.get('last_observed')
+            if (mask is None or mask.dtype!=np.bool_ or times is None or
+                    not np.array_equal(mask,self.snapshot.layers['occupancy']==0) or
+                    not np.isnan(times).all() or self.snapshot.metadata.get('free_space_supported') is not False):
+                raise ValueError('Assumed-free projection must preserve its mask and absence of observation times')
         # Older packages may contain extra assets. Geometry loading never opens them.
 
     def close(self):
@@ -86,4 +92,7 @@ class StaticEnvironmentMap:
             geometry_status=self.snapshot.metadata['geometry_status'],
             ground_estimator=self.snapshot.metadata.get('ground_estimator'),
             free_recovery_policy=self.snapshot.metadata.get('dynamic_filter', {}).get('geometric_free_recovery_policy'),
+            projection_strategy=self.snapshot.metadata.get('projection_strategy'),
+            free_assumption=self.snapshot.metadata.get('free_assumption'),
+            free_space_supported=self.snapshot.metadata.get('free_space_supported'),
             time_scope=self.manifest['time_scope'], source=self.manifest['source'])

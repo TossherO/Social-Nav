@@ -3,6 +3,7 @@
 #include <mutex>
 #include <string>
 #include <QKeyEvent>
+#include <QTimer>
 #include <OgreCamera.h>
 #include <OgreRay.h>
 #include <OgreSceneNode.h>
@@ -13,11 +14,13 @@
 #include <ros/ros.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <sensor_msgs/point_cloud2_iterator.h>
+#include <std_msgs/Empty.h>
 #include <rviz/display_context.h>
 #include <rviz/ogre_helpers/arrow.h>
 #include <rviz/properties/float_property.h>
 #include <rviz/properties/string_property.h>
 #include <rviz/tool.h>
+#include <rviz/tool_manager.h>
 #include <rviz/viewport_mouse_event.h>
 
 namespace social_nav_rviz {
@@ -25,7 +28,7 @@ class GroundPoseTool : public rviz::Tool {
  public:
   explicit GroundPoseTool(bool initial) : initial_(initial) {
     shortcut_key_=initial ? 'p' : 'g';
-    topic_=new rviz::StringProperty("Topic",initial ? "/initialpose" : "/move_base_simple/goal",
+    topic_=new rviz::StringProperty("Topic",initial ? "/social_nav_interactive/initial_pose_candidate" : "/move_base_simple/goal",
         "Pose intent output; this tool never commands the chassis.",getPropertyContainer());
     ground_topic_=new rviz::StringProperty("Ground topic","/social_nav_interactive/ground_map",
         "Supported static terrain cells in the RViz fixed frame.",getPropertyContainer());
@@ -41,9 +44,7 @@ class GroundPoseTool : public rviz::Tool {
     subscribe();
   }
   void activate() override {
-    deactivate();subscribe();
-    if (initial_) publisher_=node_.advertise<geometry_msgs::PoseWithCovarianceStamped>(topic_->getStdString(),1);
-    else publisher_=node_.advertise<geometry_msgs::PoseStamped>(topic_->getStdString(),1);
+    deactivate();subscribe();advertise();
     setStatus("Press on supported ground, drag for heading, release to submit. Esc cancels.");
   }
   void deactivate() override {
@@ -86,6 +87,9 @@ class GroundPoseTool : public rviz::Tool {
         arrow_->setOrientation(Ogre::Quaternion(Ogre::Radian(yaw),Ogre::Vector3::UNIT_Z)*
             Ogre::Quaternion(Ogre::Radian(-Ogre::Math::HALF_PI),Ogre::Vector3::UNIT_Y));
         if (event.leftUp()) {
+          if (publisher_.getNumSubscribers()==0) {
+            deactivate();setStatus("No pose subscriber connected; nothing published. Check the session and try again.");return Render;
+          }
           geometry_msgs::PoseStamped pose;pose.header.frame_id=frame_;pose.header.stamp=ros::Time::now();
           pose.pose.position.x=start_.x;pose.pose.position.y=start_.y;pose.pose.position.z=start_.z;
           pose.pose.orientation.z=std::sin(yaw/2);pose.pose.orientation.w=std::cos(yaw/2);
@@ -94,7 +98,7 @@ class GroundPoseTool : public rviz::Tool {
             message.pose.covariance[0]=message.pose.covariance[7]=.25;
             message.pose.covariance[35]=std::pow(Ogre::Math::PI/12.,2);publisher_.publish(message);
           } else publisher_.publish(pose);
-          deactivate();setStatus("Pose submitted. Check the session's accepted intent marker and planning result.");
+          deactivate();setStatus("Pose published. Check the session's accepted intent marker and planning result.");
           return Render|Finished;
         }
       }
@@ -105,6 +109,14 @@ class GroundPoseTool : public rviz::Tool {
   }
  private:
   struct Terrain { std::string frame;std::vector<Point> cells; };
+  void advertise() {
+    const auto topic=topic_->getStdString();
+    if (publisher_ && topic==published_) return;
+    publisher_.shutdown();
+    if (initial_) publisher_=node_.advertise<geometry_msgs::PoseWithCovarianceStamped>(topic,1);
+    else publisher_=node_.advertise<geometry_msgs::PoseStamped>(topic,1);
+    published_=topic;
+  }
   void subscribe() {
     const auto topic=ground_topic_->getStdString();
     if (topic==subscribed_) return;
@@ -135,7 +147,7 @@ class GroundPoseTool : public rviz::Tool {
   }
   bool initial_,dragging_=false;
   Point start_{};
-  std::string frame_,subscribed_;
+  std::string frame_,subscribed_,published_;
   ros::NodeHandle node_;
   ros::Publisher publisher_;
   ros::Subscriber subscriber_;
@@ -147,7 +159,29 @@ class GroundPoseTool : public rviz::Tool {
 };
 class GroundGoalTool : public GroundPoseTool { public:GroundGoalTool():GroundPoseTool(false){} };
 class GroundInitialPoseTool : public GroundPoseTool { public:GroundInitialPoseTool():GroundPoseTool(true){} };
+class ConfirmInitialPoseTool : public rviz::Tool {
+ public:
+  void onInitialize() override {
+    setName("Confirm Initial Pose");
+    publisher_=node_.advertise<std_msgs::Empty>("/social_nav_interactive/confirm_initial_pose",1);
+  }
+  void activate() override {
+    if (publisher_.getNumSubscribers()) {
+      publisher_.publish(std_msgs::Empty());
+      setStatus("Confirmation requested. Check the session status.");
+    } else setStatus("No initial-pose confirmation listener; nothing sent.");
+    QTimer::singleShot(0,this,[this]() {
+      auto* manager=context_->getToolManager();
+      if (manager && manager->getCurrentTool()==this) manager->setCurrentTool(manager->getDefaultTool());
+    });
+  }
+  void deactivate() override {}
+ private:
+  ros::NodeHandle node_;
+  ros::Publisher publisher_;
+};
 } // namespace social_nav_rviz
 
 PLUGINLIB_EXPORT_CLASS(social_nav_rviz::GroundGoalTool,rviz::Tool)
 PLUGINLIB_EXPORT_CLASS(social_nav_rviz::GroundInitialPoseTool,rviz::Tool)
+PLUGINLIB_EXPORT_CLASS(social_nav_rviz::ConfirmInitialPoseTool,rviz::Tool)
