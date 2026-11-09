@@ -13,7 +13,7 @@ from navigation.planning.motion import load_motion_config
 from navigation.planning.planner import Planner,se2,transform_poses
 from perception.visualization.navigation import NavigationView,display_packet
 from perception.visualization.surface import DisplayGrids,DisplaySurface,line_segments,navigation_grid
-from tests.test_navigation_planning import asset,bundle,request,grid
+from tests.navigation_fixtures import asset,bundle,request,grid
 
 
 def ground_grid(z=-1.,stamp=10.):

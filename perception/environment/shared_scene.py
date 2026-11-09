@@ -2,7 +2,7 @@
 import copy
 from perception.environment.layers import GridSnapshot
 from perception.environment.scene import SceneInputs
-from .buffers import SharedArrayPool
+from interfaces.shared import SharedArrayPool
 
 
 class ScenePool:
@@ -10,7 +10,7 @@ class ScenePool:
         self.pool=SharedArrayPool(slots,slot_bytes)
 
     def publish(self,scene,reader):
-        scene.verify();arrays={};description=dict(record=copy.deepcopy(scene.record),grids={},rgb=scene.rgb is not None)
+        scene.verify();arrays={};description=dict(record=copy.deepcopy(scene.record),grids={})
         for name,grid in (('geometry',scene.geometry),('prior_geometry',scene.prior_geometry)):
             if grid is None:continue
             description['grids'][name]=copy.deepcopy(grid.metadata)

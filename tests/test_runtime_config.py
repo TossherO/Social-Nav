@@ -7,7 +7,7 @@ import unittest
 import xml.etree.ElementTree as ET
 import numpy as np
 import yaml
-from runtime.config import algorithm_config,ROOT
+from perception.mapping_localization.configuration import algorithm_config,ROOT
 from perception.sensors.image import rgb_array
 
 

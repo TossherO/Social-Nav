@@ -13,8 +13,8 @@ import rospy
 from sensor_msgs.msg import PointCloud2, Imu
 import yaml
 
-from runtime.config import algorithm_config
-from runtime.inputs import bag_observations
+from perception.mapping_localization.configuration import algorithm_config
+from perception.sensors.observations import bag_observations
 from perception.mapping_localization.context import pose_matrix
 from perception.mapping_localization.runtime import LocalizationSession
 

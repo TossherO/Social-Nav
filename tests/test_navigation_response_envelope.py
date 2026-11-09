@@ -1,8 +1,11 @@
 """Synthetic response counterexamples and conservative execution enclosure."""
 import unittest
 import json
+from pathlib import Path
+import tempfile
 
 import numpy as np
+import yaml
 
 from navigation.planning.motion import load_motion_config
 from navigation.planning.footprint import VehicleGeometry, footprint_status
@@ -11,7 +14,7 @@ from navigation.safety.response import execution_response_enclosure, execution_e
 from navigation.safety.guard import LocalSafety
 from navigation.planning.inputs import load_config as planning_config
 from perception.environment.context import fingerprint
-from tests.test_navigation_planning import grid, bundle, request
+from tests.navigation_fixtures import grid, bundle, request
 from tests.test_navigation_prediction import tracked_scene, track
 
 
@@ -33,7 +36,11 @@ def _independent_stop(initial, pending, desired, response_acceleration, braking,
 
 class ResponseEnvelopeCounterexamples(unittest.TestCase):
     def setUp(self):
-        self.motion = load_motion_config('navigation/planning/configs/motion_trial.yaml')
+        self.motion = load_motion_config(profile='trial')
+        # This synthetic counterexample assumes the original low-acceleration
+        # profile, independently of later changes to the wheelchair trial.
+        self.motion.update(max_forward_mps=.1,max_reverse_mps=.05,max_angular_rps=.15,
+            max_acceleration_mps2=.1,max_angular_acceleration_rps2=.15)
         self.settings = dict(actuator_delay_s=.8, reaction_s=1.)
         self.dt = .1
         self.motion['execution_response_bounds'] = dict(max_planar_speed_mps=.10,max_stop_time_s=1.4)
@@ -46,6 +53,33 @@ class ResponseEnvelopeCounterexamples(unittest.TestCase):
         path = stopping_trajectory(feedback, np.array([desired, 0.]), self.motion,
             self.settings, self.dt, pending=np.array([pending, 0.]))
         return float(path[-1, 1])
+
+    def test_current_wheelchair_bounds_are_used_for_trial_motion(self):
+        from navigation.control.vehicle import load_vehicle_profile
+        trial=load_motion_config(profile='trial')
+        geometry,motion,profile=load_vehicle_profile('configs/wheelchair_vehicle.yaml',trial,require_execution=True)
+        envelope=execution_response_enclosure(dict(pose=[0.,0.,0.]),geometry,motion,self.settings,self.dt,.1)
+        self.assertEqual(envelope['max_yaw_rate_rps'],profile['measured_limits']['max_angular_rps'])
+        self.assertEqual(envelope['max_planar_speed_mps'],profile['execution_response_bounds']['max_planar_speed_mps'])
+        self.assertAlmostEqual(envelope['translation_bound_m'],envelope['duration_s']*envelope['max_planar_speed_mps'])
+
+    def test_trial_rejects_each_threshold_below_its_required_bound(self):
+        from navigation.control.vehicle import load_vehicle_profile
+        profile=yaml.safe_load(Path('configs/wheelchair_vehicle.yaml').read_text())
+        trial=load_motion_config(profile='trial')
+        cases=(('measured_limits','max_forward_mps',.799,'max_forward_mps'),
+               ('measured_limits','max_reverse_mps',.199,'max_reverse_mps'),
+               ('measured_limits','max_angular_rps',.399,'max_angular_rps'),
+               ('execution_response_bounds','max_planar_speed_mps',.799,'Planar-speed bound'),
+               ('controller','feedback_max_linear_mps',.799,'feedback_max_linear_mps'),
+               ('controller','feedback_max_angular_rps',.399,'feedback_max_angular_rps'))
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'vehicle.yaml'
+            for section,key,value,message in cases:
+                changed={**profile,section:{**profile[section],key:value}}
+                path.write_text(yaml.safe_dump(changed))
+                with self.subTest(key=key),self.assertRaisesRegex(ValueError,message):
+                    load_vehicle_profile(path,trial,require_execution=True)
 
     def test_fast_response_can_outtravel_one_nominal_prediction(self):
         # Candidate target .01 is one .1-second planning step from zero.
@@ -121,8 +155,10 @@ class ResponseEnvelopeCounterexamples(unittest.TestCase):
 
 class ExecutionEnvelopeGateTests(unittest.TestCase):
     def setUp(self):
-        self.motion=load_motion_config('navigation/planning/configs/motion_trial.yaml')
-        self.motion.update(parameters_assumed=False,collision_backend='cpu',collision_library=None,
+        self.motion=load_motion_config(profile='trial')
+        self.motion.update(max_forward_mps=.1,max_reverse_mps=.05,max_angular_rps=.15,
+            max_acceleration_mps2=.1,max_angular_acceleration_rps2=.15,
+            parameters_assumed=False,collision_backend='cpu',collision_library=None,
             execution_response_bounds=dict(max_planar_speed_mps=.10,max_stop_time_s=.5),
             execution_max_angular_rps=.15)
         self.geometry=VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],np.eye(4),

@@ -1,10 +1,19 @@
-# Task overrides; sensor geometry and noise remain in fast_lio.yaml / roll.yaml.
+# 本文件覆盖任务参数；传感器几何与噪声仍由 fast_lio.yaml 和 roll.yaml 提供。
+# 局部里程计设置。
 odometry:
+  # 是否发布定位状态。
   publish_state: false
+# 发布开关。
 publish:
+  # 是否发布扫描点云。
   scan_publish_en: false
+  # 是否发布车体坐标系下的扫描。
   scan_bodyframe_pub_en: false
+  # 是否发布雷达扫描数据。
   lidar_scan_en: true
+# ROLL 后端参数。
 roll:
+  # 是否允许更新地图。
   mapUpdateEnabled: false
+  # 是否启用临时建图。
   temporaryMappingEnabled: false

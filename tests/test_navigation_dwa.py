@@ -12,7 +12,7 @@ from navigation.planning.motion import load_motion_config
 from navigation.planning.continuity import reference_envelope
 from navigation.planning.footprint import VehicleGeometry
 from navigation.planning.reference import ReferenceRuntime
-from tests.test_navigation_planning import bundle,request
+from tests.navigation_fixtures import bundle,request
 from tests.navigation_fixtures import FakeWorker,scene_at
 
 
@@ -82,8 +82,8 @@ class DwaTests(unittest.TestCase):
         self.assertGreater(packet['proposal']['velocity'][0],0.)
         self.assertLessEqual(packet['proposal']['velocity'][0],self.motion['max_acceleration_mps2']*.05+1e-9)
 
-    def test_trial_profile_can_start_and_obeys_its_lower_speed_and_acceleration(self):
-        motion=load_motion_config('navigation/planning/configs/motion_trial.yaml')
+    def test_trial_profile_can_start_and_obeys_speed_and_acceleration(self):
+        motion=load_motion_config(profile='trial')
         controller=DwaController(self.cfg,motion,self.geometry)
         for speed in (0.,.095):
             result=controller.command(self.req,self.scene,dict(self.feedback,velocity=[speed,0.]),
@@ -96,13 +96,14 @@ class DwaTests(unittest.TestCase):
             self.assertFalse(result['executable'])
 
     def test_new_thin_wall_forces_deceleration_and_never_uses_reference_as_free_space(self):
-        cells=np.zeros((60,60),np.int8);cells[:,29]=100;current=bundle(cells)
+        # Keep the wall inside the current profile's predicted stopping range.
+        cells=np.zeros((60,60),np.int8);cells[:,28]=100;current=bundle(cells)
         f=dict(self.feedback,velocity=[.4,0.])
         r=self.controller.command(self.req,current,f,self.reference,now=10.,clock_domain='synthetic')
         self.assertEqual(r['status'],'candidate',r)
         self.assertLessEqual(r['velocity'][0],.4+1e-9)
         self.assertGreater(sum(r['rejections'].values()),0)
-        self.assertEqual(current.geometry.layers['occupancy'][20,29],100)
+        self.assertEqual(current.geometry.layers['occupancy'][20,28],100)
 
     def test_speed_recovery_keeps_actual_initial_state_and_can_reduce_without_full_stop(self):
         f=dict(self.feedback,velocity=[.95,0.])

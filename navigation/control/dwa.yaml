@@ -1,19 +1,39 @@
 # Bounded direct velocity selection; development settings, not measured hardware.
+# DWA 线速度采样数量。
 linear_samples: 3
+# DWA 角速度采样数量。
 angular_samples: 7
+# 每次选择允许评估的候选数上限。
 max_candidates: 24
+# 仅非执行规划对照使用；实机执行沿用车辆档案中的安全预算。
+planning_reaction_s: 0.5
+# 仅非执行规划对照使用的执行器延迟预算，单位为秒。
+planning_actuator_delay_s: 0.3
 # Cooperative deadlines, not a hard real-time guarantee. Geometry queries are
 # shared across every candidate and both prediction/braking sweeps in one call.
+# 一次计算的协作式时间预算，单位为秒。
 max_compute_s: 0.08
+# 轨迹安全认证的时间预算，单位为秒。
 certification_budget_s: 0.05
+# 一次调用共享的几何认证检查次数上限。
 certification_max_checks: 2000
+# 轨迹预测时长，单位为秒。
 prediction_s: 1.5
+# 时间采样间隔，单位为秒。
 sample_s: 0.1
+# 沿路线或参考路径选取目标的前视距离，单位为米。
 lookahead_m: 0.8
+# 参考路径参与评分的窗口长度，单位为米。
 path_window_m: 3.0
+# 路径偏离代价权重。
 path_weight: 8.0
+# 路径进展评分权重。
 progress_weight: 2.0
+# 朝向评分权重。
 heading_weight: 0.8
+# 障碍净距评分权重。
 clearance_weight: 0.03
+# 速度变化代价权重。
 change_weight: 0.1
+# 参考路径允许的最大年龄，单位为秒。
 reference_max_age_s: 5.0

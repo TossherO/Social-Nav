@@ -1,36 +1,68 @@
-# RPY then XYZ; front-end output is already the LiDAR pose.
+# 顺序为横滚、俯仰、偏航及 XYZ；前端输出已是雷达位姿。
+# ROLL 后端参数。
 roll:
-  # Independent feature queries; output coefficients retain their scan order.
+  # 特征查询相互独立，输出系数仍保持原扫描顺序。
+  # ROLL 匹配工作线程数。
   matchingThreads: 2
+  # ROLL 匹配计算后端。
   matchingBackend: cuda
+  # ROLL 匹配使用的 CUDA 设备编号。
   matchingCudaDevice: 0
+  # CUDA 匹配的空间分格尺寸，单位为米。
   matchingCudaCellSize: 0.5
+  # 是否在 CUDA 匹配中处理角点。
   matchingCudaCorners: false
+  # CUDA 匹配使用的工作线程数。
   matchingCudaThreads: 1
+  # 是否启用 ROLL 的 CUDA 平面拟合。
   matchingCudaPlaneFit: false
+  # 定位状态发布话题。
   localizationStateTopic: /localization/state
+  # 局部定位坐标系。
   localFrame: odom
+  # 是否发布历史兼容输出。
   publishLegacyOutputs: false
+  # 是否发布定位坐标变换。
   publishLocalizationTF: true
+  # 是否启用固定地图定位模式。
   localizationMode: false
+  # 是否保存关键帧地图。
   saveKeyframeMap: true
+  # 是否保存 PCD 地图。
   savePCD: true
+  # 是否保存位姿记录。
   savePose: false
+  # 是否保存日志。
   saveLog: false
+  # 关键帧地图目录。
   saveKeyframeMapDirectory: ''
+  # 是否保存原始点云。
   saveRawCloud: false
+  # 是否启用 ROLL 的脚本运行模式。
   bashRun: false
+  # 是否启用调试模式。
   debugMode: false
+  # 是否提供真值数据。
   gtAvailable: false
+  # 真值输入话题。
   gtTopic: /rtk_odom
+  # 是否以车体中心作为参考。
   bodyCentered: false
+  # 是否使用 GPS。
   useGPS: false
+  # GPS 输入话题。
   gpsTopic: /rtk
+  # GNSS 初始化所需的观测数。
   gnss_init_num: 5
+  # 是否使用 GPS 高程。
   useGpsElevation: true
+  # GNSS 参考原点纬度。
   lati0: 31.03047381
+  # GNSS 参考原点经度。
   longi0: 121.4372151
+  # GNSS 参考原点高程。
   alti0: 15.57
+  # GPS 因子各维度的方差参数。
   gps_variance:
   - 0.02
   - 0.02
@@ -38,6 +70,7 @@ roll:
   - 0.1
   - 0.1
   - 0.1
+  # 里程计因子各维度的方差参数。
   odom_variance:
   - 0.002
   - 0.002
@@ -45,6 +78,7 @@ roll:
   - 0.01
   - 0.01
   - 0.01
+  # 回环因子各维度的方差参数。
   loop_variance:
   - 0.5
   - 0.5
@@ -52,10 +86,15 @@ roll:
   - 0.5
   - 0.5
   - 0.5
+  # ROLL 点云输入话题。
   pointCloudTopic: cloud_registered_lidar
+  # ROLL 雷达里程计输入话题。
   odometryTopic: OdometryLidar
+  # ROLL IMU 输入话题。
   imuTopic: imu/data1
+  # ROLL 里程计话题。
   odomTopic: odom
+  # IMU 到车体变换的六维参数。
   array_imu_to_body:
   - 0
   - 0
@@ -63,6 +102,7 @@ roll:
   - 0
   - 0
   - 0
+  # 雷达到车体变换的六维参数。
   array_lidar_to_body:
   - 0
   - 0
@@ -70,6 +110,7 @@ roll:
   - 0
   - 0
   - 0
+  # GPS 到车体变换的六维参数。
   array_gps_to_body:
   - 0
   - 0
@@ -77,44 +118,83 @@ roll:
   - 0
   - 0
   - 0
+  # 全局地图可视化搜索半径，单位为米。
   globalMapVisualizationSearchRadius: 1000.0
+  # 全局地图可视化位姿采样密度参数。
   globalMapVisualizationPoseDensity: 0.5
+  # 全局地图可视化体素尺寸，单位为米。
   globalMapVisualizationLeafSize: 0.2
+  # 添加关键帧的位移阈值，单位为米。
   surroundingkeyframeAddingDistThreshold: 0.5
+  # 添加关键帧的角度阈值，单位为弧度。
   surroundingkeyframeAddingAngleThreshold: 0.2
+  # 周围关键帧降采样密度参数。
   surroundingKeyframeDensity: 0.5
+  # 周围关键帧搜索半径，单位为米。
   surroundingKeyframeSearchRadius: 50.0
+  # GPS 协方差筛选阈值。
   gpsCovThreshold: 2.0
+  # 位姿协方差筛选阈值。
   poseCovThreshold: 0.5
+  # 雷达坐标系名称。
   lidarFrame: rslidar
+  # 地图坐标系名称。
   mapFrame: map
+  # 雷达传感器类型。
   sensor: velodyne
+  # 激光雷达扫描线数。
   N_SCAN: 16
+  # 单圈水平扫描列数。
   Horizon_SCAN: 1800
+  # 扫描下采样倍率。
   downsampleRate: 1
+  # 雷达输入的最小距离，单位为米。
   lidarMinRange: 0.2
+  # 雷达输入的最大距离，单位为米。
   lidarMaxRange: 150.0
+  # 角点特征提取阈值。
   edgeThreshold: 0.1
+  # 平面特征提取阈值。
   surfThreshold: 0.1
+  # 匹配所需的最少有效角点特征数。
   edgeFeatureMinValidNum: 10
+  # 匹配所需的最少有效平面特征数。
   surfFeatureMinValidNum: 50
+  # 里程计平面点下采样体素尺寸，单位为米。
   odometrySurfLeafSize: 0.2
+  # 建图角点下采样体素尺寸，单位为米。
   mappingCornerLeafSize: 0.1
+  # 建图平面点下采样体素尺寸，单位为米。
   mappingSurfLeafSize: 0.1
+  # 后端使用的 CPU 核心数。
   numberOfCores: 4
+  # 是否启用回环检测。
   loopClosureEnableFlag: true
+  # 回环检测频率，单位为赫兹。
   loopClosureFrequency: 1.0
+  # 周围关键帧数量参数。
   surroundingKeyframeSize: 50
+  # 历史关键帧回环搜索半径，单位为米。
   historyKeyframeSearchRadius: 2.0
+  # 回环候选与当前帧的最小时间差，单位为秒。
   historyKeyframeSearchTimeDiff: 100.0
+  # 用于回环匹配的历史关键帧数。
   historyKeyframeSearchNum: 25
+  # 回环匹配接受阈值。
   historyKeyframeFitnessScore: 0.2
+  # 里程计相关输出使用的坐标系。
   odometryFrame: rslidar
+  # 是否允许更新地图。
   mapUpdateEnabled: false
+  # 是否启用临时建图。
   temporaryMappingEnabled: false
+  # 是否仅使用最新扫描。
   latestScanOnly: false
+  # 是否启用二次融合。
   enableSecondaryFusion: false
+  # 是否启用重定位。
   reloc_enabled: false
+  # 初始位姿，顺序为横滚、俯仰、偏航及 XYZ。
   initialGuess:
   - 0
   - 0
@@ -122,20 +202,36 @@ roll:
   - 0
   - 0
   - 0
+  # 可视化路径保留点数上限。
   visualizationPathLimit: 2000
+  # 日志输出目录。
   log_dir: ''
+  # 是否启用关键帧缓存。
   useKeyframeCache: true
+  # 关键帧缓存条目数上限。
   keyframeCacheMaxEntries: 256
+  # 关键帧缓存字节数上限。
   keyframeCacheMaxBytes: 134217728
+  # 地图是否与重力方向对齐。
   gravityAlignedMap: true
-  # Active only with --association-coverage. Distances in metres, angles in radians.
+  # 仅指定 --association-coverage 时启用；距离单位为米，角度单位为弧度。
+  # 地图关联区域重进入与匹配确认条件。
   coverageGate:
+    # 重新进入地图关联区域的边界余量，单位为米。
     reentryMargin: 0.5
+    # 地图关联匹配所需的最小内点比例。
     minInlier: 0.55
+    # 地图关联匹配允许的最大残差。
     maxResidual: 0.10
+    # 地图关联匹配允许的最大平移步长，单位为米。
     maxStep: 0.75
+    # 地图关联匹配允许的最大旋转角，单位为弧度。
     maxAngle: 0.15
+    # 地图关联允许的最大重力方向偏差，单位为弧度。
     maxGravity: 0.0872665
+    # 连续地图匹配的平移一致性阈值，单位为米。
     consistencyDistance: 0.25
+    # 连续地图匹配的旋转一致性阈值，单位为弧度。
     consistencyAngle: 0.035
+    # 确认地图关联所需的连续匹配次数。
     confirmationMatches: 5

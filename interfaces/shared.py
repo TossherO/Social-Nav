@@ -1,4 +1,4 @@
-"""Single-writer sealed memfd slots, with explicit read leases and reuse epochs.
+"""Single-writer sealed shared slots, with explicit read leases and reuse epochs.
 
 Only small FrameRef descriptors cross the control channel. A reader mapping is
 OS read-only. The writer never reuses a sealed slot before every lease is acked.

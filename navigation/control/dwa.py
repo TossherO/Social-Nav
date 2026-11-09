@@ -38,13 +38,16 @@ def load_config(path=None):
 
 
 class DwaController:
-    def __init__(self,planning,motion,geometry,*,asset=None,settings=None,device_batch=None):
+    def __init__(self,planning,motion,geometry,*,asset=None,settings=None,device_batch=None,execution=False):
         self.device_batch=device_batch
         self.diagnostics=False
         self.planning=copy.deepcopy(planning);self.motion=copy.deepcopy(motion);self.geometry=geometry;self.asset=asset
         self.settings=copy.deepcopy(settings) if settings is not None else load_config();self.goal_settings=tracking_config()
         from navigation.safety.config import load_stopping_config
         self.safety_settings=load_stopping_config(motion)
+        if not execution:
+            for name in ('reaction_s','actuator_delay_s'):
+                self.safety_settings[name]=self.settings.get('planning_'+name,self.safety_settings[name])
         self.sweep=SweepChecker(motion.get('collision_backend','cpu'),motion.get('collision_library'))
         self.sweep.metrics=None if device_batch is None else device_batch.metrics
         sources=[Path(__file__),Path(__file__).parents[1]/'kinematics.py',Path(__file__).parents[1]/'safety/guard.py',

@@ -43,7 +43,7 @@ hint=dict(format='map_height_attitude_hint',source=dict(
     live_usage='Only roll, pitch and map Z seed; operator must select current LiDAR XY and heading in RViz.')
 config=dict(map=str(MAP.relative_to(ROOT)),static_map=str(STATIC.relative_to(ROOT)),
     coverage=str(coverage.relative_to(ROOT)),initial_pose_hint=str((OUT/'height_hint.json').relative_to(ROOT)),
-    motion_config='navigation/planning/configs/motion_trial.yaml')
+    motion_config='navigation/planning/configs/motion.yaml',motion_profile='trial')
 for name,value in [('height_hint.json',hint),('manifest.json',dict(scope='live_shadow_software_preparation',
         actuation_enabled=False,map_field_acceptance=False,coverage_field_acceptance=False,
         map_fingerprint=fingerprint,map_asset_digest=asset_digest(MAP),

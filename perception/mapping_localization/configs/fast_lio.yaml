@@ -1,62 +1,117 @@
-# Spatial/time calibration is loaded from sensors/calibration/lidar_imu.yaml.
+# 空间和时间标定由 sensors/calibration/lidar_imu.yaml 加载。
+# 是否启用雷达特征提取。
 feature_extract_enable: false
+# 输入点云抽样过滤的步长。
 point_filter_num: 3
+# 定位匹配每帧迭代次数上限。
 max_iteration: 3
-# Matching workers only; mapping keeps one worker unless explicitly overridden.
+# 此项仅设置匹配线程；建图默认使用一个线程，除非显式覆盖。
+# 匹配工作线程数。
 matching_threads: 1
-# Direct runtime defaults; the ROS diagnostic launch explicitly selects cpu.
+# 直接运行时的默认设置；ROS 诊断入口会显式选择 CPU。
+# 匹配计算后端。
 matching_backend: cuda
+# 匹配使用的 CUDA 设备编号。
 matching_cuda_device: 0
-# Experimental device least-squares fit; false keeps the original Eigen QR.
+# 实验性设备端最小二乘拟合；false 保留原有 Eigen QR 方法。
+# 是否启用实验性 CUDA 平面拟合。
 matching_cuda_plane_fit: false
+# 点云去畸变计算后端。
 deskew_backend: cuda
+# 观测线性化计算后端。
 linearization_backend: cpu
+# 是否使用紧凑滤波求解。
 filter_compact_solve: false
+# 输入表面点下采样体素尺寸。
 filter_size_surf: 0.4
+# 地图点下采样体素尺寸。
 filter_size_map: 0.2
+# 局部地图立方体边长，单位为米。
 cube_side_length: 600
+# 是否启用调试模式。
 debugMode: false
+# 是否将地图调整至所需竖直方向。
 need_map_erected: true
+# 是否使用真值初始化。
 initialize_with_gt: false
+# 雷达与 IMU 的启动初始化条件。
 initialization:
+  # 是否启用本组功能。
   enabled: true
-  # Start checking at 1s; finish only after conditioning and stability gates pass.
+  # 从 1 秒开始检查；只有满足条件数和稳定性要求后才完成初始化。
+  # 开始检查初始化所需的最短时长，单位为秒。
   min_duration: 1.0
+  # 初始化允许的最长时长，单位为秒。
   max_duration: 6.0
+  # 初始化所需的最少扫描数。
   min_scans: 10
-  # Linearized sensitivity to >=2cm geometric perturbations, not true covariance.
+  # 对不小于 2 厘米几何扰动的线性化敏感度，并非真实协方差。
+  # 倾角对几何扰动的最大线性化敏感度。
   max_tilt_sensitivity: 0.01
+  # 初始化条件需持续稳定的时长，单位为秒。
   stable_duration: 0.3
-  # /camera/imu specific force is in m/s^2; use calibrated unit conversion here.
+  # /camera/imu 的比力单位为米每二次方秒，此处使用标定的单位转换系数。
+  # IMU 加速度量纲转换系数。
   acceleration_scale: 1.0
+  # 初始化使用的点云体素尺寸，单位为米。
   voxel: 0.3
+  # 允许的最大匹配残差。
   max_residual: 0.06
+  # 允许的最大加速度计偏置。
   max_acc_bias: 1.5
+# 本配置段的通用设置。
 common:
+  # 雷达点云话题。
   lid_topic: /rslidar_points
+  # IMU 输入话题。
   imu_topic: /camera/imu
+# 点云预处理设置。
 preprocess:
+  # 点云预处理使用的雷达类型编号。
   lidar_type: 4
+  # 雷达扫描线数。
   scan_line: 16
+  # 雷达近距离盲区过滤半径，单位为米。
   blind: 1.0
+  # 点云消息时间戳是否对应扫描结束。
   stamp_at_scan_end: true
+# 建图相关的传感器和滤波参数。
 mapping:
+  # 加速度计测量噪声参数。
   acc_cov: 0.1
+  # 陀螺仪测量噪声参数。
   gyr_cov: 0.1
+  # 加速度计偏置噪声参数。
   b_acc_cov: 0.01
+  # 陀螺仪偏置噪声参数。
   b_gyr_cov: 0.01
+  # 定位使用的视场角，单位为度。
   fov_degree: 180
+  # 定位匹配使用的探测范围，单位为米。
   det_range: 100.0
+  # 地图可视化下采样体素尺寸，单位为米。
   visualize_voxel_size: 0.4
+  # 是否加载已有点云地图。
   load_pcd: false
+  # 是否记录运行中的位姿日志。
   runtime_pos_log_enable: false
+# 发布开关。
 publish:
+  # 是否发布坐标变换。
   publish_tf: false
+  # 是否发布地图点云。
   map_pub: false
+  # 是否发布轨迹路径。
   path_en: false
+  # 是否发布扫描点云。
   scan_publish_en: true
+  # 是否发布稠密扫描。
   dense_publish_en: true
+  # 是否发布车体坐标系下的扫描。
   scan_bodyframe_pub_en: true
+# 点云文件保存设置。
 pcd_save:
+  # 是否保存 PCD 点云。
   pcd_save_en: false
+  # 点云保存间隔；负值的具体处理以实现为准。
   interval: -1

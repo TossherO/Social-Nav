@@ -165,13 +165,13 @@ class NearFieldTests(unittest.TestCase):
         self.assertEqual(result.metadata['near_field_memory']['restored_cells'],1)
         self.assertFalse(result.layers['occupancy'].flags.writeable)
 
-    def test_current_hit_without_current_ground_invalidates_history_after_it_expires(self):
+    def test_current_hit_uses_cached_ground_and_history_recovers_after_expiry(self):
         memory=self.model();memory.update(sample(1,state=0),np.empty((0,3)))
         hit=memory.update(sample(2),np.array([[.55,.05,.5]]))
-        self.assertEqual(hit.metadata['near_field_memory']['invalidated_hit_cells'],1)
-        self.assertEqual(hit.layers['occupancy'][40,45],-1)
+        self.assertEqual(hit.metadata['near_field_memory']['invalidated_hit_cells'],0)
+        self.assertEqual(hit.layers['occupancy'][40,45],100)
         later=memory.update(sample(20),np.empty((0,3)))
-        self.assertEqual(later.layers['occupancy'][40,45],-1)
+        self.assertEqual(later.layers['occupancy'][40,45],0)
         memory.update(sample(21,state=0),np.empty((0,3)))
         self.assertEqual(memory.update(sample(100),np.empty((0,3))).layers['occupancy'][40,45],0)
 
@@ -219,12 +219,16 @@ class NearFieldTests(unittest.TestCase):
         returned=memory.update(sample(100,sensor_x=0),np.empty((0,3)))
         self.assertEqual(returned.layers['occupancy'][40,45],0)
 
-    def test_new_hit_outside_blind_zone_cancels_window_candidate(self):
+    def test_expired_hit_outside_blind_zone_preserves_window_candidate(self):
         memory=NearFieldFreeMemory(dict(load_config(),hit_invalidates_free=True),dict(remember_outside_ring=True))
         memory.update(sample(1,state=0),np.empty((0,3)))
         memory.update(sample(2,sensor_x=5),np.array([[.55,.05,.5]]))
         returned=memory.update(sample(100,sensor_x=0),np.empty((0,3)))
-        self.assertEqual(returned.layers['occupancy'][40,45],-1)
+        self.assertEqual(returned.layers['occupancy'][40,45],0)
+
+    def test_retired_immediate_invalidation_is_rejected(self):
+        with self.assertRaisesRegex(ValueError,'only supports temporary obstacle overlay'):
+            NearFieldFreeMemory(load_config(),dict(temporary_obstacle_overlay=False))
 
     def test_background_free_survives_temporary_hits_but_does_not_hide_active_obstacle(self):
         memory=NearFieldFreeMemory(dict(load_config(),hit_invalidates_free=True),

@@ -44,7 +44,7 @@ def serial_access(path):
     return dict(realpath=str(path), opened=False, ownership='no_visible_owner_at_check_time')
 
 
-def inspect(config_path, *, motion_path=None, vehicle_profile=None, chassis_port=None,
+def inspect(config_path, *, motion_path=None, motion_profile=None, vehicle_profile=None, chassis_port=None,
             execution=False, runtime_path=None, gpu=None):
     checks, assets = [], []
 
@@ -103,9 +103,10 @@ def inspect(config_path, *, motion_path=None, vehicle_profile=None, chassis_port
 
     def load_motion():
         from navigation.planning.motion import load_motion_config
-        path = motion_path or (config or {}).get('motion_config')
+        from .interactive import motion_selection
+        path,profile = motion_selection(config or {},path=motion_path,profile=motion_profile)
         asset('selected_motion_config', path)
-        return load_motion_config(resolve(path))
+        return load_motion_config(path,profile=profile)
     motion = check('motion_config_valid', load_motion)
 
     def vehicle():
@@ -214,13 +215,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default='navigation/planning/configs/interactive.yaml')
     parser.add_argument('--motion-config')
+    parser.add_argument('--motion-profile')
     parser.add_argument('--runtime-config')
     parser.add_argument('--vehicle-profile')
     parser.add_argument('--chassis-port')
     parser.add_argument('--gpu')
     parser.add_argument('--execution-check', action='store_true', help='Also require a confirmed vehicle profile and idle device; never execute')
     args = parser.parse_args(argv)
-    report = inspect(args.config, motion_path=args.motion_config, runtime_path=args.runtime_config,
+    report = inspect(args.config, motion_path=args.motion_config, motion_profile=args.motion_profile, runtime_path=args.runtime_config,
                      vehicle_profile=args.vehicle_profile, chassis_port=args.chassis_port,
                      execution=args.execution_check, gpu=args.gpu)
     print(json.dumps(report, ensure_ascii=False, indent=2))

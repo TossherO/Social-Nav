@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 from navigation.planning.motion import load_motion_config,estimate_motion,twists,interpolate_se2
 from navigation.planning.footprint import VehicleGeometry
-from tests.test_navigation_planning import bundle
+from tests.navigation_fixtures import bundle
 
 
 class MotionTests(unittest.TestCase):

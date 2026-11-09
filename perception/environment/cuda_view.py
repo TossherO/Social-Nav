@@ -62,8 +62,6 @@ def _decode_layers(out, *, policy, people, device):
     for index, (key, dtype) in enumerate(VIEW_DTYPES.items()):
         if index >= 11 and policy is None:
             continue
-        if index >= 13 and not policy.settings['temporary_obstacle_overlay']:
-            continue
         if device is None:
             value = out[index].astype(dtype)
             if key in ('obstacle_min_z', 'obstacle_max_z'):

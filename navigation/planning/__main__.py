@@ -33,6 +33,7 @@ def main(argv=None):
     online=commands.add_parser('online',help='ROS planning-only grid/pose/goal input and timed Path output')
     online.add_argument('--geometry',choices=['historical'],required=True)
     online.add_argument('--config');online.add_argument('--motion-config');online.add_argument('--runtime-config')
+    online.add_argument('--motion-profile')
     online.add_argument('--environment-config');online.add_argument('--static-map')
     online.add_argument('--grid-topic',default='/perception/environment/grid')
     online.add_argument('--state-topic',default='/localization/state')
@@ -76,7 +77,7 @@ def main(argv=None):
     if args.command=='online':
         from .online import run
         from .motion import load_motion_config
-        motion=load_motion_config(args.motion_config)
+        motion=load_motion_config(args.motion_config,profile=args.motion_profile)
         if args.collision_backend:motion['collision_backend']=args.collision_backend
         from .reference import load_config as reference_config
         settings=reference_config(args.runtime_config)

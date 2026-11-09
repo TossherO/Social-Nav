@@ -1,28 +1,82 @@
-# Assumed development limits, not measured hardware limits.
-# The historical profile name records provenance; no historical controller is loaded.
-model: differential
-parameters_assumed: true
-collision_backend: cpu
-collision_library: outputs/navigation/build/libsocial_nav_collision_cuda.so
-# User-selected wheel_nav:v1 radius for moving search arcs. With spin enabled,
-# this is not a hard curvature constraint on differential velocity commands.
-min_turning_radius_m: 1.05
-performance_reference: configs/wheelchair_motion_reference.json
-performance_profile: teb
-# Reverse capability confirmed by the user; numeric speed/braking limits remain assumed.
-allow_reverse: true
-# In-place rotation confirmed by the user; angular limits remain assumed.
-allow_in_place_rotation: true
-reverse_tolerance_mps: 0.005
-max_initial_lateral_mps: 0.08
-max_initial_profile_ratio: 2.0
-state_window_s: 0.35
-state_max_age_s: 0.15
-state_max_gap_s: 0.16
-stationary_min_window_s: 0.2
-stationary_position_span_m: 0.004
-stationary_yaw_span_rad: 0.006
-stationary_max_linear_mps: 0.03
-stationary_max_angular_rps: 0.04
-max_result_age_s: 0.5
-brake_deceleration_scale: 0.75
+# 共用规划假设；下方数值不代表已测得的车辆能力。
+# 未显式选择时使用的运动档位。
+default_profile: normal
+# 本配置段的通用设置。
+common:
+  # 车辆运动学模型。
+  model: differential
+  # 运动参数是否仍属于假设。
+  parameters_assumed: true
+  # 该值用于运动搜索圆弧；允许原地旋转时，它不是速度命令的硬曲率限制。
+  # 运动搜索圆弧使用的最小转弯半径，单位为米；允许原地旋转时并非速度命令的硬曲率限制。
+  min_turning_radius_m: 1.05
+  # 是否允许倒车。
+  allow_reverse: true
+  # 是否允许原地旋转。
+  allow_in_place_rotation: true
+  # 判断速度方向时的倒车容差，单位为米每秒。
+  reverse_tolerance_mps: 0.005
+  # 初始横向速度允许上限，单位为米每秒。
+  max_initial_lateral_mps: 0.08
+  # 初始速度相对配置上限允许的比例。
+  max_initial_profile_ratio: 2.0
+  # 运动状态估计使用的历史时间窗口，单位为秒。
+  state_window_s: 0.35
+  # 状态估计中最新位姿允许的最大年龄，单位为秒。
+  state_max_age_s: 0.15
+  # 状态估计中相邻位姿允许的最大时间间隔，单位为秒。
+  state_max_gap_s: 0.16
+  # 判定静止所需的最短位姿窗口，单位为秒。
+  stationary_min_window_s: 0.2
+  # 静止判定允许的位置变化范围，单位为米。
+  stationary_position_span_m: 0.01
+  # 静止判定允许的偏航角变化范围，单位为弧度。
+  stationary_yaw_span_rad: 0.01
+  # 静止判定允许的线速度上限，单位为米每秒。
+  stationary_max_linear_mps: 0.03
+  # 静止判定允许的角速度上限，单位为弧度每秒。
+  stationary_max_angular_rps: 0.04
+  # 运动结果允许的最大年龄，单位为秒。
+  max_result_age_s: 0.5
+  # 由加速度配置计算名义制动减速度的比例。
+  brake_deceleration_scale: 0.75
+
+# 可显式选择的运动档位。
+profiles:
+  # 常规档位与本车试验候选保持一致；数值不是已测得的车辆能力。
+  normal:
+    # 规划允许的最大前进速度，单位为米每秒。
+    max_forward_mps: 0.8
+    # 规划允许的最大倒车速度，单位为米每秒。
+    max_reverse_mps: 0.2
+    # 规划允许的最大角速度，单位为弧度每秒。
+    max_angular_rps: 0.40
+    # 规划使用的最大线加速度，单位为米每二次方秒。
+    max_acceleration_mps2: 0.36
+    # 规划使用的最大角加速度，单位为弧度每二次方秒。
+    max_angular_acceleration_rps2: 0.30
+  # 本车试验候选档位；数值和制动能力仍有待物理确认。
+  trial:
+    # 规划允许的最大前进速度，单位为米每秒。
+    max_forward_mps: 0.80
+    # 规划允许的最大倒车速度，单位为米每秒。
+    max_reverse_mps: 0.20
+    # 规划允许的最大角速度，单位为弧度每秒。
+    max_angular_rps: 0.40
+    # 规划使用的最大线加速度，单位为米每二次方秒。
+    max_acceleration_mps2: 0.36
+    # 规划使用的最大角加速度，单位为弧度每二次方秒。
+    max_angular_acceleration_rps2: 0.30
+  # 来自 10 月 20 日离线对照的参考上限，不是硬件能力上限。
+  # 仅供对照和逐项调参的激进参考档位，不代表车辆能力。
+  aggressive:
+    # 规划允许的最大前进速度，单位为米每秒。
+    max_forward_mps: 1.3
+    # 规划允许的最大倒车速度，单位为米每秒。
+    max_reverse_mps: 0.2
+    # 规划允许的最大角速度，单位为弧度每秒。
+    max_angular_rps: 1.0
+    # 规划使用的最大线加速度，单位为米每二次方秒。
+    max_acceleration_mps2: 0.8
+    # 规划使用的最大角加速度，单位为弧度每二次方秒。
+    max_angular_acceleration_rps2: 1.0

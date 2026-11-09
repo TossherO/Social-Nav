@@ -7,7 +7,7 @@ import numpy as np
 from navigation.planning.inputs import load_config
 from navigation.planning.route import RoutePlan, RouteSession, _lookahead
 from navigation.planning.footprint import VehicleGeometry
-from tests.test_navigation_planning import bundle,asset
+from tests.navigation_fixtures import bundle,asset
 
 
 def reference():

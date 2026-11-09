@@ -92,8 +92,8 @@ def write_json(path, value):
 def build(args, stop=None):
     import numpy as np
     import yaml
-    from runtime.config import algorithm_config, DEFAULT_CALIBRATION
-    from runtime.inputs import bag_observations, selected_messages
+    from perception.mapping_localization.configuration import algorithm_config, DEFAULT_CALIBRATION
+    from perception.sensors.observations import bag_observations, selected_messages
     from runtime.metrics import Metrics
     from perception.sensors.clock_session import check_time_calibration
     from .runtime import LocalizationSession

@@ -1,6 +1,11 @@
 # Wall-clock software limits; no chassis command topic is configurable.
+# 周期时长，单位为秒。
 period_s: 0.1
+# 数据包超时时间，单位为秒。
 packet_timeout_s: 0.3
+# 源时钟停滞的判定时长，单位为秒。
 clock_stall_s: 0.3
+# 地图数据超时时间，单位为秒。
 grid_timeout_s: 0.5
+# 输入队列容量。
 inbox_size: 12

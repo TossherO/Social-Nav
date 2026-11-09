@@ -12,7 +12,7 @@ import time
 import numpy as np
 import yaml
 
-from .buffers import SharedArrayReader
+from interfaces.shared import SharedArrayReader
 from .transport import Connection,frame_ref
 from .metrics import Metrics
 
@@ -45,6 +45,7 @@ def parser():
     p.add_argument('--environment-update-hz',type=float,help='Override the environment update rate without changing observation age limits')
     p.add_argument('--environment-window-m',type=float,help='Override the square local environment window in metres')
     p.add_argument('--motion-config',help='Explicit motion YAML shared by reference planning, DWA and independent safety')
+    p.add_argument('--motion-profile',help='Named profile in the selected motion YAML')
     p.add_argument('--display',action='store_true',help='Publish optional RViz display topics; no core subscribes to them')
     p.add_argument('--interactive-session',action='store_true',help='Enable session status and bag pause/preview commands')
     p.add_argument('--pause-at',type=float,help='Pause an interactive bag after this many source seconds; hold at bag end')
@@ -68,7 +69,8 @@ def main():
         raise ValueError('--record-decision-inputs explicitly enables VLM image preparation; remove --no-image')
     if args.gpu is not None:os.environ['CUDA_VISIBLE_DEVICES']=str(args.gpu)
     os.environ.setdefault('OMP_NUM_THREADS','2');os.environ.setdefault('OPENBLAS_NUM_THREADS','1')
-    from .config import algorithm_config,runtime_settings,DEFAULT_CALIBRATION
+    from .config import runtime_settings
+    from perception.mapping_localization.configuration import algorithm_config,DEFAULT_CALIBRATION
     from perception.sensors.clock_session import check_time_calibration
     source=Path(args.source_run).resolve() if args.source_run else None
     run={} if source is None else json.loads((source/'run.json').read_text())
@@ -137,7 +139,7 @@ def main():
     from navigation.planning.reference import ReferenceRuntime
     from navigation.control.device import DeviceDwaBatch
     from navigation.control.shadow import DwaShadowController,load_config as shadow_config
-    from .reference import SharedReferenceWorker
+    from navigation.planning.runtime import Worker
     from .safety import SafetyProcess,SafetyTelemetry
     from .export import SceneExporter
     from .command import CommandInbox
@@ -165,8 +167,10 @@ def main():
         decision_recorder=DecisionRecorder(output/'decision_inputs',metrics=metrics,
             image_policy=det_cfg['image_association'],camera_calibration=args.camera_calibration)
     motion_path=Path(args.motion_config or ROOT/'navigation/planning/configs/motion.yaml').expanduser().resolve()
-    motion_source=dict(path=str(motion_path),fingerprint=file_fingerprint(motion_path))
-    planning=planning_config();motion=load_motion_config(motion_path);geometry=VehicleGeometry.historical(ROOT/planning['geometry_reference'])
+    motion_document=yaml.safe_load(motion_path.read_text())
+    motion_source=dict(path=str(motion_path),fingerprint=file_fingerprint(motion_path),
+        profile=args.motion_profile or (motion_document.get('default_profile') if isinstance(motion_document,dict) else None))
+    planning=planning_config();motion=load_motion_config(motion_path,profile=args.motion_profile);geometry=VehicleGeometry.historical(ROOT/planning['geometry_reference'])
     if args.vehicle_profile:
         from navigation.control.vehicle import load_vehicle_profile
         geometry,motion,_=load_vehicle_profile(args.vehicle_profile,motion,require_execution=args.execute)
@@ -181,10 +185,10 @@ def main():
     if args.route:
         from navigation.planning.route_replay import RouteReplay
         route_replay=RouteReplay(args.route,bag,args.route_floor,geometry,planning,settings['route_replay'],asset)
-    reference=ReferenceRuntime(planning,motion,geometry,worker_factory=lambda *parts:SharedReferenceWorker(*parts,metrics=metrics))
+    reference=ReferenceRuntime(planning,motion,geometry,worker_factory=lambda *parts:Worker(*parts,metrics=metrics))
     batch=DeviceDwaBatch(device=device,library=ROOT/settings['dwa_library'],metrics=metrics)
     shadow=shadow_config();shadow['period_s']=settings['control_period_s']
-    controller=DwaShadowController(planning,motion,geometry,asset=asset,device_batch=batch,settings=shadow)
+    controller=DwaShadowController(planning,motion,geometry,asset=asset,device_batch=batch,settings=shadow,execution=args.execute)
     planning_recorder=None
     if args.record_planning:
         from .planning_record import PlanningRecorder

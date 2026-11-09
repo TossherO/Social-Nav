@@ -9,7 +9,7 @@ from perception.environment.layers import GridSnapshot, load_config
 from perception.environment.navigation import navigation_geometry
 from perception.environment.scene import assemble_scene, SceneInputs
 from navigation.planning.inputs import scene_status
-from tests.test_navigation_planning import grid, asset, request
+from tests.navigation_fixtures import grid, asset, request
 
 
 def prior_asset(cells=None):
@@ -130,7 +130,7 @@ class NavigationConsumerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             current.save(directory); loaded = SceneInputs.load(directory)
             np.testing.assert_array_equal(loaded.geometry.layers['navigation_occupancy'], current.geometry.layers['navigation_occupancy'])
-        from runtime.scenes import ScenePool, read_scene
+        from perception.environment.shared_scene import ScenePool, read_scene
         pool = ScenePool(1, 1048576); reader = pool.pool.reader()
         try:
             description = pool.publish(current, 'reference'); loaded = read_scene(reader, description)

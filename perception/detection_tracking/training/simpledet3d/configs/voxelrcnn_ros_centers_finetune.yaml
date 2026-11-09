@@ -1,55 +1,96 @@
+# 继承的基础配置文件路径。
 _BASE_CONFIG_: voxelrcnn_wheelchair_weak_stage3.yaml
 
 # Incremental center-only training; tools/train.py selects the historical Stage 3
 # best checkpoint by effective MAX_SWEEPS unless --pretrained_model overrides it.
 # New capture groups are assigned explicitly by a generated input config.
 # Draft frames use positive-only supervision; unverified detections stay ignored.
+# 数据集与数据处理配置。
 DATA_CONFIG:
+    # 数据集路径。
     DATA_PATH: data/wheelchair_ros_centers
+    # 原始数据路径。
     RAW_DATA_PATH: data/wheelchair_ros_centers
+    # 各数据划分的元数据文件路径。
     INFO_PATH:
+        # 训练阶段使用的配置。
         train: [annotations.json]
+        # 测试阶段使用的配置。
         test: [annotations.json]
+    # 弱监督数据和训练设置。
     WEAK_SUPERVISION:
+        # 按距离分组的评估设置。
         DISTANCE_EVAL:
+            # 是否启用本组功能。
             ENABLED: true
             # Horizontal radius from the LiDAR origin; last bin has no upper edge.
+            # 距离分组的边界，单位为米。
             EDGES_M: [0, 3, 6, 10]
+            # 各损失或样本项的权重。
             WEIGHTS: [1.0, 0.5, 0.25, 0.1]
+    # 训练数据增强设置。
     DATA_AUGMENTOR:
         # ROI completeness is not valid outside its original rectangle. Only
         # keep the inherited Y mirror (ALONG_AXIS_LIST: [x]), which preserves it.
+        # 显式禁用的数据增强列表。
         DISABLE_AUG_LIST: [random_world_rotation, random_world_scaling, random_world_translation]
 
+# 任务场景数据配置。
 TASK_SCENE:
+    # 是否启用本组功能。
     ENABLED: true
+    # 随机数种子。
     SEED: 666
+    # 数据采样器设置。
     SAMPLER: cyclic_coverage
     # null = ceil(sum of weights), aligned to DDP; weight-1 frames stay fully covered.
     # An explicit budget changes fractional-weight replay, never repeats within an epoch.
+    # 每个训练轮次抽取的样本数。
     EPOCH_SAMPLES: null
+    # 数据集在验证中的角色。
     VALIDATION_ROLE: legacy_weak_regression
+    # 参与训练的数据集列表。
     TRAIN_DATASETS:
+        # 当前组件或处理步骤的名称。
         - NAME: task
+          # 当前损失或样本项的权重。
           WEIGHT: 1.0
+          # 关联的配置文件路径。
           CONFIG: {}
+        # 当前组件或处理步骤的名称。
         - NAME: legacy
+          # 当前损失或样本项的权重。
           WEIGHT: 0.2
+          # 关联的配置文件路径。
           CONFIG:
+              # 数据集路径。
               DATA_PATH: data/wheelchair_weak
+              # 原始数据路径。
               RAW_DATA_PATH: data/wheelchair_raw
+              # 各数据划分的元数据文件路径。
               INFO_PATH:
+                  # 训练阶段使用的配置。
                   train: [wheelchair_weak_infos_train_indoor_exhaustive.pkl]
+    # 参与验证的数据集列表。
     VALIDATION_DATASETS:
+        # 当前组件或处理步骤的名称。
         - NAME: legacy_weak
+          # 关联的配置文件路径。
           CONFIG:
+              # 数据集路径。
               DATA_PATH: data/wheelchair_weak
+              # 原始数据路径。
               RAW_DATA_PATH: data/wheelchair_raw
+              # 各数据划分的元数据文件路径。
               INFO_PATH:
+                  # 测试阶段使用的配置。
                   test: [wheelchair_weak_infos_val_indoor_exhaustive.pkl]
 
 # Inherit the original Stage 3 freeze list; VFE and the 3D backbone stay trainable.
 
+# 训练优化器及学习率设置。
 OPTIMIZATION:
+    # 训练轮数。
     NUM_EPOCHS: 3
+    # 初始或基准学习率。
     LR: 0.00005

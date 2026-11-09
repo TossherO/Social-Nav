@@ -9,7 +9,7 @@ from navigation.kinematics import braking_path,velocity_step,turning_residual
 from navigation.planning.inputs import load_config
 from navigation.planning.motion import load_motion_config
 from navigation.planning.footprint import VehicleGeometry
-from tests.test_navigation_planning import bundle,request
+from tests.navigation_fixtures import bundle,request
 
 
 class ControlTests(unittest.TestCase):
@@ -130,7 +130,8 @@ class ControlTests(unittest.TestCase):
         for _ in range(30):
             after=velocity_step(v,[0.,0.],self.motion,.1)
             self.assertGreaterEqual(turning_residual(after,self.motion),-1e-9)
-            self.assertLessEqual(abs(after-v).max(),.024+1e-9)
+            self.assertLessEqual(abs(after[0]-v[0]),self.motion['max_acceleration_mps2']*.1+1e-9)
+            self.assertLessEqual(abs(after[1]-v[1]),self.motion['max_angular_acceleration_rps2']*.1+1e-9)
             trace.append(after.copy());v=after
         np.testing.assert_allclose(v,[0.,0.],atol=1e-12)
         from navigation.planning.motion import twists

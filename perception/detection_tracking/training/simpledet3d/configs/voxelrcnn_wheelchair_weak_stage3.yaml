@@ -1,35 +1,53 @@
+# 继承的基础配置文件路径。
 _BASE_CONFIG_: voxelrcnn_wheelchair_weak_stage2.yaml
 
 # Stage 3: short target-only task-scene adaptation. Partial regression
 # masks and disabled target ROI supervision protect dimensions/yaw/ROI from
 # direct weak-label gradients.
+# 源域和目标域混合训练设置。
 MIXED_DOMAIN:
+    # 是否启用本组功能。
     ENABLED: false
 
 # This historical data selection uses completed indoor-center frames; the
 # ros_centers_finetune config adds current task annotations and weighted replay.
 # XY/shared features and classification remain trainable; z/size/yaw/ROI box
 # regression stay fixed.
+# 数据集与数据处理配置。
 DATA_CONFIG:
+    # 弱监督数据和训练设置。
     WEAK_SUPERVISION:
+        # 完整标注区域中的背景损失权重。
         EXHAUSTIVE_BACKGROUND_WEIGHT: 0.5
+        # 是否只对中心分量进行回归监督。
         FORCE_CENTER_ONLY_REGRESSION: true
+        # 候选区域的中心弱监督设置。
         ROI_CENTER_SUPERVISION:
+            # 是否启用本组功能。
             ENABLED: true
 
+# 指数移动平均教师模型设置。
 EMA_TEACHER:
+    # 是否启用本组功能。
     ENABLED: false
 
+# 需要冻结的模型模块设置。
 MODEL_FREEZE:
+    # 需要处理的模型模块名称列表。
     MODULE_NAMES:
         - dense_head.heads_list.0.center_z
         - dense_head.heads_list.0.dim
         - dense_head.heads_list.0.rot
         - roi_head.reg_fc_layers
         - roi_head.reg_pred_layer
+    # 保持训练模式的模块名称列表。
     TRAIN_MODE_MODULE_NAMES: []
 
+# 训练优化器及学习率设置。
 OPTIMIZATION:
+    # 每张 GPU 的训练批大小。
     BATCH_SIZE_PER_GPU: 8
+    # 训练轮数。
     NUM_EPOCHS: 5
+    # 初始或基准学习率。
     LR: 0.0001

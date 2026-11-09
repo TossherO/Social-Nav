@@ -12,7 +12,27 @@ from navigation.planning.footprint import VehicleGeometry
 from navigation.planning.planner import Planner
 from navigation.planning.reference import planning_config
 from navigation.planning.continuity import reference_envelope
-from tests.test_navigation_planning import bundle,request,grid
+from tests.navigation_fixtures import bundle,request,grid
+
+
+class ChassisAuthorizationTests(unittest.TestCase):
+    def test_authorization_requires_fresh_exact_goal_and_respects_expiry(self):
+        from navigation.safety.shadow import chassis_authorization
+        goal={'task_id':'t','goal_revision':1}
+        result=dict(state='allowed',completion_freshness_checked=True,wire_velocity_units=[100,20],
+            velocity=[.1,.02],request=goal,decision_complete_mono=10.,remaining_validity_s=.12)
+        args=dict(arm={'enabled':True,'revision':2},emergency=False,manual=False,
+            active_goal=goal,clock_domain='runtime_live')
+        with patch('navigation.safety.shadow.time.monotonic',return_value=10.01):
+            packet=chassis_authorization(result,**args)
+            self.assertTrue(packet['allowed']);self.assertAlmostEqual(packet['expires_mono'],10.12)
+            self.assertEqual(packet['units'],[100,20]);self.assertEqual(packet['arm_revision'],2)
+            for change in (dict(emergency=True),dict(manual=True),dict(active_goal={'task_id':'other'}),dict(active_goal=None)):
+                self.assertFalse(chassis_authorization(result,**dict(args,**change))['allowed'])
+            for change in (dict(completion_freshness_checked=False),dict(wire_velocity_units=[99,20]),dict(state='stop')):
+                self.assertFalse(chassis_authorization(dict(result,**change),**args)['allowed'])
+            missing=chassis_authorization(None,**args)
+            self.assertFalse(missing['allowed']);self.assertEqual(missing['expires_mono'],missing['mono'])
 
 
 class ShadowTests(unittest.TestCase):
@@ -106,7 +126,7 @@ class ShadowTests(unittest.TestCase):
         ros.Publisher.assert_not_called()
 
     def test_map_reassociation_invalidates_a_proposal_even_with_fresh_local_geometry(self):
-        from tests.test_navigation_planning import asset
+        from tests.navigation_fixtures import asset
         current=asset();req=request('mapped',goal=[4.,2.])
         planner=Planner(self.config,self.geometry,require_actual_start=True)
         result=reference_envelope(planner.query(req,scene=self.scene,asset=current,now=10.,clock_domain='synthetic'),req,self.scene,current)
@@ -136,7 +156,20 @@ class ShadowTests(unittest.TestCase):
         estimate=observed_feedback(reverse,self.scene,self.geometry,self.motion,now=10.)
         self.assertNotIn('stationary_evidence',estimate);self.assertLess(estimate['velocity'][0],-.2)
         slow=[dict(r,position=[2.+.025*(r['stamp_s']-9.7),2.,0.]) for r in self.rows]
-        self.assertNotIn('stationary_evidence',observed_feedback(slow,self.scene,self.geometry,self.motion,now=10.))
+        slow_feedback=observed_feedback(slow,self.scene,self.geometry,self.motion,now=10.)
+        self.assertEqual(slow_feedback['velocity'],[0.,0.])
+        self.assertGreater(slow_feedback['stationary_evidence']['linear_bound_mps'],.024)
+        self.assertGreater(motion_uncertainty_margin(slow_feedback,self.geometry,1.),.025)
+        moving=[dict(r,position=[2.+.035*(r['stamp_s']-9.7),2.,0.]) for r in self.rows]
+        self.assertNotIn('stationary_evidence',observed_feedback(moving,self.scene,self.geometry,self.motion,now=10.))
+        rotating=[]
+        for r in self.rows:
+            angle=.03*(r['stamp_s']-9.7)
+            rotating.append(dict(r,quaternion_xyzw=[0.,0.,float(np.sin(angle/2)),float(np.cos(angle/2))]))
+        feedback=observed_feedback(rotating,self.scene,self.geometry,self.motion,now=10.)
+        self.assertEqual(feedback['velocity'],[0.,0.])
+        self.assertGreater(feedback['stationary_evidence']['yaw_span_rad'],.006)
+        self.assertGreater(feedback['stationary_evidence']['angular_bound_rps'],.029)
 
     def test_grid_change_during_allowed_gate_is_rechecked_before_publication(self):
         original=self.safety.guard.gate;calls=[]

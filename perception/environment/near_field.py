@@ -58,12 +58,14 @@ class NearFieldFreeMemory:
     """Continuous local lifecycle; optional bounded candidates beyond the blind ring."""
     DEFAULTS=dict(lowest_beam_deg=-15.,max_radius_m=3.5,boundary_margin_m=.15,
                   max_sensor_tilt_rad=.35,ground_change_m=.15,remember_outside_ring=False,
-                  temporary_obstacle_overlay=False)
+                  temporary_obstacle_overlay=True)
 
     def __init__(self, config, settings=None):
         if config.get('hit_invalidates_free') is not True:
             raise ValueError('Near-field memory requires explicit hit_invalidates_free')
         self.config=config;self.settings=dict(self.DEFAULTS,**(settings or {}))
+        if self.settings['temporary_obstacle_overlay'] is not True:
+            raise ValueError('Near-field memory only supports temporary obstacle overlay')
         if (not -45<=self.settings['lowest_beam_deg']<0 or
                 any(not np.isfinite(v) or v<=0 for k,v in self.settings.items()
                     if k not in ('lowest_beam_deg','remember_outside_ring','temporary_obstacle_overlay')) or
@@ -100,7 +102,7 @@ class NearFieldFreeMemory:
             restored_cells=restored,cached_cells=cached,invalidated_hit_cells=invalidated,
             hit_conflict_cells=hits,ground_conflict_cells=conflicts,temporary_obstacle_cells=active,
             obstacle_overlay_lifetime_s=self.config['obstacle_ttl_s'],
-            hit_policy='temporary_overlay_on_historical_prior' if self.settings['temporary_obstacle_overlay'] else 'invalidate_candidate',
+            hit_policy='temporary_overlay_on_historical_prior',
             current_obstacles_preserved=True,time_semantics='reused_original_observation_times',
             compute_backend=backend,scope='local_history_view_not_fresh_ray_measurement')
 
@@ -155,14 +157,12 @@ class NearFieldFreeMemory:
             keep=(cells>=0).all(1)&(cells[:,0]<shape[1])&(cells[:,1]<shape[0])
             cells,points=cells[keep],points[keep];x,y=cells.T
             if moving is not None:moving=moving[keep]
-            reference=self.ground_cache if self.settings['temporary_obstacle_overlay'] else self.fields['ground_z']
-            heights=points[:,2]-reference[y,x]
-            eligible=np.isfinite(heights) if self.settings['temporary_obstacle_overlay'] else valid[y,x]
-            seen=eligible&np.isfinite(heights)
+            heights=points[:,2]-self.ground_cache[y,x]
+            seen=np.isfinite(heights)
             selected=np.flatnonzero(seen)
             seen[selected]=(heights[selected]>=self.config['min_obstacle_height_m'])&(heights[selected]<=self.config['max_height_m'])
             hit=hit.copy();hit[y[seen],x[seen]]=True
-            if self.settings['temporary_obstacle_overlay'] and seen.any():
+            if seen.any():
                 lower=np.full(shape,np.inf);upper=np.full(shape,-np.inf)
                 np.minimum.at(lower,(y[seen],x[seen]),points[seen,2])
                 np.maximum.at(upper,(y[seen],x[seen]),points[seen,2])
@@ -179,8 +179,7 @@ class NearFieldFreeMemory:
         certified=(raw['occupancy']==0)&raw['ground_support']&(
             raw['coverage']>=self.config['free_vertical_coverage'])&~hit&~paused
         retained=valid if self.settings['remember_outside_ring'] else valid&blind
-        blocked=np.zeros(shape,bool) if self.settings['temporary_obstacle_overlay'] else hit
-        valid=(retained|certified)&~blocked&~conflict
+        valid=(retained|certified)&~conflict
         self.confirmed[~valid]=np.nan
         certified&=~conflict
         self.confirmed[certified]=stamp
@@ -215,17 +214,16 @@ class NearFieldFreeMemory:
                 layers['ground_support'],r))
         layers['near_field_free']=restored
         layers['near_field_free_classified_at']=np.where(restored,self.confirmed,np.nan)
-        if self.settings['temporary_obstacle_overlay']:
-            layers['near_field_obstacle']=active
-            layers['near_field_obstacle_stamp']=np.where(blind,self.hit_stamp,np.nan)
-            layers['near_field_obstacle_expires_at']=np.where(blind,self.hit_expires,np.nan)
+        layers['near_field_obstacle']=active
+        layers['near_field_obstacle_stamp']=np.where(blind,self.hit_stamp,np.nan)
+        layers['near_field_obstacle_expires_at']=np.where(blind,self.hit_expires,np.nan)
         if person_only is not None:
             person_only=np.asarray(person_only)
             if person_only.dtype!=bool or person_only.shape!=shape:raise ValueError('Invalid exclusive person columns')
             layers['person_background_free']=valid&person_only&(layers['occupancy']==100)&~paused
         metadata=dict(m,snapshot_id=m['snapshot_id']+':near_field:'+self.binding,
             near_field_memory=self.describe(m['snapshot_id'],[valid.sum(),
-                0 if self.settings['temporary_obstacle_overlay'] else invalidated,conflict.sum(),
+                0,conflict.sum(),
                 invalidated,restored.sum(),active.sum()],ring,'cpu'))
         for array in layers.values():array.flags.writeable=False
         return GridSnapshot(metadata,layers)

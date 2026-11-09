@@ -1,20 +1,40 @@
+# 本配置段的通用设置。
 common:
+  # 雷达驱动消息来源类型。
   msg_source: 1
+  # 是否发布雷达原始数据包。
   send_packet_ros: false
+  # 是否发布雷达点云。
   send_point_cloud_ros: true
+# 雷达设备、驱动或坐标信息。
 lidar:
+  # 雷达驱动连接及过滤设置。
   - driver:
+      # 雷达驱动使用的设备型号。
       lidar_type: RSHELIOS_16P
+      # 雷达测量数据 UDP 端口。
       msop_port: 6699
+      # 雷达设备信息 UDP 端口。
       difop_port: 7788
+      # 保留扫描的起始角度，单位为度。
       start_angle: 0
+      # 保留扫描的结束角度，单位为度。
       end_angle: 360
+      # 是否等待设备信息包后再处理点云。
       wait_for_difop: true
+      # 雷达点云最小距离，单位为米。
       min_distance: 0.2
+      # 雷达点云最大距离，单位为米。
       max_distance: 200
+      # 是否使用雷达设备时钟。
       use_lidar_clock: false
+    # ROS 话题和坐标系设置。
     ros:
+      # ROS 点云消息的坐标系名称。
       ros_frame_id: rslidar
+      # ROS 接收原始雷达包的话题。
       ros_recv_packet_topic: /rslidar_packets
+      # ROS 发布原始雷达包的话题。
       ros_send_packet_topic: /rslidar_packets
+      # ROS 发布雷达点云的话题。
       ros_send_point_cloud_topic: /rslidar_points

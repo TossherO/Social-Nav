@@ -32,7 +32,7 @@ class ReferenceRuntime:
     def __init__(self,planning,motion,geometry,settings=None,*,worker_factory=Worker):
         self.motion=motion;self.geometry=geometry;self.settings=copy.deepcopy(settings) if settings is not None else load_config()
         self.planning=planning_config(planning,self.settings)
-        self.worker=worker_factory('reference',self.planning,motion,geometry)
+        self.worker=worker_factory(self.planning,geometry)
         self.events=deque(maxlen=512);self.sequence=0;self.epoch=0;self.context=None
         self.latest=None;self.current=None;self.reference=None;self.reason='waiting_for_observation'
         self.cancelled={};self.last_sent=-np.inf;self.next_retry=-np.inf;self.blocked=False;self.need_replan=False

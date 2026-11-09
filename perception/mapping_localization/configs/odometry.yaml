@@ -1,21 +1,41 @@
-# Local LiDAR-IMU motion estimation. No ROLL, keyframe archive, loop graph or map export.
+# 仅运行局部雷达—IMU 运动估计，不启用 ROLL、关键帧归档、回环图或地图导出。
+# 局部地图立方体边长，单位为米。
 cube_side_length: 200
+# 建图相关的传感器和滤波参数。
 mapping:
+  # 定位匹配使用的探测范围，单位为米。
   det_range: 50.0
+# 发布开关。
 publish:
+  # 是否发布扫描点云。
   scan_publish_en: false
+  # 是否发布稠密扫描。
   dense_publish_en: false
+  # 是否发布车体坐标系下的扫描。
   scan_bodyframe_pub_en: false
+  # 是否发布雷达扫描数据。
   lidar_scan_en: false
+  # 是否发布地图点云。
   map_pub: false
+  # 是否发布轨迹路径。
   path_en: false
+# 局部里程计设置。
 odometry:
+  # 是否发布定位状态。
   publish_state: true
+  # 是否启用可视化。
   visualize: false
+  # 使用数据的最大距离，单位为米。
   max_range: 50.0
+  # 有效匹配点数下限。
   min_effective_points: 20
+  # 匹配内点比例下限。
   min_inlier_ratio: 0.1
+  # 允许的最大配准误差，单位为米。
   max_registration_error_m: 0.2
+  # 可视化路径保留点数上限。
   visualization_path_limit: 2000
+  # 待处理扫描数量上限。
   max_pending_scans: 32
+  # 待处理 IMU 采样数量上限。
   max_pending_imu: 20000

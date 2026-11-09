@@ -1,44 +1,81 @@
 # Flat keys are upstream Config attributes plus bounded motion and final fitting.
 # Unknown keys are rejected by the adapter.
 # Geometry-only, LiDAR-only; sensor frame is not a calibrated vehicle/gravity frame.
+# 使用的设备标识。
 device: cuda
+# 随机数种子。
 seed: 42
+# 是否启用点云去畸变。
 deskew: true
+# 运动预测允许的最大时间间隔，单位为秒。
 motion_prediction_max_gap_s: 0.5
+# 是否启用定位跟踪。
 track_on: true
+# 是否使用颜色信息。
 color_on: false
+# 是否建立颜色地图。
 color_map_on: false
+# 颜色输入通道配置。
 color_channel: 0
+# 是否启用语义信息。
 semantic_on: false
+# 使用数据的最小距离，单位为米。
 min_range: 0.8
+# 使用数据的最大距离，单位为米。
 max_range: 35.0
+# 点云保留高度下界，单位为米。
 min_z: -3.0
+# 点云保留高度上界，单位为米。
 max_z: 5.0
+# 点云下采样体素尺寸，单位为米。
 vox_down_m: 0.15
+# 源点云下采样体素尺寸，单位为米。
 source_vox_down_m: 0.5
+# 地图体素尺寸，单位为米。
 voxel_size_m: 0.3
 # Decode each neighbour before aggregation, retaining the upstream SDF
 # disagreement mask for sparse LiDAR and loop-corrected maps.
+# 是否先聚合特征再解码。
 weighted_first: false
 # Fit the same global field that fixed-map localization will query. Uses only
 # observed mapping surfaces; no localization data or decoder/geometry updates.
+# 最终地图拟合的迭代次数。
 final_map_refine_iters: 5000
+# 最终地图拟合的批大小。
 final_map_refine_bs: 2048
+# 最终拟合的表面采样偏移，单位为米。
 final_map_refine_offset_m: 0.08
+# 局部地图半径，单位为米。
 local_map_radius: 30.0
+# 训练或映射缓冲容量。
 buffer_size: 10000000
+# 样本池容量上限。
 pool_capacity: 2000000
+# 优化批大小。
 bs: 4096
+# 新增样本的批大小。
 bs_new_sample: 2048
+# 每帧优化迭代次数。
 iters: 12
+# 初始化阶段的迭代倍率。
 init_iter_ratio: 40
+# 冻结相关模型参数的帧数。
 freeze_after_frame: 40
+# 束调整执行频率，以帧数表示；零表示关闭。
 ba_freq_frame: 0
+# 是否启用动态点过滤。
 dynamic_filter_on: true
+# 是否启用位姿图优化。
 pgo_on: true
+# 是否启用全局回环。
 global_loop_on: true
+# 是否使用局部地图上下文。
 local_map_context: false
+# 回环是否使用特征信息。
 loop_with_feature: false
+# 是否启用 Open3D 可视化。
 o3d_vis_on: false
+# 是否启用 WandB 记录。
 wandb_vis_on: false
+# 是否减少运行日志输出。
 silence: true

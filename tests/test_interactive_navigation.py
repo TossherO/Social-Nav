@@ -18,7 +18,7 @@ from navigation.planning.manual_goal import ManualGoals
 from navigation.planning.motion import load_motion_config
 from runtime.playback import BagPlayback
 from runtime.session import InteractiveSession
-from tests.test_ground_probe import frame
+from tests.chassis_fixtures import frame
 
 
 class PlaybackTests(unittest.TestCase):

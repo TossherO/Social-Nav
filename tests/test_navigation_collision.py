@@ -7,7 +7,7 @@ import numpy as np
 from navigation.planning.collision import SweepChecker,CertificationBudget
 from navigation.planning.footprint import VehicleGeometry,swept_check,polygon_status
 from perception.environment.context import layer_binding
-from tests.test_navigation_planning import grid
+from tests.navigation_fixtures import grid
 
 
 class CollisionTests(unittest.TestCase):

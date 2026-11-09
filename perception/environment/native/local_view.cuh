@@ -110,10 +110,10 @@ __global__ void memory_hits(const double* xyz,int n,const uint8_t* moving,NearCe
     int x=floor((xyz[3*j]-p.x)/p.resolution),y=floor((xyz[3*j+1]-p.y)/p.resolution);
     if(x<0 || x>=p.width || y<0 || y>=p.height)return;
     int i=y*p.width+x,size=p.height*p.width;const auto& c=cells[i];
-    double ground=p.settings[7]?c.ground:c.free_ground,h=xyz[3*j+2]-ground;
-    if((!p.settings[7] && !isfinite(c.classified)) || !isfinite(h) || h<p.minimum || h>p.maximum)return;
+    double h=xyz[3*j+2]-c.ground;
+    if(!isfinite(h) || h<p.minimum || h>p.maximum)return;
     atomicOr(flags+i,2u|((!moving || !moving[j])?4u:0u));
-    if(p.settings[7]) {min_atomic(hit_bounds+i,xyz[3*j+2]);max_atomic(hit_bounds+size+i,xyz[3*j+2]);}
+    min_atomic(hit_bounds+i,xyz[3*j+2]);max_atomic(hit_bounds+size+i,xyz[3*j+2]);
 }
 __global__ void memory_finish(NearCell* cells,const unsigned* flags,const double* hit_bounds,NearPolicy p,
     double* out,int* counts) {
@@ -122,15 +122,14 @@ __global__ void memory_finish(NearCell* cells,const unsigned* flags,const double
     bool paused=f&32;
     bool valid=isfinite(c.classified),certified=!paused && out[i]==0 && out[7*size+i] && out[3*size+i]>=p.coverage && !hit;
     if(valid && hit)atomicAdd(counts+3,1);
-    if(valid && hit && !p.settings[7])atomicAdd(counts+1,1);
     if(conflict)atomicAdd(counts+2,1);
-    if(p.settings[7] && (f&2)) {
+    if(f&2) {
         if(f&4)c.ordinary_stamp=p.stamp;
         c.hit_stamp=p.stamp;c.expires=p.stamp+((f&4)?p.settings[8]:fmin(p.settings[8],p.settings[9]));
         c.expires=fmax(c.expires,c.ordinary_stamp+p.settings[8]);
         c.hit_min=hit_bounds[i];c.hit_max=hit_bounds[size+i];
     }
-    valid=((valid && (p.settings[6] || blind)) || certified) && !(hit && !p.settings[7]) && !conflict;
+    valid=((valid && (p.settings[6] || blind)) || certified) && !conflict;
     if(!valid)c.classified=NAN;
     if(certified && !conflict) {
         c.classified=p.stamp;c.free_ground=float(out[6*size+i]);c.free_coverage=float(out[3*size+i]);c.free_seen=out[2*size+i];

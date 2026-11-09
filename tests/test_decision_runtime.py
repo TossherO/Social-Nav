@@ -22,7 +22,7 @@ from perception.environment.context import fingerprint
 from perception.environment.scene import assemble_scene
 from perception.environment.layers import load_config as environment_config
 from tests.test_environment_scene import person
-from tests.test_navigation_planning import grid
+from tests.navigation_fixtures import grid
 from tests.test_navigation_prediction import track
 
 
@@ -168,15 +168,20 @@ class DecisionRuntimeTests(unittest.TestCase):
         self.assertEqual(raw['observation_id'],'raw');self.assertEqual(bound['observation_id'],r['observation_id'])
         with self.assertRaises(ValueError):bind_scene_observation(dict(raw,clock_domain='ros_sim_time'),scene)
 
-    def test_seating_preflight_keeps_candidates_unknown_and_blocks_reverse(self):
+    def test_seating_preflight_keeps_candidates_unknown_and_respects_reverse_policy(self):
         _,_,_,scene=observation(10);data=candidate_set(scene)
         data['candidates'][0]['pose']=[2.5,2.,0.]
         data['candidates'].append(dict(id=1,pose=[1.,2.,0.],motion='reverse',geometry='unknown'))
         before=copy.deepcopy(data)
-        result=check_navigation(data,scene,self.planning,load_motion_config(),self.geometry,now=10.)
+        motion=load_motion_config();motion['allow_reverse']=False
+        result=check_navigation(data,scene,self.planning,motion,self.geometry,now=10.)
         self.assertEqual(result['candidates'][0]['status'],'path_found',result['candidates'][0])
         self.assertEqual(result['candidates'][1]['status'],'not_planned')
         self.assertEqual(data,before);self.assertFalse(result['executable'])
+        motion['allow_reverse']=True
+        allowed=check_navigation(data,scene,self.planning,motion,self.geometry,now=10.)
+        self.assertEqual(allowed['candidates'][1]['status'],'path_found')
+        self.assertEqual(data,before);self.assertFalse(allowed['executable'])
 
     def test_seating_feedback_rejects_shadow_and_wrong_revision(self):
         _,_,_,scene=observation(10);data=candidate_set(scene)

@@ -9,7 +9,7 @@ from navigation.planning.inputs import load_config
 from navigation.planning.planner import Planner
 from navigation.planning.reference import ReferenceRuntime
 from navigation.planning.continuity import reference_envelope
-from tests.test_navigation_planning import grid,bundle,request
+from tests.navigation_fixtures import grid,bundle,request
 from tests import test_route_replay as route_fixtures
 from tests import test_navigation_dwa as dwa_fixtures
 from tests.navigation_fixtures import FakeWorker

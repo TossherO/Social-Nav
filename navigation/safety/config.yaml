@@ -1,6 +1,11 @@
 # Independent local checks under explicit development braking assumptions.
+# 安全检查输入允许的最大年龄，单位为秒。
 max_input_age_s: 0.5
+# 运动反馈允许的最大年龄，单位为秒。
 feedback_max_age_s: 0.15
+# 停车模型反应时间预算，单位为秒。
 reaction_s: 0.2
+# 停车模型执行器延迟预算，单位为秒。
 actuator_delay_s: 0.2
+# 扫掠碰撞检查的采样数上限。
 max_sweep_samples: 2000

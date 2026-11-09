@@ -10,8 +10,8 @@ import numpy as np
 import yaml
 from perception.environment.geometry import interpolate_origins
 from perception.mapping_localization.runtime import LocalizationSession
-from .inputs import selected_messages,bag_observations
-from .buffers import SharedArrayPool
+from perception.sensors.observations import selected_messages,bag_observations,ros_messages
+from interfaces.shared import SharedArrayPool
 from .transport import Connection,frame_wire
 from .metrics import Metrics
 
@@ -53,8 +53,7 @@ def main():
         pool.release(ref,'gpu')
     try:
         if args.live:
-            from .ros_input import messages
-            source=messages(config,stop_event=stop,include_rgb=args.with_rgb)
+            source=ros_messages(config,stop_event=stop,include_rgb=args.with_rgb)
         else:source=None
         image_topics=dict(rgb='/camera/color/image_raw',camera_info='/camera/color/camera_info') if args.with_rgb else None
         raw_source=selected_messages(args.bag,config,duration=args.duration,start=args.start,messages=source,image_topics=image_topics)

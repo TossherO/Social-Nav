@@ -15,4 +15,4 @@ source outputs/runtime/environment/activate.sh
 source perception/scripts/ros1_env.sh
 exec /home/tl/miniconda3/envs/social-nav-runtime/bin/python -B -m runtime.preflight \
   --config navigation/commissioning/interactive.yaml \
-  --motion-config navigation/planning/configs/motion_trial.yaml --gpu "${GPU_ID:-0}"
+  --motion-profile trial --gpu "${GPU_ID:-0}"

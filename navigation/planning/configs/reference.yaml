@@ -1,8 +1,15 @@
 # A single asynchronous spatial-reference worker; local control has no job queue.
+# 参考路径请求的最短重试间隔，单位为秒。
 retry_s: 1.0
+# 参考路径失败后的重试等待时间，单位为秒。
 failure_retry_s: 3.0
+# 参考路径重新验证的时间间隔，单位为秒。
 revalidate_s: 3.0
+# 操作的超时时间，单位为秒。
 timeout_s: 2.0
+# 结果允许的最大年龄，单位为秒。
 max_age_s: 5.0
+# 启动阶段允许的最长等待时间，单位为秒。
 startup_timeout_s: 12.0
+# 终点直线接近段的长度，单位为米。
 terminal_straight_m: 1.5

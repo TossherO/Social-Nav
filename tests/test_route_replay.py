@@ -12,7 +12,7 @@ from navigation.planning.route_replay import RouteReplay
 from perception.mapping_localization.results import file_fingerprint
 from perception.environment.scene import assemble_scene
 from perception.environment.layers import load_config as environment_config
-from tests.test_navigation_planning import grid,asset
+from tests.navigation_fixtures import grid,asset
 from tests.test_navigation_route import reference
 
 

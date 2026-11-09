@@ -114,8 +114,8 @@ def main():
         raise ValueError('Require 0 <= warmup < duration')
     if args.component=='roll' and (args.gpu_deskew or args.gpu_linearize):raise ValueError('Select the frontend component for deskew/linearization trials')
     if args.gpu is not None:os.environ['CUDA_VISIBLE_DEVICES']=args.gpu
-    from runtime.config import algorithm_config
-    from runtime.inputs import bag_observations
+    from perception.mapping_localization.configuration import algorithm_config
+    from perception.sensors.observations import bag_observations
     from .results import file_fingerprint
     source=Path(args.source_run).resolve();manifest=json.loads((source/'run.json').read_text())
     mode=args.mode or manifest['mode'];config,_=algorithm_config(mode=mode,source_run=source)

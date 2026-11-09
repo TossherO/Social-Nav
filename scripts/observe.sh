@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # This machine-local wrapper selects live shadow observation only.
 set -eo pipefail
-SOCIAL_NAV_LOCAL_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+SOCIAL_NAV_LOCAL_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SOCIAL_NAV_LOCAL_ROOT"
 SOCIAL_NAV_DRY_RUN=0
 if [[ $# -gt 0 ]]; then
   if [[ $# -eq 1 && "$1" == --help ]]; then
-    printf '%s\n' '用法：bash navigation/commissioning/start_observe.sh [--dry-run]' \
+    printf '%s\n' '用法：bash scripts/observe.sh [--dry-run]' \
       '先在另一终端运行 bash perception/capture/start_sensors.sh。' \
       '本入口打开RViz并进行在线观察与规划，不接入底盘。' \
       '用Ground Pose Estimate选择当前雷达位置与朝向，再选择目标；q回车退出。'
@@ -24,7 +24,7 @@ source navigation/commissioning/performance.env
 SOCIAL_NAV_SESSION_DIR="$SOCIAL_NAV_LOCAL_ROOT/outputs/navigation/live_observation/$(date +%Y%m%d_%H%M%S_%N)"
 SOCIAL_NAV_OBSERVE_COMMAND=(taskset -c "$SOCIAL_NAV_COMMISSIONING_CPU_LIST" /home/tl/miniconda3/envs/social-nav-runtime/bin/python -B -m runtime.interactive \
   --live --gpu "${GPU_ID:-0}" --config "$SOCIAL_NAV_LOCAL_ROOT/navigation/commissioning/interactive.yaml" \
-  --motion-config "$SOCIAL_NAV_LOCAL_ROOT/navigation/planning/configs/motion_trial.yaml" \
+  --motion-profile trial \
   --environment-update-hz "$SOCIAL_NAV_COMMISSIONING_ENVIRONMENT_HZ" --environment-window-m "$SOCIAL_NAV_COMMISSIONING_WINDOW_M" \
   --vehicle-profile "$SOCIAL_NAV_LOCAL_ROOT/configs/wheelchair_vehicle.yaml" \
   --output "$SOCIAL_NAV_SESSION_DIR")

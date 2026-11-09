@@ -28,8 +28,9 @@ def session_inputs(config_path):
     from perception.mapping_localization.coverage import PriorCoverage, asset_digest
     from perception.mapping_localization.results import map_fingerprint
     config = yaml.safe_load(Path(config_path).read_text())
-    config = {key: str(resolve(config[key])) for key in
-              ('map', 'static_map', 'coverage', 'initial_pose_hint', 'motion_config')}
+    config = dict({key: str(resolve(config[key])) for key in
+              ('map', 'static_map', 'coverage', 'initial_pose_hint', 'motion_config')},
+              motion_profile=config.get('motion_profile'))
     if not Path(config['map'], 'COMPLETE').is_file():
         raise ValueError('Select a complete localization map')
     asset = StaticEnvironmentMap(config['static_map'])
@@ -96,12 +97,20 @@ def session_notice(status, *, selected=False):
     return ('ready', 'Map localization ready. Select a goal.\np + Enter pauses; s cancels; q exits.', False)
 
 
+def motion_selection(config, *, path=None, profile=None):
+    """A custom file uses its own default unless a profile is explicitly selected."""
+    if profile is None and path is None:profile=config.get('motion_profile')
+    return resolve(path or config['motion_config']), profile
+
+
 def runtime_command(args, config, pose):
+    motion_path, profile = motion_selection(config, path=args.motion_config, profile=args.motion_profile)
     command = [sys.executable, '-B', '-m', 'runtime', '--mode', 'localization',
                '--map', config['map'], '--static-map', config['static_map'],
                '--coverage', config['coverage'], '--pose', *map(str, pose),
-               '--motion-config', str(resolve(args.motion_config or config['motion_config'])),
+               '--motion-config', str(motion_path),
                '--output', str(Path(args.output)/'run'), '--display', '--interactive-session', '--record-planning']
+    if profile is not None:command += ['--motion-profile', profile]
     if args.live:
         command += ['--live']
     else:
@@ -137,6 +146,7 @@ def parser():
     p.add_argument('--initial-z', type=float, help='LiDAR map Z initial guess, overriding the selected map hint')
     p.add_argument('--pose-file', help='Explicit saved LiDAR start, validated against this bag, map and --start; skips mouse initialization')
     p.add_argument('--motion-config')
+    p.add_argument('--motion-profile')
     p.add_argument('--runtime-config', help='Same machine scheduling override inspected by runtime.preflight')
     p.add_argument('--environment-update-hz', type=float, help='Override environment update rate (at most 10 Hz)')
     p.add_argument('--environment-window-m', type=float, help='Override the square local environment window in metres')
@@ -176,7 +186,8 @@ def main(argv=None):
     if args.vehicle_profile:
         from navigation.control.vehicle import load_vehicle_profile
         from navigation.planning.motion import load_motion_config
-        load_vehicle_profile(resolve(args.vehicle_profile), load_motion_config(resolve(args.motion_config or config['motion_config'])),
+        motion_path, profile = motion_selection(config, path=args.motion_config, profile=args.motion_profile)
+        load_vehicle_profile(resolve(args.vehicle_profile), load_motion_config(motion_path,profile=profile),
                              require_execution=args.execute)
     output = resolve(args.output); output.mkdir(parents=True, exist_ok=False); args.output = str(output)
     (output/'session.json').write_text(json.dumps(dict(source='live' if args.live else 'bag', config=config,

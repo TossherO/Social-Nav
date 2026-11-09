@@ -7,7 +7,7 @@ from navigation.planning.overlay import reference_overlay,overlap_states
 from navigation.planning.footprint import VehicleGeometry,polygon_cells
 from navigation.planning.inputs import load_config
 from navigation.planning.planner import Planner
-from tests.test_navigation_planning import asset,bundle,request
+from tests.navigation_fixtures import asset,bundle,request
 
 
 class ReferenceOverlayTests(unittest.TestCase):

@@ -87,8 +87,8 @@ class BuildMapTests(unittest.TestCase):
     def run_fake(self, *extra, stop=None, session_factory=None):
         with patch.object(build_map, 'bag_metadata', side_effect=lambda *args:
                 dict(lidar_scans=self.bag_count, start_s=10., end_s=11.)), \
-                patch('runtime.inputs.selected_messages', side_effect=self.raw), \
-                patch('runtime.inputs.bag_observations', side_effect=self.observations), \
+                patch('perception.sensors.observations.selected_messages', side_effect=self.raw), \
+                patch('perception.sensors.observations.bag_observations', side_effect=self.observations), \
                 patch('perception.mapping_localization.runtime.LocalizationSession', side_effect=session_factory or self.make_session), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             return build_map.build(self.args(*extra), stop=stop)
@@ -211,7 +211,7 @@ class BuildMapTests(unittest.TestCase):
             build_map.validate(self.args())
 
     def test_explicit_clock_mismatch_is_rejected_before_native_constructor(self):
-        from runtime.config import DEFAULT_CALIBRATION
+        from perception.mapping_localization.configuration import DEFAULT_CALIBRATION
         config = yaml.safe_load(DEFAULT_CALIBRATION.read_text())
         config['common']['imu_time_offset'] = -.04
         config['calibration']['deployment_clock_group'] = 'synthetic_A'

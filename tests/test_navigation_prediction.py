@@ -11,7 +11,7 @@ from navigation.planning.footprint import VehicleGeometry
 from navigation.planning.motion import load_motion_config
 from navigation.safety.guard import LocalSafety
 from navigation.tasks import TaskPolicy
-from tests.test_navigation_planning import grid,request,asset
+from tests.navigation_fixtures import grid,request,asset
 from tests.test_environment_scene import person
 
 
@@ -67,7 +67,7 @@ class PredictionTests(unittest.TestCase):
         self.assertEqual(PeopleModel(scene,self.cfg).reason,'unknown_person_covariance_order')
 
     def test_missing_people_scope_and_horizon_are_explicit(self):
-        from tests.test_navigation_planning import bundle
+        from tests.navigation_fixtures import bundle
         path=[[0,2,2,0],[1,2,2,0]]
         self.assertEqual(PeopleModel(bundle(),self.cfg).check(path,self.geometry)['scope'],'geometry_only')
         self.assertFalse(PeopleModel(bundle(),dict(self.cfg,required=True)).check(path,self.geometry)['valid'])
@@ -103,7 +103,7 @@ class PredictionTests(unittest.TestCase):
         self.assertEqual(guard.gate(proposal,req,scene,feedback,now=10.,clock_domain='synthetic',dt=.1,emergency_stop=True)['reason'],'emergency_stop')
         # Same path and proposal with an occupied current footprint must stop;
         # a rejected proposal cannot bypass geometry evidence.
-        from tests.test_navigation_planning import bundle
+        from tests.navigation_fixtures import bundle
         cells=np.zeros((60,60),np.int8);cells[20,20]=100;occupied=bundle(cells)
         blocked_proposal=dict(proposal,scene_binding=occupied.record['input_fingerprint'])
         blocked=guard.gate(blocked_proposal,req,occupied,feedback,now=10.,clock_domain='synthetic',dt=.1)
@@ -269,7 +269,7 @@ class PolicyTests(unittest.TestCase):
 
     def test_mapped_goal_uses_current_association_and_actual_feedback(self):
         from navigation.control.tracking import goal_feedback,load_config as control_config
-        from tests.test_navigation_planning import bundle
+        from tests.navigation_fixtures import bundle
         scene=bundle();a=asset();req=request('mapped',goal=[2.,2.],goal_behavior='stop')
         feedback=dict(status='valid',source='synthetic',stamp_s=10.,clock_domain='synthetic',local_identity=['test',0,'odom'],pose=[2,2,0],velocity=[0,0])
         result=goal_feedback(req,scene,feedback,control_config(),now=10.,clock_domain='synthetic',active=True,geometry=self.geometry,asset=a,planning=self.config)

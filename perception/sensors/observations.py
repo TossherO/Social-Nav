@@ -1,31 +1,76 @@
-"""Bag sensor decoding. Importing this module does not import ROS or start nodes."""
+"""Causal LiDAR, IMU and camera observations from bag or live messages."""
 from collections import deque
+from contextlib import contextmanager, nullcontext
+import queue
 import numpy as np
 from perception.mapping_localization.native import rs16_preprocess
 from perception.sensors.pointcloud import pointcloud_fields
 from perception.sensors.image import rgb_array
 
 
+def ros_messages(config,*,stop_event=None,include_rgb=False):
+    """Receive sensor topics from ROS without subscribing to derived results."""
+    import rospy
+    from sensor_msgs.msg import PointCloud2,Imu,Image,CameraInfo
+    rospy.init_node('social_nav_sensor_edge',disable_signals=True)
+    inbox=queue.Queue(24000);failed=[]
+    def callback(message,topic):
+        try:inbox.put_nowait((topic,message,None))
+        except queue.Full:failed.append('Sensor edge backlog exceeded its budget')
+    subscribers=[]
+    topics=[(config['common']['lid_topic'],PointCloud2),(config['common']['imu_topic'],Imu)]
+    if include_rgb:topics += [('/camera/color/image_raw',Image),('/camera/color/camera_info',CameraInfo)]
+    for topic,kind in topics:
+        subscribers.append(rospy.Subscriber(topic,kind,callback,callback_args=topic,queue_size=256,
+            buff_size=8*1024*1024,tcp_nodelay=True))
+    try:
+        while not rospy.is_shutdown() and not (stop_event is not None and stop_event.is_set()):
+            if failed:raise RuntimeError(failed[0])
+            try:yield inbox.get(timeout=.1)
+            except queue.Empty:continue
+    finally:
+        for subscriber in subscribers:subscriber.unregister()
+
+
+@contextmanager
+def _message_source(path,messages,topics):
+    if messages is None:
+        import rosbag
+    with (rosbag.Bag(str(path)) if messages is None else nullcontext(messages)) as bag:
+        yield bag.read_messages(topics=topics) if messages is None else bag
+
+
+class _ScanInterval:
+    """Track the requested interval from the first LiDAR measurement."""
+    def __init__(self,start,duration):
+        self.start=start;self.duration=duration;self.origin=None;self.first=None
+
+    def accept(self,stamp):
+        if self.origin is None:self.origin=stamp
+        if self.first is None:
+            if stamp-self.origin<self.start-1e-6:return False
+            self.first=stamp
+        if self.duration is not None and stamp-self.first>self.duration:return None
+        return True
+
+
 def selected_messages(path,config,*,start=0.,duration=None,messages=None,image_topics=None):
     """Select a sensor interval, retaining its leading IMU measurements."""
-    from contextlib import nullcontext
-    if messages is None:import rosbag
     lidar=config['common']['lid_topic'];imu=config['common']['imu_topic']
-    lead=deque();origin=first=None
-    with (rosbag.Bag(str(path)) if messages is None else nullcontext(messages)) as bag:
-        source=bag.read_messages(topics=[lidar,imu]+list((image_topics or {}).values())) if messages is None else bag
+    lead=deque();interval=_ScanInterval(start,duration)
+    with _message_source(path,messages,[lidar,imu]+list((image_topics or {}).values())) as source:
         for row in source:
             topic,msg,_=row;stamp=msg.header.stamp.to_sec()
-            if first is None:
+            if interval.first is None:
                 if topic==imu:
                     lead.append(row)
                     while lead and stamp-lead[0][1].header.stamp.to_sec()>1.:lead.popleft()
                 if topic!=lidar:continue
-                if origin is None:origin=stamp
-                if stamp-origin<start-1e-6:continue
-                first=stamp
+                accepted=interval.accept(stamp)
+                if accepted is False:continue
                 yield from lead;lead.clear()
-            if topic==lidar and duration is not None and stamp-first>duration:return
+                if accepted is None:return
+            elif topic==lidar and interval.accept(stamp) is None:return
             yield row
 
 
@@ -35,15 +80,13 @@ def bag_observations(path,config,*,duration=None,image_topics=None,start=0.,mess
     Header time is retained. A later IMU arrival only signals that a complete
     earlier scan can be processed; that future sample is never fed to it.
     """
-    from contextlib import nullcontext
-    if messages is None:import rosbag
     topic=config['common']['lid_topic'];imu_topic=config['common']['imu_topic']
     offset=config['common'].get('imu_time_offset',0.)
-    imu=deque();scans=deque();images=deque(maxlen=16);intrinsics=deque(maxlen=16);last_imu=-np.inf;last_imu_stamp_ns=None;first=None;origin=None
+    imu=deque();scans=deque();images=deque(maxlen=16);intrinsics=deque(maxlen=16);last_imu=-np.inf;last_imu_stamp_ns=None
+    interval=_ScanInterval(start,duration)
     image_topics=image_topics or {}
     rgb_topic=image_topics.get('rgb');info_topic=image_topics.get('camera_info')
-    with (rosbag.Bag(str(path)) if messages is None else nullcontext(messages)) as bag:
-        source=bag.read_messages(topics=[topic,imu_topic]+list(image_topics.values())) if messages is None else bag
+    with _message_source(path,messages,[topic,imu_topic]+list(image_topics.values())) as source:
         for name,msg,_ in source:
             if name==imu_topic:
                 t=msg.header.stamp.to_sec()+offset
@@ -55,7 +98,7 @@ def bag_observations(path,config,*,duration=None,image_topics=None,start=0.,mess
                         f'effective_delta_s={t-last_imu:.9f}, header_seq={getattr(msg.header,"seq",None)}, caller={caller}')
                 last_imu=t;last_imu_stamp_ns=stamp_ns;a=msg.linear_acceleration;g=msg.angular_velocity
                 imu.append((t,a.x,a.y,a.z,g.x,g.y,g.z))
-                if first is None:
+                if interval.first is None:
                     while imu and t-imu[0][0]>1.:imu.popleft()
                 if len(imu)>40000:raise RuntimeError('IMU backlog exceeds native input budget')
             elif name==rgb_topic:
@@ -65,10 +108,9 @@ def bag_observations(path,config,*,duration=None,image_topics=None,start=0.,mess
                     frame_id=msg.header.frame_id,stamp_ns=msg.header.stamp.to_nsec(),distortion_model=msg.distortion_model)))
             elif name==topic:
                 stamp=msg.header.stamp.to_sec()
-                if origin is None:origin=stamp
-                if stamp-origin<start-1e-6:continue
-                if first is None:first=stamp
-                if duration is not None and stamp-first>duration:return
+                accepted=interval.accept(stamp)
+                if accepted is False:continue
+                if accepted is None:return
                 fields=pointcloud_fields(msg,['x','y','z','intensity','timestamp'])
                 raw=np.column_stack([fields[k] for k in ('x','y','z','intensity')]).astype(np.float32)
                 points,begin,end=rs16_preprocess(fields,config,stamp)

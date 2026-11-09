@@ -17,11 +17,7 @@ from unittest.mock import patch
 
 from navigation.control.chassis_protocol import decode_feedback
 from navigation.control.ground_probe import PROFILE,PulseWindow,ReceiptWindow,_serial_owner,probe_profile,main,summarize_motion,validate_silence
-
-
-def frame(mode=1,velocity=0,angular=0):
-    payload=struct.pack('>2h2i2HBHB2h2hB',int(velocity*1000),int(angular*1000),0,0,0,80,0,0,mode,0,0,0,0,0)
-    return b'\xbf\x01'+payload+bytes([sum(payload)&255])
+from tests.chassis_fixtures import frame
 
 
 class PulseGuardTests(unittest.TestCase):

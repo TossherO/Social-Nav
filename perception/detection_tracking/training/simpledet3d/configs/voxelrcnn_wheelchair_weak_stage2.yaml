@@ -1,46 +1,85 @@
+# 继承的基础配置文件路径。
 _BASE_CONFIG_: voxelrcnn_wheelchair_weak_stage1.yaml
 
 # Stage 2: indoor-dominant EMA/pseudo-label training.  Online EMA conservatively
 # upgrades geometry only around existing center anchors; unmatched predictions
 # remain disabled until multi-view/temporal agreement is implemented.
+# 数据集与数据处理配置。
 DATA_CONFIG:
+    # 各数据划分的元数据文件路径。
     INFO_PATH:
+        # 训练阶段使用的配置。
         train: [wheelchair_weak_infos_train_indoor_exhaustive.pkl]
+        # 测试阶段使用的配置。
         test: [wheelchair_weak_infos_val_indoor_exhaustive.pkl]
+    # 弱监督数据和训练设置。
     WEAK_SUPERVISION:
+        # 候选区域的中心弱监督设置。
         ROI_CENTER_SUPERVISION:
+            # 是否启用本组功能。
             ENABLED: true
 
+# 源域和目标域混合训练设置。
 MIXED_DOMAIN:
+    # 是否启用本组功能。
     ENABLED: true
+    # 混合训练中源域数据的采样比例。
     SOURCE_RATIO: 0.25
+    # 混合训练中主要目标域数据的采样比例。
     TARGET_PRIMARY_RATIO: 0.50
+    # 辅助目标域数据及采样设置。
     SECONDARY_TARGET:
+        # 是否启用本组功能。
         ENABLED: true
+        # 当前数据来源的采样比例。
         RATIO: 0.25
+        # 各数据划分的元数据文件路径。
         INFO_PATH: [wheelchair_weak_infos_train_indoor_non_exhaustive.pkl]
+    # 混合数据训练每轮的样本数。
     EPOCH_SIZE: 80000
 
+# 指数移动平均教师模型设置。
 EMA_TEACHER:
+    # 是否启用本组功能。
     ENABLED: true
+    # 指数移动平均的衰减系数。
     DECAY: 0.999
+    # 评估时是否使用教师模型。
     EVAL_WITH_TEACHER: true
+    # 候选检测得分阈值。
     SCORE_THRESH: 0.7
+    # 教师预测与已有中心匹配的距离阈值。
     MATCH_DISTANCE: 0.5
+    # 教师分类监督的权重。
     CLS_WEIGHT: 0.5
+    # 教师框监督的权重。
     BOX_WEIGHT: 0.3
+    # 是否允许使用未匹配已有标注的教师预测。
     ALLOW_UNMATCHED: false
+    # 候选框允许的最小水平尺寸。
     MIN_HORIZONTAL_SIZE: 0.15
+    # 候选框允许的最大水平尺寸。
     MAX_HORIZONTAL_SIZE: 1.5
+    # 候选框允许的最小高度。
     MIN_HEIGHT: 0.6
+    # 候选框允许的最大高度。
     MAX_HEIGHT: 2.4
+    # 划分近距离候选的距离阈值，单位为米。
     NEAR_DISTANCE: 8.0
+    # 划分远距离候选的距离阈值，单位为米。
     FAR_DISTANCE: 15.0
+    # 近距离候选要求的最少点数。
     NEAR_MIN_POINTS: 5
+    # 中等距离候选要求的最少点数。
     MID_MIN_POINTS: 3
+    # 远距离候选要求的最少点数。
     FAR_MIN_POINTS: 1
 
+# 训练优化器及学习率设置。
 OPTIMIZATION:
+    # 每张 GPU 的训练批大小。
     BATCH_SIZE_PER_GPU: 8
+    # 训练轮数。
     NUM_EPOCHS: 10
+    # 初始或基准学习率。
     LR: 0.0003

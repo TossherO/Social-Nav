@@ -77,10 +77,10 @@ class _ShadowOutput:
 
 class DwaShadowController(_ShadowOutput):
     """Direct bounded velocity selection, sharing the existing private wire envelope."""
-    def __init__(self,planning,motion,geometry,*,asset=None,settings=None,dwa_settings=None,device_batch=None):
+    def __init__(self,planning,motion,geometry,*,asset=None,settings=None,dwa_settings=None,device_batch=None,execution=False):
         from .dwa import DwaController
         super().__init__(motion,geometry,asset,settings)
-        self.controller=DwaController(planning,motion,geometry,asset=asset,settings=dwa_settings,device_batch=device_batch)
+        self.controller=DwaController(planning,motion,geometry,asset=asset,settings=dwa_settings,device_batch=device_batch,execution=execution)
         self.last_offered=None
 
     def accept(self,result,request,scene,*,now,clock_domain):

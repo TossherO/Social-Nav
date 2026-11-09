@@ -1,54 +1,105 @@
+# 选用的规划算法。
 algorithm: dijkstra
+# 搜索时使用的几何模型。
 search_geometry: footprint
+# 碰撞检查的安全余量，单位为米。
 safety_margin_m: 0.05
+# 障碍净距代价的距离尺度，单位为米。
 clearance_cost_scale_m: 0.8
+# 障碍净距代价增益。
 clearance_cost_gain: 0.25
+# 条件障碍的路径代价。
 conditional_obstacle_cost: 60
+# 局部重新规划设置。
 local_replanning:
+  # 是否启用本组功能。
   enabled: true
+  # 沿路线或参考路径选取目标的前视距离，单位为米。
   lookahead_m: 2.0
+  # 是否复用仍通过空闲检查的参考路径。
   reuse_free_reference: true
+# 路线前视目标的候选设置。
 route_goals:
+  # 候选目标采样步长，单位为米。
   step_m: 0.5
+  # 每次选择允许评估的候选数上限。
   max_candidates: 6
+  # 允许的最大绕行长度比例。
   max_detour_ratio: 1.25
+  # 允许的最大额外绕行距离，单位为米。
   max_detour_extra_m: 0.5
+# 带姿态的路径搜索设置。
 pose_search:
+  # 是否启用本组功能。
   enabled: true
+  # 是否缓存搜索启发信息。
   cache_heuristic: true
+  # 搜索状态数上限。
   max_states: 600000
+  # 搜索展开次数上限。
   max_expansions: 100000
+  # 搜索时间上限，单位为秒。
   max_search_s: 0.8
+  # 目标附近要求的直线接近长度，单位为米。
   goal_approach_straight_m: 0.6
+  # 搜索转弯半径增加的余量，单位为米。
   radius_margin_m: 0.05
+  # 搜索状态的空间分辨率，单位为米。
   state_resolution_m: 0.2
+  # 局部搜索状态的空间分辨率，单位为米。
   local_state_resolution_m: 0.1
+  # 倒车路径代价系数。
   reverse_penalty: 1.1
+  # 转弯代价权重。
   turn_weight: 0.3
+# 行人预测及社交代价设置。
 people:
+  # 行人运动预测模型。
   prediction_model: deterministic
+  # 用于规划的行人身体半径假设，单位为米。
   body_radius_m: 0.30 # Development geometry; not a measured body-size guarantee.
   # Planning may trade distant conflicts against progress. Safety checks the
   # entire stopping path independently, without this planning cutoff.
+  # 规划中人物硬碰撞检查的时间范围，单位为秒。
   hard_horizon_s: 1.0
+  # 较远未来冲突的代价。
   future_conflict_cost: 1.0
+  # 是否要求该输入有效。
   required: false
+  # 同时处理的轨迹数上限。
   max_tracks: 128
+  # 行人观察允许的最大年龄，单位为秒。
   max_observation_age_s: 0.5
+  # 单条行人轨迹允许的最大年龄，单位为秒。
   max_track_age_s: 0.8
+  # 预测时域长度，单位为秒。
   horizon_s: 6.0
+  # 时间采样间隔，单位为秒。
   sample_s: 0.1
+  # 行人前方个人空间距离，单位为米。
   personal_front_m: 0.8
+  # 行人后方个人空间距离，单位为米。
   personal_back_m: 0.4
+  # 行人侧向个人空间距离，单位为米。
   personal_side_m: 0.45
+  # 个体个人空间的代价权重。
   individual_cost: 0.2
+  # 群体空间的代价权重。
   group_cost: 1.0
+  # 判定群体邻近关系的距离，单位为米。
   group_distance_m: 0.75
+  # 决策信息允许的最大年龄，单位为秒。
   decision_max_age_s: 2.0
+# 处理的地图栅格数上限。
 max_cells: 4000000
+# 路径采样点数上限。
 max_path_samples: 200000
+# 局部几何数据允许的最大年龄，单位为秒。
 max_geometry_age_s: 0.5
+# 地图关联结果允许的最大年龄，单位为秒。
 max_association_age_s: 0.5
+# 规划原生库路径。
 native_library: outputs/navigation/build/libsocial_nav_global_planner.so
 # Explicitly selected historical geometry, never current hardware confirmation.
+# 未指定车辆档案时使用的历史几何参考文件。
 geometry_reference: configs/wheelchair_geometry_reference.json

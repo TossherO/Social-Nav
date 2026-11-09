@@ -1,21 +1,37 @@
-# Fixed-map operation is read-only; no loop search, extension or save.
+# 固定地图定位为只读模式，不进行回环搜索、地图扩展或保存。
+# 局部里程计设置。
 odometry:
+  # 是否发布定位状态。
   publish_state: false
+# 发布开关。
 publish:
+  # 是否发布扫描点云。
   scan_publish_en: false
+  # 是否发布车体坐标系下的扫描。
   scan_bodyframe_pub_en: false
+  # 是否发布雷达扫描数据。
   lidar_scan_en: true
+# ROLL 后端参数。
 roll:
-  # 16-beam scans in the legacy maps have useful height constraints below 100.
-  # Retain them; still project out genuinely weak directions below this bound.
+  # 旧地图的 16 线扫描在特征值低于 100 时仍有有效高度约束。
+  # 降低阈值以保留这些约束，同时继续滤除低于本阈值的弱方向。
+  # 定位退化方向判定的特征值阈值。
   degeneracyEigenThreshold: 10.0
+  # 是否启用回环检测。
   loopClosureEnableFlag: false
+  # 是否允许更新地图。
   mapUpdateEnabled: false
+  # 是否启用临时建图。
   temporaryMappingEnabled: false
+  # 周围关键帧搜索半径，单位为米。
   surroundingKeyframeSearchRadius: 40.0
-  # Fixed-map geometry and indices remain useful across small pose changes.
-  # Only localization reuses the submap; mapping still follows new/optimized keyframes.
+  # 小幅位姿变化时，固定地图几何和索引仍可复用。
+  # 仅定位复用子地图；建图仍跟随新增或优化后的关键帧。
+  # 定位子地图更新的位移阈值，单位为米。
   localizationSubmapUpdateDistance: 2.0
+  # 是否异步准备定位子地图。
   localizationAsyncSubmap: true
+  # 关键帧缓存条目数上限。
   keyframeCacheMaxEntries: 1024
+  # 关键帧缓存字节数上限。
   keyframeCacheMaxBytes: 268435456

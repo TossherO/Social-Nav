@@ -10,7 +10,7 @@ from navigation.planning.planner import Planner
 from navigation.safety.guard import LocalSafety
 from perception.environment.context import fingerprint
 from tests import test_navigation_dwa as fixtures
-from tests.test_navigation_planning import bundle
+from tests.navigation_fixtures import bundle
 
 
 class ReverseTests(unittest.TestCase):

@@ -1,102 +1,201 @@
-# User-accepted trial candidate. The motion and protocol flags are set to true.
-# Several motion, braking and timing values remain unverified physical assumptions;
-# the software treats true verification flags as confirmation for execution.
+# 本文件提供本车几何、底盘和执行假设。规划限值来自所选运动档位，
+# 本文件负责核对这些限值，并直接提供几何、停车、控制器和执行设置。
+# 该候选档案已由用户接受用于试验，运动和协议确认标志设置为 true。
+# 部分运动、制动和时序数值仍是未经物理验证的假设；软件会将 true 标志
+# 作为执行检查中的确认条件，不能据此认定这些假设已经得到物理证明。
+# 配置或记录的格式标识。
 format: wheelchair_vehicle_profile
+# 车辆档案标识。
 vehicle_id: wheelchair_tl_local
+# 车辆参数来源及确认状态。
 verification:
+  # 该记录或配置的来源。
   source:
+    # 车辆标识的来源说明。
     identity:
+      # 来源或数据类型。
       kind: local_software_label
+      # 该记录或判断的适用范围。
       scope: this_wheelchair_and_current_test_records
+      # 该记录的补充说明。
       note: 本机轮椅标识，不代表厂商型号或控制器序列号。
+    # 用户对试验参数适用性的判断。
     user_trial_assessment:
+      # 记录日期。
       date: '2026-11-08'
+      # 记录的声明。
       statement: 用户确认填写的数值适合作为本次试验参数，并要求整理档案中的注释和状态。
+      # 该记录或判断的适用范围。
       scope: 用户对试验参数适用性的判断，不代表已取得固件资料或完成物理上界验证。
+    # 当前速度与反馈门限的来源及适用范围。
+    user_selected_speed_thresholds:
+      # 该状态不代表已测得实际运动能力。
+      status: user_selected_software_thresholds_not_physical_limits
+      # 选择依据和未覆盖的实际响应。
+      note: 用户要求按当前运动档位设置软件临界值；实际速度上界、超调与新速度下停车时间尚未确认。
+    # 用户选择的试验假设及其来源。
     requested_scheme_one:
+      # 记录日期。
       date: '2026-11-08'
+      # 当前状态。
       status: user_selected_assumptions_not_verified_vehicle_capability
+      # 可追溯的来源记录路径。
       reference: outputs/navigation/vehicle_profile_review_20261108/empirical_draft/vehicle_evidence.yaml
+      # 该记录的补充说明。
       note: 用户明确要求将方案一的加速度和制动假设写入执行档案；这些数值尚无本车物理上界或保证制动依据。
+    # 车辆轮廓及雷达到车体的外参。
     geometry:
+      # 确认状态说明。
       confirmation: user_confirmed_current_rectangular_footprint_and_lidar_to_base_transform
+      # 可追溯的来源记录路径。
       reference: configs/wheelchair_geometry_reference.json
+      # 来源文件的 SHA-256 摘要。
       reference_sha256: f43c11c01e0236abc63a2ef35454aafaf590d70a50203fe33caa746ba02c7679
+    # 实机执行准备及其限制。
     execution_preparation:
+      # 当前状态。
       status: candidate_settings_not_physical_acceptance
+      # 底盘通信记录的来源。
       wire_reference: outputs/navigation/ground_probe/turns_higher_speed_20261107/review.json
+      # 时序分析的来源。
       timing_reference: outputs/navigation/combined_stop_20261107/analysis.json
+      # 该记录的补充说明。
       note: 起步观测包含爬升和死区，预算及填写的制动和超时数值均为假设，未确认固件超时或保证制动能力。
+    # 待补充的本车测量及已有观察。
     remaining_measurements:
+      # 可追溯的来源记录路径。
       reference: outputs/navigation/remaining_measurements/review_20261108/report.md
+      # 已有观察覆盖的动作阶段。
       observed_stages: [left_braking, right_braking, forward_silence]
+      # 现场操作人员报告。
       operator_report: automatic_stop_without_intervention_electric_mode_normal
+      # 是否已确认控制器固件的失联超时配置。
       configured_firmware_watchdog_known: false
+      # 是否已确认可保证的制动能力。
       guaranteed_braking_confirmed: false
+    # 实机执行条件审查记录。
     execution_audit:
+      # 可追溯的来源记录路径。
       reference: outputs/navigation/vehicle_profile_review_20261108/report.md
+      # 当前状态。
       status: incomplete_execution_requirements
+    # 底盘控制器资料核查记录。
     controller_source_review:
+      # 可追溯的来源记录路径。
       reference: outputs/navigation/vehicle_profile_review_20261108/source_review.md
+      # 协议文档与观测帧长度是否存在冲突。
       protocol_document_conflicts_with_observed_frame_lengths: true
+      # 是否已确认固件失联超时。
       firmware_watchdog_known: false
+    # 经验观察与离线场景推测的记录。
     empirical_draft:
+      # 可追溯的来源记录路径。
       reference: outputs/navigation/vehicle_profile_review_20261108/empirical_draft/report.md
+      # 当前状态。
       status: approximate_observations_and_offline_scenarios_not_execution_limits
+    # 停车时间窗口敏感性分析的记录。
     stopping_window_sensitivity:
+      # 可追溯的来源记录路径。
       reference: outputs/navigation/vehicle_profile_review_20261108/empirical_draft/stopping_windows.json
+      # 当前状态。
       status: threshold_sensitive_not_firmware_timeout_or_guaranteed_stop
+    # 陀螺仪转向与停车观察的记录。
     gyro_turn_observations:
+      # 可追溯的来源记录路径。
       reference: outputs/navigation/vehicle_profile_review_20261108/empirical_draft/gyro_stopping.json
+      # 当前状态。
       status: same_imu_as_lio_not_independent_calibration
+    # 倒车观察的记录。
     reverse_observation:
+      # 可追溯的来源记录路径。
       reference: outputs/navigation/vehicle_profile_review_20261108/offline_trajectory/report.md
+      # 现场操作人员报告。
       operator_report: reverse_automatic_stop_without_intervention
+      # 是否已确认可保证的制动能力。
       guaranteed_braking_confirmed: false
+    # 视频与断发观察的记录。
     video_silence_observation:
+      # 可追溯的来源记录路径。
       reference: outputs/navigation/video_silence/20261108_183312_622008/review/report.md
+      # 当前状态。
       status: aborted_on_candidate_reverse_then_active_zero
+      # 是否已确认固件失联超时。
       firmware_watchdog_known: false
+    # 独立停车链路的审查记录。
     independent_stop_chain_review:
+      # 可追溯的来源记录路径。
       reference: outputs/navigation/vehicle_profile_review_20261108/loss_boundary/report.md
+      # 当前状态。
       status: communication_loss_stop_not_confirmed
+  # 车辆几何是否按档案确认。
   geometry_confirmed: true
+  # 运动参数是否按档案确认。
   motion_confirmed: true
+  # 底盘协议是否按档案确认。
   protocol_confirmed: true
+# 车辆轮廓及雷达到车体的外参。
 geometry:
+  # 以车体参考坐标系表示的轮廓顶点，单位为米。
   footprint: [[-0.28, -0.33], [0.82, -0.33], [0.82, 0.33], [-0.28, 0.33]]
+  # 雷达到车体坐标系的齐次变换矩阵。
   base_from_lidar:
     - [1.0, 0.0, 0.0, 0.67]
     - [0.0, 1.0, 0.0, 0.33]
     - [0.0, 0.0, 1.0, -0.20]
     - [0.0, 0.0, 0.0, 1.0]
+# 车辆档案中声明的约束；是否实测须查阅来源记录。
 measured_limits:
-  # Host planning candidates, not measured vehicle capability bounds.
-  max_forward_mps: 0.10
-  max_reverse_mps: 0.05
-  # Command limit used in the supervised left/right turning probe; not a
-  # verified bound on physical angular speed.
-  max_angular_rps: 0.20
+  # 该既有字段名下保存声明的试验范围；上方来源和确认记录区分了观察与假设。
+  # 这些数值并不全是实际测得的车辆能力上界。
+  # 速度字段按用户要求设为当前规划档位的临界值，未包含实际超调余量。
+  # 规划允许的最大前进速度，单位为米每秒。
+  max_forward_mps: 0.80
+  # 规划允许的最大倒车速度，单位为米每秒。
+  max_reverse_mps: 0.20
+  # 用户指定的试验临界值，不是已验证的实际角速度上界。
+  # 规划允许的最大角速度，单位为弧度每秒。
+  max_angular_rps: 0.40
+  # 规划使用的最大线加速度，单位为米每二次方秒。
   max_acceleration_mps2: 1.00
-  # User-requested trial model, not a measured physical acceleration bound.
+  # 用户选择的试验模型，不是实测角加速度上界。
+  # 规划使用的最大角加速度，单位为弧度每二次方秒。
   max_angular_acceleration_rps2: 1.00
-  # Offline assumptions, not guaranteed minimum braking capabilities.
+  # 离线制动假设，不代表已保证的最小制动能力。
+  # 声明的最小线制动减速度，单位为米每二次方秒。
   minimum_braking_mps2: 0.75
-  # User-requested trial assumption, not a measured or guaranteed bound.
+  # 用户选择的试验假设，不是已测得或已保证的下界。
+  # 声明的最小角制动减速度，单位为弧度每二次方秒。
   minimum_angular_braking_rps2: 0.75
-  # Model budgets used as placeholders, not verified physical bounds.
+  # 模型预算占位值，不是已验证的物理上界。
+  # 声明的执行器最大延迟，单位为秒。
   maximum_actuator_delay_s: 0.8
-  firmware_watchdog_s: 1.0  # Actual firmware timeout remains unknown.
-protocol: af01_12_bf01_32_payload_sum_mode1_3  # User-selected candidate; manufacturer protocol remains unverified.
+  # 档案采用的固件失联超时预算，单位为秒。
+  firmware_watchdog_s: 1.0  # 实际固件失联超时仍未知。
+# 底盘通信协议标识。
+protocol: af01_12_bf01_32_payload_sum_mode1_3  # 用户选择的候选协议；厂商协议仍未确认。
+# 实机执行安全检查使用的响应范围。
 execution_response_bounds:
-  # Offline sensitivity scenario, not verified physical execution bounds.
-  # Source: outputs/navigation/vehicle_profile_review_20261108/map_feasibility/report.md
-  max_planar_speed_mps: 0.10
+  # 速度按用户要求设为软件校验临界值，不是已验证的实际执行上界。
+  # 档案声明的实际平面速度上界，单位为米每秒。
+  max_planar_speed_mps: 0.80
+  # 停车时间为原有离线敏感性假设，尚未在新速度下验证。
+  # 来源：outputs/navigation/vehicle_profile_review_20261108/map_feasibility/report.md
+  # 档案声明的停稳时间上界，单位为秒。
   max_stop_time_s: 1.2
+# 应用于 DWA 和独立安全监督，不能低于默认预算。
+# 停车判断使用的本车反应和延迟预算。
 stopping_model:
-  reaction_s: 1.0
-  actuator_delay_s: 0.8
+  # 停车模型反应时间预算，单位为秒。
+  reaction_s: 0.5
+  # 停车模型执行器延迟预算，单位为秒。
+  actuator_delay_s: 0.3
+# 应用于底盘协议字段和反馈校验。
+# 底盘控制帧与反馈范围设置。
 controller:
+  # 底盘控制帧中的速度限制字段。
   velocity_limit_field: 1500
-  feedback_max_linear_mps: 0.15
-  feedback_max_angular_rps: 0.30
+  # 反馈阈值按用户要求设为规划档位的临界值，未包含实际超调余量。
+  # 底盘反馈线速度允许的绝对值上限，单位为米每秒。
+  feedback_max_linear_mps: 0.80
+  # 底盘反馈角速度允许的绝对值上限，单位为弧度每秒。
+  feedback_max_angular_rps: 0.40

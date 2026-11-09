@@ -1,121 +1,222 @@
+# 继承的基础配置文件路径。
 _BASE_CONFIG_: voxelrcnn_coda_16line.yaml
 
 # Stage 1: CODA source supervision + Wheelchair sensor/center adaptation.
+# 检测类别名称。
 CLASS_NAMES: ['Pedestrian']
+# 推理数值精度。
 PRECISION: fp32
 
+# 数据集与数据处理配置。
 DATA_CONFIG:
+    # 数据集路径。
     DATA_PATH: 'data/wheelchair_weak'
+    # 原始数据路径。
     RAW_DATA_PATH: 'data/wheelchair_raw'
+    # 单样本最多使用的扫描帧数。
     MAX_SWEEPS: 1
+    # 历史扫描允许的最大时间间隔，单位为秒。
     MAX_SWEEP_TIME_LAG: 0.35
+    # 历史扫描的选择方式。
     SWEEP_SELECT_MODE: near
+    # 点云强度归一化除数。
     INTENSITY_NORMALIZATION: 255.0
+    # 是否将点云强度置零。
     ZERO_INTENSITY: false
+    # 是否允许没有真值框的样本。
     ALLOW_EMPTY_GT: true
+    # 是否启用类别平衡重采样。
     BALANCED_RESAMPLING: false
 
+    # 各数据划分的元数据文件路径。
     INFO_PATH:
+        # 训练阶段使用的配置。
         train: [wheelchair_weak_infos_train_all.pkl]
+        # 测试阶段使用的配置。
         test: [wheelchair_weak_infos_val_indoor_exhaustive.pkl]
 
+    # 弱监督数据和训练设置。
     WEAK_SUPERVISION:
+        # 是否启用本组功能。
         ENABLED: true
+        # 是否启用人工中心相关评估。
         CENTER_EVAL: true
+        # 中心命中评估使用的距离阈值列表。
         CENTER_HIT_THRESHOLDS: [0.5, 1.0]
         # 与当前 Wheelchair 部署/人工审计阈值对齐，避免低分候选让
         # CenterHit 过早饱和而削弱 best checkpoint 的区分能力。
+        # 中心评估使用的检测得分阈值。
         CENTER_SCORE_THRESH: 0.3
+        # 完整标注区域中的背景损失权重。
         EXHAUSTIVE_BACKGROUND_WEIGHT: 0.25
+        # 选择最佳模型时使用的评估指标。
         BEST_METRIC: 'CenterF1@0.50m'
+        # 候选区域的中心弱监督设置。
         ROI_CENTER_SUPERVISION:
+            # 是否启用本组功能。
             ENABLED: false
 
+    # 训练数据增强设置。
     DATA_AUGMENTOR:
+        # 显式禁用的数据增强列表。
         DISABLE_AUG_LIST: ['placeholder']
+        # 数据增强步骤及参数列表。
         AUG_CONFIG_LIST:
+            # 当前组件或处理步骤的名称。
             - NAME: random_world_flip
+              # 随机翻转使用的坐标轴。
               ALONG_AXIS_LIST: ['x']
+            # 当前组件或处理步骤的名称。
             - NAME: random_world_rotation
+              # 场景随机旋转角度范围。
               WORLD_ROT_ANGLE: [-0.78539816, 0.78539816]
+            # 当前组件或处理步骤的名称。
             - NAME: random_world_scaling
+              # 场景随机缩放范围。
               WORLD_SCALE_RANGE: [0.95, 1.05]
 
 # Wheelchair 室内拥挤场景需要保留相邻行人的独立框。这里只覆盖模型最终
 # 评估/推理 NMS；Dense Head proposal NMS(0.7) 与 ROI TRAIN/TEST
 # NMS(0.8/0.7) 仍继承 CODA 基础配置，不受影响。
+# 检测网络配置。
 MODEL:
+    # 候选区域精修网络设置。
     ROI_HEAD:
+        # 候选区域训练目标设置。
         TARGET_CONFIG:
+            # 候选中心判为正样本的距离阈值。
             CENTER_POS_DISTANCE: 0.5
+            # 候选中心判为负样本的距离阈值。
             CENTER_NEG_DISTANCE: 1.0
+    # 检测结果后处理设置。
     POST_PROCESSING:
+        # 候选检测得分阈值。
         SCORE_THRESH: 0.3
+        # 非极大值抑制设置。
         NMS_CONFIG:
+            # 非极大值抑制使用的重叠阈值。
             NMS_THRESH: 0.2
 
 # The source branch uses the same spatial grid and single-frame layout as the
 # target branch, which is required by MixedDomainDataset.
+# 源域数据配置。
 SOURCE_DATA_CONFIG:
+    # 数据集路径。
     DATA_PATH: 'data/coda_downsample'
+    # 原始数据路径。
     RAW_DATA_PATH: 'data/coda_raw'
+    # 单样本最多使用的扫描帧数。
     MAX_SWEEPS: 1
+    # 历史扫描允许的最大时间间隔，单位为秒。
     MAX_SWEEP_TIME_LAG: 0.35
+    # 历史扫描的选择方式。
     SWEEP_SELECT_MODE: near
+    # 训练和测试使用的数据划分。
     DATA_SPLIT:
+        # 训练阶段使用的配置。
         train: train
+        # 测试阶段使用的配置。
         test: val
+    # 各数据划分的元数据文件路径。
     INFO_PATH:
+        # 训练阶段使用的配置。
         train: [coda_infos_train.pkl]
+        # 测试阶段使用的配置。
         test: [coda_infos_val.pkl, coda_infos_test.pkl]
+    # 点云保留范围，按最小 XYZ 和最大 XYZ 排列，单位为米。
     POINT_CLOUD_RANGE: [-4.8, -9.6, -1.5, 14.4, 9.6, 4.5]
+    # 是否启用类别平衡重采样。
     BALANCED_RESAMPLING: false
+    # 训练数据增强设置。
     DATA_AUGMENTOR:
+        # 显式禁用的数据增强列表。
         DISABLE_AUG_LIST: ['placeholder']
+        # 数据增强步骤及参数列表。
         AUG_CONFIG_LIST:
+            # 当前组件或处理步骤的名称。
             - NAME: random_world_flip
+              # 随机翻转使用的坐标轴。
               ALONG_AXIS_LIST: ['x']
+            # 当前组件或处理步骤的名称。
             - NAME: random_world_rotation
+              # 场景随机旋转角度范围。
               WORLD_ROT_ANGLE: [-0.78539816, 0.78539816]
+            # 当前组件或处理步骤的名称。
             - NAME: random_world_scaling
+              # 场景随机缩放范围。
               WORLD_SCALE_RANGE: [0.95, 1.05]
+    # 点特征编码设置。
     POINT_FEATURE_ENCODING:
+        # 点特征编码方式。
         encoding_type: absolute_coordinates_encoding
+        # 模型实际使用的点特征字段及顺序。
         used_feature_list: ['x', 'y', 'z', 'intensity', 'timestamp']
+        # 源数据提供的点特征字段及顺序。
         src_feature_list: ['x', 'y', 'z', 'intensity', 'timestamp']
+    # 数据预处理步骤列表。
     DATA_PROCESSOR:
+        # 当前组件或处理步骤的名称。
         - NAME: mask_points_and_boxes_outside_range
+          # 是否移除范围外的标注框。
           REMOVE_OUTSIDE_BOXES: true
+        # 当前组件或处理步骤的名称。
         - NAME: shuffle_points
+          # 训练和测试是否分别打乱点顺序。
           SHUFFLE_ENABLED:
+              # 训练阶段使用的配置。
               train: true
+              # 测试阶段使用的配置。
               test: false
+        # 当前组件或处理步骤的名称。
         - NAME: transform_points_to_voxels
+          # 在线推理时是否跳过该处理步骤。
           SKIP_RUNTIME: true
+          # 体素在 XYZ 三个方向的尺寸，单位为米。
           VOXEL_SIZE: [0.05, 0.05, 0.2]
+          # 每个体素允许的点数上限。
           MAX_POINTS_PER_VOXEL: 20
+          # 训练和测试时的体素数量上限。
           MAX_NUMBER_OF_VOXELS:
+              # 训练阶段使用的配置。
               train: 60000
+              # 测试阶段使用的配置。
               test: 80000
 
+# 源域和目标域混合训练设置。
 MIXED_DOMAIN:
+    # 是否启用本组功能。
     ENABLED: true
+    # 混合训练中源域数据的采样比例。
     SOURCE_RATIO: 0.5
+    # 混合数据训练每轮的样本数。
     EPOCH_SIZE: 80000
 
+# 指数移动平均教师模型设置。
 EMA_TEACHER:
+    # 是否启用本组功能。
     ENABLED: false
+    # 指数移动平均的衰减系数。
     DECAY: 0.999
+    # 候选检测得分阈值。
     SCORE_THRESH: 0.7
+    # 教师预测与已有中心匹配的距离阈值。
     MATCH_DISTANCE: 0.5
+    # 教师分类监督的权重。
     CLS_WEIGHT: 0.5
+    # 教师框监督的权重。
     BOX_WEIGHT: 0.3
     # Keep false until augmentation/temporal agreement is added to unmatched
     # Teacher detections.  Existing centers may still be upgraded.
+    # 是否允许使用未匹配已有标注的教师预测。
     ALLOW_UNMATCHED: false
+    # 未匹配教师预测的得分阈值。
     UNMATCHED_SCORE_THRESH: 0.9
 
+# 训练优化器及学习率设置。
 OPTIMIZATION:
+    # 每张 GPU 的训练批大小。
     BATCH_SIZE_PER_GPU: 8
+    # 训练轮数。
     NUM_EPOCHS: 10
+    # 初始或基准学习率。
     LR: 0.0003

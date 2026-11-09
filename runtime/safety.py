@@ -10,14 +10,14 @@ import json
 import threading
 import signal
 from .transport import Connection
-from .buffers import SharedArrayReader
-from .scenes import ScenePool,read_scene
+from interfaces.shared import SharedArrayReader
+from perception.environment.shared_scene import ScenePool,read_scene
 
 
 def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,motion,geometry,clock_domain,asset_path,shadow_settings,chassis_fd=None):
     signal.signal(signal.SIGINT,signal.SIG_IGN)
     os.environ['CUDA_VISIBLE_DEVICES']=''
-    from navigation.safety.shadow import ShadowSafety
+    from navigation.safety.shadow import ShadowSafety,chassis_authorization
     from perception.environment.storage import StaticEnvironmentMap
     reader=SharedArrayReader(buffer_fd.detach(),owner,slots,slot_bytes)
     pose=Connection(socket.socket(fileno=pose_fd.detach()));output=socket.socket(fileno=output_fd.detach());output.setblocking(False)
@@ -96,23 +96,8 @@ def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,mot
                 except (BlockingIOError,BrokenPipeError,ConnectionResetError):dropped+=1
             if chassis is not None:
                 with engine.lock:
-                    allowed=bool(result and result['state']=='allowed' and result.get('completion_freshness_checked'))
-                    units=[] if result is None else result.get('wire_velocity_units',[])
-                    # A clipped/changed target needs its own exact wire check.
-                    allowed=allowed and len(units)==2 and [x/1000. for x in units]==result['velocity']
-                    if engine.emergency or engine.manual or engine.active_goal is None:allowed=False
-                    if result is not None and result.get('request')!=engine.active_goal:allowed=False
-                    completed=time.monotonic() if result is None else result['decision_complete_mono']
-                    packet=dict(mono=time.monotonic(),arm=arm['enabled'],arm_revision=arm['revision'],
-                        allowed=allowed,units=units,expires_mono=completed+min(.15,(result or {}).get('remaining_validity_s',0.)))
-                    feedback=(result or {}).get('feedback') or {}
-                    packet['diagnostics']=dict(reason=(result or {}).get('reason'),
-                        safety_sequence=(result or {}).get('sequence_id'), decision_complete_mono=completed,
-                        decision_stamp_s=(result or {}).get('stamp_s'),
-                        trajectory_binding=(result or {}).get('trajectory_binding'),
-                        trajectory_as_of=(result or {}).get('trajectory_as_of'),
-                        clock_domain=clock_domain,
-                        pose_velocity_estimate={key:feedback.get(key) for key in ('source','stamp_s','velocity')})
+                    packet=chassis_authorization(result,arm=arm,emergency=engine.emergency,
+                        manual=engine.manual,active_goal=engine.active_goal,clock_domain=clock_domain)
                     try:chassis.send(json.dumps(packet,allow_nan=False).encode())
                     except BlockingIOError:pass
                     except (BrokenPipeError,ConnectionResetError,ConnectionRefusedError) as error:

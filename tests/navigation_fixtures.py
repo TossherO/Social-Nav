@@ -1,7 +1,41 @@
 """Shared synthetic worker and observation fixtures; not a test entry point."""
+import hashlib
+from types import SimpleNamespace
+import numpy as np
 from perception.environment.scene import assemble_scene
-from perception.environment.layers import load_config as environment_config
-from tests.test_navigation_planning import bundle
+from perception.environment.layers import GridSnapshot, load_config as environment_config
+
+
+def grid(cells=None, *, generation=0):
+    cells = np.zeros((60, 60), np.int8) if cells is None else cells
+    transform = np.eye(4); transform[:2, 3] = [2., 2.]
+    return GridSnapshot(dict(shape=list(cells.shape), resolution=.1, origin_xy=[0., 0.], frame_id='odom',
+        snapshot_id='local:'+str(generation), stamp_s=10., session_id='test', generation=generation,
+        world_from_lidar=transform.tolist(), geometry_status='OBSERVED', sensor_frame='lidar', localization_source='synthetic'),
+        dict(occupancy=cells))
+
+
+def bundle(cells=None, *, generation=0, associated=True):
+    current = grid(cells, generation=generation)
+    current.metadata['association'] = dict(valid=associated, map_id='map-a', map_frame='map', local_frame='odom',
+        local_session_id='test', local_generation=generation, stamp_s=10., measurement_stamp_s=9.9,
+        map_from_local=np.eye(4).tolist(), association_session='association', association_generation=0)
+    return assemble_scene(current, clock_domain='synthetic', settings=environment_config()['scene'])
+
+
+def asset(cells=None):
+    current = grid(cells)
+    current.metadata.update(frame_id='map', map_id='map-a', snapshot_id='static-a')
+    return SimpleNamespace(snapshot=current, manifest=dict(snapshot_id='static-a',
+        layers_sha256=hashlib.sha256(current.layers['occupancy'].tobytes()).hexdigest()))
+
+
+def request(mode='static', **changes):
+    values = dict(request_id='r', task_id='t', goal_revision=0, mode=mode, frame_id='map' if mode != 'local' else 'odom',
+                  target_reference='base_link', goal=[4., 4.], map_snapshot_id='static-a')
+    if mode == 'static': values['start'] = [2., 2., 0.]
+    values.update(changes)
+    return values
 
 
 class FakeWorker:

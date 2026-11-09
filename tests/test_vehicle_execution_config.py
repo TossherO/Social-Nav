@@ -1,6 +1,7 @@
 """Vehicle-specific stopping and serial fields; synthetic profiles only."""
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 import numpy as np
@@ -12,14 +13,15 @@ from navigation.control.vehicle import controller_settings,load_vehicle_profile
 from navigation.planning.motion import load_motion_config
 from navigation.planning.inputs import load_config as planning_config
 from navigation.safety.config import load_stopping_config
-from tests.test_ground_probe import frame
+from tests.chassis_fixtures import frame
 
 
 class VehicleExecutionConfigTests(unittest.TestCase):
     def setUp(self):
-        self.motion=load_motion_config('navigation/planning/configs/motion_trial.yaml')
-        # These tests exercise a synthetic 0.1 m/s² braking boundary, independent
-        # of the current wheelchair trial acceleration setting.
+        self.motion=load_motion_config(profile='trial')
+        # Keep the synthetic low-speed and braking boundary independent of
+        # changes to the actual wheelchair trial profile.
+        self.motion.update(max_forward_mps=.1,max_reverse_mps=.05,max_angular_rps=.2)
         self.motion['max_acceleration_mps2']=.1
         self.motion['max_angular_acceleration_rps2']=.15
         self.motion['brake_deceleration_scale']=.75
@@ -46,16 +48,31 @@ class VehicleExecutionConfigTests(unittest.TestCase):
 
     def test_profile_stopping_model_is_shared_by_dwa_and_independent_safety(self):
         from navigation.control.dwa import DwaController
+        from navigation.control.shadow import DwaShadowController
         from navigation.safety.guard import LocalSafety
         geometry,motion,_=self.load(self.profile())
         motion.update(collision_backend='cpu',collision_library=None)
         planning=planning_config()
-        dwa=DwaController(planning,motion,geometry)
+        dwa=DwaController(planning,motion,geometry,execution=True)
         guard=LocalSafety(geometry,motion,planning['safety_margin_m'],people_settings=planning['people'],execution=True)
         self.assertEqual(dwa.safety_settings,guard.settings)
         self.assertEqual(guard.settings['reaction_s'],1.)
         self.assertEqual(guard.settings['actuator_delay_s'],.8)
         self.assertEqual(guard.settings['feedback_max_age_s'],.15)
+
+        comparison=DwaController(planning,motion,geometry)
+        self.assertEqual(comparison.safety_settings['reaction_s'],.5)
+        self.assertEqual(comparison.safety_settings['actuator_delay_s'],.3)
+        from navigation.control.device import DeviceDwaBatch
+        grid=SimpleNamespace(metadata=dict(origin_xy=[0.,0.],resolution=.1))
+        model=SimpleNamespace(as_of=1.,origin=1.)
+        feedback=dict(pose=[0.,0.,0.],velocity=[0.,0.])
+        device=DeviceDwaBatch._parameters(comparison,grid,model,[0.,0.,0.],[0.,0.],[0.,0.],feedback,0.,.1,0.)
+        self.assertEqual((device[15],device[18]),(.3,.5))
+        self.assertEqual(guard.settings['reaction_s'],1.)
+        self.assertEqual(guard.settings['actuator_delay_s'],.8)
+        shadow=DwaShadowController(planning,motion,geometry,execution=True)
+        self.assertEqual(shadow.controller.safety_settings,guard.settings)
 
     def test_profile_budgets_must_cover_declared_hardware_response(self):
         for key,value in (('reaction_s',.7),('actuator_delay_s',.6)):

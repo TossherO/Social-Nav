@@ -1,29 +1,55 @@
-# Scheduling/transport only. Model, map, motion and safety parameters stay owned
-# by their existing module configurations.
+# 本文件仅管理调度与数据传输；模型、地图、运动和安全参数由各模块配置维护。
+# 读取传感器和运行原生定位的 Python 解释器。
 input_python: /usr/bin/python3
+# 扫描共享缓冲槽位数。
 shared_scan_slots: 4
+# 每个扫描共享槽位的字节上限。
 shared_scan_slot_bytes: 8388608
+# 安全数据共享缓冲槽位数。
 shared_safety_slots: 16
+# 每个安全数据共享槽位的字节上限。
 shared_safety_slot_bytes: 1048576
+# 控制周期，单位为秒。
 control_period_s: 0.1
+# 场景导出的目标频率，单位为赫兹。
 scene_export_hz: 1.0
+# 可视化发布设置。
 display:
+  # 点云显示发布频率，单位为赫兹。
   scan_hz: 10.0
+  # 行人显示发布频率，单位为赫兹。
   people_hz: 10.0
+  # 环境地图显示发布频率，单位为赫兹。
   map_hz: 5.0
+  # RGB 图像显示发布频率，单位为赫兹。
   rgb_hz: 2.0
+  # 导航结果显示发布频率，单位为赫兹。
   navigation_hz: 5.0
+  # 每次显示的点云点数上限。
   max_scan_points: 20000
-  height_mode: ground  # ground: follow supported terrain; plane: fixed XY diagnostic.
-  path_z_m: 0.03  # Offset above ground, or absolute Z in plane mode.
-  ground_plane_radius_m: 1.5  # Display-only floor-fit extension near the sensor blind spot.
+  # 显示高度模式：ground 跟随地面，plane 使用固定平面。
+  height_mode: ground  # ground 跟随地面；plane 使用固定平面诊断。
+  # ground 模式下的地面高度偏移，plane 模式下的绝对高度，单位为米。
+  path_z_m: 0.03  # 地面上方的偏移；plane 模式中为绝对高度。
+  # 仅用于显示的近车地面拟合延伸半径，单位为米。
+  ground_plane_radius_m: 1.5  # 仅用于显示近车盲区附近的地面拟合延伸。
+# 录制路线回放的目标更新设置。
 route_replay:
+  # 沿路线或参考路径选取目标的前视距离，单位为米。
   lookahead_m: 3.0
+  # 路线目标两次更新的最短间隔，单位为秒。
   min_update_s: 2.0
+  # 触发路线目标更新的目标位置变化距离，单位为米。
   goal_shift_m: 1.0
+# 传感器输入超时，单位为秒。
 sensor_input_timeout_s: 2.0
+# 启动阶段允许的最长等待时间，单位为秒。
 startup_timeout_s: 60.0
+# 结束时完成清理和保存的最长等待时间，单位为秒。
 finalization_timeout_s: 60.0
+# 环境地图 CUDA 原生库路径。
 environment_library: outputs/runtime/build/environment/libsocial_nav_occupancy_cuda.so
+# DWA CUDA 原生库路径。
 dwa_library: outputs/runtime/build/dwa/libsocial_nav_dwa_cuda.so
+# 碰撞检查 CUDA 原生库路径。
 collision_library: outputs/runtime/build/planning/libsocial_nav_collision_cuda.so

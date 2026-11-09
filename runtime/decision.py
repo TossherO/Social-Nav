@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 import uuid
 
-from .buffers import SharedArrayPool, BufferFull
+from interfaces.shared import SharedArrayPool, BufferFull
 from decision.vlm.trajectory_inputs import local_scope, pose, HISTORY_S
 
 

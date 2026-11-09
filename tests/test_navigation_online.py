@@ -9,7 +9,7 @@ from navigation.planning.footprint import VehicleGeometry
 from navigation.planning.reference import ReferenceRuntime,load_config as reference_config
 from navigation.planning.online import PlanningBridge,goal_request
 from tests.navigation_fixtures import FakeWorker,scene_at
-from tests.test_navigation_planning import request
+from tests.navigation_fixtures import request
 
 
 class OnlineTests(unittest.TestCase):
@@ -24,7 +24,7 @@ class OnlineTests(unittest.TestCase):
 
     def test_people_join_is_latest_past_and_late_delivery_does_not_advance_grid_cutoff(self):
         from tests.test_environment_scene import person
-        from tests.test_navigation_planning import grid
+        from tests.navigation_fixtures import grid
         def source(stamp):
             value=person(stamp);value['localization_binding']=dict(session_id='test',generation=0,frame_id='odom')
             return value

@@ -1,59 +1,106 @@
 # Current camera/LiDAR calibration; sensors.launch does not load this record.
 # Historical application constants and development records are archived.
+# 当前状态。
 status: validated_on_fixed_mount_holdout
 # Held-out projection review; no manually paired geometric ground truth.
+# 当前传感器安装状态是否已经重新核对。
 current_mounting_revalidated: true
+# 准确性确认依据及其限制。
 accuracy_acceptance: heldout_projection_review_without_geometric_ground_truth
+# 标定适用的传感器安装范围。
 mounting_scope: after_entire_D435i_refixed_2026_10_19
+# 前向相机设备和话题信息。
 front_camera:
+  # 相机设备身份配置的位置。
   device_binding: configs/perception.local.json:sensors.serial_front
+  # ROS 命名空间。
   namespace: camera
+  # 图像输入话题。
   image_topic: /camera/color/image_raw
+  # 相机光学坐标系。
   optical_frame: camera_color_optical_frame
+  # 传感器身份对应关系的依据。
   assignment_basis: new_fixed_mount_bags_and_corresponding_CameraInfo
+# 雷达设备、驱动或坐标信息。
 lidar:
+  # ROS 话题名称。
   topic: /rslidar_points
+  # 数据使用的坐标系名称。
   frame: rslidar
+# 雷达到相机光学坐标系的变换。
 lidar_to_camera_optical:
+  # 变换的源坐标系。
   source_frame: rslidar
+  # 变换的目标坐标系。
   target_frame: camera_color_optical_frame
+  # 坐标变换采用的约定。
   convention: column_vector_p_target_equals_T_times_p_source
+  # 变换平移分量使用的单位。
   translation_unit: meter
+  # 齐次变换矩阵。
   matrix:
     - [0.034817661622102536, -0.9993935151449336, 0.0005764767317173458, 0.03487444640013709]
     - [-0.14988151326778815, -0.005791991618261383, -0.9886870004271584, -0.1457527445945997]
     - [0.9880907156833966, 0.03433736622613098, -0.1499922760042196, -0.013882944685095839]
     - [0.0, 0.0, 0.0, 1.0]
+# 相机光学坐标系到雷达的变换。
 camera_optical_to_lidar:
+  # 变换的源坐标系。
   source_frame: camera_color_optical_frame
+  # 变换的目标坐标系。
   target_frame: rslidar
+  # 该结果的推导方式。
   derivation: rigid_inverse_of_current_lidar_to_camera_optical
+  # 坐标变换采用的约定。
   convention: column_vector_p_target_equals_T_times_p_source
+  # 变换平移分量使用的单位。
   translation_unit: meter
+  # 齐次变换矩阵。
   matrix:
     - [0.034817661622102536, -0.14988151326778815, 0.9880907156833966, -0.009342279847100801]
     - [-0.9993935151449336, -0.005791991618261383, 0.03433736622613098, 0.03448580065748532]
     - [0.0005764767317173458, -0.9886870004271584, -0.1499922760042196, -0.1462062826350999]
     - [0.0, 0.0, 0.0, 1.0]
+# 相机和雷达到车体坐标系的安装变换状态。
 vehicle_mounting_transform:
+  # 当前状态。
   status: not_confirmed
+  # 该记录的补充说明。
   note: camera_lidar_relative_calibration_does_not_define_base_link
 # Historical sources of the earliest initial matrix, not of the fitted result.
+# 历史来源记录。
 sources:
+  # 最早历史镜像来源。
   original_image: nav_gpu_backup:latest
+  # 最早历史文件路径。
   original_path: /home/ros_packages/perception_test/scripts/infer2.py
+  # 历史感知镜像来源。
   perception_image: ros_navigation:latest
+  # 历史感知文件路径。
   perception_path: /home/ros_packages/src/perception_test/scripts/infer2.py
+  # 历史容器名称。
   stopped_container: my_perception
+  # 历史应用中使用的矩阵字段名。
   application_matrix_key: lidar2cam
+  # 来源归档中证据的位置。
   evidence_in_source_archive: hys/sensor_migration/artifacts/extrinsics_sources
+  # 来源归档中报告的位置。
   report_in_source_archive: hys/sensor_migration/artifacts/extrinsics-recovery-validation.json
+# 标定方法和数据来源。
 calibration_source:
+  # 采用的方法名称。
   method: direct_visual_lidar_calibration_NID_BFGS
+  # 标定或数据来源记录。
   source_record: outputs/perception/calibration/camera_lidar_fixed_mount/report.md
+  # 标定使用的数据集路径。
   dataset: data/datasets/wheelchair_calibration/lidar_camera
+  # 用于拟合的 bag 列表。
   training_bags: [01.bag, 02.bag, 03.bag]
+  # 用于保留验证的 bag 列表。
   validation_bags: [val.bag]
+  # 标定优化使用的初始值来源。
   initial: earliest_historical_application_extrinsic
+  # 该记录或判断的适用范围。
   scope: joint_training_fit_and_heldout_projection_review_for_fixed_mount_only
+  # 相机内参的来源。
   intrinsics: corresponding_CameraInfo

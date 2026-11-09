@@ -1,134 +1,247 @@
-# Shared XY grid resolution and occupancy voxel edge length, in metres.
+# XY 栅格与占据体素共用分辨率，单位为米。
+# XY 栅格分辨率及占据体素边长，单位为米。
 resolution: 0.10
+# 环境地图计算后端设置。
 compute:
+  # 使用的计算后端。
   backend: cuda
+  # 使用的设备标识。
   device: 0
+# 局部环境地图正方形窗口边长，单位为米。
 window_m: 18.0
+# 相对地面的障碍高度上限，单位为米。
 max_height_m: 1.8
+# 相对地面的障碍高度下限，单位为米。
 min_obstacle_height_m: 0.12
-# Retain measured ground and voxel evidence through short near-field occlusion.
-# Confirmed people still use dynamic.transient_ttl_s; unknown is never filled.
+# 短时近场遮挡期间保留地面和体素观测证据。
+# 已确认人物仍使用 dynamic.transient_ttl_s；未知区域不会因此填为空闲。
+# 局部体素观测证据的保留时间，单位为秒。
 voxel_ttl_s: 16.0
-# Occupied evidence has a shorter life than measured free space/ground.
-# Expiration withdraws the obstacle to UNKNOWN; it never manufactures free rays.
+# 占据证据的保留期短于自由空间和地面观测。
+# 过期后撤销障碍并恢复为未知，不会凭空生成自由射线。
+# 普通障碍证据的保留时间，单位为秒。
 obstacle_ttl_s: 2.0
-# New hits withdraw earlier free odds in the current local evidence.
-# Offline full-map fusion retains its cumulative sensor model separately.
+# 新命中撤销当前局部原生证据中的旧自由概率。
+# 离线全图融合另外保留其累积传感器模型。
+# 新命中是否撤销当前原生证据中的旧自由概率。
 hit_invalidates_free: true
-# Historical background is reused only within the nearest ground scan ring.
+# 历史自由背景仅在最近地面扫描圈内复用。
+# 近场盲区历史自由背景与临时障碍设置。
 near_field:
+  # 是否启用本组功能。
   enabled: true
+  # 估计近场盲区使用的最低激光束仰角，单位为度。
   lowest_beam_deg: -15.0
+  # 近场历史复用或人物处理的最大半径，单位为米。
   max_radius_m: 3.5
+  # 近场盲区边界内缩余量，单位为米。
   boundary_margin_m: 0.15
+  # 允许使用近场盲区模型的传感器最大倾角，单位为弧度。
   max_sensor_tilt_rad: 0.35
+  # 判定地面高度发生冲突的阈值，单位为米。
   ground_change_m: 0.15
+  # 是否保留盲圈外候选，进入盲圈后才用于恢复。
   remember_outside_ring: true
-  temporary_obstacle_overlay: true
-# Derived navigation view: measured static FREE over a confirmed floor, with
-# current/retained endpoints taking precedence. No generic UNKNOWN filling.
+# 派生导航视图复用有确认地面依据的实测静态自由背景；当前及保留的障碍点优先。
+# 不对未知区域进行通用填充。
+# 静态地图自由背景支持导航的设置。
 navigation_support:
+  # 是否启用本组功能。
   enabled: true
+  # 导航支持半径，单位为米。
   radius_m: 3.5
+# 射线和局部观测使用的最大距离，单位为米。
 max_range_m: 20.0
+# 处理的射线数量上限。
 max_rays: 5000
+# 体素数量上限。
 max_voxels: 900000
+# 局部环境地图的目标更新频率，单位为赫兹。
 update_hz: 5.0
-# Deskewed endpoints do not contain moving ray origins. Ray updates require
-# a bounded single-origin approximation, using the measured relative motion.
+# 去畸变后的点不包含运动中的射线原点。射线更新使用有界的单原点近似，
+# 并检查实测的相对运动。
+# 单原点射线近似允许的单帧最大平移，单位为米。
 max_scan_translation_m: 0.03
+# 射线原点位姿插值允许的最大时间间隔，单位为秒。
 max_origin_interpolation_gap_s: 0.2
+# 地面候选位于传感器下方的最小距离，单位为米。
 ground_min_below_sensor_m: 0.2
+# 地面候选位于传感器下方的最大距离，单位为米。
 ground_max_below_sensor_m: 2.2
+# 地面拟合使用的水平半径，单位为米。
 ground_fit_radius_m: 6.0
+# 地面点高度容差，单位为米。
 ground_tolerance_m: 0.07
+# 拟合地面要求的最少点数。
 ground_min_points: 30
+# 拟合地面要求的最小内点比例。
 ground_min_ratio: 0.2
+# 地面最大坡度角，单位为弧度。
 ground_max_slope_rad: 0.26
+# 地面证据提供局部支持的半径，单位为米。
 ground_support_radius_m: 0.55
+# 连续地面平面估计与重获设置。
 ground_tracking:
+  # 是否启用本组功能。
   enabled: true
-  # Estimated from consecutive observed planes, never a presumed installation height.
+  # 地面参考由连续观测平面估计，不使用假定的安装高度。
+  # 确认地面参考所需的最少观测次数。
   min_observations: 5
+  # 地面估计要求的最少内点数。
   min_inliers: 60
+  # 地面内点要求覆盖的最小空间跨度，单位为米。
   min_span_m: 0.6
+  # 地面高度中位绝对偏差上限，单位为米。
   max_height_mad_m: 0.04
+  # 地面参考允许的高度偏差，单位为米。
   height_tolerance_m: 0.15
+  # 参考地面附近的候选搜索带宽，单位为米。
   search_band_m: 0.20
-  # Balance measured XY support and reject vertical columns before fitting.
+  # 拟合前均衡 XY 支持并剔除竖直点柱。
+  # 均衡地面候选支持的 XY 分格尺寸，单位为米。
   support_cell_m: 0.25
+  # 候选分格允许的最大竖直跨度，单位为米。
   max_cell_vertical_span_m: 0.30
+  # 地面外推允许的最大误差，单位为米。
   max_extrapolation_error_m: 0.15
+  # 地面参考重获所需的观测次数。
   reacquire_observations: 5
-# Fraction of the collision-height voxel column with actual free evidence.
-# 1.0 is conservative: sparse coverage stays UNKNOWN, even with a visible floor.
+# 碰撞高度范围内实际自由证据的覆盖比例。
+# 1.0 较保守：即使看到地面，覆盖不足的列仍为未知。
+# 判定整列自由所需的实际垂直覆盖比例。
 free_vertical_coverage: 1.0
+# 占据概率判定阈值。
 occupied_probability: 0.65
+# 自由概率判定阈值。
 free_probability: 0.45
+# 点云输入话题。
 pointcloud_topic: /cloud_registered_lidar
+# 点云数据使用的坐标系。
 pointcloud_frame: lidar
+# 传感器坐标系。
 sensor_frame: rslidar
+# 定位状态输入话题。
 localization_topic: /localization/state
+# 等待匹配位姿的最长时间，单位为秒。
 pose_wait_s: 0.4
+# 当前模块的输出话题。
 output_topic: /perception/environment
+# 快照缓存容量。
 snapshot_cache_size: 12
+# 地图关联允许的最大年龄，单位为秒。
 association_max_age_s: 0.5
+# 确认地图关联所需的匹配次数。
 association_confirm_matches: 2
+# 动态人物观测和临时证据设置。
 dynamic:
+  # 是否启用本组功能。
   enabled: true
+  # 行人观察允许的最大年龄，单位为秒。
   max_people_age_s: 0.25
+  # 等待相关数据的时间，单位为秒。
   wait_s: 0.12
+  # 接受检测或跟踪结果的最低得分。
   min_score: 0.5
+  # 确认人物跟踪所需的最少命中次数。
   min_hits: 3
+  # 人物处理范围的外扩余量，单位为米。
   padding_m: 0.12
+  # 近场历史复用或人物处理的最大半径，单位为米。
   max_radius_m: 0.65
+  # 人物对象半径允许上限，单位为米。
   object_radius_limit_m: 0.55
+  # 人物点分割使用的种子距离，单位为米。
   seed_distance_m: 0.4
+  # 人物点聚类要求的最少点数。
   min_cluster_points: 3
+  # 人物临时占据证据保留时间，单位为秒。
   transient_ttl_s: 0.2
+  # 静态证据计数的最短观测时间间隔，单位为秒。
   static_observation_interval_s: 0.5
+  # 静态证据所需的最少独立观测次数。
   static_min_observations: 3
-# Offline final-map projection. Endpoint maps alone never provide free rays.
+# 离线最终地图投影；只有端点的地图不提供自由射线。
+# 离线静态地图融合设置。
 static:
+  # 自由概率判定阈值。
   free_probability: 0.35
+  # 静态地图导出时使用的动态点过滤方式。
   dynamic_filter: geometric
+  # 处理的射线数量上限。
   max_rays: 2500
+  # 处理的点数上限。
   max_points: 4000000
+  # 处理的地图栅格数上限。
   max_cells: 2000000
+  # 静态地面拟合使用的位姿采样间距，单位为米。
   ground_pose_spacing_m: 3.0
+  # 静态地面拟合使用的位姿数上限。
   max_ground_poses: 256
+  # 体素数量上限。
   max_voxels: 6000000
+  # 静态自由证据所需的最少观测次数。
   free_min_observations: 3
+  # 自由证据相对命中证据要求的最小比例。
   free_to_hit_ratio: 2.0
+  # 射线终点前保留的余量，单位为米。
   ray_end_margin_m: 0.20
+  # 人物掩码地面高度允许外推的距离，单位为米。
   mask_ground_extrapolation_m: 0.30
-  # Compact isolated returns are conditional route costs, not permanent barriers.
-  # Their measured occupancy remains in layers.npz and PGM exports.
+  # 紧凑的孤立回波作为条件路线代价，而非永久障碍。
+  # 其原始占据信息仍保留在 layers.npz 和 PGM 导出中。
+  # 条件障碍允许的最大面积，单位为平方米。
   conditional_max_area_m2: 0.8
+  # 条件障碍允许的最大跨度，单位为米。
   conditional_max_extent_m: 2.0
+# 环境扫描异步记录的容量限制。
 scan_recording:
+  # 保存的记录数上限。
   max_records: 12000
+  # 保存数据的字节上限。
   max_bytes: 1073741824
+  # 队列容量。
   queue_size: 8
+  # 异步待写入数据的字节上限。
   max_pending_bytes: 67108864
+# 位姿历史与匹配设置。
 poses:
+  # 位姿允许的最大年龄，单位为秒。
   max_pose_age_s: 0.15
+  # 关键帧匹配允许的时间误差，单位为秒。
   keyframe_time_tolerance_s: 0.01
+  # 位姿历史缓存容量。
   pose_history_size: 256
+# 下游地图消费者的数据时效设置。
 consumer:
+  # 局部几何数据允许的最大年龄，单位为秒。
   max_geometry_age_s: 0.5
+  # RGB 图像允许的最大年龄，单位为秒。
   max_rgb_age_s: 0.3
+  # 工具查询裁剪区域的栅格数上限。
   tool_crop_cells: 4096
+# 场景数据组装和缓存设置。
 scene:
+  # 当前模块的输出话题。
   output_topic: /perception/scene
+  # RGB 图像输入话题。
   rgb_topic: /camera/color/image_raw
+  # 行人观察输入话题。
   people_topic: /perception/people/json
+  # RGB 图像允许的最大年龄，单位为秒。
   max_rgb_age_s: 0.3
+  # 行人观察允许的最大年龄，单位为秒。
   max_people_age_s: 0.3
+  # 行人观察所用位姿允许的最大年龄，单位为秒。
   max_people_pose_age_s: 0.1
+  # 地图关联结果允许的最大年龄，单位为秒。
   max_association_age_s: 0.5
+  # 等待场景输入汇合的最长时间，单位为秒。
   join_wait_s: 0.4
+  # 队列容量。
   queue_size: 4
+  # 缓存条目数上限。
   cache_size: 8
+  # 静态先验裁剪半径，单位为米。
   prior_radius_m: 15.0
+  # 静态先验裁剪的栅格数上限。
   prior_max_cells: 100000

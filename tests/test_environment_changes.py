@@ -8,7 +8,7 @@ from perception.environment.occupancy import OccupancyTree
 from navigation.planning.planner import Planner
 from navigation.planning.inputs import load_config as planning_config
 from navigation.planning.footprint import VehicleGeometry
-from tests.test_navigation_planning import asset, request
+from tests.navigation_fixtures import asset, request
 
 
 def evidence(cells, stamp=10., generation=0):
@@ -139,7 +139,7 @@ class ChangeTests(unittest.TestCase):
         self.assertEqual(current.layers['occupancy'][20,20],100)
 
     def test_global_cache_reuses_geometry_but_rechecks_current_obstacles(self):
-        from tests.test_navigation_planning import bundle
+        from tests.navigation_fixtures import bundle
         cfg=planning_config();geometry=VehicleGeometry([[-.1,-.1],[.1,-.1],[.1,.1],[-.1,.1]],np.eye(4),source='synthetic')
         planner=Planner(cfg,geometry);source=asset()
         first=planner.query(request('mapped'),scene=bundle(),asset=source,now=10.,clock_domain='synthetic')

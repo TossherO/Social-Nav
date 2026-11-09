@@ -119,14 +119,14 @@ class VLMImageBranchTests(unittest.TestCase):
             self.assertEqual(report['image_detector_calls'],0)
 
     def test_live_edge_only_subscribes_camera_when_explicitly_requested(self):
-        from runtime.ros_input import messages
+        from perception.sensors.observations import ros_messages
         for enabled in (False,True):
             topics=[]
             ros=SimpleNamespace(init_node=lambda *a,**k:None,is_shutdown=lambda:True,
                 Subscriber=lambda topic,*a,**k:topics.append(topic) or SimpleNamespace(unregister=lambda:None))
             sensor=SimpleNamespace(PointCloud2=object,Imu=object,Image=object,CameraInfo=object)
             with patch.dict('sys.modules',{'rospy':ros,'sensor_msgs.msg':sensor}):
-                self.assertEqual(list(messages(dict(common=dict(lid_topic='/lidar',imu_topic='/imu')),include_rgb=enabled)),[])
+                self.assertEqual(list(ros_messages(dict(common=dict(lid_topic='/lidar',imu_topic='/imu')),include_rgb=enabled)),[])
             self.assertEqual(topics,['/lidar','/imu']+(['/camera/color/image_raw','/camera/color/camera_info'] if enabled else []))
 
     def test_annotation_preparation_keeps_explicit_calibration_without_yolo_records(self):

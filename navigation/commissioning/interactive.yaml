@@ -1,5 +1,12 @@
+# 定位使用的地图路径。
 map: outputs/perception/lab_floor2_20261107/mapping_compensated/map
+# 环境和导航使用的静态地图包路径。
 static_map: outputs/perception/lab_floor2_20261107/static_environment_compensated_20cm
+# 地图定位关联适用区域的文件路径。
 coverage: navigation/commissioning/coverage_observation.yaml
+# 初始化时参考的高度和姿态提示文件。
 initial_pose_hint: navigation/commissioning/height_hint.json
-motion_config: navigation/planning/configs/motion_trial.yaml
+# 运动配置文件路径。
+motion_config: navigation/planning/configs/motion.yaml
+# 交互会话选择的运动档位。
+motion_profile: trial

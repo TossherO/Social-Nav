@@ -20,8 +20,7 @@ from decision.agent.workflows.drivers import SavedObservationDriver, SimulationD
 from decision.agent.workflows.replay import ActionReplay
 from perception.environment.layers import load_config
 from perception.environment.scene import assemble_scene
-from runtime.agent_state import AgentState
-from runtime.command import CommandInbox
+from runtime.command import AgentState, CommandInbox
 from tests.test_environment_consumers import snapshot
 from tests.test_agent import ScriptedFeedback, reply, navigate, action
 

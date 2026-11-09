@@ -1,29 +1,56 @@
 # Fixed-mount D435i: historical spatial calibration, sensor timestamps by default.
 # p_IMU = R_IL p_LiDAR + t_IL, meters; corrected IMU time = header + offset.
+# 本配置段的通用设置。
 common:
+  # 是否启用传感器时间同步处理。
   time_sync_en: false
+  # 加到 IMU 原始时间戳上的固定偏移，单位为秒。
   imu_time_offset: 0.0
+# 建图相关的传感器和滤波参数。
 mapping:
+  # 是否在线估计雷达与 IMU 外参。
   extrinsic_est_en: false
+  # 雷达到 IMU 变换的旋转矩阵，按行展开。
   extrinsic_R: [0.034422752833998656, -0.9994010775138369, 0.0035440586213223795, -0.1017201488821126, -0.007031286452225755, -0.9947882047562827, 0.9942173230228543, 0.033882846323895016, -0.10190126263330139]
+  # 雷达到 IMU 变换的平移向量，单位为米。
   extrinsic_T: [0.017050145601790967, -0.1402067782050747, -0.0022317593563983065]
+# 标定结果的状态、来源及适用范围。
 calibration:
+  # 当前状态。
   status: validated_fixed_mount_spatial_with_unestimated_time_offset
+  # 当前传感器安装状态是否已经重新核对。
   current_mounting_revalidated: true
+  # 标定适用的传感器安装范围。
   mounting_scope: after_entire_D435i_refixed_2026_10_19
+  # 时间偏移的验证状态。
   time_offset_validity: zero_offset_operational_default_not_independently_calibrated
+  # 雷达坐标系名称。
   lidar_frame: rslidar
+  # IMU 坐标系名称。
   imu_frame: camera_imu_optical_frame
+  # 标定或数据来源记录。
   source_record: outputs/perception/calibration/lidar_imu_combined/report.md
+  # 标定来源产物路径。
   source_artifact: outputs/perception/calibration/lidar_imu_combined/models.json
+  # 空间外参的来源记录。
   spatial_source_record: outputs/perception/calibration/lidar_imu_joint/optimized.json
+  # 相机相关先验文件。
   camera_prior: perception/sensors/calibration/front_camera_lidar.yaml
+  # 采用的方法名称。
   method: historical_joint_spatial_with_native_sensor_timestamps
+  # 进行比较时使用的模型。
   comparison_model: camera_joint
+  # 传感器时间戳处理策略。
   timing_policy: sensor_timestamps
+  # 时间偏移比较的来源记录。
   time_offset_source_record: outputs/perception/time_offset_comparison/report.md
+  # 明确声明的设备时钟会话组；空值表示未声明。
   deployment_clock_group: null
+  # 平移参数采用的处理策略。
   translation_policy: retain_camera_chained_prior
+  # 弱约束旋转方向采用的处理策略。
   weak_rotation_policy: retain_camera_prior_about_main_turn_axis
+  # 是否完成独立的六自由度标定。
   independent_full_6dof_calibration: false
+  # 验证内容和适用范围。
   validation_scope: historical_spatial_holdouts_and_short_zero_offset_comparison_not_independent_clock_calibration

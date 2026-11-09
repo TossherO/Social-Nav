@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 import yaml
 
 from perception.sensors.clock_session import record_bag_session, session_path, time_calibration_report, check_time_calibration
-from runtime.config import algorithm_config, ROOT
+from perception.mapping_localization.configuration import algorithm_config, ROOT
 
 
 class ClockSessionTests(unittest.TestCase):

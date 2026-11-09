@@ -10,13 +10,28 @@ from .backend import ROOT
 from .footprint import wrap
 
 
-def load_motion_config(path=None):
+def load_motion_config(path=None, *, profile=None):
     default=Path(__file__).with_name('configs')/'motion.yaml'
-    cfg=yaml.safe_load(Path(path or default).read_text())
-    if path is not None:
-        defaults=yaml.safe_load(default.read_text())
-        for key in ('collision_backend','collision_library','stationary_min_window_s','stationary_position_span_m',
-                    'stationary_yaw_span_rad','stationary_max_linear_mps','stationary_max_angular_rps'):
+    source=Path(path or default)
+    cfg=yaml.safe_load(source.read_text())
+    if not isinstance(cfg,dict):raise ValueError('Motion configuration must be a mapping')
+    if 'profiles' in cfg or 'common' in cfg or 'default_profile' in cfg:
+        if set(cfg)!={'default_profile','common','profiles'} or not isinstance(cfg['common'],dict) or not isinstance(cfg['profiles'],dict):
+            raise ValueError('Motion profiles require default_profile, common and profiles')
+        name=cfg['default_profile'] if profile is None else profile
+        if not isinstance(name,str) or name not in cfg['profiles'] or not isinstance(cfg['profiles'][name],dict):
+            raise ValueError('Unknown motion profile: '+str(name))
+        selected=cfg['profiles'][name]
+        required={'max_forward_mps','max_reverse_mps','max_angular_rps','max_acceleration_mps2','max_angular_acceleration_rps2'}
+        if not required<=selected.keys() or set(selected)&set(cfg['common']):
+            raise ValueError('Motion profile must declare all limits without overriding common settings')
+        cfg=dict(cfg['common'],**selected)
+    elif profile is not None:
+        raise ValueError('A flat motion configuration does not define profiles')
+    else:
+        defaults=yaml.safe_load(default.read_text())['common']
+        for key in ('stationary_min_window_s','stationary_position_span_m','stationary_yaw_span_rad',
+                    'stationary_max_linear_mps','stationary_max_angular_rps'):
             cfg.setdefault(key,defaults[key])
     if cfg.get('performance_reference'):
         source=Path(cfg['performance_reference']);source=source if source.is_absolute() else ROOT/source
@@ -36,7 +51,8 @@ def load_motion_config(path=None):
     if cfg['state_window_s']<cfg['state_max_gap_s']:raise ValueError('Invalid state window')
     if cfg['stationary_min_window_s']>cfg['state_window_s']:raise ValueError('Stationary evidence exceeds pose window')
     if cfg['brake_deceleration_scale']>1:raise ValueError('Braking assumption cannot exceed nominal acceleration')
-    value=Path(cfg['collision_library']);cfg['collision_library']=str(value if value.is_absolute() else ROOT/value)
+    if 'collision_library' in cfg:
+        value=Path(cfg['collision_library']);cfg['collision_library']=str(value if value.is_absolute() else ROOT/value)
     return cfg
 
 

@@ -9,10 +9,30 @@ import numpy as np
 from perception.environment.context import fingerprint
 from perception.environment.scene import SceneInputs,snapshot_from_message
 from navigation.control.shadow import ClockWatch,TOPICS,load_config,observed_feedback,publisher
-from navigation.planning.online import goal_request
+from navigation.planning.online import goal_request,planning_scene
 from navigation.planning.continuity import goal_binding,context_binding
-from navigation.planning.online import planning_scene
 from .guard import LocalSafety
+
+
+def chassis_authorization(result, *, arm, emergency, manual, active_goal, clock_domain):
+    """Convert one completed safety decision to a bounded chassis authorization."""
+    allowed=bool(result and result['state']=='allowed' and result.get('completion_freshness_checked'))
+    units=[] if result is None else result.get('wire_velocity_units',[])
+    # A clipped/changed target needs its own exact wire check.
+    allowed=allowed and len(units)==2 and [x/1000. for x in units]==result['velocity']
+    if emergency or manual or active_goal is None:allowed=False
+    if result is not None and result.get('request')!=active_goal:allowed=False
+    completed=time.monotonic() if result is None else result['decision_complete_mono']
+    packet=dict(mono=time.monotonic(),arm=arm['enabled'],arm_revision=arm['revision'],
+        allowed=allowed,units=units,expires_mono=completed+min(.15,(result or {}).get('remaining_validity_s',0.)))
+    feedback=(result or {}).get('feedback') or {}
+    packet['diagnostics']=dict(reason=(result or {}).get('reason'),
+        safety_sequence=(result or {}).get('sequence_id'),decision_complete_mono=completed,
+        decision_stamp_s=(result or {}).get('stamp_s'),
+        trajectory_binding=(result or {}).get('trajectory_binding'),
+        trajectory_as_of=(result or {}).get('trajectory_as_of'),clock_domain=clock_domain,
+        pose_velocity_estimate={key:feedback.get(key) for key in ('source','stamp_s','velocity')})
+    return packet
 
 
 def _association_remaining(scene, now):
@@ -286,7 +306,7 @@ class ShadowSafety:
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--geometry',choices=['historical'],required=True)
-    parser.add_argument('--config');parser.add_argument('--motion-config');parser.add_argument('--shadow-config')
+    parser.add_argument('--config');parser.add_argument('--motion-config');parser.add_argument('--motion-profile');parser.add_argument('--shadow-config')
     parser.add_argument('--static-map');parser.add_argument('--environment-config')
     parser.add_argument('--grid-topic',default='/perception/environment/grid');parser.add_argument('--state-topic',default='/localization/state')
     parser.add_argument('--people-topic',default='/perception/people/json')
@@ -304,7 +324,7 @@ def main():
     from rospy.numpy_msg import numpy_msg
     from social_nav_localization.msg import LocalizationState
     from perception.mapping_localization.ros.context_node import state_row
-    planning=planning_config(args.config);motion=load_motion_config(args.motion_config);settings=load_config(args.shadow_config)
+    planning=planning_config(args.config);motion=load_motion_config(args.motion_config,profile=args.motion_profile);settings=load_config(args.shadow_config)
     if args.collision_backend:motion['collision_backend']=args.collision_backend
     geometry=VehicleGeometry.historical(planning['geometry_reference']);rospy.init_node('social_nav_shadow_safety')
     clock='ros_sim_time' if rospy.get_param('/use_sim_time',False) else 'ros_time'

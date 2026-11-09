@@ -9,7 +9,7 @@ from navigation.planning.continuity import reference_envelope
 from navigation.control.dwa import DwaController
 from navigation.safety.guard import LocalSafety
 from navigation.kinematics import braking_path
-from tests.test_navigation_planning import bundle,request
+from tests.navigation_fixtures import bundle,request
 
 
 class RotationTests(unittest.TestCase):

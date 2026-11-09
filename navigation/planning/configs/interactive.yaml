@@ -1,7 +1,14 @@
 # One validated map/region pair for interactive development; paths are repo-relative.
+# 定位使用的地图路径。
 map: outputs/perception/wheelchair_20261020/environment_integration/mapping/map
+# 环境和导航使用的静态地图包路径。
 static_map: outputs/navigation/october20_route_replay/static_map
+# 地图定位关联适用区域的文件路径。
 coverage: outputs/perception/wheelchair_20261020/environment_integration/localization_coverage_manual.yaml
 # Only initial roll, pitch and map Z are used as a guess. XY and yaw come from RViz.
+# 初始化时参考的高度和姿态提示文件。
 initial_pose_hint: outputs/perception/wheelchair_20261020/environment_integration/localization2.initial_pose.json
+# 运动配置文件路径。
 motion_config: navigation/planning/configs/motion.yaml
+# 交互会话选择的运动档位。
+motion_profile: normal
