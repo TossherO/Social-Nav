@@ -223,6 +223,7 @@ def main():
     agent_observer=None
     if args.agent_observations:
         from decision.agent.adapters.runtime import ObservationWorker
+        commands.agent_state.enable_goal_observations()
         agent_observer=ObservationWorker(commands.agent_state.publish_observation,metrics=metrics,geometry=geometry)
     schedule=[] if args.commands is None else json.loads(Path(args.commands).read_text())
     if not isinstance(schedule,list) or any(set(v)!={'offset_s','kind','value'} or not np.isfinite(v['offset_s']) or v['offset_s']<0 for v in schedule):
@@ -396,7 +397,7 @@ def main():
                             exporter.submit(last_device,people,rgb=rgb,name=packet['observation_id'])
                             next_export=stamp+1/settings['scene_export_hz']
                     if agent_observer is not None and scene is not None and abs(scene.record['as_of']-stamp)<1e-6:
-                        agent_observer.submit(scene,arrays.get('rgb'),packet['rgb_stamp'],packet['rgb_frame'])
+                        agent_observer.submit(scene,arrays.get('rgb'),packet['rgb_stamp'],packet['rgb_frame'],packet['camera_info'])
                     if decision_recorder is not None:
                         current_scene=scene if scene is not None and abs(scene.record['as_of']-stamp)<1e-6 else None
                         decision_recorder.submit(people,arrays,scene=current_scene,

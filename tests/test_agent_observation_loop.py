@@ -104,6 +104,25 @@ class ObservationLoopTests(unittest.TestCase):
         self.assertEqual(len(published), 1)
         self.assertEqual(published[0].record['rgb']['pixel_sha256'], self.observation.record['rgb']['pixel_sha256'])
 
+    def test_local_occupancy_projection_is_bound_and_immutable(self):
+        from perception.environment.context import fingerprint
+        grid_source=snapshot()
+        grid_source.metadata['association']=dict(valid=True,local_session_id='local',local_generation=0,
+            stamp_s=10.,measurement_stamp_s=10.,map_from_local=np.eye(4).tolist())
+        scene=assemble_scene(grid_source,clock_domain='synthetic',settings=load_config()['scene'])
+        observation=Observation.from_scene(scene,include_local_grid=True)
+        grid=observation.local_grid()
+        self.assertIsNotNone(grid)
+        np.testing.assert_array_equal(grid.layers['occupancy'],scene.geometry.layers['occupancy'])
+        self.assertFalse(grid.layers['occupancy'].flags.writeable)
+        modified=copy.deepcopy(observation.record)
+        modified['local_grid']['occupancy_zlib_base64']='AAAA'
+        with self.assertRaises(ValueError):
+            Observation(modified,observation.image).local_grid()
+        modified['input_fingerprint']=fingerprint({k:v for k,v in modified.items() if k!='input_fingerprint'})
+        with self.assertRaises((ValueError, __import__('zlib').error)):
+            Observation(modified,observation.image).local_grid()
+
     def test_runtime_observation_uses_the_supplied_vehicle_geometry(self):
         from navigation.planning.footprint import VehicleGeometry
         transform = np.eye(4);transform[0,3] = .7
@@ -121,6 +140,29 @@ class ObservationLoopTests(unittest.TestCase):
         first, second = state.snapshot(), state.snapshot()
         self.assertEqual(first['control']['stamp_s'], second['control']['stamp_s'])
         self.assertFalse(second['execution_feedback'])
+
+    def test_localization_goal_evidence_is_bound_and_never_chassis_completion(self):
+        from perception.environment.context import fingerprint
+        state=AgentState()
+        state.enable_goal_observations()
+        request=dict(task_id='t',goal_revision=1,mode='mapped',goal=[1.,2.,0.])
+        binding=dict(valid=True,map_id='map',association_session='s',association_generation=0)
+        feedback=dict(status='valid',source='causal_algorithm_poses_not_chassis_feedback',
+                      local_identity=['s',0,'odom'])
+        def publish(stamp,**diag):
+            value=dict(stamp_s=stamp,clock_domain='runtime_live',request=request,
+                feedback=dict(feedback,stamp_s=stamp),recorded_goal_diagnostic=dict(
+                    request_binding=fingerprint(request),criteria_met=True,stopped=True,**diag))
+            state.publish_control(value,map_binding=binding)
+            return state.snapshot()['control']['goal_observation']
+        self.assertEqual(publish(10.)['status'],'holding')
+        for stamp in (10.1,10.2,10.3,10.4):publish(stamp)
+        held=publish(10.51)
+        self.assertEqual(held['status'],'criteria_held')
+        self.assertFalse(held['physical_acceptance']);self.assertFalse(held['execution_feedback'])
+        self.assertEqual(publish(12.)['status'],'holding')
+        state.publish_control(dict(stamp_s=12.1,clock_domain='runtime_live',request=None,feedback={}),map_binding=binding)
+        self.assertEqual(state.snapshot()['control']['goal_observation']['status'],'unavailable_or_not_met')
 
     def test_agent_runtime_client_rejects_safety_override_before_connection(self):
         client = RuntimeClient(self.root/'does-not-exist.sock')

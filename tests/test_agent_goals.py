@@ -76,6 +76,54 @@ class IndoorGoalTests(unittest.TestCase):
         self.arrived()
         self.assertEqual(self.session.call('check_goal',goal_id='r')['status'],'completed')
 
+    def test_semantic_reference_allows_a_free_pose_but_needs_post_arrival_evidence(self):
+        goal=dict(goal_id='near',kind='reference',target_id='front_window',description='Stop by the window',
+                  semantic_conditions=['The chosen stopping place is by the window'])
+        pose=[5.,4.,0.]
+        result=self.select(goal,pose)
+        self.assertEqual(result['status'],'accepted')
+        self.assertEqual(self.nav.target_pose,pose)
+        self.arrived()
+        self.assertEqual(self.session.call('check_goal',goal_id='near')['status'],'needs_semantic_evidence')
+        self.session.tick()
+        self.session.observation=self.rgb()
+        checked=self.session.call('check_goal',goal_id='near',observation_id=self.session.observation.record['observation_id'],
+            semantic_result='satisfied',evidence='Synthetic window visible',_context=self.session.context())
+        self.assertEqual(checked['status'],'completed')
+        self.assertFalse(checked['real_robot_success'])
+
+    def test_reference_without_semantic_completion_condition_is_rejected(self):
+        result=self.session.call('record_task',goals=[dict(goal_id='near',kind='reference',target_id='front_window',description='By window')])
+        self.assertEqual(result['status'],'unavailable')
+        self.assertIn('observable original task condition',result['reason'])
+
+    def test_reference_does_not_complete_when_actual_pose_misses_selected_point(self):
+        goal=dict(goal_id='near',kind='reference',target_id='front_window',description='Stop by window',
+                  semantic_conditions=['Near the window'])
+        self.assertEqual(self.select(goal,[5.,4.,0.])['status'],'accepted')
+        self.arrived();self.nav.state['pose']=[6.,4.,0.]
+        result=self.session.call('check_goal',goal_id='near')
+        self.assertEqual(result['status'],'not_met')
+        self.assertFalse(result['checks']['selected_position_met'])
+
+    def test_explicit_point_id_and_yaw_resolve_without_borrowing_annotation_yaw(self):
+        self.session.call('record_task',goals=[point_goal('elevator')])
+        view_id=query_map(self.session)
+        result=self.session.call('navigate',goal_id='elevator',point_id='elevator',yaw=.71,
+            view_id=view_id,orientation_source='autonomous')
+        self.assertEqual(result['status'],'accepted')
+        self.assertEqual(self.nav.target_pose,[5,4,.71])
+        self.assertEqual(self.session.task_goals.goals[0]['selected']['selected_point_id'],'elevator')
+
+    def test_navigate_rejects_ambiguous_pose_forms(self):
+        from decision.agent.tools.framework import validate_call
+        import jsonschema
+        common=dict(goal_id='g',view_id='v',orientation_source='autonomous')
+        for extra in ({},{'point_id':'elevator'},{'pose':[5,4,0],'yaw':0},
+                      {'pose':[5,4,0],'point_id':'elevator','yaw':0}):
+            with self.assertRaises(jsonschema.ValidationError):
+                validate_call(dict(tool='navigate',arguments=dict(common,**extra)))
+
     def test_required_yaw_is_checked_and_never_repaired(self):
         goal = dict(point_goal('elevator'),required_yaw=.4)
         result = self.select(goal,[5,4,1.4])
@@ -84,14 +132,60 @@ class IndoorGoalTests(unittest.TestCase):
         self.assertIsNone(self.session.skill.record['handle'])
         self.assertIsNone(self.session.task_goals.goals[0]['selected'])
 
-    def test_facing_landmark_checks_model_yaw_without_generating_one(self):
+    def test_facing_named_point_allows_semantic_heading_and_needs_current_judgement(self):
         result = self.select(dict(point_goal('elevator'),facing='front_window'),[5,4,1.57])
-        self.assertEqual(result['status'],'refused')
-        view = self.session.spatial_view
-        result = self.session.call('navigate',goal_id='elevator',pose=[5,4,.05],
-            view_id=view.record['view_id'],orientation_source='semantic')
         self.assertEqual(result['status'],'accepted')
-        self.assertEqual(self.nav.target_pose,[5,4,.05])
+        self.assertEqual(self.nav.target_pose,[5,4,1.57])
+        self.arrived()
+        self.assertEqual(self.session.call('check_goal',goal_id='elevator')['reason'],
+                         'read_a_fresh_post_arrival_map_then_judge_facing')
+        original=self.nav.spatial_inputs
+        self.nav.spatial_inputs=lambda:dict(original(),pose=self.nav.state['pose'],stamp_s=self.nav.state['stamp_s'])
+        query_map(self.session)
+        result=self.session.call('check_goal',goal_id='elevator',facing_result='satisfied',
+            facing_evidence='Synthetic map indicates the relevant corridor direction',_context=self.session.context())
+        self.assertEqual(result['status'],'completed')
+        self.assertIn('not_independent_ground_truth',result['semantic']['facing']['source'])
+
+    def test_facing_region_can_follow_corridor_instead_of_region_centroid(self):
+        goal=dict(point_goal('elevator'),facing='lobby_area')
+        self.assertEqual(self.select(goal,[5,4,1.57])['status'],'accepted')
+        self.arrived()
+        original=self.nav.spatial_inputs
+        self.nav.spatial_inputs=lambda:dict(original(),pose=self.nav.state['pose'],stamp_s=self.nav.state['stamp_s'])
+        query_map(self.session)
+        args=dict(goal_id='elevator',facing_result='unknown',facing_evidence='No corridor evidence')
+        self.assertEqual(self.session.call('check_goal',_context=self.session.context(),**args)['status'],'unknown')
+        args.update(facing_result='satisfied',facing_evidence='Synthetic connected corridor lies to the left')
+        self.nav.state['pose']=[5,4,0.]
+        self.assertEqual(self.session.call('check_goal',_context=self.session.context(),**args)['reason'],
+                         'actual_heading_differs_from_selected_heading')
+        self.nav.state['pose']=[5,4,1.57]
+        self.assertEqual(self.session.call('check_goal',_context=self.session.context(),**args)['status'],'completed')
+
+    def test_facing_judgement_requires_a_post_arrival_view_used_by_model(self):
+        self.assertEqual(self.select(dict(point_goal('elevator'),facing='lobby_area'),[5,4,1.57])['status'],'accepted')
+        self.arrived()
+        original=self.nav.spatial_inputs
+        self.nav.spatial_inputs=lambda:dict(original(),pose=self.nav.state['pose'],stamp_s=self.nav.state['stamp_s']-.01)
+        query_map(self.session)
+        args=dict(goal_id='elevator',facing_result='satisfied',facing_evidence='Synthetic corridor')
+        result=self.session.call('check_goal',_context=self.session.context(),**args)
+        self.assertEqual(result['reason'],'read_a_fresh_post_arrival_map_then_judge_facing')
+        self.nav.spatial_inputs=lambda:dict(original(),pose=self.nav.state['pose'],stamp_s=self.nav.state['stamp_s'])
+        query_map(self.session)
+        self.assertEqual(self.session.call('check_goal',**args)['status'],'needs_semantic_evidence')
+        self.assertEqual(self.session.call('check_goal',_context=self.session.context(),**args)['status'],'completed')
+
+    def test_facing_rejects_semantic_view_with_different_pose(self):
+        self.assertEqual(self.select(dict(point_goal('elevator'),facing='lobby_area'),[5,4,1.57])['status'],'accepted')
+        self.arrived()
+        original=self.nav.spatial_inputs
+        self.nav.spatial_inputs=lambda:dict(original(),pose=[5,4,0.],stamp_s=self.nav.state['stamp_s'])
+        query_map(self.session)
+        result=self.session.call('check_goal',goal_id='elevator',facing_result='satisfied',
+            facing_evidence='Synthetic map',_context=self.session.context())
+        self.assertEqual(result['reason'],'map_view_pose_differs_from_current_pose')
 
     def test_region_geometry_supports_concavity_and_boundary(self):
         polygon = [[0,0],[2,0],[2,1],[1,1],[1,2],[0,2]]
@@ -114,6 +208,7 @@ class IndoorGoalTests(unittest.TestCase):
     def test_semantic_completion_requires_consumed_post_arrival_rgb(self):
         self.select(dict(point_goal('elevator'),semantic_conditions=['Entrance is visible']),[5,4,0])
         self.arrived()
+        self.session.tick()
         self.session.observation = self.rgb()
         args=dict(goal_id='elevator',observation_id=self.session.observation.record['observation_id'],
                   semantic_result='satisfied',evidence='Synthetic fixture judgement only')
@@ -122,6 +217,15 @@ class IndoorGoalTests(unittest.TestCase):
         self.assertEqual(result['status'],'completed')
         self.assertIn('not_independent_ground_truth',result['semantic']['source'])
 
+    def test_scene_after_arrival_cannot_make_pre_arrival_rgb_current(self):
+        self.select(dict(point_goal('elevator'),semantic_conditions=['Entrance is visible']),[5,4,0])
+        self.arrived()
+        self.nav.state['stamp_s'] += .02
+        self.session.observation = self.rgb()
+        result=self.session.call('check_goal',goal_id='elevator',observation_id=self.session.observation.record['observation_id'],
+            semantic_result='satisfied',evidence='Fixture',_context=self.session.context())
+        self.assertEqual(result['status'],'needs_semantic_evidence')
+
     def test_old_image_and_unknown_semantics_cannot_complete_goal(self):
         self.select(dict(point_goal('elevator'),semantic_conditions=['View is clear']),[5,4,0])
         self.arrived()
@@ -129,6 +233,7 @@ class IndoorGoalTests(unittest.TestCase):
         args=dict(goal_id='elevator',observation_id=self.session.observation.record['observation_id'],
                   semantic_result='satisfied',evidence='Old image')
         self.assertEqual(self.session.call('check_goal',_context=self.session.context(),**args)['status'],'needs_semantic_evidence')
+        self.session.tick()
         self.session.observation = self.rgb()
         args.update(observation_id=self.session.observation.record['observation_id'],semantic_result='unknown',evidence='Insufficient evidence')
         self.assertEqual(self.session.call('check_goal',_context=self.session.context(),**args)['status'],'unknown')
@@ -208,13 +313,13 @@ class IndoorGoalTests(unittest.TestCase):
     def test_annotation_overlay_preserves_map_asset_and_adds_regions(self):
         asset = self.root/'asset.json'
         base = copy.deepcopy(self.catalog.value)
-        base.pop('regions');base.pop('landmarks')
+        base.pop('regions')
         asset.write_text(json.dumps(base))
         overlay = dict(self.catalog.value,asset=str(asset))
         path = self.root/'catalog.json';path.write_text(json.dumps(overlay))
         loaded = Catalog.load(path)
         self.assertIn('lobby_area',loaded.regions)
-        self.assertIn('front_window',loaded.landmarks)
+        self.assertIn('front_window',loaded.places)
         self.assertNotIn('regions',json.loads(asset.read_text()))
 
 

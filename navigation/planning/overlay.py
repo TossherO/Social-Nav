@@ -37,7 +37,8 @@ def reference_overlay(prior, local, raw, local_from_map, scene):
     report=dict(source_scene=scene.record['input_fingerprint'],source_as_of=scene.record['as_of'],
         source_layers=scene.record['geometry']['layer_binding'],source_prior=pm['snapshot_id'],
         local_from_map=transform.tolist(),projection='positive_area_SE2_overlap_at_current_base',
-        unknown_to_free=0,occupied_overlaps_rejected=0,persistent=False,static_occupied_preserved=True,
+        unknown_to_free=0,occupied_overlaps_rejected=0,current_occupied_added=0,
+        persistent=False,static_occupied_preserved=True,
         free_source='raw_local_free_and_verified_navigation_free')
     association=np.asarray(scene.record['prior']['map_from_local'])
     if np.arccos(np.clip(association[2,2],-1.,1.))>.15:
@@ -51,23 +52,46 @@ def reference_overlay(prior, local, raw, local_from_map, scene):
     hi=np.minimum(np.asarray(pm['shape'])[::-1],np.ceil((mapped.max(0)-pm['origin_xy'])/pm['resolution']).astype(int))
     if (hi<=lo).any():return prior,dict(report,status='outside_prior')
     y,x=np.mgrid[lo[1]:hi[1],lo[0]:hi[0]];x=x.ravel();y=y.ravel()
-    unknown=prior.layers['occupancy'][y,x]==-1;x,y=x[unknown],y[unknown]
     xy=np.c_[x+.5,y+.5]*pm['resolution']+pm['origin_xy']
     points=xy@rotation.T+transform[:2,2]
+    # Cheap conservative neighbourhood filter before exact polygon overlaps.
+    # Include centres just outside the local raster: their cells can overlap it.
+    from scipy.ndimage import maximum_filter
+    radius=np.ceil((pm['resolution']/2*np.abs(rotation).sum(axis=1)+m['resolution']/2)/m['resolution']).astype(int)+1
+    occupied=local.layers['occupancy']==100
+    near=maximum_filter(occupied,size=(int(2*radius[1]+1),int(2*radius[0]+1)),mode='constant')
+    ij=np.floor((points-m['origin_xy'])/m['resolution']).astype(int)
+    shape=np.asarray(m['shape'])[::-1]
+    possible=((ij>=-radius)&(ij<shape+radius)).all(axis=1)
+    clipped=np.clip(ij,0,shape-1)
+    possible &= near[clipped[:,1],clipped[:,0]]
+    rows=np.flatnonzero(possible)
+    hit=np.zeros(len(x),bool)
+    if len(rows):
+        _,hit[rows]=overlap_states(points[rows],rotation.T,pm['resolution'],local,raw)
+    old=prior.layers['occupancy'][y,x]
+    changed_hit=hit&(old!=100)
+    report['current_occupied_added']=int(changed_hit.sum())
+    # A current hit is hard occupancy, including where an older static obstacle
+    # was marked conditional and would otherwise be removed by reference_grid.
+    conditional=prior.layers.get('conditional_obstacle')
+    clear_conditional=hit if conditional is not None else None
+    unknown=old==-1
     # Free centre is only a cheap necessary condition. Every accepted target
     # still goes through the complete overlap check below.
-    ij=np.floor((points-m['origin_xy'])/m['resolution']).astype(int)
-    inside=((ij>=0)&(ij<np.asarray(m['shape'])[::-1])).all(axis=1)
-    rows=np.flatnonzero(inside);xx,yy=ij[rows].T
+    inside=((ij>=0)&(ij<shape)).all(axis=1)
+    rows=np.flatnonzero(inside&unknown&~hit);xx,yy=ij[rows].T
     rows=rows[(local.layers['occupancy'][yy,xx]==0)&(raw[yy,xx]==0)]
-    if not len(rows):return prior,dict(report,status='valid')
-    x,y,points=x[rows],y[rows],points[rows]
-    free,hit=overlap_states(points,rotation.T,pm['resolution'],local,raw)
-    report.update(status='valid',unknown_to_free=int(free.sum()),occupied_overlaps_rejected=int(hit.sum()))
-    if not free.any():return prior,report
-    cells=prior.layers['occupancy'].copy();cells[y[free],x[free]]=0
+    free=np.zeros(len(x),bool)
+    if len(rows):
+        free[rows],rejected=overlap_states(points[rows],rotation.T,pm['resolution'],local,raw)
+        report['occupied_overlaps_rejected']=int(rejected.sum())
+    report.update(status='valid',unknown_to_free=int(free.sum()))
+    if not free.any() and not changed_hit.any() and not (conditional is not None and (conditional[y[hit],x[hit]]).any()):return prior,report
+    cells=prior.layers['occupancy'].copy();cells[y[free],x[free]]=0;cells[y[hit],x[hit]]=100
     cells.flags.writeable=False;layers=dict(occupancy=cells)
-    if 'conditional_obstacle' in prior.layers:
-        layers['conditional_obstacle']=prior.layers['conditional_obstacle']
+    if conditional is not None:
+        conditional=conditional.copy();conditional[y[clear_conditional],x[clear_conditional]]=False
+        conditional.flags.writeable=False;layers['conditional_obstacle']=conditional
     return GridSnapshot(dict(pm,snapshot_id='reference_overlay:'+fingerprint(report),
         reference_overlay=report,layer_scope='temporary_reference_occupancy_and_risk'),layers),report

@@ -35,11 +35,17 @@ def load_config(path=None):
         raise ValueError('Invalid DWA configuration')
     if any(type(settings[k]) is not int for k in ('linear_samples','angular_samples','max_candidates','certification_max_checks')):
         raise ValueError('DWA sample counts must be integers')
-    if settings['linear_samples']*settings['angular_samples']+3>settings['max_candidates'] or settings['max_candidates']>64:
+    if settings['linear_samples']*(settings['angular_samples']+1)+7>settings['max_candidates'] or settings['max_candidates']>64:
         raise ValueError('DWA candidate budget exceeded')
     if settings['certification_budget_s']>settings['max_compute_s']:
         raise ValueError('Certification budget exceeds the whole control computation budget')
     return settings
+
+
+def approach_should_brake(remaining, tolerance, toward_speed, braking_time, control_interval):
+    """Nominal stopping trigger from the current estimate, not a braking guarantee."""
+    speed=max(0.,float(toward_speed))
+    return remaining <= tolerance + speed*(control_interval+braking_time/2.)
 
 
 class DwaController:
@@ -103,6 +109,9 @@ class DwaController:
             model=self._model(scene)
             if model.status=='invalid' or model.status=='missing' and model.config['required']:raise ValueError(model.reason)
             velocity=np.asarray(feedback['velocity'],float);age=now-feedback['stamp_s']
+            raw_velocity=np.asarray(feedback.get('velocity_raw',velocity),float)
+            if raw_velocity.shape!=(2,) or not np.isfinite(raw_velocity).all():
+                raise ValueError('raw_feedback_invalid')
             reverse=self.motion['max_reverse_mps']*self.motion['max_initial_profile_ratio'] if self.motion['allow_reverse'] else self.motion['reverse_tolerance_mps']
             if (velocity[0]<-reverse or
                     velocity[0]>self.motion['max_forward_mps']*self.motion['max_initial_profile_ratio'] or
@@ -161,6 +170,10 @@ class DwaController:
             if not rotation_mode and not len(prepared[2]):raise ValueError('empty_reference')
             goal=local_goal(request,scene,self.geometry,self.asset,self.planning)
             stop=request.get('goal_behavior','pass_through')=='stop'
+            minimum=self.motion.get('minimum_command_speeds')
+            braking_time=max(max(abs(initial[0]),abs(raw_velocity[0]))/self.motion['max_acceleration_mps2'],
+                             max(abs(initial[1]),abs(raw_velocity[1]))/self.motion['max_angular_acceleration_rps2'])
+            approach_brake=False
             if rotation_mode:
                 if np.linalg.norm(start[:2]-path[0,:2])>self.goal_settings['goal_position_tolerance_m']:
                     raise ValueError('rotation_anchor_not_reached')
@@ -168,6 +181,12 @@ class DwaController:
                 error=wrap(path[-1,2]-start[2])
                 remaining=max(0.,abs(error)-self.goal_settings['goal_yaw_tolerance_rad']/2)
                 limit=min(self.motion['max_angular_rps'],remaining/self.settings['prediction_s'])
+                if minimum and abs(error)>self.goal_settings['goal_yaw_tolerance_rad']:
+                    limit=max(limit,minimum['angular_rps'])
+                if minimum:
+                    approach_brake=approach_should_brake(abs(error),self.goal_settings['goal_yaw_tolerance_rad'],
+                        max(np.sign(error)*initial[1],np.sign(error)*raw_velocity[1]),
+                        braking_time,dt)
                 target_w=np.sign(error)*limit
                 dw=self.motion['max_angular_acceleration_rps2']*dt
                 low=np.array([0.,max(-limit,initial[1]-dw)])
@@ -178,6 +197,8 @@ class DwaController:
                     if high[1]>=low[1]:
                         choices.extend(np.array([0.,w]) for w in np.linspace(low[1],high[1],self.settings['angular_samples']))
                         choices.append(np.array([0.,np.clip(target_w,low[1],high[1])]))
+                    if minimum and limit>=minimum['angular_rps']:
+                        choices.append(np.array([0.,np.sign(error)*minimum['angular_rps']]))
             else:
                 a,delta,length,arc=prepared
                 fraction=np.clip(np.sum((start[:2]-a)*delta,axis=1)/length**2,0,1)
@@ -197,7 +218,14 @@ class DwaController:
                 speed_limits=dict(pursuit=float(speed))
                 remaining=max(0.,arc[-1]-progress-self.goal_settings['goal_position_tolerance_m']/2)
                 if stop or cusp_stop:
-                    speed=min(speed,remaining/self.settings['prediction_s'])
+                    approach_limit=remaining/self.settings['prediction_s']
+                    if minimum and arc[-1]-progress>self.goal_settings['goal_position_tolerance_m']:
+                        floor=minimum['forward_mps'] if gear>0 else minimum['reverse_mps']
+                        approach_limit=max(approach_limit,floor)
+                    if minimum:
+                        approach_brake=approach_should_brake(arc[-1]-progress,self.goal_settings['goal_position_tolerance_m'],
+                            max(gear*initial[0],gear*raw_velocity[0]),braking_time,dt)
+                    speed=min(speed,approach_limit)
                     speed_limits['goal_approach']=float(speed)
                 curve=abs(wrap(np.diff(path[:,2])))/np.maximum(np.linalg.norm(np.diff(path[:,:2],axis=0),axis=1),1e-9)
                 if len(curve)==len(length):
@@ -216,22 +244,45 @@ class DwaController:
                     choices.extend([np.array([v,w]) for v in np.linspace(low[0],high[0],self.settings['linear_samples'])
                         for w in np.linspace(low[1],high[1],self.settings['angular_samples'])])
                     choices.extend([np.clip([gear*speed,gear*speed*curvature],low,high),np.clip(initial if self.previous is None else self.previous,low,high)])
+                    if minimum:
+                        # Zero is a braking target for angular velocity, not an
+                        # assertion that the vehicle's current yaw rate is zero.
+                        choices.extend(np.array([v,0.]) for v in np.linspace(low[0],high[0],self.settings['linear_samples']))
+                        floor=minimum['forward_mps'] if gear>0 else minimum['reverse_mps']
+                        if speed>=floor:
+                            choices.append(np.array([gear*floor,0.]))
+                        turn_sign=np.sign(gear*curvature)
+                        if turn_sign:
+                            for target_v in (gear*floor,low[0],high[0]):
+                                if abs(target_v)>=floor and abs(target_v)<=speed:
+                                    choices.append(np.array([target_v,turn_sign*minimum['angular_rps']]))
                 elif initial[0]*gear>speed:
                     # A bounded actuator target for speed recovery. The measured
                     # overspeed is never clipped or replaced by this target state.
                     choices.append(np.array([gear*speed,np.clip(initial[1],-min(self.motion['max_angular_rps'],speed/self.motion['min_turning_radius_m']),
                         min(self.motion['max_angular_rps'],speed/self.motion['min_turning_radius_m']))]))
+                    if minimum:
+                        choices.append(np.array([gear*speed,0.]))
             choices=np.unique(np.round(choices,12),axis=0)
+            if minimum:
+                v,w=choices[:,0],choices[:,1]
+                valid_v=(np.abs(v)<1e-9)|(v>=minimum['forward_mps']-1e-9)|(v<=-minimum['reverse_mps']+1e-9)
+                valid_w=(np.abs(w)<1e-9)|(np.abs(w)>=minimum['angular_rps']-1e-9)
+                choices=choices[valid_v & valid_w]
             choices=choices[np.asarray(turning_residual(choices,self.motion))>=-1e-9]
             if self.diagnostics:
                 out['sampling']=dict(initial=initial.tolist(),observation_velocity=velocity.tolist(),dt=dt,
                     speed_limits=speed_limits,speed=float(speed),low=low.tolist(),high=high.tolist(),
                     empty_window=bool(np.any(high<low)),choices=choices.tolist())
-            if (stop and np.linalg.norm(start[:2]-goal[:2])<=self.goal_settings['goal_position_tolerance_m'] and
-                    (len(goal)==2 or abs(wrap(start[2]-goal[2]))<=self.goal_settings['goal_yaw_tolerance_rad'])):
-                # Hold braking while GoalMonitor checks measured dwell. A noisy
-                # reference refresh must not restart an already settled approach.
+            at_goal=(stop and np.linalg.norm(start[:2]-goal[:2])<=self.goal_settings['goal_position_tolerance_m'] and
+                     (len(goal)==2 or abs(wrap(start[2]-goal[2]))<=self.goal_settings['goal_yaw_tolerance_rad']))
+            if at_goal or approach_brake:
+                # Keep zero as a target while the endpoint or nominal braking
+                # trigger applies; this does not assert physical arrival.
                 choices=np.zeros((1,2))
+            if minimum:
+                out['approach_brake']=bool(approach_brake)
+                out['minimum_command_blocked']=bool(not at_goal and not approach_brake and not np.any(np.abs(choices)>1e-9))
             if len(choices)>self.settings['max_candidates']:raise ValueError('candidate_budget_exceeded')
             if self.device_batch is None:
                 # Shared current-state propagation; candidate arrays remain bounded.

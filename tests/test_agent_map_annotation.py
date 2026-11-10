@@ -30,7 +30,7 @@ class MapAnnotationTests(unittest.TestCase):
     def test_export_roundtrip_and_map_identity(self):
         self.editor.update('点','entrance','入口',['门'],[0,1],'靠近入口')
         self.editor.update('区域','hall','大厅',[],[[0,0],[2,0],[2,2],[0,2]])
-        self.editor.update('地标','desk','前台',[],[1,1])
+        self.editor.update('点','desk','前台',[],[1,1])
         out=self.root/'catalog.json';digest=self.editor.save(out)
         catalog=Catalog.load(out)
         self.assertEqual(catalog.value['map_snapshot_id'],'static')
@@ -48,7 +48,7 @@ class MapAnnotationTests(unittest.TestCase):
     def test_invalid_elements_do_not_change_the_catalog(self):
         original=json.dumps(self.editor.value,sort_keys=True)
         for kind,identity,coordinates in [('点','outside',[99,99]),('区域','cross',[[0,0],[2,2],[0,2],[3,0]]),
-                                            ('地标','mission_start',[0,0])]:
+                                            ('点','mission_start',[0,0])]:
             with self.assertRaises(ValueError):self.editor.update(kind,identity,'名称',[],coordinates)
         self.assertEqual(json.dumps(self.editor.value,sort_keys=True),original)
 
@@ -56,6 +56,15 @@ class MapAnnotationTests(unittest.TestCase):
         path=self.root/'catalog.json';self.editor.save(path)
         self.asset.manifest['snapshot_id']='another'
         with self.assertRaisesRegex(ValueError,'不一致'):Annotation(self.map,'floor',path)
+
+    def test_legacy_landmark_import_preserves_identity_without_changing_input(self):
+        original=dict(self.editor.value,landmarks=[dict(landmark_id='desk',name='前台',aliases=['柜台'],position=[1.,1.],source='old')])
+        path=self.root/'old.json';path.write_text(json.dumps(original,ensure_ascii=False))
+        imported=Annotation(self.map,'floor',path)
+        self.assertEqual(imported.value['places'][0]['place_id'],'desk')
+        self.assertEqual(imported.value['places'][0]['pose'],[1.,1.])
+        self.assertNotIn('landmarks',imported.value)
+        self.assertEqual(json.loads(path.read_text()),original)
 
     def test_changed_source_map_cannot_be_saved(self):
         (self.map/'layers.npz').write_bytes(b'changed')

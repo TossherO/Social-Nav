@@ -4,6 +4,7 @@ import base64
 from collections import deque
 import copy
 import json
+import math
 import os
 from pathlib import Path
 import socket
@@ -18,6 +19,11 @@ class AgentState:
         self.lock = threading.Lock()
         self.control = self.observation = self.image = self.updated_mono = None
         self.vehicle_context = None
+        self.goal_evidence = None
+
+    def enable_goal_observations(self):
+        with self.lock:
+            self.goal_evidence = GoalObservationEvidence()
 
     def configure_vehicle(self, geometry, motion):
         keys = ('allow_reverse','allow_in_place_rotation','min_turning_radius_m','max_forward_mps','max_reverse_mps',
@@ -38,6 +44,8 @@ class AgentState:
         value['localization'] = None if localization is None else {k: copy.deepcopy(localization.get(k)) for k in
             ('stamp_s', 'session_id', 'generation', 'frame_id', 'health', 'source', 'position', 'quaternion_xyzw')}
         with self.lock:
+            if self.goal_evidence is not None:
+                value['goal_observation'] = self.goal_evidence.update(packet,map_binding)
             self.control, self.updated_mono = value, time.monotonic()
 
     def publish_observation(self, record, image):
@@ -54,6 +62,43 @@ class AgentState:
                 vehicle_context=copy.deepcopy(self.vehicle_context),
                 received_age_s=None if self.updated_mono is None else max(0., time.monotonic()-self.updated_mono),
                 scope='shadow_recommendation_not_execution', executable=False, execution_feedback=False)
+
+
+class GoalObservationEvidence:
+    """Track fresh localization-based goal criteria, never hardware acceptance."""
+    def __init__(self):
+        from navigation.control.tracking import load_config
+        self.settings = load_config()
+        self.key = self.since = self.last = None
+
+    def update(self, packet, map_binding):
+        from perception.environment.context import fingerprint
+        request, feedback = packet.get('request'), packet.get('feedback') or {}
+        diagnostic = packet.get('recorded_goal_diagnostic') or {}
+        stamp = feedback.get('stamp_s')
+        identity = feedback.get('local_identity')
+        ok = (isinstance(request,dict) and feedback.get('status') == 'valid' and
+              feedback.get('source') == 'causal_algorithm_poses_not_chassis_feedback' and
+              diagnostic.get('request_binding') == fingerprint(request) and
+              diagnostic.get('criteria_met') is True and diagnostic.get('stopped') is True and
+              type(stamp) in (int,float) and math.isfinite(stamp) and
+              type(packet.get('stamp_s')) in (int,float) and
+              0 <= packet['stamp_s']-stamp <= self.settings['feedback_max_age_s'] and
+              isinstance(identity,list) and len(identity) == 3 and
+              (request.get('mode') != 'mapped' or bool((map_binding or {}).get('valid'))))
+        if not ok:
+            self.key = self.since = self.last = None
+            return dict(status='unavailable_or_not_met',execution_feedback=False,physical_acceptance=False)
+        key = fingerprint(dict(request=request,identity=identity,clock_domain=packet['clock_domain'],map_binding=map_binding))
+        if key != self.key or self.last is not None and (stamp < self.last or stamp-self.last > self.settings['observation_max_age_s']):
+            self.key,self.since = key,stamp
+        self.last = stamp
+        held = stamp-self.since
+        return dict(status='criteria_held' if held >= self.settings['goal_dwell_s'] else 'holding',
+                    held_s=held,feedback_stamp_s=stamp,clock_domain=packet['clock_domain'],
+                    local_identity=copy.deepcopy(identity),request_binding=diagnostic['request_binding'],
+                    task_id=request.get('task_id'),goal_revision=request.get('goal_revision'),
+                    source=feedback['source'],execution_feedback=False,physical_acceptance=False)
 
 
 def validate(kind,value):

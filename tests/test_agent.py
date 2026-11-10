@@ -10,7 +10,7 @@ import numpy as np
 from decision.agent import ROOT
 from decision.agent.tools.places import Catalog
 from decision.agent.core.model import ApiError, Model
-from decision.agent.core.store import Budget, Store
+from decision.agent.core.store import Budget, Store, shared_budget
 from decision.agent.core.session import AgentSession
 from decision.agent.tools.framework import Reply, validate_call
 
@@ -235,6 +235,23 @@ class AgentTests(unittest.TestCase):
             budget.reserve(50000, 1024)
         self.assertEqual(budget.summary()['calls'], 1)
         budget.close()
+
+    def test_local_shared_budget_changes_limit_without_resetting_ledger(self):
+        import json
+        config=self.root/'configs/agent_budget.local.json'
+        config.parent.mkdir()
+        first=shared_budget(self.root)
+        self.assertEqual(first.limit,.8)
+        first.reserve(1000,100)
+        first.close()
+        config.write_text(json.dumps({'limit_rmb':2.5}))
+        second=shared_budget(self.root)
+        self.assertEqual(second.limit,2.5)
+        self.assertEqual(second.summary()['calls'],1)
+        second.close()
+        config.write_text(json.dumps({'limit_rmb':11}))
+        with self.assertRaises(ValueError):
+            shared_budget(self.root)
 
     def client(self, reply):
         config = self.root/'private.json'

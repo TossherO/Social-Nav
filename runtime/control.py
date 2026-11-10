@@ -134,6 +134,7 @@ class ControlLoop:
                             waiting=status['waiting'],start_evidence=status['start_evidence']))
                     with self.metrics.span('dwa_control'):
                         packet=self.controller.step(self.request,self.scene,list(self.rows),self.reference.reference,now=now,clock_domain=self.clock_domain,dt=dt)
+                    self.reference.note_control(packet,monotonic_s=mono)
                     self.safety.packet(packet);self.record('control',packet);self.count+=1
                     if self.metrics.trace_path is not None:
                         r=None if self.scene is None else self.scene.record

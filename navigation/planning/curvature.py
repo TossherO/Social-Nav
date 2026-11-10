@@ -84,18 +84,35 @@ def reference_tails(reference,start,policy):
     if not len(length):return
     fraction=np.clip(np.sum((start[:2]-reference[:-1,:2])*delta,axis=1)/np.maximum(length**2,1e-15),0,1)
     distance=np.linalg.norm(start[:2]-reference[:-1,:2]-fraction[:,None]*delta,axis=1)
-    i=int(np.argmin(distance))
+    yaws=reference[:-1,2]+fraction*wrap(np.diff(reference[:,2]))
+    angles=abs(wrap(yaws-start[2]));i=int(np.argmin(distance+.05*angles))
     if distance[i]>.25:return
-    yaw=reference[i,2]+fraction[i]*wrap(reference[i+1,2]-reference[i,2])
+    yaw=yaws[i]
     if abs(wrap(yaw-start[2]))>.4:return
     # This tail starts on the old route, not at the actual robot pose. Keep that
     # distinction explicit in the planner result; local trajectory generation
     # still starts at the current observed pose and checks all motion limits.
     yield reference[i:]
+    turns=wrap(np.diff(reference[:,2]));mid=reference[:-1,2]+turns/2
+    direction=np.where(length>1e-7,np.where(np.sum(delta*np.c_[np.cos(mid),np.sin(mid)],axis=1)<0,-1,1),
+                       np.where(turns<0,-2,2))
+    end=i+1
+    while end<len(direction) and direction[end]==direction[i]:end+=1
+    # Do not shortcut a later direction change or a planned turn.
+    if abs(direction[i])==2 and np.linalg.norm(reference[i,:2]-start[:2])<1e-6:
+        done=wrap(start[2]-reference[i,2]);total=turns[i]
+        if done*total>=-1e-10 and abs(done)<=abs(total)+1e-6:
+            candidate=compact_poses(np.vstack([start,reference[i+1:]]))
+            if len(candidate)>=2 and motion_valid(candidate,policy):yield candidate
     arc=np.r_[0.,np.cumsum(length)];progress=arc[i]+fraction[i]*length[i]
-    indices=sorted(set(min(len(reference)-1,int(np.searchsorted(arc,progress+d))) for d in (.8,1.5,2.5)))
+    indices=sorted(set(min(end,int(np.searchsorted(arc,progress+d))) for d in (.2,.5,.8,1.5,2.5)))
     for index in indices:
-        for path,total in connections(start,reference[index],policy['min_turning_radius_m'],.1):
-            if total>1.6*max(.1,arc[index]-progress)+.2:break
-            candidate=np.vstack([path,reference[index+1:]])
-            if motion_valid(candidate,policy):yield compact_poses(candidate)
+        # A connector must keep the current section's travel direction. It
+        # still passes exact-start kinematic and complete swept-grid checks.
+        directions=(True,) if direction[i]==-1 else (False,) if direction[i]==1 else ()
+        for reverse in directions:
+            if reverse and not policy['allow_reverse']:continue
+            for path,total in connections(start,reference[index],policy['min_turning_radius_m'],.1,reverse=reverse):
+                if total>1.6*max(.1,arc[index]-progress)+.2:break
+                candidate=np.vstack([path,reference[index+1:]])
+                if motion_valid(candidate,policy):yield compact_poses(candidate)

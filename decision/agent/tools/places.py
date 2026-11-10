@@ -11,6 +11,16 @@ from .. import ROOT
 class Catalog:
     def __init__(self, value):
         self.value = copy.deepcopy(value)
+        # Legacy object annotations become ordinary named points in memory;
+        # the source catalog is never edited and identities stay unchanged.
+        for landmark in self.value.pop('landmarks', []):
+            item=copy.deepcopy(landmark)
+            item['place_id']=item.pop('landmark_id')
+            item['pose']=item.pop('position')
+            item.setdefault('reference','base_link')
+            item.setdefault('status','manual_annotation')
+            self.value['places'].append(item)
+        value=self.value
         self.fingerprint = hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
         self.places = {p['place_id']: p for p in value['places']}
         self.condition = value.get('map_condition', 'complete')
@@ -23,14 +33,13 @@ class Catalog:
             if units.get('position','metres')!='metres' or units.get('angle','radians')!='radians':
                 raise ValueError('Complete-map annotations use metres and radians')
         self.regions = {p['region_id']: p for p in value.get('regions', [])}
-        self.landmarks = {p['landmark_id']: p for p in value.get('landmarks', [])}
-        if len(self.regions)!=len(value.get('regions',[])) or len(self.landmarks)!=len(value.get('landmarks',[])):
+        if len(self.regions)!=len(value.get('regions',[])):
             raise ValueError('Duplicate map annotation identity')
-        ids = [*self.places, *self.regions, *self.landmarks]
+        ids = [*self.places, *self.regions]
         if len(ids) != len(set(ids)):
             raise ValueError('Map annotation identities must be unique')
         if any(p.get('frame_id',value['frame_id'])!=value['frame_id'] for p in
-               [*self.places.values(),*self.regions.values(),*self.landmarks.values()]):
+               [*self.places.values(),*self.regions.values()]):
             raise ValueError('Annotations must use the catalog coordinate frame')
         for region in self.regions.values():
             polygon = region['polygon']
@@ -39,9 +48,6 @@ class Catalog:
             area = sum(a[0]*b[1]-b[0]*a[1] for a,b in zip(polygon,polygon[1:]+polygon[:1]))
             if abs(area) <= 1e-10:
                 raise ValueError('Region has zero signed area')
-        for landmark in self.landmarks.values():
-            if len(landmark['position']) != 2 or not all(math.isfinite(v) for v in landmark['position']):
-                raise ValueError('Landmark requires a finite XY position')
         if len(self.places) != len(value['places']):
             raise ValueError('Duplicate place identity')
         for p in self.places.values():
@@ -68,7 +74,7 @@ class Catalog:
         value['map_condition'] = selected
         if selected == 'none':
             value = dict(scope=value['scope'], floor_id=None, frame_id=None, map_condition='none',
-                         places=[], regions=[], landmarks=[], access={})
+                         places=[], regions=[], access={})
         return cls(value)
 
     def require_complete(self):
@@ -77,11 +83,10 @@ class Catalog:
 
     def annotations(self):
         if self.condition != 'complete':
-            return dict(points=[], regions=[], landmarks=[])
+            return dict(points=[], regions=[])
         fields = ('place_id', 'name', 'aliases', 'pose', 'reference', 'status', 'description')
         return dict(points=[dict({k:p[k] for k in fields if k in p}, display_id='P'+str(i+1)) for i,p in enumerate(self.places.values())],
-                    regions=[dict(copy.deepcopy(p),display_id='R'+str(i+1)) for i,p in enumerate(self.regions.values())],
-                    landmarks=[dict(copy.deepcopy(p),display_id='L'+str(i+1)) for i,p in enumerate(self.landmarks.values())])
+                    regions=[dict(copy.deepcopy(p),display_id='R'+str(i+1)) for i,p in enumerate(self.regions.values())])
 
     def lookup(self, name=''):
         if self.condition != 'complete':

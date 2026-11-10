@@ -124,6 +124,8 @@ def runtime_command(args, config, pose):
         command += ['--gpu', args.gpu]
     if args.runtime_config:
         command += ['--runtime-config', str(resolve(args.runtime_config))]
+    if getattr(args,'agent_observations',False):
+        command += ['--agent-observations']
     if args.environment_update_hz is not None:
         command += ['--environment-update-hz', str(args.environment_update_hz)]
     if args.environment_window_m is not None:
@@ -151,6 +153,7 @@ def parser():
     p.add_argument('--motion-config')
     p.add_argument('--motion-profile')
     p.add_argument('--runtime-config', help='Same machine scheduling override inspected by runtime.preflight')
+    p.add_argument('--agent-observations', action='store_true', help='Publish bounded RGB observations for the nonexecuting Agent')
     p.add_argument('--environment-update-hz', type=float, help='Override environment update rate (at most 10 Hz)')
     p.add_argument('--environment-window-m', type=float, help='Override the square local environment window in metres')
     p.add_argument('--vehicle-profile')

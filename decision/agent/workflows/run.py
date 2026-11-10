@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from .. import ROOT
 from ..core.session import AgentSession
-from ..core.store import Budget, Store
+from ..core.store import Store, shared_budget
 from ..tools.places import Catalog
 from .common import emit, make_loop
 from .drivers import SimulationDriver
@@ -31,7 +31,7 @@ def run_simulation(args):
                       model_requests=0 if args.actions else actor.requests, decision_turns=actor.requests,
                       exit_reason=actor.exit_reason, real_robot_success=False)
         if not args.actions:
-            budget = Budget(ROOT/'outputs/decision/agent/api_budget.sqlite')
+            budget = shared_budget()
             result['api_budget'] = budget.summary()
             budget.close()
         (out/'summary.json').write_text(json.dumps(result, ensure_ascii=False, indent=2)+'\n')

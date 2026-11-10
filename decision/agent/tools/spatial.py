@@ -22,14 +22,54 @@ def extent(grid):
     return [x, y, x+w*m['resolution'], y+h*m['resolution']]
 
 
+def display_extent(grid, annotations, *, extras=(), padding_m=1.):
+    """Crop unknown-only borders without hiding fixed annotations or live poses.
+
+    Return map coordinates, not a new raster or a new occupancy classification.
+    An entirely unknown map retains its original extent.
+    """
+    asset=np.asarray(extent(grid),dtype=float)
+    cells=grid.layers['occupancy'];known=(cells==0)|(cells==100)
+    rows=np.flatnonzero(known.any(axis=1));cols=np.flatnonzero(known.any(axis=0))
+    if len(rows) and len(cols):
+        origin=np.asarray(grid.metadata['origin_xy']);res=grid.metadata['resolution']
+        bounds=np.r_[origin+np.array([cols[0],rows[0]])*res-padding_m,
+                     origin+np.array([cols[-1]+1,rows[-1]+1])*res+padding_m]
+        bounds[:2]=np.maximum(bounds[:2],asset[:2]);bounds[2:]=np.minimum(bounds[2:],asset[2:])
+        policy='known_occupancy_with_padding'
+    else:
+        bounds=asset.copy();policy='all_unknown_original_extent'
+    fixed=[]
+    for point in annotations.get('points',[]):
+        if point.get('place_id')!='mission_start' and point.get('pose') is not None:
+            fixed.append(point['pose'][:2])
+    for region in annotations.get('regions',[]):fixed.extend(region['polygon'])
+    def include(points):
+        if not points:return False
+        xy=np.asarray(points,dtype=float)
+        if xy.ndim!=2 or xy.shape[1]!=2 or not np.isfinite(xy).all():raise ValueError('Invalid display positions')
+        low,high=xy.min(0),xy.max(0)
+        expand=bool((low<bounds[:2]).any() or (high>bounds[2:]).any())
+        if expand:
+            bounds[:2]=np.minimum(bounds[:2],low-padding_m)
+            bounds[2:]=np.maximum(bounds[2:],high+padding_m)
+        return expand
+    annotation_expanded=include(fixed)
+    live_expanded=include(list(extras))
+    return dict(bounds=bounds.tolist(),asset_bounds=asset.tolist(),policy=policy,padding_m=padding_m,
+                annotation_expanded=annotation_expanded,live_positions_expanded=live_expanded)
+
+
 def spatial_source_binding(inputs):
     scene = inputs.get('scene')
     geometry = inputs.get('geometry')
     return fingerprint(dict(global_binding=layer_binding(inputs['global_grid']),
         scene_binding=None if scene is None else scene.record['input_fingerprint'],
+        local_grid_binding=None if inputs.get('local_grid') is None else layer_binding(inputs['local_grid']),
+        local_grid_map_from_local=inputs.get('local_grid_map_from_local'),
         pose=inputs.get('pose'),local_pose=inputs.get('local_pose'),stamp_s=inputs.get('stamp_s'),
         clock_domain=inputs.get('clock_domain'),
-        footprint=None if geometry is None else geometry.footprint.tolist()))
+        footprint=None if geometry is None else geometry.footprint.tolist(),sensors=inputs.get('sensors')))
 
 
 def sample(grid, xy, transform=None):
@@ -44,11 +84,12 @@ def sample(grid, xy, transform=None):
 
 
 def map_font(size):
-    for path in ('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-                 '/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf',
-                 'C:/Windows/Fonts/msyh.ttc'):
+    for path,index in (('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',2),
+                       ('/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf',0),
+                       ('C:/Windows/Fonts/msyh.ttc',0)):
         if Path(path).is_file():
-            return ImageFont.truetype(path, size)
+            try:return ImageFont.truetype(path,size,index=index)
+            except OSError:continue
     return ImageFont.truetype('DejaVuSans.ttf', size)
 
 
@@ -74,15 +115,15 @@ def reference_layout(bounds, captions, *, max_edge=2048):
     if not all(math.isfinite(v) and v>0 for v in (span_x,span_y)):
         raise ValueError('Reference map requires finite nonempty bounds')
     ratio = max_edge/1024
-    font,small = map_font(round(15*ratio)),map_font(round(16*ratio))
+    font,small = map_font(round(12*ratio)),map_font(round(12*ratio))
     title = 'MAP XY metres | x right, y up | yaw CCW radians'
     minimum_width = min(max_edge,round(320*ratio))
 
     def text_layout(width):
         headers = wrap_map_text(title,font,width-36*ratio)
         lines = [line for caption in captions for line in wrap_map_text(caption,small,width-36*ratio)]
-        top = round((34+24*len(headers))*ratio)
-        legend_height = round((32+24*len(lines))*ratio)
+        top = round((34+20*len(headers))*ratio)
+        legend_height = round((30+20*len(lines))*ratio)
         overhead = top+30*ratio+legend_height
         return headers,lines,top,legend_height,overhead
 
@@ -110,25 +151,107 @@ def reference_layout(bounds, captions, *, max_edge=2048):
         width = fitted
 
 
+def semantic_label_layout(entries, font, frame, ratio):
+    """Place point and region labels around nearby anchors with short leaders."""
+    if not entries:return []
+    left,top,right,bottom=frame
+    anchors=np.asarray([e['anchor'] for e in entries],float)
+    parents=list(range(len(entries)))
+    def root(i):
+        while parents[i]!=i:
+            parents[i]=parents[parents[i]];i=parents[i]
+        return i
+    for i in range(len(entries)):
+        for j in range(i):
+            if np.linalg.norm(anchors[i]-anchors[j])<=55*ratio:
+                parents[root(i)]=root(j)
+    groups={}
+    for i in range(len(entries)):groups.setdefault(root(i),[]).append(i)
+    def crossed(a,b,c,d):
+        def cross(p,q,r):return (q[0]-p[0])*(r[1]-p[1])-(q[1]-p[1])*(r[0]-p[0])
+        return cross(a,b,c)*cross(a,b,d)<-1e-8 and cross(c,d,a)*cross(c,d,b)<-1e-8
+    def hits_box(a,b,box):
+        lo,hi=0.,1.
+        for p,d,low,high in zip(a,(b[0]-a[0],b[1]-a[1]),box[:2],box[2:]):
+            if abs(d)<1e-9:
+                if p<low or p>high:return False
+            else:
+                t1,t2=(low-p)/d,(high-p)/d
+                lo=max(lo,min(t1,t2));hi=min(hi,max(t1,t2))
+                if lo>hi:return False
+        return True
+    def near_line(a,b,p):
+        delta=np.asarray(b)-a;length=float(delta@delta)
+        t=0. if length<1e-10 else np.clip((np.asarray(p)-a)@delta/length,0.,1.)
+        return np.linalg.norm(np.asarray(p)-(np.asarray(a)+t*delta))<5*ratio
+    result=[]
+    # Top-to-bottom ordering preserves the spatial order of adjacent leaders.
+    for index in sorted(range(len(entries)),key=lambda i:(anchors[i,1],anchors[i,0],i)):
+        e=entries[index];x,y=anchors[index];size=font.getbbox(e['text']);tw=size[2]-size[0];th=size[3]-size[1]
+        if tw>right-left-8:
+            e=dict(e,text=e['text'].split(' ',1)[0]);size=font.getbbox(e['text']);tw=size[2]-size[0];th=size[3]-size[1]
+        group=anchors[groups[root(index)]];low=group.min(0);high=group.max(0);mid=(low[0]+high[0])/2
+        sides=('left','right') if x<mid else ('right','left')
+        offsets=(0.,-1.,1.,-2.,2.,-3.,3.)
+        region=e.get('region_bounds')
+        if region is not None:
+            low=np.minimum(low,region[:2]);high=np.maximum(high,region[2:])
+        proposals=[]
+        for side in sides:
+            tx=low[0]-10*ratio-tw-size[0] if side=='left' else high[0]+10*ratio-size[0]
+            for offset in offsets:
+                proposals.append((tx,y-(size[1]+size[3])/2+offset*(th+5*ratio)))
+        if region is not None:
+            for side in ('top','bottom'):
+                ty=region[1]-10*ratio-size[3] if side=='top' else region[3]+10*ratio-size[1]
+                for offset in offsets:
+                    proposals.append((x-(size[0]+size[2])/2+offset*(tw+5*ratio),ty))
+        options=[]
+        for tx,ty in proposals:
+            tx1=min(max(tx,left+3-size[0]),right-4-size[2])
+            ty1=min(max(ty,top+3-size[1]),bottom-4-size[3])
+            box=(tx1+size[0],ty1+size[1],tx1+size[2],ty1+size[3])
+            end=(max(box[0],min(x,box[2])),max(box[1],min(y,box[3])))
+            penalty=0.
+            for p in anchors:
+                if box[0]-4*ratio<=p[0]<=box[2]+4*ratio and box[1]-4*ratio<=p[1]<=box[3]+4*ratio:penalty+=10000
+            for j,p in enumerate(anchors):
+                if j!=index and near_line((x,y),end,p):penalty+=3000
+                other_region=entries[j].get('region_bounds')
+                if j!=index and other_region is not None and not (
+                        other_region[0]<=x<=other_region[2] and other_region[1]<=y<=other_region[3]):
+                    if hits_box((x,y),end,other_region):penalty+=3000
+            for old in result:
+                other=old['box'];pad=3*ratio
+                if box[0]<other[2]+pad and box[2]>other[0]-pad and box[1]<other[3]+pad and box[3]>other[1]-pad:penalty+=10000
+                if crossed((x,y),end,old['anchor'],old['end']):penalty+=10000
+                if hits_box((x,y),end,other) or hits_box(old['anchor'],old['end'],box):penalty+=5000
+            penalty+=float(np.hypot(end[0]-x,end[1]-y))*.1
+            options.append((penalty,dict(e,index=index,anchor=(x,y),end=end,box=box,text_xy=(tx1,ty1))))
+        result.append(min(options,key=lambda item:item[0])[1])
+    return result
+
+
 def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_local=None, tracks=(), geometry=None,
-           size=(896,768), detailed=False, trajectory=(), local_view=False):
+           size=(896,768), detailed=False, trajectory=(), local_view=False, sensors=None):
     annotations = catalog.annotations()
     legend = []
     if detailed:
-        for kind in ('points','regions','landmarks'):
+        for kind in ('points','regions'):
             for item in annotations[kind]:
                 if kind=='points' and item.get('pose') is None:
                     continue
                 legend.append(item['display_id']+' '+item.get('name',item.get('description','')))
     captions = ['Pale: prior free | cyan: observed free | dark: occupied | grey: unknown',
-                'Orange robot | blue trail | red P/people | green R | purple L']
+                'Orange robot | blue trail | red P/people | green R']
     layout = reference_layout(bounds,[*captions,'    '.join(legend)]) if size is None else None
     width,height = layout['size'] if layout else size
     ratio = layout['ratio'] if layout else width/896
     canvas = Image.new('RGB', (width,height), '#f2f4f7')
     draw = ImageDraw.Draw(canvas)
-    font = map_font(round((15 if detailed else 19)*ratio))
-    small = map_font(round(16*ratio))
+    font = map_font(round((12 if detailed else 16)*ratio))
+    label_font = map_font(max(10,round((10 if detailed else 14)*ratio)))
+    small = map_font(round(12*ratio))
     lines = []
     for item in legend:
         candidate = (lines[-1]+'    '+item) if lines else item
@@ -139,6 +262,8 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
     legend_height = layout['legend_height'] if layout else (80+len(lines)*24)*ratio
     x0,y0,x1,y1 = map(float,bounds)
     top = layout['top'] if layout else round(58*ratio)
+    if local_view and sensors and (sensors.get('camera') or {}).get('view',{}).get('status') == 'approximate_pinhole':
+        top = max(top,round(72*ratio))
     scale = min((width-136*ratio)/(x1-x0), (height-top-30*ratio-legend_height)/(y1-y0))
     w,h = max(1,round((x1-x0)*scale)),max(1,round((y1-y0)*scale))
     left = (width-w)//2
@@ -157,16 +282,30 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
     canvas.paste(Image.fromarray(rgb.reshape(h,w,3)), (left,top))
     def pixel(point):
         return (left+(point[0]-x0)*scale, top+(y1-point[1])*scale)
+    if local_view and pose is not None and sensors and sensors.get('status') == 'configured':
+        camera = sensors.get('camera') or {}
+        view = camera.get('view') or {}
+        if view.get('status') == 'approximate_pinhole':
+            offset = np.asarray(camera['position_m'][:2])
+            rotation = np.array([[math.cos(pose[2]),-math.sin(pose[2])],
+                                 [math.sin(pose[2]),math.cos(pose[2])]])
+            origin = np.asarray(pose[:2])+rotation@offset
+            for yaw in view['edge_yaw_rad']:
+                direction = pose[2]+yaw
+                end = origin+2.5*np.array([math.cos(direction),math.sin(direction)])
+                draw.line([pixel(origin),pixel(end)],fill='#7848bf',width=max(1,round(2*ratio)))
+            cx,cy = pixel(origin)
+            draw.ellipse((cx-3*ratio,cy-3*ratio,cx+3*ratio,cy+3*ratio),fill='#7848bf')
     occupied_labels = []
     def label(point,text,color,below=False):
         x,y = pixel(point)
         if not (left<=x<=left+w and top<=y<=top+h):
             return
-        size = draw.textbbox((0,0),text,font=font)
+        size = draw.textbbox((0,0),text,font=label_font)
         tw,th = size[2]-size[0],size[3]-size[1]
         if tw>w-8 and detailed:
             text = text.split(' ',1)[0]
-            size = draw.textbbox((0,0),text,font=font)
+            size = draw.textbbox((0,0),text,font=label_font)
             tw,th = size[2]-size[0],size[3]-size[1]
         candidates = [(x-35*ratio if below else x+10*ratio,y+12*ratio if below else y-23*ratio)]
         for step in (1,2,3):
@@ -176,15 +315,14 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
         for choice,(tx,ty) in enumerate(candidates):
             tx = min(max(tx,left+3),left+w-tw-4)
             ty = min(max(ty,top+2-size[1]),top+h-size[3]-3)
-            box = draw.textbbox((tx,ty),text,font=font)
+            box = draw.textbbox((tx,ty),text,font=label_font)
             if not any(box[0]<old[2]+4 and box[2]>old[0]-4 and box[1]<old[3]+4 and box[3]>old[1]-4
                        for old in occupied_labels):
                 break
         occupied_labels.append(box)
         if choice>0:
             draw.line([(x,y),(max(box[0],min(x,box[2])),max(box[1],min(y,box[3])))],fill=color,width=max(1,round(ratio)))
-        draw.rectangle((box[0]-2,box[1]-2,box[2]+2,box[3]+2),fill='#ffffff')
-        draw.text((tx,ty),text,fill=color,font=font)
+        draw.text((tx,ty),text,fill=color,font=label_font,stroke_width=1,stroke_fill='#d4d8d9')
     def title(item):
         return item['display_id']+(' '+item.get('name',item.get('description','')) if detailed else '')
     for segment in trajectory:
@@ -194,23 +332,28 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
         elif points:
             x,y = points[0]
             draw.ellipse((x-2*ratio,y-2*ratio,x+2*ratio,y+2*ratio),fill='#1778b5')
+    semantic=[]
     for region in annotations['regions']:
-        draw.line([pixel(p) for p in [*region['polygon'],region['polygon'][0]]],fill='#269255',width=max(2,round(3*ratio)))
-        label(region['polygon'][0],title(region),'#14723b')
+        vertices=np.asarray([pixel(p) for p in region['polygon']])
+        draw.line([*map(tuple,vertices),tuple(vertices[0])],fill='#269255',width=max(2,round(3*ratio)))
+        anchor=tuple(vertices[0]);region_bounds=np.r_[vertices.min(0),vertices.max(0)]
+        if left<=anchor[0]<=left+w and top<=anchor[1]<=top+h:
+            semantic.append(dict(anchor=anchor,text=title(region),color='#14723b',point=False,region_bounds=region_bounds))
     for point in annotations['points']:
         if point.get('pose') is None:
             continue
         x,y = pixel(point['pose'])
         if left<=x<=left+w and top<=y<=top+h:
-            radius = 6*ratio
-            draw.ellipse((x-radius,y-radius,x+radius,y+radius),fill='#bc3053')
-            label(point['pose'],title(point),'#a41b3d')
-    for landmark in annotations['landmarks']:
-        x,y = pixel(landmark['position'])
-        if left<=x<=left+w and top<=y<=top+h:
-            radius = 5*ratio
-            draw.rectangle((x-radius,y-radius,x+radius,y+radius),fill='#7040a0')
-            label(landmark['position'],title(landmark),'#7040a0')
+            semantic.append(dict(anchor=(x,y),text=title(point),color='#a41b3d',point=True))
+    placed=semantic_label_layout(semantic,label_font,(left,top,left+w,top+h),ratio)
+    for item in placed:
+        draw.line([item['anchor'],item['end']],fill=item['color'],width=max(1,round(ratio)))
+    for item in placed:
+        x,y=item['anchor']
+        if item['point']:
+            radius=3.2*ratio;draw.ellipse((x-radius,y-radius,x+radius,y+radius),fill='#bc3053')
+        draw.text(item['text_xy'],item['text'],fill=item['color'],font=label_font,stroke_width=1,stroke_fill='#d4d8d9')
+        occupied_labels.append(item['box'])
     for track in tracks:
         if not track.get('confirmed') or track.get('state') != 'observed':
             continue
@@ -248,12 +391,14 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
         draw.text((max(2,left-55*ratio),y-10*ratio),f'{value:.1f}',font=small,fill='#223548')
     headers = layout['headers'] if layout else ['MAP XY metres | x right, y up | yaw CCW radians']
     for i,line in enumerate(headers):
-        draw.text((18*ratio,(10+i*24)*ratio),line,font=font,fill='#162c43')
+        draw.text((18*ratio,(10+i*(20 if layout else 24))*ratio),line,font=font,fill='#162c43')
     if local_view and local_grid is None:
         draw.text((18*ratio,34*ratio),'STATIC PRIOR ONLY | no current local grid',font=small,fill='#8b4c15')
+    if local_view and sensors and (sensors.get('camera') or {}).get('view',{}).get('status') == 'approximate_pinhole':
+        draw.text((18*ratio,48*ratio),'Purple: approximate camera FOV, not visibility',font=small,fill='#7848bf')
     footer = height-legend_height+15*ratio
     for i,line in enumerate(layout['lines'] if layout else [*captions,*lines]):
-        draw.text((18*ratio,footer+i*24*ratio),line,font=small,fill='#263b51')
+        draw.text((18*ratio,footer+i*(20 if layout else 24)*ratio),line,font=small,fill='#263b51')
     buffer = io.BytesIO()
     canvas.save(buffer,format='PNG')
     return buffer.getvalue()
@@ -282,12 +427,13 @@ class ReferenceMap:
         static = Catalog(value)
         if grid.metadata['frame_id'] != static.value['frame_id']:
             raise ValueError('Reference map and annotations use different frames')
-        bounds = extent(grid)
+        display=display_extent(grid,static.annotations());bounds=display['bounds']
         image = render(static,grid,bounds,None,size=None,detailed=True)
         with Image.open(io.BytesIO(image)) as picture:
             image_size = list(picture.size)
         record = dict(frame_id=static.value['frame_id'],units=dict(position='metres',angle='radians'),
-                      map_condition='complete',bounds=bounds,global_binding=layer_binding(grid),
+                      map_condition='complete',bounds=bounds,asset_bounds=display['asset_bounds'],
+                      display_crop=display,global_binding=layer_binding(grid),
                       annotations=static.annotations(),image_role='static_annotated_global_map',
                       image_sha256=hashlib.sha256(image).hexdigest(),image_size=image_size,
                       image_layout='map_aspect_and_wrapped_legend',max_image_edge=2048,
@@ -329,7 +475,18 @@ class SpatialView:
             people = scene.record['people']
             if people['status']=='valid':
                 tracks = people['data']['tracks']
-        full = extent(global_grid)
+        elif inputs.get('local_grid') is not None:
+            local=inputs['local_grid']
+            matrix=np.asarray(inputs.get('local_grid_map_from_local'),dtype=float)
+            if matrix.shape != (4,4) or not np.isfinite(matrix).all():
+                raise ValueError('Local occupancy requires its measured map transform')
+            transform=matrix[np.ix_([0,1,3],[0,1,3])]
+        extras=[]
+        if pose is not None:extras.append(pose[:2])
+        for segment in trajectory:
+            extras.extend(p['pose'][:2] for p in segment['samples'])
+        display=display_extent(global_grid,catalog.annotations(),extras=extras)
+        full=display['bounds']
         if bounds is None:
             centre = np.array(pose[:2]) if pose is not None else (np.array(full[:2])+full[2:])/2
             bounds = [*(centre-3.),*(centre+3.)]
@@ -339,19 +496,21 @@ class SpatialView:
             raise ValueError('Map view and annotation coordinate frames differ')
         images = (render(catalog,global_grid,full,pose,geometry=inputs.get('geometry'),size=(768,640),trajectory=trajectory),
                   render(catalog,global_grid,bounds,pose,local_grid=local,map_from_local=transform,
-                         tracks=tracks,geometry=inputs.get('geometry'),local_view=True))
+                         tracks=tracks,geometry=inputs.get('geometry'),local_view=True,sensors=inputs.get('sensors')))
         record = dict(catalog_fingerprint=catalog.fingerprint,map_condition=catalog.condition,
             frame_id=catalog.value['frame_id'],target_reference='base_link',units=dict(position='metres',angle='radians'),
-            full_bounds=full,local_bounds=list(bounds),pose=copy.deepcopy(pose),input_source_binding=spatial_source_binding(inputs),
+            full_bounds=display['asset_bounds'],overview_bounds=full,display_crop=display,
+            local_bounds=list(bounds),pose=copy.deepcopy(pose),input_source_binding=spatial_source_binding(inputs),
             source_stamp_s=inputs.get('stamp_s'),clock_domain=inputs.get('clock_domain'),
             global_binding=layer_binding(global_grid),local_binding=None if local is None else layer_binding(local),
-            local_observation_id=None if scene is None else scene.record['observation_id'],
+            local_observation_id=inputs.get('local_grid_observation_id') if scene is None else scene.record['observation_id'],
             map_from_local=None if transform is None else transform.tolist(),
             local_source='current_measurement' if local is not None else 'static_prior_only',
             annotations=catalog.annotations(),
             robot_footprint=None if inputs.get('geometry') is None else inputs['geometry'].footprint.tolist(),
             geometry_assumed=None if inputs.get('geometry') is None else inputs['geometry'].assumed,
-            heading_reference='base_link_x',camera_extrinsics_status='not_provided',
+            heading_reference='base_link_x',camera_extrinsics_status=(inputs.get('sensors') or {}).get('status','not_provided'),
+            camera_view=copy.deepcopy(((inputs.get('sensors') or {}).get('camera') or {}).get('view',dict(status='unavailable'))),
             trajectory=dict(segment_count=len(trajectory),sample_count=sum(len(s['samples']) for s in trajectory),
                             source_binding=fingerprint(trajectory),scope='measured_poses_only_not_planned_route'),
             image_roles=['trajectory_global_overview','target_or_robot_local_map'],

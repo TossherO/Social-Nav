@@ -12,7 +12,7 @@ from perception.visualization.edit_geometry import validate_polygon
 from .tools.places import Catalog
 
 
-KINDS = {'点': ('places', 'place_id'), '区域': ('regions', 'region_id'), '地标': ('landmarks', 'landmark_id')}
+KINDS = {'点': ('places', 'place_id'), '区域': ('regions', 'region_id')}
 
 
 class Annotation:
@@ -39,10 +39,10 @@ class Annotation:
             self.value = dict(scope='development_prior',map_condition='complete',floor_id=floor_id,
                 frame_id=m['frame_id'],map_asset=ref['path'],map_snapshot_id=m['snapshot_id'],
                 localization_map_id=self.map_id,source='manual_semantic_annotation',
-                access={},places=[],regions=[],landmarks=[])
-        self.value.setdefault('regions',[]);self.value.setdefault('landmarks',[])
+                access={},places=[],regions=[])
+        self.value.setdefault('regions',[])
         self.value.setdefault('access',{})
-        Catalog(self.value)
+        self.value=Catalog(self.value).value
         self.undo = []
 
     def update(self, kind, identity, name, aliases, coordinates, description='', previous=None):
@@ -71,8 +71,8 @@ class Annotation:
                             cross(a,b,c)*cross(a,b,d)<=0 and cross(c,d,a)*cross(c,d,b)<=0):
                         raise ValueError('区域边不能相交')
             coordinates = polygon.tolist()
-        elif coordinates.shape not in ([(2,), (3,)] if kind=='点' else [(2,)]):
-            raise ValueError('点使用 [x,y] 或 [x,y,yaw]，地标使用 [x,y]')
+        elif coordinates.shape not in [(2,), (3,)]:
+            raise ValueError('点使用 [x,y] 或 [x,y,yaw]')
         elif not np.isfinite(coordinates).all():
             raise ValueError('坐标必须为有限数值')
         else:
@@ -86,8 +86,7 @@ class Annotation:
                 'source':'manual_map_annotation'}
         if description.strip():item['description'] = description.strip()
         if kind=='点':item.update(pose=coordinates,reference='base_link',status='manual_annotation',allow_shadow=True)
-        elif kind=='区域':item['polygon'] = coordinates
-        else:item['position'] = coordinates
+        else:item['polygon'] = coordinates
         value[group].append(item)
         Catalog(value)
         self.undo.append(self.value);self.value=value
@@ -173,7 +172,7 @@ def make_figure(annotation, output, geometry=None):
         artists.clear()
         for kind,(group,field) in KINDS.items():
             for item in annotation.value[group]:
-                point=item.get('pose') if kind=='点' else item.get('position') if kind=='地标' else item.get('polygon')
+                point=item.get('pose') if kind=='点' else item.get('polygon')
                 if point is None:continue
                 if kind=='区域':
                     p=np.asarray(point);line,=ax.plot(*np.vstack([p,p[0]]).T,color='#168a55',lw=2);artists.append(line);xy=p.mean(axis=0)
@@ -205,7 +204,7 @@ def make_figure(annotation, output, geometry=None):
         item=next(p for p in annotation.value[group] if p[field]==ident)
         selected[0]=(group,ident);mode.setCurrentText(kind);identity.setText(ident);name.setText(item['name'])
         aliases.setText(','.join(item.get('aliases',[])));description.setText(item.get('description',''))
-        coords.setText(json.dumps(item.get({'点':'pose','区域':'polygon','地标':'position'}[kind]),ensure_ascii=False));vertices.clear();redraw()
+        coords.setText(json.dumps(item.get({'点':'pose','区域':'polygon'}[kind]),ensure_ascii=False));vertices.clear();redraw()
 
     def apply_edit():
         try:
@@ -273,7 +272,7 @@ def make_figure(annotation, output, geometry=None):
 
 
 def main():
-    p=argparse.ArgumentParser(description='对项目静态环境地图标注 Agent 点、区域与地标')
+    p=argparse.ArgumentParser(description='对项目静态环境地图标注 Agent 点与区域')
     p.add_argument('--static-map',required=True);p.add_argument('--floor-id',required=True)
     p.add_argument('--catalog',help='只读导入已有语义目录，必须与地图匹配')
     p.add_argument('--vehicle-profile',help='可选轮椅档案，用于显示已指定朝向的车体轮廓')

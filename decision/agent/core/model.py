@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 import httpx
 import jsonschema
 from .. import ROOT
-from .store import Budget, Store, encode
+from .store import Store, encode, shared_budget
 from .media import image_part, png_part
 from .context import project_dialogue, view_context, visual_inputs
 from perception.environment.context import fingerprint
@@ -277,7 +277,7 @@ class Model:
 
 def api_work(config, session, payload, observation=None, spatial_view=None, *, cache_mode='implicit'):
     # Background operations own their database connections and credentials.
-    store, budget = Store(session), Budget(ROOT/'outputs/decision/agent/api_budget.sqlite')
+    store, budget = Store(session), shared_budget()
     try:
         return Model(config,budget,store,cache_mode=cache_mode).decide(payload,observation=observation,spatial_view=spatial_view)
     finally:

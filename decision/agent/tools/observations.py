@@ -1,11 +1,14 @@
 """Causal bounded Agent observations, independent of local T1/T2/T3 windows."""
 from dataclasses import dataclass
 import copy
+import base64
+import binascii
 import hashlib
 import io
 import json
 from pathlib import Path
 import sqlite3
+import zlib
 import numpy as np
 from PIL import Image
 from perception.environment.context import fingerprint
@@ -31,7 +34,7 @@ class Observation:
         return self
 
     @classmethod
-    def from_scene(cls, scene, *, rgb=None, source=None, geometry=None):
+    def from_scene(cls, scene, *, rgb=None, source=None, geometry=None, sensors=None, include_local_grid=False):
         from navigation.planning.footprint import VehicleGeometry
         from .. import ROOT
         scene.verify()
@@ -73,6 +76,10 @@ class Observation:
                                unknown_cells=int(np.count_nonzero(cells == -1))),
                  people=dict(status=s['people']['status'], count=(len(s['people']['data']['tracks']) if s['people']['status'] == 'valid' else None)),
                  rgb=bound_rgb, source=copy.deepcopy(source), scope='observed_input_not_execution_feedback')
+        if sensors is not None:
+            r['sensors'] = copy.deepcopy(sensors)
+        if include_local_grid and s['geometry']['status'] == 'valid' and prior.get('valid'):
+            r['local_grid'] = local_grid_record(scene)
         r['input_fingerprint'] = fingerprint(r)
         return cls(r, image).verify()
 
@@ -89,7 +96,57 @@ class Observation:
             value['people']['count'] = None
         value['rgb'] = {k:copy.deepcopy(self.record['rgb'][k]) for k in
             ('status','stamp_s','age_s','frame_id','shape','reason') if k in self.record['rgb']}
+        if 'sensors' in self.record:
+            value['sensors'] = copy.deepcopy(self.record['sensors'])
         return value
+
+    def local_grid(self):
+        """Decode only the bound occupancy projection, never an arbitrary scene."""
+        self.verify()
+        item = self.record.get('local_grid')
+        if item is None:
+            return None
+        from perception.environment.layers import GridSnapshot
+        shape = item['metadata']['shape']
+        if len(shape) != 2 or any(type(n) is not int or not 0 < n <= 600 for n in shape):
+            raise ValueError('Invalid local Agent grid size')
+        metadata=item['metadata']
+        if (not isinstance(metadata.get('frame_id'),str) or not metadata['frame_id'] or
+                not isinstance(metadata.get('snapshot_id'),str) or not metadata['snapshot_id'] or
+                np.shape(metadata.get('origin_xy')) != (2,) or
+                not np.isfinite(metadata['origin_xy']).all() or
+                not isinstance(metadata.get('resolution'),(int,float)) or
+                not np.isfinite(metadata['resolution']) or metadata['resolution'] <= 0):
+            raise ValueError('Invalid local Agent grid geometry')
+        try:
+            data = base64.b64decode(item['occupancy_zlib_base64'],validate=True)
+            decoder = zlib.decompressobj()
+            raw = decoder.decompress(data,shape[0]*shape[1]+1)
+        except (binascii.Error,zlib.error) as error:
+            raise ValueError('Invalid local Agent grid encoding') from error
+        if len(raw) != shape[0]*shape[1] or not decoder.eof or decoder.unused_data:
+            raise ValueError('Invalid local Agent grid payload')
+        cells = np.frombuffer(raw,dtype=np.int8).reshape(shape)
+        if not np.isin(cells,[-1,0,100]).all():
+            raise ValueError('Invalid local occupancy values')
+        return GridSnapshot(copy.deepcopy(item['metadata']),dict(occupancy=cells))
+
+
+def local_grid_record(scene):
+    """Capture a bounded, immutable occupancy-only projection of a sealed scene."""
+    grid = scene.geometry
+    cells = np.asarray(grid.layers['occupancy'])
+    if cells.dtype != np.int8 or cells.ndim != 2 or max(cells.shape) > 600:
+        raise ValueError('Invalid Agent local occupancy source')
+    metadata = {k:copy.deepcopy(grid.metadata[k]) for k in ('frame_id','shape','resolution','origin_xy','snapshot_id')}
+    if list(cells.shape) != metadata['shape']:
+        raise ValueError('Agent local occupancy shape mismatch')
+    encoded=base64.b64encode(zlib.compress(cells.tobytes(),1)).decode('ascii')
+    if len(encoded) > 500000:
+        raise ValueError('Agent local occupancy exceeds IPC budget')
+    return dict(metadata=metadata,occupancy_zlib_base64=encoded,
+                map_from_local=copy.deepcopy(scene.record['prior'].get('map_from_local')),
+                source_scene_binding=scene.record['input_fingerprint'])
 
 
 class ObservationSet:

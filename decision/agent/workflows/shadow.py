@@ -9,7 +9,7 @@ from .drivers import SavedObservationDriver
 from ..adapters.shadow import SavedShadowNavigation, RuntimeShadowNavigation
 from ..tools.observations import ObservationSet
 from ..adapters.runtime import RuntimeClient
-from ..core.store import Store, Budget
+from ..core.store import Store, shared_budget
 from ..core.session import AgentSession
 
 
@@ -51,7 +51,7 @@ def run(args):
                       decision_turns=actor.requests, exit_reason=actor.exit_reason,
                       real_robot_success=False, navigation_execution_verified=False)
         if not args.actions:
-            budget = Budget(ROOT/'outputs/decision/agent/api_budget.sqlite')
+            budget = shared_budget()
             result['api_budget'] = budget.summary()
             budget.close()
         (output/'summary.json').write_text(json.dumps(result, ensure_ascii=False, indent=2)+'\n')

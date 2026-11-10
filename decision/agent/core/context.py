@@ -21,15 +21,23 @@ def robot_context(navigation):
                   source='active_adapter_motion' if motion is not None else 'not_published_by_this_adapter',
                   parameters_assumed=None if motion is None else motion.get('parameters_assumed'),
                   **{key:None if motion is None else motion.get(key) for key in keys})
+    observation = getattr(navigation,'value',{}).get('observation') or getattr(getattr(navigation,'current',None),'record',{}) or {}
+    current = navigation.snapshot()
+    valid = (not current.get('input_stale') and observation.get('clock_domain') == current.get('clock_domain') and
+             observation.get('local_identity') == [current.get(k) for k in ('session_id','generation','frame_id')] and
+             observation.get('map_binding') == current.get('map_binding') and
+             0 <= current.get('stamp_s',0)-observation.get('stamp_s',-float('inf')) <= 3.)
+    sensors = copy.deepcopy(observation.get('sensors',dict(status='unavailable',reason='no_bound_sensor_context')) if valid
+                            else dict(status='unavailable',reason='sensor_observation_not_current'))
     return dict(type='intelligent_wheelchair',scope=navigation.scope,pose_reference='base_link',kinematics_interface='differential',
                 velocity_fields=['forward_mps','yaw_rate_rad_s'],lateral_command_supported=False,
-                body=body,motion=limits,physical_platform_performance_verified=False)
+                body=body,motion=limits,sensors=sensors,physical_platform_performance_verified=False)
 
 
 def same_fixed_annotations(annotations, reference):
     def fixed(value):
         return dict(points=[p for p in value.get('points',[]) if p['place_id']!='mission_start'],
-                    regions=value.get('regions',[]),landmarks=value.get('landmarks',[]))
+                    regions=value.get('regions',[]))
     return fixed(annotations)==fixed(reference.record['annotations'])
 
 

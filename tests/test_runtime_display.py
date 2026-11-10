@@ -1,5 +1,5 @@
 """Display sampling is independent, bounded and never refreshes observation time."""
-from collections import deque
+from collections import deque, OrderedDict
 from pathlib import Path
 import tempfile
 import threading
@@ -99,6 +99,7 @@ class RuntimeDisplayTests(unittest.TestCase):
         view=NavigationView(geometry,load_config(),height_mode='plane').update(row,None,mono=0.)
         transforms=[];markers=[];display=object.__new__(RuntimeDisplay);display.rospy=rospy
         display.map_tf=SimpleNamespace(publish=transforms.append)
+        display._map_tf_seen=OrderedDict()
         display.publishers={name:SimpleNamespace(get_num_connections=lambda:0)
             for name in ('path','lidar_path','reference','trajectory')}
         display.publishers['navigation']=SimpleNamespace(get_num_connections=lambda:1,publish=markers.append)
@@ -118,6 +119,20 @@ class RuntimeDisplayTests(unittest.TestCase):
         display._publish_map_transform(dict(row,has_map_pose=False))
         display._publish_map_transform(dict(row,health=1))
         self.assertEqual(len(transforms),1)
+        # Scan, navigation and a changed localization session must not publish
+        # the same TF frame pair at the same ROS timestamp twice.
+        display._publish_map_transform(row)
+        display._publish_map_transform(dict(row,session_id='next',generation=1,map_position=[6.,6.,0.]))
+        self.assertEqual(len(transforms),1)
+        # A different, even out-of-order measurement keeps its source stamp.
+        display._publish_map_transform(dict(row,stamp_s=10.05))
+        display._publish_map_transform(dict(row,stamp_s=10.2))
+        display._publish_map_transform(dict(row,stamp_s=10.05))
+        self.assertEqual(len(transforms),3)
+        self.assertEqual([t.transforms[0].header.stamp for t in transforms],
+            [rospy.Time.from_sec(x) for x in (10.1,10.05,10.2)])
+        display._publish_map_transform(dict(row,stamp_s=10.2,map_frame='other_map'))
+        self.assertEqual(len(transforms),4)
 
     def test_map_topics_use_navigation_cells_and_keep_raw_diagnostic(self):
         from perception.visualization.surface import DisplayGrids

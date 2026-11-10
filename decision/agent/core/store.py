@@ -61,8 +61,8 @@ class Budget:
     A shared ledger prevents a new session resetting this development allowance.
     """
     def __init__(self, path, limit=0.8, input_rate=1.2, output_rate=4.0):
-        if not 0 < limit < 1 or min(input_rate, output_rate) <= 0:
-            raise ValueError('Development allowance must be positive and below one RMB')
+        if not 0 < limit <= 10 or min(input_rate, output_rate) <= 0:
+            raise ValueError('Development allowance must be positive and at most ten RMB')
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, timeout=10)
         self.db.execute('CREATE TABLE IF NOT EXISTS calls (id TEXT PRIMARY KEY, reserved REAL, charged REAL, status TEXT, record TEXT)')
@@ -104,3 +104,19 @@ class Budget:
 
     def close(self):
         self.db.close()
+
+
+def shared_budget(root=None):
+    """Use the local allowance with the same persistent shared ledger."""
+    if root is None:
+        from .. import ROOT
+        root = ROOT
+    root = Path(root)
+    settings = root/'configs/agent_budget.local.json'
+    limit = .8
+    if settings.exists():
+        value = json.loads(settings.read_text())
+        if not isinstance(value,dict) or set(value) != {'limit_rmb'} or type(value['limit_rmb']) not in (int,float):
+            raise ValueError('Invalid local Agent budget settings')
+        limit = value['limit_rmb']
+    return Budget(root/'outputs/decision/agent/api_budget.sqlite',limit=limit)

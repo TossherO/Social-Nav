@@ -39,6 +39,7 @@ class ReferenceRuntime:
         self.diagnostics=False;self.last_reply=None;self.start_evidence=None
         self.failure=None
         self.retry_after_observation=None
+        self.control_blocked_since=None
 
     def __enter__(self):return self
     def __exit__(self,*args):self.close()
@@ -54,6 +55,7 @@ class ReferenceRuntime:
         self.reason=reason;self.blocked=False;self.need_replan=False;self.last_sent=self.next_retry=-np.inf
         self.failure=None
         self.retry_after_observation=None
+        self.control_blocked_since=None
         if self.worker.job is not None:self.worker.restart()
         self._event('invalidated',reason=reason)
 
@@ -91,6 +93,23 @@ class ReferenceRuntime:
 
     def request_replan(self):self.need_replan=True
 
+    def note_control(self,packet,*,monotonic_s=None):
+        """Request an early refresh after sustained lack of local progress.
+
+        This is only a planning hint: DWA and independent safety continue to
+        check every candidate, without waiting for the background worker.
+        """
+        proposal=packet.get('proposal') or {};velocity=proposal.get('velocity') or [0.,0.]
+        goal=packet.get('recorded_goal_diagnostic') or {}
+        stopped=(proposal.get('status')=='candidate' and len(velocity)>=2 and
+            abs(velocity[0])<.03 and abs(velocity[1])<.05 and not goal.get('reached_xy',False))
+        blocked=proposal.get('reason')=='no_admissible_velocity' or stopped
+        if not blocked:
+            self.control_blocked_since=None;return
+        now=time.monotonic() if monotonic_s is None else monotonic_s
+        if self.control_blocked_since is None:self.control_blocked_since=now
+        elif now-self.control_blocked_since>=1.:self.request_replan()
+
     def tick(self,*,now,clock_domain):
         mono=time.monotonic();response=self.worker.poll()
         if response is not None:
@@ -113,6 +132,10 @@ class ReferenceRuntime:
                     if result.get('reason') in ('navigation_prior_future_or_stale','geometry_future_or_stale'):
                         transient_input=True;self.failure=None
                         raise ValueError(result['reason'])
+                    # A fresh negative geometry result supersedes the older
+                    # spatial reference. Budget/unavailable errors do not prove
+                    # a route blocked and retain the existing fallback policy.
+                    if result['status']=='no_path':self.reference=self.current=None
                     self.failure=dict(request_binding=fingerprint(job['request']),reason=result['reason'],
                         as_of=job['scene'].record['as_of'],job_id=job['job_id'])
                     raise ValueError('reference_has_no_path')

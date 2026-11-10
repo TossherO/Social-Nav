@@ -1,5 +1,5 @@
 """Optional latest-only ROS display; each group retains its own source time."""
-from collections import Counter, deque
+from collections import Counter, deque, OrderedDict
 import copy
 import math
 import threading
@@ -50,6 +50,7 @@ class RuntimeDisplay:
         from visualization_msgs.msg import MarkerArray
         self.rospy=rospy;rospy.init_node('social_nav_runtime_display',disable_signals=True)
         self.map_tf=None
+        self._map_tf_seen=OrderedDict()
         if asset is not None:
             from tf2_msgs.msg import TFMessage
             self.map_tf=rospy.Publisher('/tf',TFMessage,queue_size=4)
@@ -100,13 +101,18 @@ class RuntimeDisplay:
 
     def _publish_map_transform(self,row):
         if getattr(self,'map_tf',None) is None or row['health']!=0 or not row.get('has_map_pose'):return
+        # ROS TF rejects duplicate timestamps for a frame pair even when the
+        # duplicate came from another display group or localization session.
+        stamp=self.rospy.Time.from_sec(row['stamp_s'])
+        key=(row['map_frame'],row['frame_id'],stamp.secs,stamp.nsecs)
+        if key in self._map_tf_seen:return
         from geometry_msgs.msg import TransformStamped
         from tf2_msgs.msg import TFMessage
         from perception.mapping_localization.context import pose_matrix
         from perception.mapping_localization.runtime import quaternion
         pose=pose_matrix(row['position'],row['quaternion_xyzw'])
         transform=pose_matrix(row['map_position'],row['map_quaternion_xyzw'])@np.linalg.inv(pose)
-        message=self._header(TransformStamped(),row['map_frame'],row['stamp_s'])
+        message=TransformStamped();message.header.frame_id=row['map_frame'];message.header.stamp=stamp
         message.child_frame_id=row['frame_id']
         message.transform.translation.x,message.transform.translation.y,message.transform.translation.z=map(float,transform[:3,3])
         q=quaternion(transform[:3,:3])
@@ -114,6 +120,8 @@ class RuntimeDisplay:
         # Use the same measured pose as this display, including newer control poses.
         # This never creates an association or changes a measurement timestamp.
         self.map_tf.publish(TFMessage(transforms=[message]))
+        self._map_tf_seen[key]=None
+        if len(self._map_tf_seen)>4096:self._map_tf_seen.popitem(last=False)
 
     def _publish(self,group,item):
         if group=='scan':

@@ -39,6 +39,77 @@ class ReverseTests(unittest.TestCase):
             self.assertEqual(result['reference_motion']['direction'],-1)
             self.assertEqual(feedback['velocity'],[v,0.])
 
+    def test_reverse_minimum_applies_to_stopped_and_moving_feedback(self):
+        motion=dict(self.motion,minimum_command_speeds=dict(forward_mps=.1,reverse_mps=.1,angular_rps=.2))
+        controller=DwaController(self.cfg,motion,self.f.geometry);controller.diagnostics=True
+        for v in (0.,-.03,-.12):
+            feedback=dict(self.f.feedback,velocity=[v,0.])
+            result=controller.command(self.request,self.f.scene,feedback,self.reference,now=10.,clock_domain='synthetic')
+            self.assertEqual(result['status'],'candidate',result)
+            self.assertLessEqual(result['velocity'][0],-.1)
+            for linear,angular in result['sampling']['choices']:
+                self.assertTrue(abs(linear)<1e-9 or abs(linear)>=.1-1e-9)
+                self.assertTrue(abs(angular)<1e-9 or abs(angular)>=.2-1e-9)
+
+    def test_reverse_overspeed_can_select_straight_deceleration(self):
+        request=dict(self.f.req,goal=[1.65,2.,0.]);reference=self.reference_for(request)
+        motion=dict(self.motion,minimum_command_speeds=dict(forward_mps=.1,reverse_mps=.1,angular_rps=.2))
+        controller=DwaController(self.cfg,motion,self.f.geometry);controller.diagnostics=True
+        feedback=dict(self.f.feedback,velocity=[-.24,.06])
+        output=controller.command(request,self.f.scene,feedback,reference,now=10.,clock_domain='synthetic')
+        self.assertEqual(output['status'],'candidate',output)
+        self.assertTrue(output['sampling']['empty_window'])
+        self.assertGreater(output['velocity'][0],-.24);self.assertLessEqual(output['velocity'][0],-.1)
+        self.assertEqual(output['velocity'][1],0.);self.assertFalse(output['minimum_command_blocked'])
+
+    def test_reconnection_preserves_reverse_section_and_later_turn(self):
+        from navigation.planning.curvature import reference_tails,motion_valid
+        old=np.array([[2.,2.,0.],[1.,2.,0.],[1.,2.,.3],[1.,2.,.6]])
+        start=np.array([1.98,2.,0.])
+        candidates=[p for p in reference_tails(old,start,self.motion) if np.allclose(p[0],start)]
+        self.assertTrue(candidates)
+        path=candidates[0]
+        self.assertTrue(motion_valid(path,self.motion))
+        np.testing.assert_allclose(path[-1],old[-1])
+        delta=np.diff(path[:,:2],axis=0);turn=np.diff(path[:,2])
+        travel=np.flatnonzero(np.linalg.norm(delta,axis=1)>1e-7)
+        self.assertLess(delta[travel[0],0],0.)
+        self.assertTrue(np.any(abs(turn)>1e-7))
+
+    def test_reconnection_never_skips_a_reverse_to_forward_cusp(self):
+        from navigation.planning.curvature import reference_tails
+        old=np.array([[2.,2.,0.],[1.9,2.,0.],[2.8,2.,0.]])
+        start=np.array([1.99,2.,0.])
+        candidates=[p for p in reference_tails(old,start,self.motion) if np.allclose(p[0],start)]
+        self.assertTrue(candidates)
+        for path in candidates:
+            self.assertLessEqual(np.min(path[:,0]),1.9+1e-8)
+
+    def test_planner_rechecks_retained_reverse_path_from_current_pose(self):
+        from tests.navigation_fixtures import grid
+        from perception.environment.scene import assemble_scene
+        from perception.environment.layers import load_config as environment_config
+        from navigation.planning.footprint import swept_check
+        def moved_scene(cells=None):
+            g=grid(cells)
+            g.metadata['association']=copy.deepcopy(self.f.scene.geometry.metadata['association'])
+            pose=np.eye(4);pose[:2,3]=[1.98,2.];g.metadata['world_from_lidar']=pose.tolist()
+            return assemble_scene(g,clock_domain='synthetic',settings=environment_config()['scene'])
+        planner=Planner(self.cfg,self.f.geometry,require_actual_start=True)
+        first=planner.query(self.request,scene=self.f.scene,now=10.,clock_domain='synthetic')
+        self.assertEqual(first['status'],'path_found',first)
+        scene=moved_scene()
+        second=planner.query(self.request,scene=scene,now=10.,clock_domain='synthetic')
+        self.assertEqual(second['status'],'path_found',second)
+        self.assertTrue(second.get('reference_continuity',{}).get('start_is_actual'))
+        np.testing.assert_allclose(second['path'][0],[1.98,2.,0.])
+        cells=np.zeros((60,60),np.int8);cells[18:23,15]=100
+        blocked=moved_scene(cells)
+        third=planner.query(self.request,scene=blocked,now=10.,clock_domain='synthetic')
+        if third['status']=='path_found':
+            self.assertEqual(swept_check(blocked.geometry,self.f.geometry,np.asarray(third['path']),
+                self.cfg['safety_margin_m'],self.cfg['max_path_samples'],prefix=False)['status'],'free')
+
     def test_forward_only_policy_rejects_reverse_reference(self):
         controller=DwaController(self.cfg,dict(self.motion,allow_reverse=False),self.f.geometry)
         result=controller.command(self.request,self.f.scene,self.f.feedback,self.reference,now=10.,clock_domain='synthetic')
@@ -75,6 +146,24 @@ class ReverseTests(unittest.TestCase):
         self.assertEqual(c['status'],'candidate',c);self.assertLess(c['velocity'][0],0.)
         self.assertEqual(c['reference_motion'],dict(direction=-1,section=1,stop_at_cusp=False))
 
+    def test_minimum_speed_approaches_cusp_brakes_and_then_reverses(self):
+        request=dict(self.f.req,goal=[2.1,2.,0.]);reference=self.reference_for(request)
+        result=copy.deepcopy(reference['result']);result['path']=[[2.,2.,0.],[2.5,2.,0.],[2.1,2.,0.]]
+        result.pop('result_binding');result['result_binding']=fingerprint(result)
+        reference=reference_envelope(result,request,self.f.scene,None)
+        motion=dict(self.motion,minimum_command_speeds=dict(forward_mps=.1,reverse_mps=.1,angular_rps=.2))
+        controller=DwaController(self.cfg,motion,self.f.geometry)
+        stationary=dict(self.f.feedback,pose=[2.31,2.,0.],velocity=[0.,0.])
+        approach=controller.command(request,self.f.scene,stationary,reference,now=10.,clock_domain='synthetic')
+        self.assertEqual(approach['velocity'],[.1,0.])
+        moving=dict(stationary,pose=[2.37,2.,0.],velocity=[.1,0.])
+        braking=controller.command(request,self.f.scene,moving,reference,now=10.,clock_domain='synthetic')
+        self.assertTrue(braking['approach_brake']);self.assertEqual(braking['velocity'],[0.,0.])
+        stopped=dict(stationary,pose=[2.40,2.,0.])
+        reverse=controller.command(request,self.f.scene,stopped,reference,now=10.,clock_domain='synthetic')
+        self.assertEqual(reverse['reference_motion']['direction'],-1)
+        self.assertLessEqual(reverse['velocity'][0],-.1)
+
     def test_independent_safety_requires_rear_free_stopping_space(self):
         feedback=dict(self.f.feedback,velocity=[-.2,0.])
         for value in (0,-1,100):
@@ -93,6 +182,7 @@ class ReverseTests(unittest.TestCase):
         from navigation.control.device import DeviceDwaBatch
         batch=DeviceDwaBatch();batch.bind(DeviceGridSnapshot.seal(self.f.scene.geometry.metadata,
             {k:torch.tensor(v,device='cuda') for k,v in self.f.scene.geometry.layers.items()}))
+        self.motion['minimum_command_speeds']=dict(forward_mps=.1,reverse_mps=.1,angular_rps=.2)
         for velocity,pending in (([0.,0.],None),([-.15,-.08],None),([.01,.005],[-.15,.08])):
             feedback=dict(self.f.feedback,velocity=velocity)
             cpu=DwaController(self.cfg,self.motion,self.f.geometry)

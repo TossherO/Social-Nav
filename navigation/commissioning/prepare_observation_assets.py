@@ -18,7 +18,7 @@ parser.add_argument('--output', required=True, help='New directory below outputs
 OUT=Path(parser.parse_args().output).expanduser().resolve()
 DATA=ROOT/'outputs/perception/lab_floor2_20261107'
 MAP=DATA/'mapping_compensated/map'
-STATIC=DATA/'static_environment_compensated_20cm'
+STATIC=DATA/'static_scans_10cm_20261110'
 SEED=DATA/'navigation_preparation/initial_pose.json'
 if not OUT.is_relative_to((ROOT/'outputs').resolve()) or OUT == (ROOT/'outputs').resolve():
     raise ValueError('Output must be a new directory below outputs')

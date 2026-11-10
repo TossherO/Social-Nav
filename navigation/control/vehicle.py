@@ -53,6 +53,16 @@ def load_vehicle_profile(path, motion, *, require_execution=False):
         if motion[name] > limits[name]:
             raise ValueError('Selected motion exceeds measured limit: '+name)
     selected=dict(motion,parameters_assumed=False,vehicle_source=source)
+    minimum=profile.get('minimum_command_speeds')
+    if minimum is not None:
+        names={'forward_mps','reverse_mps','angular_rps'}
+        if not isinstance(minimum,dict) or set(minimum)!=names:
+            raise ValueError('Minimum command speeds require forward_mps, reverse_mps and angular_rps')
+        for name,limit in (('forward_mps',motion['max_forward_mps']),('reverse_mps',motion['max_reverse_mps']),('angular_rps',motion['max_angular_rps'])):
+            value=minimum[name]
+            if type(value) not in (int,float) or not math.isfinite(value) or not 0<value<=limit:
+                raise ValueError('Invalid minimum command speed: '+name)
+        selected['minimum_command_speeds']=dict(minimum)
     if profile.get('controller') is not None:selected['controller']=profile['controller']
     if require_execution and profile.get('protocol') != 'af01_12_bf01_32_payload_sum_mode1_3':
         raise ValueError('Confirm the exact tested serial protocol before execution')

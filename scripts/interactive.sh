@@ -15,15 +15,23 @@ SOCIAL_NAV_LOCAL_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SOCIAL_NAV_LOCAL_ROOT"
 SOCIAL_NAV_LAUNCH_KIND="${1:-}"
 if [[ $# -gt 0 ]]; then shift; fi
-if [[ $# -gt 1 ]]; then
-  echo '参数过多，请使用 --help 查看用法。' >&2; exit 2
-fi
+SOCIAL_NAV_AGENT_OBSERVATIONS=0
+SOCIAL_NAV_MODE_ARG=''
+for SOCIAL_NAV_ARG in "$@"; do
+  if [[ "$SOCIAL_NAV_ARG" == --agent-observations ]]; then
+    SOCIAL_NAV_AGENT_OBSERVATIONS=1
+  elif [[ -z "$SOCIAL_NAV_MODE_ARG" ]]; then
+    SOCIAL_NAV_MODE_ARG="$SOCIAL_NAV_ARG"
+  else
+    echo '参数过多，请使用 --help 查看用法。' >&2; exit 2
+  fi
+done
 case "$SOCIAL_NAV_LAUNCH_KIND" in
   observe)
-    SOCIAL_NAV_LAUNCH_MODE="${1:---start}"
+    SOCIAL_NAV_LAUNCH_MODE="${SOCIAL_NAV_MODE_ARG:---start}"
     case "$SOCIAL_NAV_LAUNCH_MODE" in
       --help)
-        printf '%s\n' '用法：bash scripts/interactive.sh observe [--dry-run]' \
+        printf '%s\n' '用法：bash scripts/interactive.sh observe [--dry-run] [--agent-observations]' \
           '先运行传感器入口。本入口打开 RViz 进行在线观察与规划，不连接底盘。'
         exit 0;;
       --start|--dry-run) ;;
@@ -33,10 +41,10 @@ case "$SOCIAL_NAV_LAUNCH_KIND" in
     SOCIAL_NAV_LAUNCH_OUTPUT=live_observation
     ;;
   execute)
-    SOCIAL_NAV_LAUNCH_MODE="${1:---dry-run}"
+    SOCIAL_NAV_LAUNCH_MODE="${SOCIAL_NAV_MODE_ARG:---dry-run}"
     case "$SOCIAL_NAV_LAUNCH_MODE" in
       --help)
-        printf '%s\n' '用法：bash scripts/interactive.sh execute [--dry-run|--check|--execute]' \
+        printf '%s\n' '用法：bash scripts/interactive.sh execute [--dry-run|--check|--execute] [--agent-observations]' \
           '默认只打印命令；--check 只检查车辆档案；--execute 启动实机会话，仍需单独人工使能。' \
           '档案检查只验证字段和数值一致性，不验证实际制动或失联停车。'
         exit 0;;
@@ -88,6 +96,9 @@ SOCIAL_NAV_LAUNCH_COMMAND=(taskset -c "$SOCIAL_NAV_COMMISSIONING_CPU_LIST" "$SOC
   --live --gpu "${GPU_ID:-0}" --config "$SOCIAL_NAV_LAUNCH_CONFIG" --motion-profile trial
   --environment-update-hz "$SOCIAL_NAV_COMMISSIONING_ENVIRONMENT_HZ" --environment-window-m "$SOCIAL_NAV_COMMISSIONING_WINDOW_M"
   --vehicle-profile configs/wheelchair_vehicle.yaml)
+if [[ "$SOCIAL_NAV_AGENT_OBSERVATIONS" == 1 ]]; then
+  SOCIAL_NAV_LAUNCH_COMMAND+=(--agent-observations)
+fi
 if [[ "$SOCIAL_NAV_LAUNCH_KIND" == execute ]]; then
   SOCIAL_NAV_LAUNCH_COMMAND+=(--execute --chassis-port /dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0)
 fi

@@ -58,15 +58,15 @@ class AgentContextTests(unittest.TestCase):
         self.assertEqual(project_dialogue(messages,None),messages)
         self.assertIn('annotations',messages[1]['content'])
 
-    def test_lookup_covers_points_regions_and_landmarks_without_leaking_future_modes(self):
+    def test_lookup_covers_points_and_regions_without_leaking_future_modes(self):
         all_items = self.session.call('lookup_places',name='')
-        self.assertTrue(all_items['places']);self.assertTrue(all_items['regions']);self.assertTrue(all_items['landmarks'])
-        landmark = all_items['landmarks'][0]
-        self.assertEqual(self.session.call('lookup_places',name=landmark['landmark_id'])['landmarks'],[landmark])
+        self.assertTrue(all_items['places']);self.assertTrue(all_items['regions'])
+        window = next(p for p in all_items['places'] if p['place_id']=='front_window')
+        self.assertEqual(self.session.call('lookup_places',name='front_window')['places'],[window])
         future = AgentSession('future',Catalog.load(CONFIG_DIR/'simulation.json',condition='simple'),
                               self.fixture.nav,self.fixture.store)
         result = future.call('lookup_places',name='')
-        self.assertEqual((result['places'],result['regions'],result['landmarks']),([],[],[]))
+        self.assertEqual((result['places'],result['regions']),([],[]))
 
     def test_requested_crop_survives_different_control_time_and_refreshes_same_intent(self):
         inputs = self.fixture.nav.spatial_inputs()
@@ -110,6 +110,95 @@ class AgentContextTests(unittest.TestCase):
         self.assertEqual(actual['motion']['max_forward_mps'],.37)
         self.assertFalse(actual['motion']['allow_reverse'])
         self.assertFalse(actual['physical_platform_performance_verified'])
+
+    def test_candidate_checks_static_footprint_and_candidate_camera_pose(self):
+        geometry=VehicleGeometry([[-.2,-.3],[.8,-.3],[.8,.3],[-.2,.3]],np.eye(4),source='fixture',assumed=False)
+        sensors=dict(status='configured',camera=dict(position_m=[.5,0.,0.],view=dict(
+            status='approximate_pinhole',edge_yaw_rad=[.5,-.5])))
+        inputs=dict(global_grid=self.fixture.grid,scene=None,pose=[4.,4.,0.],stamp_s=10.,
+                    clock_domain=self.fixture.nav.clock_domain,geometry=geometry,sensors=sensors)
+        self.fixture.nav.spatial_inputs=lambda:inputs
+        self.session.prompt()
+        view=self.session.spatial_view.record['view_id']
+        point=self.session.catalog.places['elevator']['pose']
+        yaw=float(np.arctan2(point[1]-4.,point[0]-4.))
+        result=self.session.call('check_candidate',pose=[4.,4.,yaw],view_id=view,point_ids=['elevator'])
+        self.assertEqual(result['static_footprint']['status'],'free')
+        self.assertTrue(result['camera_view']['points'][0]['in_horizontal_fov'])
+        self.assertFalse(result['camera_view']['actual_visibility_verified'])
+        self.assertFalse(result['static_footprint']['route_checked'])
+        result=self.session.call('check_candidate',pose=[4.,4.,yaw+np.pi],view_id=view,point_ids=['elevator'])
+        self.assertFalse(result['camera_view']['points'][0]['in_horizontal_fov'])
+        result=self.session.call('check_candidate',pose=[0.,0.,0.],view_id=view)
+        self.assertEqual(result['static_footprint']['status'],'outside')
+        inputs['stamp_s']=10.1
+        self.assertEqual(self.session.call('check_candidate',pose=[4.,4.,0.],view_id=view)['reason'],'spatial_source_changed')
+
+    def test_candidate_preserves_occupied_unknown_and_missing_camera(self):
+        from perception.environment.layers import GridSnapshot
+        geometry=VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],np.eye(4),source='fixture')
+        for cell,expected in ((100,'occupied'),(-1,'unknown')):
+            cells=np.zeros((100,140),np.int8);cells[40,40]=cell
+            grid=GridSnapshot(dict(self.fixture.grid.metadata),dict(occupancy=cells))
+            self.fixture.nav.spatial_inputs=lambda:dict(global_grid=grid,scene=None,pose=[4.,4.,0.],stamp_s=10.,
+                clock_domain=self.fixture.nav.clock_domain,geometry=geometry)
+            self.session.prompt()
+            result=self.session.call('check_candidate',pose=[4.,4.,0.],view_id=self.session.spatial_view.record['view_id'])
+            self.assertEqual(result['static_footprint']['status'],expected)
+            self.assertEqual(result['camera_view']['status'],'unavailable')
+
+    def test_candidate_transforms_bound_local_grid_and_reports_coverage(self):
+        from perception.environment.layers import GridSnapshot
+        geometry=VehicleGeometry([[-.1,-.1],[.1,-.1],[.1,.1],[-.1,.1]],np.eye(4),source='fixture')
+        cells=np.zeros((20,20),np.int8);cells[10,10]=100
+        local=GridSnapshot(dict(frame_id='odom',shape=[20,20],resolution=.1,origin_xy=[0.,0.],snapshot_id='local'),
+                           dict(occupancy=cells))
+        transform=np.eye(4);transform[:2,3]=[3.,3.]
+        inputs=dict(global_grid=self.fixture.grid,scene=None,local_grid=local,local_grid_observation_id='source',
+                    local_grid_map_from_local=transform.tolist(),pose=[4.,4.,0.],stamp_s=10.,
+                    clock_domain=self.fixture.nav.clock_domain,geometry=geometry)
+        self.fixture.nav.spatial_inputs=lambda:inputs
+        self.session.prompt();view=self.session.spatial_view.record['view_id']
+        result=self.session.call('check_candidate',pose=[4.,4.,0.],view_id=view)
+        self.assertEqual(result['static_footprint']['status'],'free')
+        self.assertEqual(result['local_footprint']['status'],'occupied')
+        result=self.session.call('check_candidate',pose=[8.,8.,0.],view_id=view)
+        self.assertEqual(result['local_footprint']['status'],'not_covered')
+
+    def test_navigation_checks_final_orientation_not_only_model_candidate(self):
+        from perception.environment.layers import GridSnapshot
+        geometry=VehicleGeometry([[-.2,-.3],[.8,-.3],[.8,.3],[-.2,.3]],np.eye(4),source='fixture')
+        cells=np.zeros((100,140),np.int8);cells[40,46]=100
+        grid=GridSnapshot(dict(self.fixture.grid.metadata),dict(occupancy=cells))
+        self.fixture.nav.geometry=geometry
+        self.fixture.nav.spatial_inputs=lambda:dict(global_grid=grid,scene=None,pose=[4.,4.,0.],stamp_s=10.,
+            clock_domain=self.fixture.nav.clock_domain,geometry=geometry)
+        self.session.prompt();view=self.session.spatial_view.record['view_id']
+        self.session.call('record_task',goals=[dict(goal_id='target',kind='point',target_id='',
+            position=[4.,4.],description='test')])
+        prior=self.session.call('check_candidate',pose=[4.,4.,float(np.pi)],view_id=view)
+        self.assertEqual(prior['static_footprint']['status'],'free')
+        result=self.session.call('navigate',goal_id='target',pose=[4.,4.,0.],view_id=view,orientation_source='autonomous')
+        self.assertEqual(result['reason'],'candidate_footprint_occupied')
+        self.assertIsNone(self.session.skill.record['handle'])
+
+    def test_navigation_respects_current_local_occupied_and_cleared_static(self):
+        from perception.environment.layers import GridSnapshot
+        geometry=VehicleGeometry([[-.2,-.3],[.8,-.3],[.8,.3],[-.2,.3]],np.eye(4),source='fixture')
+        self.fixture.nav.geometry=geometry
+        for static_cell,local_cell,expected in ((0,100,'refused'),(100,0,'accepted')):
+            static=np.zeros((100,140),np.int8);static[40,46]=static_cell
+            local=np.zeros((100,140),np.int8);local[40,46]=local_cell
+            grid=GridSnapshot(dict(self.fixture.grid.metadata),dict(occupancy=static))
+            local_grid=GridSnapshot(dict(self.fixture.grid.metadata,snapshot_id='local'),dict(occupancy=local))
+            self.fixture.nav.spatial_inputs=lambda:dict(global_grid=grid,scene=None,local_grid=local_grid,
+                local_grid_observation_id='obs',local_grid_map_from_local=np.eye(4).tolist(),pose=[4.,4.,0.],
+                stamp_s=10.,clock_domain=self.fixture.nav.clock_domain,geometry=geometry)
+            session=AgentSession('test',self.session.catalog,self.fixture.nav,self.fixture.store)
+            session.prompt();view=session.spatial_view.record['view_id']
+            session.call('record_task',goals=[dict(goal_id='target',kind='point',target_id='',position=[4.,4.],description='test')])
+            result=session.call('navigate',goal_id='target',pose=[4.,4.,0.],view_id=view,orientation_source='autonomous')
+            self.assertEqual(result['status'],expected)
 
     def test_current_rgb_metadata_and_missing_inputs_are_explicit(self):
         self.session.prompt()

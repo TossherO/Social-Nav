@@ -79,7 +79,7 @@ class SavedShadowNavigation:
             raise ValueError('Saved scene changed after observation binding')
         return dict(global_grid=self._asset.snapshot,scene=scene,pose=r['map_base_pose'],local_pose=r['base_pose'],
                     stamp_s=r['stamp_s'],clock_domain=r['clock_domain'],
-                    geometry=self.geometry)
+                    geometry=self.geometry,sensors=copy.deepcopy(r.get('sensors')))
 
     def reference_grid(self):
         from perception.environment.storage import StaticEnvironmentMap
@@ -164,9 +164,15 @@ class RuntimeShadowNavigation:
                    record.get('clock_domain')==self.clock_domain and
                    record.get('map_binding')==state.get('map_binding') and
                    0 <= state['stamp_s']-record.get('stamp_s',-float('inf')) <= 3.)
-        return dict(global_grid=self._asset.snapshot,scene=None,pose=record.get('map_base_pose') if current else None,
+        observation = self.client.observation(self.value) if current else None
+        grid = None if observation is None else observation.local_grid()
+        return dict(global_grid=self._asset.snapshot,scene=None,local_grid=grid,
+                    local_grid_observation_id=record.get('observation_id') if grid is not None else None,
+                    local_grid_map_from_local=(record.get('local_grid') or {}).get('map_from_local') if grid is not None else None,
+                    pose=record.get('map_base_pose') if current else None,
                     stamp_s=record.get('stamp_s') if current else None,clock_domain=self.clock_domain,
-                    geometry=getattr(self,'geometry',None) or VehicleGeometry.historical(ROOT/'configs/wheelchair_geometry_reference.json'))
+                    geometry=getattr(self,'geometry',None) or VehicleGeometry.historical(ROOT/'configs/wheelchair_geometry_reference.json'),
+                    sensors=copy.deepcopy(record.get('sensors')) if current else None)
 
     def reference_grid(self):
         return SavedShadowNavigation.reference_grid(self)

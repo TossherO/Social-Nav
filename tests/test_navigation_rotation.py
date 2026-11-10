@@ -43,6 +43,34 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(allowed['state'],'allowed',allowed)
         self.assertFalse(allowed['executable'])
 
+    def test_startup_rotation_is_a_scored_and_checked_candidate(self):
+        motion=dict(self.motion,minimum_command_speeds=dict(forward_mps=.1,reverse_mps=.1,angular_rps=.2))
+        controller=DwaController(self.cfg,motion,self.geometry);controller.diagnostics=True
+        feedback=dict(self.feedback,stationary_evidence=dict(position_span_m=0.,yaw_span_rad=0.,linear_bound_mps=0.,angular_bound_rps=0.))
+        result=controller.command(self.req,self.scene,feedback,self.reference(),now=10.,clock_domain='synthetic')
+        self.assertEqual(result['status'],'candidate',result)
+        self.assertIn([0.,.2],result['sampling']['choices'])
+        self.assertAlmostEqual(result['velocity'][1],.2)
+        checked=LocalSafety(self.geometry,motion,.05,simulation=True).gate(
+            result,self.req,self.scene,feedback,now=10.,clock_domain='synthetic',dt=.1)
+        self.assertEqual(checked['state'],'allowed',checked)
+        self.assertEqual(checked['velocity'],result['velocity'])
+
+    def test_minimum_can_complete_angular_approach_from_rest(self):
+        motion=dict(self.motion,minimum_command_speeds=dict(forward_mps=.1,reverse_mps=.1,angular_rps=.2))
+        self.req=dict(self.req,goal=[2.,2.,.3])
+        controller=DwaController(self.cfg,motion,self.geometry);controller.diagnostics=True
+        feedback=dict(self.feedback,stationary_evidence=dict(position_span_m=0.,yaw_span_rad=0.,linear_bound_mps=0.,angular_bound_rps=0.))
+        result=controller.command(self.req,self.scene,feedback,self.reference(),now=10.,clock_domain='synthetic')
+        self.assertEqual(result['status'],'candidate',result)
+        limit=result['sampling']['speed_limits']['angular_approach']
+        self.assertAlmostEqual(limit,.2)
+        self.assertEqual(result['velocity'],[0.,.2])
+        self.assertFalse(result['minimum_command_blocked'])
+        braking=controller.command(self.req,self.scene,dict(feedback,pose=[2.,2.,.12],velocity=[0.,.2]),self.reference(),now=10.,clock_domain='synthetic')
+        self.assertTrue(braking['approach_brake'])
+        self.assertEqual(braking['velocity'],[0.,0.])
+
     def test_unknown_between_free_endpoint_footprints_blocks_rotation(self):
         cells=np.zeros((60,60),np.int8);cells[23,23]=-1
         scene=bundle(cells);a=[2.,2.,0.];b=[2.,2.,np.pi/2]
@@ -56,6 +84,16 @@ class RotationTests(unittest.TestCase):
         np.testing.assert_allclose(poses[:,1:3],np.broadcast_to([2.,2.],poses[:,1:3].shape))
         self.assertGreater(poses[-1,3],0.)
         np.testing.assert_allclose(velocity,[0.,0.],atol=1e-12)
+
+    def test_reconnect_to_ongoing_rotation_from_actual_yaw(self):
+        from navigation.planning.curvature import reference_tails,motion_valid
+        old=np.array([[2.,2.,0.],[2.,2.,.1],[2.,2.,.2],[2.,2.,.3]])
+        start=np.array([2.,2.,.05])
+        candidates=[p for p in reference_tails(old,start,self.motion) if np.allclose(p[0],start)]
+        self.assertTrue(candidates)
+        self.assertTrue(motion_valid(candidates[0],self.motion))
+        self.assertGreaterEqual(np.diff(candidates[0][:,2]).min(),-1e-8)
+        np.testing.assert_allclose(candidates[0][-1],old[-1])
 
     def test_delayed_feedback_simulation_reaches_yaw_then_stops(self):
         from navigation.simulation import run_case
@@ -83,15 +121,21 @@ class RotationTests(unittest.TestCase):
         if not torch.cuda.is_available():self.skipTest('CUDA unavailable')
         from perception.environment.device import DeviceGridSnapshot
         from navigation.control.device import DeviceDwaBatch
-        ref=self.reference();cpu=DwaController(self.cfg,self.motion,self.geometry)
+        ref=self.reference()
         batch=DeviceDwaBatch();batch.bind(DeviceGridSnapshot.seal(self.scene.geometry.metadata,
             {k:torch.tensor(v,device='cuda') for k,v in self.scene.geometry.layers.items()}))
-        gpu=DwaController(self.cfg,self.motion,self.geometry,device_batch=batch)
-        a=cpu.command(self.req,self.scene,self.feedback,ref,now=10.,clock_domain='synthetic')
-        b=gpu.command(self.req,self.scene,self.feedback,ref,now=10.,clock_domain='synthetic')
-        self.assertEqual(a['status'],'candidate',a);self.assertEqual(b['status'],'candidate',b)
-        np.testing.assert_allclose(a['velocity'],b['velocity'],atol=1e-10)
-        np.testing.assert_allclose(cpu.result['trajectory']['points'],gpu.result['trajectory']['points'],atol=1e-9)
+        for enabled in (False,True):
+            motion=dict(self.motion);feedback=dict(self.feedback)
+            if enabled:
+                motion['minimum_command_speeds']=dict(forward_mps=.1,reverse_mps=.1,angular_rps=.2)
+                feedback['stationary_evidence']=dict(position_span_m=0.,yaw_span_rad=0.,linear_bound_mps=0.,angular_bound_rps=0.)
+            cpu=DwaController(self.cfg,motion,self.geometry)
+            gpu=DwaController(self.cfg,motion,self.geometry,device_batch=batch)
+            a=cpu.command(self.req,self.scene,feedback,ref,now=10.,clock_domain='synthetic')
+            b=gpu.command(self.req,self.scene,feedback,ref,now=10.,clock_domain='synthetic')
+            self.assertEqual(a['status'],'candidate',a);self.assertEqual(b['status'],'candidate',b)
+            np.testing.assert_allclose(a['velocity'],b['velocity'],atol=1e-10)
+            np.testing.assert_allclose(cpu.result['trajectory']['points'],gpu.result['trajectory']['points'],atol=1e-9)
 
 
 if __name__=='__main__':unittest.main()

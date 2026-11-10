@@ -4,7 +4,7 @@ linear_samples: 3
 # DWA 角速度采样数量。
 angular_samples: 7
 # 每次选择允许评估的候选数上限。
-max_candidates: 24
+max_candidates: 32
 # Cooperative deadlines, not a hard real-time guarantee. Geometry queries are
 # shared across all candidates and their prediction sweeps in one call.
 # 一次计算的协作式时间预算，单位为秒。

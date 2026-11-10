@@ -44,6 +44,111 @@ class DwaTests(unittest.TestCase):
         again=self.controller.command(self.req,self.scene,self.feedback,self.reference,now=10.,clock_domain='synthetic')
         self.assertLessEqual(again['velocity'][0],self.motion['max_acceleration_mps2']*.1+1e-9)
 
+    def test_vehicle_minimum_command_is_predicted_and_independently_checked(self):
+        from navigation.safety.guard import LocalSafety
+        motion=dict(self.motion,minimum_command_speeds=dict(forward_mps=.1,reverse_mps=.1,angular_rps=.2))
+        controller=DwaController(self.cfg,motion,self.geometry);controller.diagnostics=True
+        feedback=dict(self.feedback,stationary_evidence=dict(position_span_m=0.,yaw_span_rad=0.,linear_bound_mps=0.,angular_bound_rps=0.))
+        result=controller.command(self.req,self.scene,feedback,self.reference,now=10.,clock_domain='synthetic')
+        self.assertEqual(result['status'],'candidate',result)
+        self.assertIn([.1,0.],result['sampling']['choices'])
+        self.assertAlmostEqual(result['velocity'][0],.1)
+        self.assertEqual(controller.result['trajectory']['candidate_velocity']['linear_x_mps'],result['velocity'][0])
+        gate=LocalSafety(self.geometry,motion,.05,simulation=True)
+        checked=gate.gate(result,self.req,self.scene,feedback,now=10.,clock_domain='synthetic',dt=.1)
+        self.assertEqual(checked['state'],'allowed',checked)
+        self.assertEqual(checked['velocity'],result['velocity'])
+        moving=controller.command(self.req,self.scene,self.feedback,self.reference,now=10.,clock_domain='synthetic')
+        self.assertAlmostEqual(moving['velocity'][0],.1)
+        for velocity in ([.03,.03],[.15,.1],[.2,-.1]):
+            sample=controller.command(self.req,self.scene,dict(self.feedback,velocity=velocity),self.reference,now=10.,clock_domain='synthetic')
+            self.assertEqual(sample['status'],'candidate',sample)
+            for linear,angular in sample['sampling']['choices']:
+                self.assertTrue(abs(linear)<1e-9 or abs(linear)>=.1-1e-9)
+                self.assertTrue(abs(angular)<1e-9 or abs(angular)>=.2-1e-9)
+
+    def test_straight_candidate_can_accelerate_with_small_nonzero_yaw_rate(self):
+        from navigation.safety.guard import LocalSafety
+        motion=dict(self.motion,minimum_command_speeds=dict(forward_mps=.1,reverse_mps=.1,angular_rps=.2))
+        controller=DwaController(self.cfg,motion,self.geometry);controller.diagnostics=True
+        feedback=dict(self.feedback,velocity=[.084,-.018])
+        result=controller.command(self.req,self.scene,feedback,self.reference,now=10.,clock_domain='synthetic')
+        self.assertEqual(result['status'],'candidate',result)
+        self.assertAlmostEqual(result['velocity'][0],.12);self.assertEqual(result['velocity'][1],0.)
+        self.assertIn([.12,0.],result['sampling']['choices'])
+        points=np.asarray(controller.result['trajectory']['points'])
+        self.assertNotEqual(points[1,3],points[0,3])  # Existing yaw rate is predicted, not erased.
+        checked=LocalSafety(self.geometry,motion,.05,simulation=True).gate(
+            result,self.req,self.scene,feedback,now=10.,clock_domain='synthetic',dt=.1)
+        self.assertEqual(checked['state'],'allowed',checked)
+
+    def test_overspeed_can_select_straight_deceleration(self):
+        motion=dict(self.motion,minimum_command_speeds=dict(forward_mps=.1,reverse_mps=.1,angular_rps=.2))
+        req=dict(self.req,goal=[2.35,2.,0.])
+        result=Planner(self.cfg,self.geometry).query(req,scene=self.scene,now=10.,clock_domain='synthetic')
+        self.assertEqual(result['status'],'path_found',result)
+        ref=reference_envelope(result,req,self.scene,None)
+        controller=DwaController(self.cfg,motion,self.geometry);controller.diagnostics=True
+        feedback=dict(self.feedback,velocity=[.24,.06])
+        output=controller.command(req,self.scene,feedback,ref,now=10.,clock_domain='synthetic')
+        self.assertEqual(output['status'],'candidate',output)
+        self.assertTrue(output['sampling']['empty_window'])
+        self.assertGreater(output['velocity'][0],.1);self.assertLess(output['velocity'][0],.24)
+        self.assertEqual(output['velocity'][1],0.);self.assertFalse(output['minimum_command_blocked'])
+
+    def test_startup_target_cannot_bypass_independent_obstacle_check(self):
+        from navigation.safety.guard import LocalSafety
+        cells=np.zeros((60,60),np.int8);cells[18:23,23]=100
+        scene=bundle(cells)
+        motion=dict(self.motion,minimum_command_speeds=dict(forward_mps=.1,reverse_mps=.1,angular_rps=.2))
+        proposal=dict(status='candidate',control_mode='dwa',velocity=[.1,0.],
+            request_binding=fingerprint(self.req),scene_binding=scene.record['input_fingerprint'],
+            trajectory_as_of=10.,trajectory_binding='test_startup')
+        checked=LocalSafety(self.geometry,motion,.05,simulation=True).gate(
+            proposal,self.req,scene,self.feedback,now=10.,clock_domain='synthetic',dt=.1)
+        self.assertEqual(checked['state'],'stop_request')
+        self.assertEqual(checked['reason'],'motion_sweep_occupied')
+
+    def test_minimum_can_complete_linear_approach_from_rest(self):
+        req=dict(self.req,goal=[2.2,2.,0.])
+        result=Planner(self.cfg,self.geometry).query(req,scene=self.scene,now=10.,clock_domain='synthetic')
+        self.assertEqual(result['status'],'path_found',result)
+        ref=reference_envelope(result,req,self.scene,None)
+        motion=dict(self.motion,minimum_command_speeds=dict(forward_mps=.1,reverse_mps=.1,angular_rps=.2))
+        controller=DwaController(self.cfg,motion,self.geometry);controller.diagnostics=True
+        result=controller.command(req,self.scene,self.feedback,ref,now=10.,clock_domain='synthetic')
+        self.assertEqual(result['status'],'candidate',result)
+        self.assertEqual(result['sampling']['speed_limits']['goal_approach'],.1)
+        self.assertEqual(result['velocity'],[.1,0.])
+        self.assertFalse(result['minimum_command_blocked'])
+        braking=controller.command(req,self.scene,dict(self.feedback,pose=[2.06,2.,0.],velocity=[.1,0.]),ref,now=10.,clock_domain='synthetic')
+        self.assertTrue(braking['approach_brake'])
+        self.assertEqual(braking['velocity'],[0.,0.])
+
+    def test_gpu_startup_candidate_matches_cpu(self):
+        import torch
+        if not torch.cuda.is_available():self.skipTest('CUDA unavailable')
+        from perception.environment.device import DeviceGridSnapshot
+        from navigation.control.device import DeviceDwaBatch
+        motion=dict(self.motion,minimum_command_speeds=dict(forward_mps=.1,reverse_mps=.1,angular_rps=.2))
+        batch=DeviceDwaBatch();batch.bind(DeviceGridSnapshot.seal(self.scene.geometry.metadata,
+            {k:torch.tensor(v,device='cuda') for k,v in self.scene.geometry.layers.items()}))
+        near=dict(self.req,goal=[2.35,2.,0.])
+        result=Planner(self.cfg,self.geometry).query(near,scene=self.scene,now=10.,clock_domain='synthetic')
+        self.assertEqual(result['status'],'path_found',result)
+        near_reference=reference_envelope(result,near,self.scene,None)
+        for req,ref,velocity in ((self.req,self.reference,[0.,0.]),
+                                 (self.req,self.reference,[.084,-.018]),
+                                 (near,near_reference,[.24,.06])):
+            feedback=dict(self.feedback,velocity=velocity)
+            cpu=DwaController(self.cfg,motion,self.geometry)
+            gpu=DwaController(self.cfg,motion,self.geometry,device_batch=batch)
+            a=cpu.command(req,self.scene,feedback,ref,now=10.,clock_domain='synthetic')
+            b=gpu.command(req,self.scene,feedback,ref,now=10.,clock_domain='synthetic')
+            self.assertEqual(a['status'],'candidate',a);self.assertEqual(b['status'],'candidate',b)
+            np.testing.assert_allclose(a['velocity'],b['velocity'],atol=1e-10)
+            np.testing.assert_allclose(cpu.result['trajectory']['points'],gpu.result['trajectory']['points'],atol=1e-9)
+
     def test_expired_computation_clears_the_previous_proposal(self):
         first=self.controller.command(self.req,self.scene,self.feedback,self.reference,now=10.,clock_domain='synthetic')
         self.assertEqual(first['status'],'candidate',first)

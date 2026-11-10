@@ -34,6 +34,8 @@ class NavigationSkill:
             return dict(status='refused', reason='navigation_context_unavailable')
         if r['handle'] is not None:
             return dict(status='refused', reason='cancel_and_confirm_existing_call_first')
+        if 'route' in destination and not callable(getattr(self.navigation,'start_route',None)):
+            return dict(status='refused',reason='route_execution_not_supported_by_adapter')
         attempt = dict(goal_id=goal_id, place_id=place_id, revision=revision, status='refused')
         r['attempts'].append(attempt)
         if ((self.navigation.scope == 'simulation') != (self.catalog.value['scope'] == 'simulation') or
@@ -44,6 +46,10 @@ class NavigationSkill:
         if requirement['kind'] == 'point' and requirement['target_id']:
             # Retain the named-point access policy without borrowing its pose.
             self.catalog.destination(requirement['target_id'], self.navigation.scope)
+        if requirement['kind'] == 'sequence':
+            for ident in requirement['checkpoints']:
+                if ident in self.catalog.places:
+                    self.catalog.destination(ident,self.navigation.scope)
         place = copy.deepcopy(destination)
         route = self.navigation.check_route(place)
         if not route['reference_found'] and not (self.navigation.scope == 'shadow' and route.get('proposal_allowed')):
@@ -58,7 +64,8 @@ class NavigationSkill:
         self.last_stamp = None
         self._emit('navigation_intent')
         try:
-            ack = self.navigation.start(place, handle)
+            ack = (self.navigation.start_route(place, handle) if 'route' in place
+                   else self.navigation.start(place, handle))
             if ack.get('accepted') is not True or ack.get('handle') != handle:
                 raise ValueError('Navigation ACK rejected or belongs to another call')
         except (OSError, EOFError, ValueError) as error:
@@ -141,6 +148,8 @@ class NavigationSkill:
                          scope=self.navigation.scope, source=feedback['source'], context=current,
                          pose=copy.deepcopy(feedback.get('pose')),frame_id=feedback.get('frame_id'),
                          execution_feedback=True, stopped=True)
+            if feedback.get('route_start_stamp_s') is not None:
+                proof['route_start_stamp_s']=feedback['route_start_stamp_s']
             r['completed'].append(proof)
             r.update(status='succeeded', handle=None)
             self._mark_attempt(handle, 'succeeded')

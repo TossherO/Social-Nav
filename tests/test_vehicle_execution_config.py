@@ -57,6 +57,12 @@ class VehicleExecutionConfigTests(unittest.TestCase):
         _,selected,profile=load_vehicle_profile('configs/wheelchair_vehicle.yaml',trial,require_execution=True)
         self.assertEqual(selected['execution_max_longitudinal_speed_mps'],profile['execution_max_longitudinal_speed_mps'])
         self.assertEqual(selected['execution_max_angular_rps'],profile['measured_limits']['max_angular_rps'])
+        self.assertEqual(selected['minimum_command_speeds'],dict(forward_mps=.1,reverse_mps=.1,angular_rps=.2))
+
+    def test_invalid_minimum_command_speeds_are_rejected(self):
+        for value in (None,True,-.1,.11):
+            p=self.profile();p['minimum_command_speeds']=dict(forward_mps=value,reverse_mps=.05,angular_rps=.2)
+            with self.subTest(value=value),self.assertRaises(ValueError):self.load(p)
 
     def test_legacy_speed_field_migrates_without_changing_its_value(self):
         p=self.profile();p['execution_max_planar_speed_mps']=p.pop('execution_max_longitudinal_speed_mps')

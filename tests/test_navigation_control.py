@@ -48,6 +48,45 @@ class ControlTests(unittest.TestCase):
         self.assertGreater(path[-1,0],0.)
         np.testing.assert_allclose(velocity,[.5,0.])
 
+    def test_minimum_speed_approach_reaches_tolerance_in_closed_loop(self):
+        from tests.navigation_fixtures import scene_at
+        from navigation.kinematics import advance
+        from navigation.control.dwa import DwaController
+        from navigation.planning.planner import Planner
+        from navigation.planning.continuity import reference_envelope
+        cfg=load_config();cfg['algorithm']='hybrid_astar'
+        motion=dict(self.motion,minimum_command_speeds=dict(forward_mps=.1,reverse_mps=.1,angular_rps=.2))
+        for goal in ([2.2,2.,0.],[1.8,2.,0.],[2.,2.,.3]):
+            with self.subTest(goal=goal):
+                scene=scene_at(10.);req=request('local',goal=goal,goal_behavior='stop',algorithm='hybrid_astar')
+                result=Planner(cfg,self.geometry,require_actual_start=True).query(req,scene=scene,now=10.,clock_domain='synthetic')
+                self.assertEqual(result['status'],'path_found',result)
+                ref=reference_envelope(result,req,scene,None)
+                controller=DwaController(cfg,motion,self.geometry);guard=LocalSafety(self.geometry,motion,.05,simulation=True)
+                pose=np.array([2.,2.,0.]);velocity=np.zeros(2);commands=[];brakes=0
+                queue=[np.zeros(2),np.zeros(2)]  # Synthetic 0.2 s delay, not a measured chassis value.
+                plant=dict(motion,max_acceleration_mps2=motion['max_acceleration_mps2']*.75,
+                    max_angular_acceleration_rps2=motion['max_angular_acceleration_rps2']*.75)
+                for i in range(40):
+                    now=10.+i*.1;scene=scene_at(now)
+                    feedback=dict(self.feedback,stamp_s=now,pose=pose.tolist(),velocity=velocity.tolist())
+                    proposal=controller.command(req,scene,feedback,ref,now=now,clock_domain='synthetic')
+                    decision=guard.gate(proposal,req,scene,feedback,now=now,clock_domain='synthetic',dt=.1)
+                    self.assertEqual(decision['state'],'allowed',decision)
+                    command=np.asarray(decision['velocity']);commands.append(command)
+                    brakes+=bool(proposal.get('approach_brake'))
+                    queue.append(command);applied=queue.pop(0)
+                    after=velocity_step(velocity,applied,plant,.1)
+                    pose=advance(pose,(velocity+after)/2,.1);velocity=after
+                self.assertLessEqual(np.linalg.norm(pose[:2]-np.asarray(goal[:2])),.120001)
+                self.assertLessEqual(abs(np.arctan2(np.sin(pose[2]-goal[2]),np.cos(pose[2]-goal[2]))),.120001)
+                np.testing.assert_allclose(velocity,[0.,0.],atol=1e-9)
+                self.assertTrue(any(np.any(abs(command)>0) for command in commands))
+                self.assertTrue(brakes)
+                for linear,angular in commands:
+                    self.assertTrue(abs(linear)<1e-9 or abs(linear)>=.1-1e-9)
+                    self.assertTrue(abs(angular)<1e-9 or abs(angular)>=.2-1e-9)
+
     def test_braking_sweep_blocks_obstacle_beyond_the_next_command_step(self):
         cells=np.zeros((60,60),np.int8);cells[18:23,30]=100;self.scene=bundle(cells)
         r=self.gate(self.proposal([.8,0.]),dict(self.feedback,velocity=[.8,0.]))
