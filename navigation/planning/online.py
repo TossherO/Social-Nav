@@ -252,7 +252,7 @@ def run(args,planning,motion,geometry,settings):
                     wire['worker_events']=events;events=[];wire['owner_compute_ms']=(time.perf_counter()-began)*1000
                     wire['result']=None if result is None else {k:result[k] for k in
                         ('result_binding','input_binding','request_binding','configuration_binding','local_goal','trajectory','control_mode',
-                         'candidate_count','valid_candidates','certification_attempts','rejections','timing_ms') if k in result}
+                         'candidate_count','ranked_candidates','valid_candidates','certification_attempts','unattempted_candidates','selection_stopped_early','rejections','timing_ms') if k in result}
                     state_pub.publish(String(data=json.dumps(wire,ensure_ascii=False,allow_nan=False)))
                     previous=key;last_publish=mono
                 time.sleep(.01)  # Wall time: a paused /clock must still revoke stale paths.

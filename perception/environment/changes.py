@@ -134,6 +134,8 @@ class PriorRevisions:
         conditional[cleared|current_hit] = False
         if 'assumed_free' in layers:
             layers['assumed_free'][cleared|current_hit] = False
+        if 'manual_edit' in layers:
+            layers['manual_edit'][cleared|current_hit] = False
         # No temporary occupied observation is written into the persistent ledger.
         # Navigation uses only occupancy/risk and builds its own safety distance
         # field. Do not copy/recompute display and terrain layers it never reads.

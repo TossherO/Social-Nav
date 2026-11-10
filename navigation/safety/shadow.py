@@ -230,7 +230,7 @@ class ShadowSafety:
                 if self.grid_received is None or mono-self.grid_received>self.settings['grid_timeout_s']:raise ValueError('grid_wall_timeout')
                 original=packet['proposal']
                 if original is not None and original.get('control_mode')=='dwa':
-                    out['control_diagnostics']={k:original.get(k) for k in ('control_mode','candidate_count','valid_candidates','certification_attempts','rejections','timing_ms','compute_ms')}
+                    out['control_diagnostics']={k:original.get(k) for k in ('control_mode','candidate_count','ranked_candidates','valid_candidates','certification_attempts','unattempted_candidates','selection_stopped_early','rejections','timing_ms','compute_ms')}
                 out.update(controller_reason=None if original is None else original.get('reason'),controller_ms=packet['compute_ms'],
                     proposed_velocity=None if original is None else original.get('velocity'),
                     proposal_receive_delay_ms=(now-packet['stamp_s'])*1000)
@@ -263,9 +263,8 @@ class ShadowSafety:
                 out['timing_ms']['independent_gate']=out['timing_ms'].get('independent_gate',0.)+(time.perf_counter()-t)*1000
                 out.update(velocity=gate['velocity'],state=gate['state'],reason=gate['reason'],
                     check=gate.get('check'),people_check=gate.get('people_check'),
-                    motion_uncertainty_margin_m=gate.get('motion_uncertainty_margin_m'),stopping_sweep=gate.get('stopping_sweep'),
-                    velocity_filter=gate.get('velocity_filter'),dynamic_geometry=gate.get('dynamic_geometry'),
-                    response_envelope=gate.get('response_envelope'))
+                    motion_uncertainty_margin_m=gate.get('motion_uncertainty_margin_m'),motion_sweep=gate.get('motion_sweep'),
+                    velocity_filter=gate.get('velocity_filter'),dynamic_geometry=gate.get('dynamic_geometry'))
                 with self.lock:
                     if self.emergency:raise ValueError('emergency_stop')
                     if self.manual:raise ValueError('manual_override')

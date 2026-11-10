@@ -73,7 +73,7 @@ def docker_projection(points, sensor_positions, config, *, map_id, frame, stamp,
 
 
 def ground_relative_projection(points, sensor_positions, config, *, map_id, frame, stamp,
-                               bounds=None, radius=.2, min_neighbors=4,
+                               bounds=None, radius=None, min_neighbors=None,
                                height_min=None, height_max=None):
     """Project points in the ground-relative collision band after a 3-D density filter.
 
@@ -82,8 +82,12 @@ def ground_relative_projection(points, sensor_positions, config, *, map_id, fram
     """
     low = config['min_obstacle_height_m'] if height_min is None else height_min
     high = config['max_height_m'] if height_max is None else height_max
-    if (any(type(x) not in (int, float) or not np.isfinite(x) for x in (low, high, radius))
-            or low < 0 or high <= low or radius <= 0 or type(min_neighbors) is not int
+    settings = config['static'].get('ground_relative_projection', {})
+    radius = settings.get('radius_m', .2) if radius is None else radius
+    min_neighbors = settings.get('min_neighbors', 2) if min_neighbors is None else min_neighbors
+    ground_radius = settings.get('ground_support_radius_m', .75)
+    if (any(type(x) not in (int, float) or not np.isfinite(x) for x in (low, high, radius, ground_radius))
+            or low < 0 or high <= low or radius <= 0 or ground_radius <= 0 or type(min_neighbors) is not int
             or not 1 <= min_neighbors <= 1024):
         raise ValueError('Invalid ground-relative height band or radius filter')
     points = np.asarray(points, dtype=np.float32)
@@ -97,7 +101,8 @@ def ground_relative_projection(points, sensor_positions, config, *, map_id, fram
     kept = points[np.isfinite(distances[:, -1])]
     if not len(kept):
         raise ValueError('No points remain after projection radius filter')
-    geometry_config = dict(config, min_obstacle_height_m=float(low), max_height_m=float(high))
+    geometry_config = dict(config, min_obstacle_height_m=float(low), max_height_m=float(high),
+                           ground_support_radius_m=float(ground_radius))
     base = static_geometry(kept, sensor_positions, geometry_config, map_id=map_id,
                            frame=frame, stamp=stamp, bounds=bounds)
     metadata = base.metadata
@@ -119,6 +124,7 @@ def ground_relative_projection(points, sensor_positions, config, *, map_id, fram
     layers['frontier'] = np.zeros(shape, bool)
     settings = dict(height_min_m=float(low), height_max_m=float(high), radius_m=float(radius),
                     min_neighbors=min_neighbors, resolution_m=float(resolution),
+                    ground_support_radius_m=float(ground_radius),
                     missing_ground_policy='retain_endpoint_as_occupied')
     signature = hashlib.sha256(json.dumps([metadata['snapshot_id'], settings], sort_keys=True).encode()).hexdigest()[:16]
     metadata = dict(metadata, snapshot_id=map_id+':ground_relative_projection:'+signature,

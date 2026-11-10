@@ -84,7 +84,7 @@ class ReverseTests(unittest.TestCase):
                 request_binding=fingerprint(self.request),scene_binding=scene.record['input_fingerprint'],trajectory_binding='synthetic')
             result=guard.gate(proposal,self.request,scene,feedback,now=10.,clock_domain='synthetic',dt=.1)
             self.assertEqual(result['state'],'allowed' if value==0 else 'stop_request',result)
-            if value:self.assertIn(result['reason'],('stopping_sweep_unknown','stopping_sweep_occupied'))
+            if value:self.assertIn(result['reason'],('motion_sweep_unknown','motion_sweep_occupied'))
 
     def test_reverse_gpu_matches_cpu_including_opposite_pending_command(self):
         import torch

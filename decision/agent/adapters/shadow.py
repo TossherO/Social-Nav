@@ -8,9 +8,22 @@ def mapped_origin(catalog, record):
     binding = record.get('map_binding') or {}
     map_id = binding.get('map_id')
     asset = catalog.value.get('map_snapshot_id', '')
-    matches = binding.get('valid') and map_id and (asset == map_id or asset.startswith(map_id+':scan_fusion:'))
+    source_id = catalog.value.get('localization_map_id')
+    matches = binding.get('valid') and map_id and (source_id == map_id if source_id else
+              asset == map_id or asset.startswith(map_id+':scan_fusion:'))
     return dict(map_binding=copy.deepcopy(binding), origin_pose=record.get('map_base_pose') if matches else None,
                 origin_frame_id=binding.get('map_frame') if matches else None, origin_stamp_s=record.get('stamp_s'))
+
+
+def load_catalog_map(catalog):
+    from perception.environment.storage import StaticEnvironmentMap
+    asset = StaticEnvironmentMap(ROOT/catalog.value['map_asset'])
+    value = catalog.value
+    if (asset.manifest['snapshot_id'] != value.get('map_snapshot_id') or
+            asset.manifest['frame_id'] != value['frame_id'] or
+            value.get('localization_map_id',asset.snapshot.metadata.get('map_id')) != asset.snapshot.metadata.get('map_id')):
+        raise ValueError('Semantic catalog and actual map asset do not match')
+    return asset
 
 
 class SavedShadowNavigation:
@@ -60,7 +73,7 @@ class SavedShadowNavigation:
                 origin['origin_frame_id'] != self.catalog.value['frame_id']):
             raise ValueError('Current observation is not localized in the annotated map')
         if self._asset is None:
-            self._asset = StaticEnvironmentMap(ROOT/self.catalog.value['map_asset'])
+            self._asset = load_catalog_map(self.catalog)
         scene = SceneInputs.load(ROOT/self.current.record['source']['scene'])
         if scene.record['input_fingerprint'] != self.current.record['scene_binding']:
             raise ValueError('Saved scene changed after observation binding')
@@ -71,7 +84,7 @@ class SavedShadowNavigation:
     def reference_grid(self):
         from perception.environment.storage import StaticEnvironmentMap
         if self._asset is None:
-            self._asset = StaticEnvironmentMap(ROOT/self.catalog.value['map_asset'])
+            self._asset = load_catalog_map(self.catalog)
         return self._asset.snapshot
 
     def check_route(self, place):
@@ -83,7 +96,7 @@ class SavedShadowNavigation:
         from navigation.planning.footprint import VehicleGeometry
         from navigation.planning.motion import load_motion_config
         if self._planner is None:
-            self._asset = StaticEnvironmentMap(ROOT/self.catalog.value['map_asset'])
+            self._asset = load_catalog_map(self.catalog)
             cfg = planning_config(load_config())
             motion = load_motion_config()
             cfg['motion_constraints'] = {k: motion[k] for k in ('min_turning_radius_m', 'allow_reverse', 'allow_in_place_rotation')}
@@ -122,6 +135,11 @@ class RuntimeShadowNavigation:
         self.catalog, self.client = catalog, client
         self.geometry = VehicleGeometry.historical(ROOT/'configs/wheelchair_geometry_reference.json')
         self.value = client.snapshot(with_image=True)
+        vehicle = self.value.get('vehicle_context')
+        if vehicle is not None:
+            self.geometry = VehicleGeometry(vehicle['footprint'],vehicle['base_from_lidar'],
+                source=vehicle['source'],assumed=vehicle['assumed'])
+            self.motion = copy.deepcopy(vehicle['motion'])
         if self.value['control'] is None:
             raise ValueError('Runtime has not published control state')
         self.clock_domain = self.value['control']['clock_domain']
@@ -136,7 +154,7 @@ class RuntimeShadowNavigation:
         from perception.environment.storage import StaticEnvironmentMap
         from navigation.planning.footprint import VehicleGeometry
         if self._asset is None:
-            self._asset = StaticEnvironmentMap(ROOT/self.catalog.value['map_asset'])
+            self._asset = load_catalog_map(self.catalog)
         record = self.value.get('observation') or {}
         state = self.snapshot()
         origin = mapped_origin(self.catalog, record)
@@ -205,7 +223,9 @@ class RuntimeShadowNavigation:
         binding = state.get('map_binding') or {}
         map_id = binding.get('map_id')
         asset = self.catalog.value.get('map_snapshot_id', '')
-        if not (binding.get('valid') and map_id and (asset == map_id or asset.startswith(map_id+':scan_fusion:'))):
+        source_id = self.catalog.value.get('localization_map_id')
+        if not (binding.get('valid') and map_id and (source_id == map_id if source_id else
+                asset == map_id or asset.startswith(map_id+':scan_fusion:'))):
             return dict(reference_found=False, proposal_allowed=False, status='unavailable',
                         reason='runtime_map_binding_unavailable', executable=False, execution_feedback=False)
         return dict(reference_found=False, proposal_allowed=True, status='runtime_geometry_check_pending',

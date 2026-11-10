@@ -29,11 +29,32 @@ struct Tree {
     std::unordered_map<Key,Votes> votes;
     double vote_interval=0, ray_end_margin=0, obstacle_ttl=INFINITY;
     bool hit_invalidates_free=false;
+    bool static_retention=false, static_initialized=false;
+    double static_first=0, static_last=0, static_box[6]{};
+    std::vector<Key> outside_hits;
     explicit Tree(double resolution): octree(resolution) {}
 };
 bool inside(const octomap::point3d& p, const double* box) {
     return p.x()>=box[0] && p.y()>=box[1] && p.z()>=box[2] &&
            p.x()<box[3] && p.y()<box[4] && p.z()<box[5];
+}
+bool rayMayTouchBox(const octomap::point3d& a, const octomap::point3d& b, const double* box, double padding) {
+    // Conservative slab intersection: voxel centers can be inside even when
+    // the geometric ray is just outside. One full voxel of padding covers it.
+    const double start[3]={a.x(),a.y(),a.z()}, end[3]={b.x(),b.y(),b.z()};
+    double lo=0, hi=1;
+    for(int axis=0;axis<3;++axis) {
+        const double low=box[axis]-padding, high=box[axis+3]+padding, delta=end[axis]-start[axis];
+        if(std::abs(delta)<1e-12) {
+            if(start[axis]<low || start[axis]>high) return false;
+        } else {
+            double t0=(low-start[axis])/delta, t1=(high-start[axis])/delta;
+            if(t0>t1) std::swap(t0,t1);
+            lo=std::max(lo,t0); hi=std::min(hi,t1);
+            if(lo>hi) return false;
+        }
+    }
+    return true;
 }
 }
 extern "C" {
@@ -48,6 +69,11 @@ int sn_occupancy_obstacle_lifetime(void* ptr, double ttl) {
 }
 int sn_occupancy_hit_invalidates_free(void* ptr, int enabled) {
     static_cast<Tree*>(ptr)->hit_invalidates_free=enabled!=0; return 0;
+}
+int sn_occupancy_enable_static_retention(void* ptr) {
+    auto& t=*static_cast<Tree*>(ptr);
+    if(!t.seen.empty()) { error="Static retention must be enabled before observations"; return -1; }
+    t.static_retention=true; return 0;
 }
 int sn_occupancy_enable_static_review(void* ptr, double interval, double margin) {
     try {
@@ -79,7 +105,21 @@ int sn_occupancy_update_masked(void* ptr, const float* xyz, int n, const double*
     const uint8_t* transient, double transient_ttl, int omit_transient) {
     try {
         auto& t=*static_cast<Tree*>(ptr);
-        for(auto it=t.seen.begin();it!=t.seen.end();) {
+        if(t.static_retention) {
+            if(!t.static_initialized) {
+                std::copy(box,box+6,t.static_box);
+                t.static_first=t.static_last=stamp; t.static_initialized=true;
+            }
+            if(stamp<t.static_last || !std::equal(box,box+6,t.static_box) ||
+                    stamp-t.static_first>ttl || stamp-t.static_first>t.obstacle_ttl ||
+                    (transient && !omit_transient))
+                throw std::runtime_error("Static retention requires fixed bounds and full-survey lifetimes");
+            t.static_last=stamp;
+            // A hit point inside the box can quantize to a voxel center outside
+            // it. The ordinary path removes those exceptional keys next scan.
+            for(const auto k:t.outside_hits) { t.seen.erase(k); t.votes.erase(k); }
+            t.outside_hits.clear();
+        } else for(auto it=t.seen.begin();it!=t.seen.end();) {
             const auto key=unpack(it->first);
             const auto& v=it->second;
             const double lifetime=v.transient?std::min(t.obstacle_ttl,transient_ttl):t.obstacle_ttl;
@@ -106,6 +146,7 @@ int sn_occupancy_update_masked(void* ptr, const float* xyz, int n, const double*
             }
             if(ray_stride<=0 || i%ray_stride) continue;
             if(length>maxrange) p=sensor+(p-sensor)*(maxrange/length);
+            if(t.static_retention && !rayMayTouchBox(sensor,p,box,t.octree.getResolution()+1e-6)) continue;
             const auto direction=p-sensor;
             const double used_length=direction.norm();
             const double limit=(used_length-t.ray_end_margin)*used_length;
@@ -136,6 +177,12 @@ int sn_occupancy_update_masked(void* ptr, const float* xyz, int n, const double*
         }
         for(const auto k:moving_hits) if(!hits.count(k)) update(k,true,true);
         for(const auto k:hits) update(k,true);
+        if(t.static_retention) {
+            for(const auto k:hits)
+                if(!inside(t.octree.keyToCoord(unpack(k)),box)) t.outside_hits.push_back(k);
+            for(const auto k:moving_hits)
+                if(!inside(t.octree.keyToCoord(unpack(k)),box)) t.outside_hits.push_back(k);
+        }
         if(t.vote_interval>0) {
             const int64_t bucket=std::floor(stamp/t.vote_interval);
             for(const auto k:review_free) if(!physical_hits.count(k)) {
@@ -150,6 +197,7 @@ int sn_occupancy_update_masked(void* ptr, const float* xyz, int n, const double*
         if(t.seen.size()>static_cast<size_t>(maxvoxels)) {
             t.seen.clear();
             t.votes.clear();
+            t.outside_hits.clear();
             throw std::runtime_error("Occupancy voxel budget exceeded; map was reset to unknown");
         }
         return static_cast<int>(t.seen.size());

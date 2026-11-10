@@ -84,7 +84,7 @@ class TrialConfigTests(unittest.TestCase):
         self.assertEqual(trial['max_angular_rps'],.4)
         self.assertEqual(trial['max_acceleration_mps2'],.36)
         self.assertEqual(trial['max_angular_acceleration_rps2'],.3)
-        self.assertEqual(trial['brake_deceleration_scale'],.75)
+        self.assertNotIn('brake_deceleration_scale',trial)
         self.assertEqual(trial['max_forward_mps'],normal['max_forward_mps'])
         self.assertEqual(trial['max_angular_rps'],normal['max_angular_rps'])
         self.assertEqual(trial['state_max_age_s'],normal['state_max_age_s'])

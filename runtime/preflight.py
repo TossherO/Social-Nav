@@ -115,10 +115,9 @@ def inspect(config_path, *, motion_path=None, motion_profile=None, vehicle_profi
         if motion is None:
             raise ValueError('Motion configuration must pass first')
         geometry, selected, profile = load_vehicle_profile(resolve(vehicle_profile), motion, require_execution=execution)
-        from navigation.safety.config import load_stopping_config
         return dict(vehicle_id=profile['vehicle_id'], geometry_assumed=geometry.assumed,
-                    stopping_model=load_stopping_config(selected),controller=controller_settings(selected),
-                    execution_response_bounds=selected.get('execution_response_bounds'),
+                    controller=controller_settings(selected),
+                    execution_max_longitudinal_speed_mps=selected.get('execution_max_longitudinal_speed_mps'),
                     execution_max_angular_rps=selected.get('execution_max_angular_rps'),
                     scope='declared_measurements_checked_against_selected_limits_not_physical_verification')
     if vehicle_profile or execution:
@@ -140,7 +139,7 @@ def inspect(config_path, *, motion_path=None, motion_profile=None, vehicle_profi
             'environment': (settings['environment_library'], ['sn_occupancy_new_cuda', 'sn_occupancy_suspend_free_history',
                                                              'sn_occupancy_local_ground_conflicts',
                                                              'sn_navigation_support_with_ground_conflicts']),
-            'dwa': (settings['dwa_library'], ['sn_dwa_evaluate']),
+            'dwa': (settings['dwa_library'], ['sn_dwa_predict']),
             'collision': (settings['collision_library'], ['sn_collision_batch_stream']),
             'lio': ('outputs/runtime/build/localization/libsocial_nav_lio.so', ['sn_lio_create', 'sn_lio_step']),
             'roll': ('outputs/runtime/build/localization/libsocial_nav_roll.so', ['sn_roll_create', 'sn_roll_step']),

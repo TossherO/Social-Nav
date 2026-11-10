@@ -100,7 +100,10 @@ def query_geometry(snapshot, points, *, frame):
                         value=float(layers[layer][y,x]);row[field]=value if np.isfinite(value) else None
             if 'assumed_free' in layers:
                 row['assumed_free']=bool(layers['assumed_free'][y,x])
-                if row['assumed_free']:row['free_source']='assumed_no_endpoint'
+                if row['assumed_free']:
+                    manual=layers.get('manual_edit')
+                    row['free_source']='manual_edit' if manual is not None and manual[y,x] else 'assumed_no_endpoint'
+            if 'manual_edit' in layers:row['manual_edit']=bool(layers['manual_edit'][y,x])
         result.append(row)
     return result
 

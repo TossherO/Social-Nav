@@ -8,7 +8,7 @@ from navigation.planning.footprint import VehicleGeometry,swept_check,footprint_
 from navigation.planning.continuity import reference_envelope
 from navigation.control.dwa import DwaController
 from navigation.safety.guard import LocalSafety
-from navigation.kinematics import braking_path
+from navigation.kinematics import ramp_path
 from tests.navigation_fixtures import bundle,request
 
 
@@ -52,10 +52,10 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(check['status'],'unknown',check)
 
     def test_rotation_braking_has_no_translation_and_stops(self):
-        poses=braking_path(np.array([2.,2.,0.]),np.array([0.,.3]),self.motion,.2,timed=True)
+        poses,velocity=ramp_path(np.array([2.,2.,0.]),np.array([0.,.3]),[0.,0.],self.motion,1.,timed=True)
         np.testing.assert_allclose(poses[:,1:3],np.broadcast_to([2.,2.],poses[:,1:3].shape))
-        expected=.3*.2+.3**2/(2*self.motion['max_angular_acceleration_rps2'])
-        self.assertAlmostEqual(poses[-1,3],expected)
+        self.assertGreater(poses[-1,3],0.)
+        np.testing.assert_allclose(velocity,[0.,0.],atol=1e-12)
 
     def test_delayed_feedback_simulation_reaches_yaw_then_stops(self):
         from navigation.simulation import run_case

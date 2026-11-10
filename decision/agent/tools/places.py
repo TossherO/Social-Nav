@@ -78,7 +78,7 @@ class Catalog:
     def annotations(self):
         if self.condition != 'complete':
             return dict(points=[], regions=[], landmarks=[])
-        fields = ('place_id', 'name', 'aliases', 'pose', 'reference', 'status')
+        fields = ('place_id', 'name', 'aliases', 'pose', 'reference', 'status', 'description')
         return dict(points=[dict({k:p[k] for k in fields if k in p}, display_id='P'+str(i+1)) for i,p in enumerate(self.places.values())],
                     regions=[dict(copy.deepcopy(p),display_id='R'+str(i+1)) for i,p in enumerate(self.regions.values())],
                     landmarks=[dict(copy.deepcopy(p),display_id='L'+str(i+1)) for i,p in enumerate(self.landmarks.values())])

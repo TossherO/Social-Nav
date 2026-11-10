@@ -139,7 +139,7 @@ text { font-family:"Noto Sans CJK SC","Microsoft YaHei",sans-serif; fill:#20334a
 <text x="858" y="844" class="node-title" font-size="22" fill="#20334a" font-weight="700">独立安全 · CPU</text>
 <text x="858" y="887" class="metric" font-size="30" fill="#20334a" font-weight="700">24.51 ms</text>
 <text x="858" y="916" class="small" font-size="18" fill="#475b70">含独立几何与时间复核</text>
-<text x="858" y="940" class="small" font-size="18" fill="#475b70">检查延迟和完整制动</text>
+<text x="858" y="940" class="small" font-size="18" fill="#475b70">检查有限时域运动</text>
 </g>
 <rect x="840" y="1004" width="300" height="44" rx="9" class="input-bar" />
 <text x="990" y="1033" class="node-title" text-anchor="middle" font-size="22" fill="#20334a" font-weight="700">建议被接收（影子模式）</text>

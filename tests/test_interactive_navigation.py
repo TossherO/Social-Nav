@@ -198,22 +198,21 @@ class DriverTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_vehicle_profile('navigation/control/vehicle.example.yaml',self.motion,require_execution=True)
 
-    def test_measured_profile_cannot_understate_braking_or_watchdog(self):
+    def test_measured_profile_cannot_understate_motion_limits(self):
         profile=yaml.safe_load(Path('navigation/control/vehicle.example.yaml').read_text())
         profile.update(vehicle_id='synthetic_fixture',protocol='af01_12_bf01_32_payload_sum_mode1_3')
         profile['controller']=dict(velocity_limit_field=1500,feedback_max_linear_mps=1.5,feedback_max_angular_rps=1.5)
-        profile['execution_response_bounds']=dict(max_planar_speed_mps=2.,max_stop_time_s=1.)
+        profile['execution_max_longitudinal_speed_mps']=2.
         profile['verification']=dict(source='synthetic unit test, not a real vehicle',geometry_confirmed=True,motion_confirmed=True,protocol_confirmed=True)
         profile['geometry']=dict(footprint=[[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],base_from_lidar=np.eye(4).tolist())
         limits=profile['measured_limits']
         for name in ('max_forward_mps','max_reverse_mps','max_angular_rps','max_acceleration_mps2','max_angular_acceleration_rps2'):
             limits[name]=self.motion[name]
-        limits.update(minimum_braking_mps2=.3,minimum_angular_braking_rps2=.3,maximum_actuator_delay_s=.1,firmware_watchdog_s=.1)
         with tempfile.TemporaryDirectory() as folder:
             path=Path(folder)/'vehicle.yaml';path.write_text(yaml.safe_dump(profile))
             geometry,motion,_=load_vehicle_profile(path,self.motion,require_execution=True)
             self.assertFalse(geometry.assumed);self.assertFalse(motion['parameters_assumed'])
-            for key,value in (('minimum_braking_mps2',.01),('firmware_watchdog_s',1.)):
+            for key,value in (('max_forward_mps',.01),('max_angular_rps',.01)):
                 bad=copy.deepcopy(profile);bad['measured_limits'][key]=value;path.write_text(yaml.safe_dump(bad))
                 with self.assertRaises(ValueError):load_vehicle_profile(path,self.motion,require_execution=True)
 
@@ -227,7 +226,7 @@ class DriverTests(unittest.TestCase):
         from navigation.safety.shadow import ShadowSafety
         fixture=ShadowTests();fixture.setUp()
         fixture.geometry.assumed=False;motion=dict(fixture.motion,parameters_assumed=False,
-            execution_response_bounds=dict(max_planar_speed_mps=fixture.motion['max_forward_mps'],max_stop_time_s=.1),
+            execution_max_longitudinal_speed_mps=fixture.motion['max_forward_mps'],
             execution_max_angular_rps=fixture.motion['max_angular_rps'])
         scene=assemble_scene(fixture.scene.geometry,clock_domain='runtime_live',settings=load_config()['scene'])
         result=Planner(fixture.config,fixture.geometry,require_actual_start=True).query(fixture.req,scene=scene,now=10.,clock_domain='runtime_live')
@@ -240,8 +239,8 @@ class DriverTests(unittest.TestCase):
         safety.push_packet(packet,mono=0.)
         result=safety.tick(10.,mono=0.,clock_now=lambda:10.)
         self.assertEqual(result['state'],'allowed',result)
-        self.assertEqual(result['response_envelope']['check']['status'],'free')
-        self.assertGreater(result['response_envelope']['additional_margin_m'],0.)
+        self.assertEqual(result['check']['status'],'free')
+        self.assertAlmostEqual(result['motion_sweep']['points'][-1][0], safety.guard.settings['prediction_s'])
         self.assertEqual([x/1000 for x in result['wire_velocity_units']],result['velocity'])
         self.assertLessEqual(result['remaining_validity_s'],.15)
         self.assertEqual(packet,original)

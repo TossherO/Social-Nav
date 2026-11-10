@@ -1,6 +1,7 @@
 """Inspect, export and query geometric environment maps."""
 import argparse
 import json
+import math
 from pathlib import Path
 import sys
 
@@ -39,6 +40,7 @@ def bundle_main(argv):
     export.add_argument('--reference-run',help='Same-bag fixed-map localization for --evidence-run')
     export.add_argument('--out', required=True)
     export.add_argument('--config')
+    export.add_argument('--resolution', type=float, help='Static output grid and fusion voxel resolution in metres')
     export.add_argument('--bounds',type=float,nargs=4,metavar=('XMIN','YMIN','XMAX','YMAX'),
                         help='Explicit source-map region, aligned outward to cells; omitted keeps the whole map')
     export.add_argument('--bag', help='Explicit relocation of the same bound source bag')
@@ -86,6 +88,13 @@ def bundle_main(argv):
         print(json.dumps(dict(out=args.out, scans=result['scans'], valid=result['valid'])))
         return
     if args.command == 'export':
+        config = load_config(args.config)
+        def progress(message):
+            print(message, file=sys.stderr, flush=True)
+        if args.resolution is not None:
+            if not math.isfinite(args.resolution) or args.resolution <= 0:
+                parser.error('--resolution must be finite and positive')
+            config['resolution'] = args.resolution
         projection_options=(args.projection_z_min,args.projection_z_max,args.projection_radius,args.projection_min_neighbors,
                             args.projection_height_min,args.projection_height_max)
         if args.projection_strategy=='observed_endpoints' and any(value is not None for value in projection_options):
@@ -101,19 +110,20 @@ def bundle_main(argv):
                 if not (args.evidence_run and args.reference_run) or args.bag or args.people or args.dynamic_filter not in (None,'geometric'):
                     parser.error('Registered ray export requires both runs and geometric filtering')
                 data=export_registered_environment(args.localization_map,args.evidence_run,args.reference_run,args.out,
-                    config=load_config(args.config),bounds=args.bounds,export_pgm=args.export_pgm)
+                    config=config,bounds=args.bounds,export_pgm=args.export_pgm,progress=progress)
             elif args.dynamic_filter != 'none' or args.bag or args.people:
                 parser.error('--localization-map requires --dynamic-filter none and cannot accept --bag or --people')
             else:
                 settings=({key:value for key,value in zip(('z_min','z_max','radius','min_neighbors','height_min','height_max'),projection_options)
                            if value is not None} if args.projection_strategy!='observed_endpoints' else None)
-                data = export_endpoint_environment(args.localization_map,args.out,config=load_config(args.config),
+                data = export_endpoint_environment(args.localization_map,args.out,config=config,
                     bounds=args.bounds,export_pgm=args.export_pgm,projection_strategy=args.projection_strategy,
                     projection_settings=settings)
         else:
             if args.evidence_run or args.reference_run:parser.error('Registered rays require --localization-map')
-            data = export_environment(args.run,args.out,config=load_config(args.config),bag=args.bag,
-                                      export_pgm=args.export_pgm,people=args.people,filter_mode=args.dynamic_filter,bounds=args.bounds)
+            data = export_environment(args.run,args.out,config=config,bag=args.bag,
+                                      export_pgm=args.export_pgm,people=args.people,filter_mode=args.dynamic_filter,
+                                      bounds=args.bounds,progress=progress)
         result=dict(out=args.out,entity_type='map',map_type='static_environment_map',snapshot_id=data['snapshot_id'])
         if args.projection_strategy in ('docker_assume_free','ground_relative_assume_free'):
             result.update(projection_strategy=args.projection_strategy,free_assumption='no_filtered_endpoint_in_cell',

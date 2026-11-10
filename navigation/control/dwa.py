@@ -1,4 +1,4 @@
-"""Bounded velocity sampling with causal inputs and complete braking certificates.
+"""Bounded velocity sampling with causal inputs and finite-horizon checks.
 
 Uses the dynamic-window formulation of Fox/Burgard/Thrun (1997) and ROS Noetic
 sampling/early rejection semantics; no ROS plugin, optimizer or second tracker.
@@ -20,12 +20,17 @@ from navigation.planning.motion import interpolate_se2,motion_uncertainty_margin
 from navigation.planning.people import PeopleModel,social_groups
 from navigation.planning.rollout import segments,project_progress
 from navigation.planning.planner import se2,transform_poses
-from navigation.safety.guard import stopping_trajectories
 from .tracking import feedback_valid,load_config as tracking_config
 
 
 def load_config(path=None):
     settings=yaml.safe_load(Path(path or Path(__file__).with_name('dwa.yaml')).read_text())
+    from navigation.safety.config import load_safety_config
+    shared=load_safety_config()
+    for name in ('prediction_s','sample_s'):
+        if name in settings and settings[name]!=shared[name]:
+            raise ValueError('DWA prediction settings must match safety config: '+name)
+        settings[name]=shared[name]
     if any(type(v) not in (int,float) or not np.isfinite(v) or v<=0 for v in settings.values()):
         raise ValueError('Invalid DWA configuration')
     if any(type(settings[k]) is not int for k in ('linear_samples','angular_samples','max_candidates','certification_max_checks')):
@@ -43,11 +48,11 @@ class DwaController:
         self.diagnostics=False
         self.planning=copy.deepcopy(planning);self.motion=copy.deepcopy(motion);self.geometry=geometry;self.asset=asset
         self.settings=copy.deepcopy(settings) if settings is not None else load_config();self.goal_settings=tracking_config()
-        from navigation.safety.config import load_stopping_config
-        self.safety_settings=load_stopping_config(motion)
-        if not execution:
-            for name in ('reaction_s','actuator_delay_s'):
-                self.safety_settings[name]=self.settings.get('planning_'+name,self.safety_settings[name])
+        from navigation.safety.config import load_safety_config
+        self.safety_settings=load_safety_config()
+        for name in ('prediction_s','sample_s'):
+            if self.settings.get(name)!=self.safety_settings[name]:
+                raise ValueError('DWA prediction settings must match safety config: '+name)
         self.sweep=SweepChecker(motion.get('collision_backend','cpu'),motion.get('collision_library'))
         self.sweep.metrics=None if device_batch is None else device_batch.metrics
         sources=[Path(__file__),Path(__file__).parents[1]/'kinematics.py',Path(__file__).parents[1]/'safety/guard.py',
@@ -80,7 +85,7 @@ class DwaController:
 
     def command(self,request,scene,feedback,reference,*,now,clock_domain,dt=.1,pending=None):
         began=time.perf_counter();self.result=None;timing={};budget=None;certification_start=None
-        certification=dict(prediction_sweep_ms=0.,braking_sweep_ms=0.,people_ms=0.,enclosures_ms=0.,cpu_fallback_ms=0.,
+        certification=dict(prediction_sweep_ms=0.,people_ms=0.,enclosures_ms=0.,cpu_fallback_ms=0.,
             cpu_fallbacks=0,reused_segments=0,gpu_refinement_batches=0,gpu_refinement_enclosures=0)
         out=dict(status='unavailable',reason=None,velocity=[0.,0.],control_mode='dwa',executable=False,
             request_binding=fingerprint(request),scene_binding=scene.record['input_fingerprint'])
@@ -161,15 +166,13 @@ class DwaController:
                     raise ValueError('rotation_anchor_not_reached')
                 progress=0.;arc=np.zeros(len(path));speed=0.
                 error=wrap(path[-1,2]-start[2])
-                brake=self.motion['max_angular_acceleration_rps2']*self.motion['brake_deceleration_scale']
-                delay=self.safety_settings['reaction_s']+self.safety_settings['actuator_delay_s']+age
                 remaining=max(0.,abs(error)-self.goal_settings['goal_yaw_tolerance_rad']/2)
-                limit=min(self.motion['max_angular_rps'],np.sqrt((brake*delay)**2+2*brake*remaining)-brake*delay)
+                limit=min(self.motion['max_angular_rps'],remaining/self.settings['prediction_s'])
                 target_w=np.sign(error)*limit
                 dw=self.motion['max_angular_acceleration_rps2']*dt
                 low=np.array([0.,max(-limit,initial[1]-dw)])
                 high=np.array([0.,min(limit,initial[1]+dw)])
-                choices=[np.zeros(2)];speed_limits=dict(angular_stopping=float(limit))
+                choices=[np.zeros(2)];speed_limits=dict(angular_approach=float(limit))
                 # Arrive at the pivot and brake translation before rotating.
                 if abs(initial[0])<=self.goal_settings['stopped_linear_mps']:
                     if high[1]>=low[1]:
@@ -194,22 +197,19 @@ class DwaController:
                 speed_limits=dict(pursuit=float(speed))
                 remaining=max(0.,arc[-1]-progress-self.goal_settings['goal_position_tolerance_m']/2)
                 if stop or cusp_stop:
-                    brake=self.motion['max_acceleration_mps2']*self.motion['brake_deceleration_scale']
-                    delay=self.safety_settings['reaction_s']+self.safety_settings['actuator_delay_s']+age
-                    speed=min(speed,np.sqrt((brake*delay)**2+2*brake*remaining)-brake*delay)
-                    speed_limits['stopping']=float(speed)
+                    speed=min(speed,remaining/self.settings['prediction_s'])
+                    speed_limits['goal_approach']=float(speed)
                 curve=abs(wrap(np.diff(path[:,2])))/np.maximum(np.linalg.norm(np.diff(path[:,:2],axis=0),axis=1),1e-9)
                 if len(curve)==len(length):
                     curve_speed=np.minimum(speed_limit,self.motion['max_angular_rps']*.8/np.maximum(curve,1e-9))
-                    distance=np.maximum(0.,arc[:-1]-progress-abs(initial[0])*.4)
-                    cap=np.sqrt(curve_speed**2+2*self.motion['max_acceleration_mps2']*self.motion['brake_deceleration_scale']*distance)
-                    speed=min(speed,float(np.min(np.where(arc[1:]>=progress,cap,np.inf))))
+                    near=(arc[1:]>=progress)&(arc[:-1]<=progress+self.settings['lookahead_m'])
+                    speed=min(speed,float(np.min(np.where(near,curve_speed,np.inf))))
                     speed_limits['path_curvature']=float(speed)
-                acceleration=self.motion['max_acceleration_mps2'];deceleration=acceleration*self.motion['brake_deceleration_scale']
+                acceleration=self.motion['max_acceleration_mps2']
                 low=np.maximum([0. if gear>0 else -speed,-self.motion['max_angular_rps']],initial-np.array([
-                    acceleration if initial[0]<0 else deceleration,self.motion['max_angular_acceleration_rps2']])*dt)
+                    acceleration,self.motion['max_angular_acceleration_rps2']])*dt)
                 high=np.minimum([speed if gear>0 else 0.,self.motion['max_angular_rps']],initial+np.array([
-                    deceleration if initial[0]<0 else acceleration,self.motion['max_angular_acceleration_rps2']])*dt)
+                    acceleration,self.motion['max_angular_acceleration_rps2']])*dt)
                 # A zero target is a braking action, not an instantaneous zero state.
                 choices=[np.zeros(2)]
                 if initial[0]*gear>=0 and np.all(high>=low):
@@ -239,15 +239,13 @@ class DwaController:
                 step=self.settings['prediction_s']/n;poses=np.empty((n+1,len(choices),3));poses[0]=start
                 current=np.broadcast_to(initial,(len(choices),2)).copy()
                 for i in range(n):
-                    targets=np.broadcast_to(actual_pending,current.shape) if i*step<self.safety_settings['actuator_delay_s'] else choices
-                    after=velocity_step(current,targets,self.motion,step)
+                    after=velocity_step(current,choices,self.motion,step)
                     poses[i+1]=advance(poses[i],(current+after)/2,step);current=after
-                brakes=stopping_trajectories(feedback,choices,self.motion,self.safety_settings,dt,pending=actual_pending,observation_age_s=age)
                 timing['candidate_generation']=(time.perf_counter()-stage)*1000;stage=time.perf_counter()
                 results=[];rejects={}
                 for j,desired in enumerate(choices):
                     points=np.c_[np.arange(n+1)*step,poses[:,j]]
-                    reason=None if self._coarse_clear(points,grid) and self._coarse_clear(brakes[j],grid) else 'coarse_obstacle_or_unknown'
+                    reason=None if self._coarse_clear(points,grid) else 'coarse_obstacle_or_unknown'
                     if reason:
                         rejects[reason]=rejects.get(reason,0)+1;continue
                     if rotation_mode:
@@ -270,9 +268,8 @@ class DwaController:
                 timing['ranking']=(time.perf_counter()-stage)*1000;stage=time.perf_counter()
             else:
                 results,rejected=self.device_batch.evaluate(self,scene,model,groups,grid,dynamic,choices,start,initial,
-                    actual_pending,feedback,age,dt,path,prepared,progress)
+                    path,prepared,progress)
                 rejects={'coarse_obstacle_or_unknown':rejected} if rejected else {}
-                brakes=None
                 timing['candidate_generation_and_ranking']=(time.perf_counter()-stage)*1000
                 stage=time.perf_counter()
                 if self.sweep.backend=='cuda':self.sweep.bind_device(grid,self.device_batch.navigation_occupancy,binding=binding)
@@ -300,7 +297,8 @@ class DwaController:
                 if not budget.check():raise ValueError(budget.reason)
                 return result
 
-            out.update(candidate_count=len(choices),rejections=rejects,valid_candidates=0,certification_attempts=0)
+            out.update(candidate_count=len(choices),ranked_candidates=len(results),rejections=rejects,
+                valid_candidates=0,certification_attempts=0,unattempted_candidates=len(results),selection_stopped_early=False)
             if not budget.check():raise ValueError(budget.reason)
             for item in sorted(results,key=lambda x:x[0]):
                 if not budget.check():raise ValueError(budget.reason)
@@ -316,19 +314,12 @@ class DwaController:
                     prediction=people_check(points,margin+dynamic.get('projection_margin_m',0.),start_time=now,
                         hard_until=model.config.get('hard_horizon_s'))
                     if not prediction['valid']:reason=prediction['reason']
-                if reason is None:
-                    braking=brakes[j] if brakes is not None else self.device_batch.trajectory(j,brake=True)
-                    dense,err=interpolate_se2(braking[:,1:],grid.metadata['resolution'],self.safety_settings['max_sweep_samples'])
-                    stop_margin=self.planning['safety_margin_m']+err+motion_uncertainty_margin(feedback,self.geometry,float(braking[-1,0]))
-                    certificate=sweep(dense,stop_margin,'braking')
-                    if certificate['status']!='free':reason='braking_'+certificate['status']
-                    elif not people_check(braking,stop_margin+dynamic.get('projection_margin_m',0.),start_time=feedback['stamp_s'])['valid']:
-                        reason='braking_people_conflict'
                 if not budget.check():raise ValueError(budget.reason)
                 if reason:rejects[reason]=rejects.get(reason,0)+1
                 else:chosen=(item[0],j,points,prediction);break
             timing['certification']=(time.perf_counter()-stage)*1000
-            out.update(candidate_count=len(choices),rejections=rejects,valid_candidates=int(chosen is not None),certification_attempts=certified)
+            out.update(valid_candidates=int(chosen is not None),certification_attempts=certified,
+                unattempted_candidates=len(results)-certified,selection_stopped_early=chosen is not None and certified<len(results))
             if chosen is None:raise ValueError('no_admissible_velocity')
             _,j,points,prediction=chosen;desired=choices[j];self.previous=desired.copy()
             # Prediction starts now; input_binding separately retains both source times.
@@ -340,7 +331,9 @@ class DwaController:
                 local_goal=dict(pose=goal.tolist(),actual_goal=True,goal_behavior=request.get('goal_behavior','pass_through')),
                 trajectory=dict(points=points.tolist(),frame_id=scene.record['frame_id'],initialization='dwa',people_check=prediction,
                     candidate_velocity=dict(linear_x_mps=float(desired[0]),angular_z_rps=float(desired[1]),executable=False)),
-                reference_binding=reference['binding'],candidate_count=len(choices),valid_candidates=1,certification_attempts=certified,rejections=rejects,
+                reference_binding=reference['binding'],candidate_count=len(choices),ranked_candidates=len(results),
+                valid_candidates=1,certification_attempts=certified,unattempted_candidates=len(results)-certified,
+                selection_stopped_early=certified<len(results),rejections=rejects,
                 timing_ms=dict(timing),executable=False,task_completed=False)
             result['certification']=dict(certification,**budget.summary())
             result['result_binding']=fingerprint(result)
@@ -352,6 +345,7 @@ class DwaController:
         except (ValueError,KeyError,TypeError,RuntimeError) as error:
             out.update(reason=str(error),velocity=[0.,0.],valid_candidates=0);self.previous=None
         if budget is not None:
+            out['unattempted_candidates']=len(results)-out['certification_attempts']
             timing['certification']=(time.perf_counter()-certification_start)*1000
             out['certification']=dict(certification,**budget.summary())
         out['compute_ms']=(time.perf_counter()-began)*1000

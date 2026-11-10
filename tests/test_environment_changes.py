@@ -9,7 +9,7 @@ from perception.environment.occupancy import OccupancyTree
 from navigation.planning.planner import Planner
 from navigation.planning.inputs import load_config as planning_config
 from navigation.planning.footprint import VehicleGeometry
-from tests.navigation_fixtures import asset, request
+from tests.navigation_fixtures import asset, bundle, request
 
 
 def evidence(cells, stamp=10., generation=0):
@@ -129,6 +129,35 @@ class ChangeTests(unittest.TestCase):
         self.assertEqual(revised.layers['occupancy'][20,20],100)
         self.assertFalse(revised.layers['assumed_free'][20,20])
         self.assertTrue(revised.layers['assumed_free'][10,10])
+
+    def test_manual_free_map_is_a_static_reference_and_mapped_checks_still_apply(self):
+        cells = np.zeros((60, 60), np.int8)
+        source = asset(cells)
+        manual = np.zeros(cells.shape, bool); manual[50, 50] = True
+        source.snapshot.layers['manual_edit'] = manual
+        # Older edited packages have a per-cell mask but no aggregate metadata.
+        geometry = VehicleGeometry([[-.1,-.1],[.1,-.1],[.1,.1],[-.1,.1]], np.eye(4), source='synthetic')
+        planner = Planner(planning_config(), geometry)
+        static = planner.query(request(), asset=source)
+        self.assertEqual(static['status'], 'path_found', static)
+        self.assertTrue(static['manual_free_present'])
+        self.assertTrue(static['unobserved_free_assumed'])
+        self.assertEqual(static['reference_policy'], 'unobserved_cells_assumed_free')
+        self.assertFalse(static['current_path_valid'])
+        self.assertTrue(static['global_reference_only'])
+        self.assertTrue(static['needs_observation'])
+
+        current = planner.query(request('mapped'), scene=bundle(), asset=source, now=10., clock_domain='synthetic')
+        self.assertEqual(current['status'], 'path_found', current)
+        self.assertTrue(current['manual_free_present'])
+        self.assertTrue(current['current_path_valid'])
+        self.assertEqual(current['local_check']['status'], 'free')
+
+        # A manual occupied or unknown cell is not an assumed free cell.
+        cells[50, 50] = 100
+        result = planner.query(request(), asset=source)
+        self.assertFalse(result['manual_free_present'])
+        self.assertFalse(result['unobserved_free_assumed'])
 
     def test_distinct_correction_histories_have_distinct_bindings(self):
         cells=np.zeros((60,60),np.int8);cells[20,20]=cells[40,40]=100;prior=evidence(cells)

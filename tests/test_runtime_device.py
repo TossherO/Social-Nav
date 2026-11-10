@@ -89,7 +89,7 @@ class DeviceBoundaryTests(unittest.TestCase):
         self.assertEqual(a['status'],'candidate',a);self.assertEqual(b['status'],a['status'],b)
         np.testing.assert_allclose(a['velocity'],b['velocity'],atol=1e-10)
 
-    def test_dwa_device_batch_preserves_cpu_decisions_and_braking_samples(self):
+    def test_dwa_device_batch_preserves_cpu_decisions_and_prediction_samples(self):
         import torch
         from tests.test_navigation_dwa import DwaTests
         from perception.environment.device import DeviceGridSnapshot

@@ -31,12 +31,16 @@ class Observation:
         return self
 
     @classmethod
-    def from_scene(cls, scene, *, rgb=None, source=None):
+    def from_scene(cls, scene, *, rgb=None, source=None, geometry=None):
         from navigation.planning.footprint import VehicleGeometry
         from .. import ROOT
         scene.verify()
         s = scene.record
-        geometry = VehicleGeometry.historical(ROOT/'configs/wheelchair_geometry_reference.json')
+        if geometry is None:
+            geometry = VehicleGeometry.historical(ROOT/'configs/wheelchair_geometry_reference.json')
+            geometry_reference = 'historical_assumed_not_current_calibration'
+        else:
+            geometry_reference = dict(kind='runtime_vehicle_geometry',assumed=geometry.assumed,source=copy.deepcopy(geometry.source))
         pose = s['localization'].get('world_from_lidar')
         local = None if pose is None else geometry.pose(pose).tolist()
         prior = s['prior']
@@ -62,7 +66,7 @@ class Observation:
         r = dict(observation_id=s['observation_id'], stamp_s=s['as_of'], clock_domain=s['clock_domain'],
                  local_identity=[s[k] for k in ('session_id', 'generation', 'frame_id')], scene_binding=s['input_fingerprint'],
                  localization_status=s['localization']['status'], base_pose=local, map_base_pose=mapped,
-                 pose_reference='base_link', geometry_reference='historical_assumed_not_current_calibration',
+                 pose_reference='base_link', geometry_reference=geometry_reference,
                  map_binding={k: copy.deepcopy(prior.get(k)) for k in ('valid', 'map_id', 'map_frame', 'map_revision', 'association_session', 'association_generation')},
                  geometry=dict(status=s['geometry']['status'], stamp_s=s['geometry']['stamp_s'],
                                free_cells=int(np.count_nonzero(cells == 0)), occupied_cells=int(np.count_nonzero(cells == 100)),

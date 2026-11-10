@@ -58,12 +58,9 @@ people:
   prediction_model: deterministic
   # 用于规划的行人身体半径假设，单位为米。
   body_radius_m: 0.30 # Development geometry; not a measured body-size guarantee.
-  # Planning may trade distant conflicts against progress. Safety checks the
-  # entire stopping path independently, without this planning cutoff.
-  # 规划中人物硬碰撞检查的时间范围，单位为秒。
+  # DWA 与独立安全从当前检查时刻起检查人物硬碰撞的时长，单位为秒。
+  # 独立安全仍在完整预测时域内检查静态占据和未知。
   hard_horizon_s: 1.0
-  # 较远未来冲突的代价。
-  future_conflict_cost: 1.0
   # 是否要求该输入有效。
   required: false
   # 同时处理的轨迹数上限。

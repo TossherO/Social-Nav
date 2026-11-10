@@ -60,20 +60,6 @@ def sample_trajectory(points,times):
     return pose,rate
 
 
-def braking_path(pose,velocity,motion,reaction_s,dt=.1,*,timed=False):
-    """Held motion through reaction delay, then symmetric assumed braking."""
-    poses=[np.asarray(pose,float)];v=np.asarray(velocity,float);times=[0.]
-    if reaction_s>0:poses.append(advance(poses[-1],v,reaction_s));times.append(reaction_s)
-    limits=np.array([motion['max_acceleration_mps2'],motion['max_angular_acceleration_rps2']])
-    duration=float(np.max(abs(v)/limits))
-    if duration>10:raise ValueError('Braking horizon exceeds model budget')
-    for step in np.full(max(1,int(np.ceil(duration/dt))),duration/max(1,int(np.ceil(duration/dt)))):
-        after=velocity_step(v,np.zeros(2),motion,step)
-        poses.append(advance(poses[-1],(v+after)/2,step));v=after
-        times.append(times[-1]+step)
-    return np.c_[times,poses] if timed else np.asarray(poses)
-
-
 def ramp_path(pose,velocity,target,motion,duration,dt=.1,*,timed=False):
     """Piecewise midpoint integration of bounded acceleration to a velocity target."""
     poses=[np.asarray(pose,float)];velocity=np.asarray(velocity,float)

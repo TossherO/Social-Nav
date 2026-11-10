@@ -16,7 +16,7 @@ from .storage import asset_reference, content_hash, export_map_server_grid
 
 
 def export_environment(run_directory, output, *, config=None, bag=None, export_pgm=False, people=None, filter_mode=None,
-                       bounds=None):
+                       bounds=None, progress=None):
     run_directory, output = Path(run_directory), Path(output)
     if output.exists():
         raise FileExistsError('Select a new environment output directory')
@@ -80,9 +80,9 @@ def export_environment(run_directory, output, *, config=None, bag=None, export_p
         digest = file_fingerprint(scans)
         if digest != expected_scans:
             raise ValueError('Deskewed scan journal no longer matches this mapping run')
-        from .fusion import fuse_scans
-        snapshot = fuse_scans(snapshot, scans, timeline, config, digest, people=observations,
-                              filter_mode=filter_mode, candidate_points=points)
+        from .fusion import fuse_scans_tiled
+        snapshot = fuse_scans_tiled(snapshot, scans, timeline, config, digest, people=observations,
+                              filter_mode=filter_mode, candidate_points=points, progress=progress)
         source.update(scans=asset_reference(scans), scans_fingerprint=digest)
     return _save_package(snapshot, output, source, config, frame, timeline.bound_keyframes, export_pgm,
                          ['not_navigation_reachability', 'final_map_is_not_causal_input_to_its_own_mapping_run'])
@@ -128,7 +128,7 @@ def export_endpoint_environment(map_path, output, *, config=None, bounds=None, e
 
 
 def export_registered_environment(map_path, evidence_run, reference_run, output, *, config=None,
-                                  bounds=None, export_pgm=False):
+                                  bounds=None, export_pgm=False, progress=None):
     """Fuse existing scan rays using an independent same-bag localization in the target map."""
     map_path, evidence_run, reference_run, output = map(Path, (map_path,evidence_run,reference_run,output))
     if output.exists():
@@ -171,9 +171,9 @@ def export_registered_environment(map_path, evidence_run, reference_run, output,
     if bounds is not None:
         origin=np.asarray(candidate.metadata['origin_xy']);upper=origin+np.asarray(candidate.metadata['shape'][::-1])*config['resolution']
         points=points[((points[:,:2]>=origin)&(points[:,:2]<upper)).all(axis=1)]
-    from .fusion import fuse_scans
-    snapshot=fuse_scans(candidate,scans,timeline,config,file_fingerprint(scans),
-                        filter_mode='geometric',candidate_points=points)
+    from .fusion import fuse_scans_tiled
+    snapshot=fuse_scans_tiled(candidate,scans,timeline,config,file_fingerprint(scans),
+                        filter_mode='geometric',candidate_points=points,progress=progress)
     source=dict(map=asset_reference(map_path),map_fingerprint=digest,input_kind='registered_recorded_rays',
         evidence_run=asset_reference(evidence_run),evidence_run_fingerprint=file_fingerprint(evidence_run/'run.json'),
         evidence_records_fingerprint=file_fingerprint(evidence_run/'localization.jsonl'),

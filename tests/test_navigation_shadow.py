@@ -95,7 +95,7 @@ class ShadowTests(unittest.TestCase):
         self.safety.tick(10.,mono=0.)
         repeated=copy.deepcopy(self.scene.geometry);repeated.layers['occupancy'][20,22]=100
         self.safety.push_grid(repeated,mono=.001)
-        self.assertEqual(self.safety.tick(10.,mono=.001)['reason'],'stopping_sweep_occupied')
+        self.assertEqual(self.safety.tick(10.,mono=.001)['reason'],'motion_sweep_occupied')
         newer=grid();newer.metadata.update(snapshot_id='new',stamp_s=10.01)
         self.safety.push_grid(newer,mono=.01)
         r=self.safety.tick(10.01,mono=.01)
@@ -103,7 +103,7 @@ class ShadowTests(unittest.TestCase):
         self.assertNotEqual(r['scene_binding'],r['proposal_scene_binding'])
         blocked=grid();blocked.metadata.update(snapshot_id='blocked',stamp_s=10.02);blocked.layers['occupancy'][20,22]=100
         self.safety.push_grid(blocked,mono=.02);r=self.safety.tick(10.02,mono=.02)
-        self.assertEqual(r['reason'],'stopping_sweep_occupied');self.assertEqual(r['velocity'],[0.,0.])
+        self.assertEqual(r['reason'],'motion_sweep_occupied');self.assertEqual(r['velocity'],[0.,0.])
 
     def test_corruption_late_packets_and_future_source_are_rejected(self):
         packet=copy.deepcopy(self.packet);packet['proposal']['velocity']=[1.,1.]
@@ -182,7 +182,7 @@ class ShadowTests(unittest.TestCase):
         self.safety.guard.gate=updating
         result=self.safety.tick(10.,mono=0.)
         self.assertEqual(len(calls),2);self.assertEqual(result['revalidation_attempts'],2)
-        self.assertEqual(result['velocity'],[0.,0.]);self.assertEqual(result['reason'],'stopping_sweep_occupied')
+        self.assertEqual(result['velocity'],[0.,0.]);self.assertEqual(result['reason'],'motion_sweep_occupied')
 
     def test_unavailable_proposal_does_not_assemble_or_verify_full_maps(self):
         packet=copy.deepcopy(self.packet);packet['sequence_id']+=1
@@ -245,7 +245,7 @@ class ShadowTests(unittest.TestCase):
         from perception.environment.scene import assemble_scene
         self.geometry.assumed=False
         motion=dict(self.motion,parameters_assumed=False,
-            execution_response_bounds=dict(max_planar_speed_mps=self.motion['max_forward_mps'],max_stop_time_s=.1),
+            execution_max_longitudinal_speed_mps=self.motion['max_forward_mps'],
             execution_max_angular_rps=self.motion['max_angular_rps'])
         scene=assemble_scene(self.scene.geometry,clock_domain='runtime_live',settings=self.safety.scene_settings)
         planner=Planner(self.config,self.geometry,require_actual_start=True)
@@ -308,7 +308,7 @@ class ShadowTests(unittest.TestCase):
         try:
             with patch.object(shadow,'planning_scene',side_effect=joining):
                 result=self.safety.tick(10.01,mono=.01)
-            self.assertEqual(result['reason'],'stopping_sweep_occupied')
+            self.assertEqual(result['reason'],'motion_sweep_occupied')
             self.assertEqual(result['velocity'],[0.,0.]);self.assertEqual(result['revalidation_attempts'],2)
         finally:
             for thread in threads:thread.join(1.)

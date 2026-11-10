@@ -90,6 +90,17 @@ def load_config(path=None):
         if not 0 < dynamic['min_score'] <= 1 or type(dynamic['enabled']) is not bool:
             raise ValueError('Invalid dynamic-filter confidence or enabled flag')
     static = values['static']
+    static.setdefault('tile_size_m', 16.)
+    if not np.isfinite(static['tile_size_m']) or static['tile_size_m'] <= 0:
+        raise ValueError('Static fusion tile size must be finite and positive')
+    projection=static.setdefault('ground_relative_projection',{})
+    if not isinstance(projection,dict):raise ValueError('Invalid ground-relative projection settings')
+    for key,default in dict(radius_m=.2,min_neighbors=2,ground_support_radius_m=.75).items():
+        projection.setdefault(key,default)
+    if (any(type(projection[k]) not in (int,float) or not np.isfinite(projection[k]) or projection[k]<=0
+            for k in ('radius_m','ground_support_radius_m')) or
+            type(projection['min_neighbors']) is not int or not 1<=projection['min_neighbors']<=1024):
+        raise ValueError('Invalid ground-relative projection settings')
     static.setdefault('free_probability', values['free_probability'])
     if not 0 < static['free_probability'] < .5:
         raise ValueError('Invalid static free probability')
@@ -149,7 +160,8 @@ class GridSnapshot:
         return cls(metadata, layers)
 
 
-def project_evidence(voxels, floor, support, origin, config, stamp, *, endpoints=None, candidates=None):
+def project_evidence(voxels, floor, support, origin, config, stamp, *, endpoints=None, candidates=None,
+                     defer_derived=False, grid_origin=None, grid_offset=None):
     """Shared local/static projection: free evidence must cover the collision column."""
     height, width = floor.shape
     resolution = config['resolution']
@@ -161,7 +173,8 @@ def project_evidence(voxels, floor, support, origin, config, stamp, *, endpoints
     free_columns = np.zeros((height*width, bins), bool)
     low, required = voxel_height_band(floor, resolution, config['min_obstacle_height_m'], config['max_height_m'])
     if len(voxels):
-        cells = np.floor((voxels[:, :2]-origin)/resolution).astype(int)
+        cells = np.floor((voxels[:, :2]-(origin if grid_origin is None else grid_origin))/resolution).astype(int)
+        if grid_offset is not None:cells -= grid_offset
         keep = (cells >= 0).all(axis=1) & (cells[:, 0] < width) & (cells[:, 1] < height)
         values, cells = voxels[keep], cells[keep]
         x, y = cells.T
@@ -182,7 +195,8 @@ def project_evidence(voxels, floor, support, origin, config, stamp, *, endpoints
     coverage = (free_columns.sum(axis=1).reshape(floor.shape)/np.maximum(1,required)).astype(np.float32)
     occupancy[(coverage >= config['free_vertical_coverage']) & support & (occupancy != 100)] = 0
     if endpoints is not None and len(endpoints):
-        cells = np.floor((endpoints[:, :2]-origin)/resolution).astype(int)
+        cells = np.floor((endpoints[:, :2]-(origin if grid_origin is None else grid_origin))/resolution).astype(int)
+        if grid_offset is not None:cells -= grid_offset
         keep = (cells >= 0).all(axis=1) & (cells[:, 0] < width) & (cells[:, 1] < height)
         x, y = cells[keep].T
         heights = endpoints[keep, 2]-floor[y, x]
@@ -199,6 +213,10 @@ def project_evidence(voxels, floor, support, origin, config, stamp, *, endpoints
         top = np.fmax(top, candidates['obstacle_max_z'])
         bottom = np.fmin(bottom, candidates['obstacle_min_z'])
         observed |= candidates['observed']
+    if defer_derived:
+        return dict(occupancy=occupancy, ground_z=floor.astype(np.float32), ground_support=support,
+                    observed=observed, last_observed=seen, coverage=coverage,
+                    obstacle_min_z=bottom.astype(np.float32), obstacle_max_z=top.astype(np.float32))
     return finish_evidence(occupancy, observed, seen, coverage, bottom, top, floor, support, resolution)
 
 

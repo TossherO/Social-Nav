@@ -104,6 +104,17 @@ class ObservationLoopTests(unittest.TestCase):
         self.assertEqual(len(published), 1)
         self.assertEqual(published[0].record['rgb']['pixel_sha256'], self.observation.record['rgb']['pixel_sha256'])
 
+    def test_runtime_observation_uses_the_supplied_vehicle_geometry(self):
+        from navigation.planning.footprint import VehicleGeometry
+        transform = np.eye(4);transform[0,3] = .7
+        geometry = VehicleGeometry([[-.3,-.3],[.5,-.3],[.5,.3],[-.3,.3]],transform,
+                                   source={'vehicle_id':'fixture'},assumed=False)
+        observed = Observation.from_scene(self.scene,geometry=geometry)
+        self.assertEqual(observed.record['geometry_reference']['source']['vehicle_id'],'fixture')
+        self.assertFalse(observed.record['geometry_reference']['assumed'])
+        np.testing.assert_allclose(observed.record['base_pose'],geometry.pose(
+            self.scene.record['localization']['world_from_lidar']))
+
     def test_runtime_state_reads_do_not_update_source_time_or_claim_execution(self):
         state = AgentState()
         state.publish_control(dict(stamp_s=10., clock_domain='runtime_bag', feedback={}, request=None))

@@ -49,9 +49,9 @@ def inspect_people(run,output,samples=5,assets=True,compare_config=None):
     from .people import PeopleModel
     from .footprint import VehicleGeometry
     from .motion import motion_uncertainty_margin
-    from navigation.safety.guard import stopping_trajectory
+    from navigation.safety.guard import predicted_trajectory
+    from navigation.safety.config import load_safety_config
     from perception.environment.context import fingerprint
-    import yaml
     source=Path(run).resolve();out=Path(output).resolve();out.mkdir(parents=True,exist_ok=False)
     if not 1<=samples<=8:raise ValueError('Choose at most eight representative cases')
     recorded=json.loads((source/'results.json').read_text())
@@ -65,7 +65,7 @@ def inspect_people(run,output,samples=5,assets=True,compare_config=None):
     if compare_config is not None:
         from .inputs import load_config
         comparison=load_config(compare_config)
-    safety=cfg.get('safety') or yaml.safe_load((Path(__file__).resolve().parents[1]/'safety/config.yaml').read_text())
+    safety=load_safety_config()
     geometry=VehicleGeometry.historical(planning['geometry_reference'])
     people={p['input_fingerprint']:p for p in map(json.loads,(source/'perception/people.jsonl').open())}
     events=list(map(json.loads,(source/'metrics.jsonl').open()))
@@ -83,8 +83,8 @@ def inspect_people(run,output,samples=5,assets=True,compare_config=None):
         model=PeopleModel(context,comparison['people']);old=PeopleModel(context,planning['people'])
         if model.status!='valid':raise ValueError(model.reason)
         if not model.tracks:continue
-        sweep=s.get('stopping_sweep')
-        points=(np.asarray(sweep['points']) if sweep else stopping_trajectory(s['feedback'],s['proposed_velocity'],motion,safety,cfg['shadow']['period_s']))
+        sweep=s.get('motion_sweep') or s.get('stopping_sweep')
+        points=(np.asarray(sweep['points']) if sweep else predicted_trajectory(s['feedback'],s['proposed_velocity'],motion,safety))
         if 'prediction_start_s' in check:
             anchor=check['prediction_start_s'];anchors=[anchor];anchor_scope='recorded_exact'
         else:
@@ -98,7 +98,7 @@ def inspect_people(run,output,samples=5,assets=True,compare_config=None):
         outcomes=[model.check(points,geometry,margin,start_time=float(t))['valid'] for t in anchors]
         probes=[]
         for scale in (.5,0.):
-            alternative=stopping_trajectory(s['feedback'],np.asarray(s['proposed_velocity'])*scale,motion,safety,cfg['shadow']['period_s'])
+            alternative=predicted_trajectory(s['feedback'],np.asarray(s['proposed_velocity'])*scale,motion,safety)
             extra=motion_uncertainty_margin(s['feedback'],geometry,float(alternative[-1,0]))
             probe=model.check(alternative,geometry,planning['safety_margin_m']+extra,start_time=anchor)
             checks=[model.check(alternative,geometry,planning['safety_margin_m']+extra,start_time=float(t))['valid'] for t in anchors]
@@ -114,7 +114,7 @@ def inspect_people(run,output,samples=5,assets=True,compare_config=None):
             action_probes=probes,recorded_velocity_filter=s.get('velocity_filter'),
             old_prediction=previous,new_prediction=current,
             new_valid_across_sampled_anchor_window=all(outcomes),new_rejected_across_sampled_anchor_window=not any(outcomes),
-            anchor_sensitive=any(outcomes) and not all(outcomes),stopping_duration_s=float(points[-1,0]),
+            anchor_sensitive=any(outcomes) and not all(outcomes),trajectory_duration_s=float(points[-1,0]),
             classification=('prediction_unavailable' if 'minimum_nominal_clearance_m' not in current else
                 'nominal_path_overlap' if current['minimum_nominal_clearance_m']<=0 else 'deterministic_clear'))
         records.append(row);working.append((entry,data,model,old,points,margin))
@@ -217,7 +217,7 @@ def inspect_people(run,output,samples=5,assets=True,compare_config=None):
         executable=False,task_completed=False)
     (out/'results.json').write_text(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False))
     page='<!doctype html><meta charset="utf-8"><title>人物预测拒绝审阅</title><style>body{font:16px sans-serif;margin:24px auto;max-width:1600px;background:#f3f5f7}article{background:white;padding:20px;margin:24px 0}img{width:100%}p{line-height:1.6}</style>'
-    page+='<h1>人物预测拒绝：集中审阅</h1><p>点云／RGB只使用原观测及过去图像；停车路径与未来圆均为模型预测，未被执行，也不是人工真值。历史记录未保存精确检查起点时，以原起点至接收时间窗口采样比较；不能把重新预测通过当作导航可放行。</p>'
+    page+='<h1>人物预测拒绝：集中审阅</h1><p>点云／RGB只使用原观测及过去图像；记录中的扫掠与未来圆均为模型预测，未被执行，也不是人工真值。旧记录可能包含停车轨迹；反事实速度使用当前有限时域预测，不是对旧模型的复现。历史记录未保存精确检查起点时，以原起点至接收时间窗口采样比较；不能把重新预测通过当作导航可放行。</p>'
     (out/'review.html').write_text(page+''.join(cards));return result['summary']
 
 

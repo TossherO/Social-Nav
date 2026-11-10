@@ -5,7 +5,7 @@ import numpy as np
 from perception.environment.context import fingerprint
 from navigation.control.tracking import goal_feedback,GoalMonitor,load_config as goal_config
 from navigation.safety.guard import LocalSafety
-from navigation.kinematics import braking_path,velocity_step,turning_residual
+from navigation.kinematics import ramp_path,velocity_step,turning_residual
 from navigation.planning.inputs import load_config
 from navigation.planning.motion import load_motion_config
 from navigation.planning.footprint import VehicleGeometry
@@ -43,21 +43,21 @@ class ControlTests(unittest.TestCase):
         proposal=self.proposal([.5,0.]);proposal.pop('control_mode')
         self.assertEqual(self.gate(proposal)['reason'],'unsupported_control_mode')
 
-    def test_model_braking_distance_matches_independent_energy_formula(self):
-        path=braking_path(np.zeros(3),np.array([.8,0.]),self.motion,.2)
-        expected=.8*.2+.8**2/(2*self.motion['max_acceleration_mps2'])
-        self.assertAlmostEqual(path[-1,0],expected,places=8)
+    def test_prediction_reaches_target_with_bounded_acceleration(self):
+        path,velocity=ramp_path(np.zeros(3),np.zeros(2),[.5,0.],self.motion,1.5)
+        self.assertGreater(path[-1,0],0.)
+        np.testing.assert_allclose(velocity,[.5,0.])
 
     def test_braking_sweep_blocks_obstacle_beyond_the_next_command_step(self):
         cells=np.zeros((60,60),np.int8);cells[18:23,30]=100;self.scene=bundle(cells)
         r=self.gate(self.proposal([.8,0.]),dict(self.feedback,velocity=[.8,0.]))
-        self.assertEqual(r['reason'],'stopping_sweep_occupied')
+        self.assertEqual(r['reason'],'motion_sweep_occupied')
         self.assertEqual(r['velocity'],[0.,0.]);self.assertEqual(r['state'],'stop_request')
 
     def test_unknown_cannot_be_cleared_by_control(self):
         cells=np.zeros((60,60),np.int8);cells[:,30:]=-1;self.scene=bundle(cells)
         r=self.gate(self.proposal([.8,0.]),dict(self.feedback,velocity=[.8,0.]))
-        self.assertEqual(r['reason'],'stopping_sweep_unknown');self.assertEqual(cells[20,30],-1)
+        self.assertEqual(r['reason'],'motion_sweep_unknown');self.assertEqual(cells[20,30],-1)
 
     def test_independent_gate_rejects_when_its_own_people_check_finishes_late(self):
         model=self.guard._people(self.scene);original=model.check;clock=[0.]
@@ -66,7 +66,7 @@ class ControlTests(unittest.TestCase):
         with patch('navigation.safety.guard.time.perf_counter',side_effect=lambda:clock[0]), \
                 patch.object(model,'check',side_effect=late):
             result=self.gate(self.proposal([.05,0.]))
-        self.assertEqual(result['reason'],'stopping_certification_time_budget_exceeded')
+        self.assertEqual(result['reason'],'motion_certification_time_budget_exceeded')
         self.assertEqual(result['state'],'stop_request');self.assertEqual(result['velocity'],[0.,0.])
         np.testing.assert_array_equal(self.guard.last_target,[0.,0.])
 
@@ -135,7 +135,7 @@ class ControlTests(unittest.TestCase):
             trace.append(after.copy());v=after
         np.testing.assert_allclose(v,[0.,0.],atol=1e-12)
         from navigation.planning.motion import twists
-        path=braking_path(np.zeros(3),trace[0],self.motion,0.)
+        path,_=ramp_path(np.zeros(3),trace[0],[0.,0.],self.motion,1.)
         intervals=twists(path,np.ones(len(path)-1))
         self.assertTrue(np.all(abs(intervals[:,2])<=abs(intervals[:,0])/self.motion['min_turning_radius_m']+1e-9))
 

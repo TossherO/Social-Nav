@@ -155,7 +155,14 @@ class Planner:
         measured_grid=grid
         if mode in ('static','mapped'):
             grid=reference_grid(grid,geometry_only=True)
-        out['unobserved_free_assumed']=grid.metadata.get('free_assumption')=='no_filtered_endpoint_in_cell'
+        manual_free_cells = getattr(asset, 'manual_free_cells', None) if mode in ('static','mapped') else 0
+        if manual_free_cells is None:
+            manual = asset.snapshot.layers.get('manual_edit')
+            manual_free_cells = (int(np.count_nonzero(manual & (asset.snapshot.layers['occupancy']==0)))
+                                 if manual is not None else 0)
+        out['manual_free_present'] = manual_free_cells > 0
+        out['unobserved_free_assumed']=(grid.metadata.get('free_assumption')=='no_filtered_endpoint_in_cell' or
+                                        out['manual_free_present'])
         out['reference_policy']=grid.metadata.get('reference_policy',
             'unobserved_cells_assumed_free' if out['unobserved_free_assumed'] else 'observed_free_only')
         if r['frame_id'] != grid.metadata['frame_id']: raise ValueError('Goal frame does not match planning frame')

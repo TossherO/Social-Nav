@@ -224,7 +224,7 @@ class NavigationConsumerTests(unittest.TestCase):
         safety.push_grid(newer, mono=.05); safety.push_state(dict(rows[-1], stamp_s=10.05))
         result = safety.tick(10.05, mono=.05)
         self.assertEqual(result['state'], 'stop_request', result)
-        self.assertEqual(result['reason'], 'stopping_sweep_occupied')
+        self.assertEqual(result['reason'], 'motion_sweep_occupied')
 
 
     def test_ros_wire_preserves_derived_states_source_and_historical_time(self):

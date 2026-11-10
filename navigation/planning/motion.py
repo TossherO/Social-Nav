@@ -50,7 +50,6 @@ def load_motion_config(path=None, *, profile=None):
             if not np.isfinite(v) or v<=0:raise ValueError('Invalid motion setting: '+k)
     if cfg['state_window_s']<cfg['state_max_gap_s']:raise ValueError('Invalid state window')
     if cfg['stationary_min_window_s']>cfg['state_window_s']:raise ValueError('Stationary evidence exceeds pose window')
-    if cfg['brake_deceleration_scale']>1:raise ValueError('Braking assumption cannot exceed nominal acceleration')
     if 'collision_library' in cfg:
         value=Path(cfg['collision_library']);cfg['collision_library']=str(value if value.is_absolute() else ROOT/value)
     return cfg

@@ -38,8 +38,6 @@ common:
   stationary_max_angular_rps: 0.04
   # 运动结果允许的最大年龄，单位为秒。
   max_result_age_s: 0.5
-  # 由加速度配置计算名义制动减速度的比例。
-  brake_deceleration_scale: 0.75
 
 # 可显式选择的运动档位。
 profiles:

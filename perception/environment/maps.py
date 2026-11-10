@@ -7,10 +7,11 @@ from .geometry import ground_plane, nearest_support, distance_to_zero
 from .layers import GridSnapshot
 
 
-def endpoint_layers(points, floor, origin, config):
+def endpoint_layers(points, floor, origin, config, *, grid_origin=None, grid_offset=None):
     """Project a selected final-map subset onto an existing ground/grid geometry."""
     shape = floor.shape
-    cells = np.floor((points[:, :2]-origin)/config['resolution']).astype(int)
+    cells = np.floor((points[:, :2]-(origin if grid_origin is None else grid_origin))/config['resolution']).astype(int)
+    if grid_offset is not None:cells -= grid_offset
     inside=(cells>=0).all(axis=1)&(cells[:,0]<shape[1])&(cells[:,1]<shape[0])
     points,cells=points[inside],cells[inside]
     x, y = cells.T

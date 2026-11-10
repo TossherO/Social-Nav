@@ -8,8 +8,6 @@ import numpy as np
 
 
 _SCORE_BYTES = np.dtype(np.float64).itemsize
-_COUNT_BYTES = np.dtype(np.int32).itemsize
-_BRAKE_CAPACITY = 256
 
 
 def _pointer(tensor):
@@ -36,13 +34,17 @@ class DeviceDwaBatch:
             library or root / 'outputs/runtime/build/dwa/libsocial_nav_dwa_cuda.so'
         )
         self.lib = C.CDLL(str(self.library))
-        self.lib.sn_dwa_evaluate.argtypes = [
+        try:
+            kernel = self.lib.sn_dwa_predict
+        except AttributeError as error:
+            raise RuntimeError('Rebuild the DWA CUDA library for finite-horizon prediction') from error
+        kernel.argtypes = [
             C.c_void_p, C.c_int, C.c_void_p, C.c_void_p, C.c_int,  # targets, path, arc
             C.c_void_p, C.c_void_p, C.c_void_p, C.c_int, C.c_int,  # state, map, shape
             C.c_void_p, C.c_int, C.c_void_p, C.c_int,             # footprint, people
             C.c_void_p, C.c_int, C.c_void_p,                      # groups, social
-            C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p,        # outputs
-            C.c_int, C.c_int, C.c_void_p,                         # steps, capacity, stream
+            C.c_void_p, C.c_void_p,                               # poses, scores
+            C.c_int, C.c_void_p,                                  # steps, stream
         ]
 
     def bind(self, snapshot):
@@ -92,18 +94,15 @@ class DeviceDwaBatch:
         return views
 
     @staticmethod
-    def _parameters(controller, grid, model, start, initial, pending, feedback,
-                    age, dt, progress):
+    def _parameters(controller, grid, model, start, initial, progress):
         """Keep the flat double layout in sync with native/dwa.cu's q fields."""
         motion = controller.motion
         settings = controller.settings
-        safety = controller.safety_settings
         previous = initial if controller.previous is None else controller.previous
         parameters = np.r_[
-            start, initial, feedback['pose'], feedback['velocity'], pending,
+            start, initial,
             motion['max_acceleration_mps2'], motion['max_angular_acceleration_rps2'],
-            motion['brake_deceleration_scale'], safety['actuator_delay_s'], age, dt,
-            safety['reaction_s'], settings['prediction_s'], settings['sample_s'],
+            settings['prediction_s'], settings['sample_s'],
             grid.metadata['origin_xy'], grid.metadata['resolution'], progress, previous,
             [settings[key] for key in (
                 'path_weight', 'progress_weight', 'heading_weight',
@@ -111,7 +110,7 @@ class DeviceDwaBatch:
             )],
             model.as_of - model.origin,
         ].astype(np.float64)
-        if len(parameters) != 33:
+        if len(parameters) != 21:
             raise RuntimeError('Invalid DWA native parameter layout')
         return parameters
 
@@ -125,10 +124,9 @@ class DeviceDwaBatch:
         raw = host.numpy()
         score_bytes = count * _SCORE_BYTES
         scores = raw[:score_bytes].view(np.float64)
-        self.counts = raw[score_bytes:].view(np.int32)
         if self.metrics:
             self.metrics.transfer(
-                'd2h', scores.nbytes + self.counts.nbytes, 'dwa_candidate_summaries'
+                'd2h', scores.nbytes, 'dwa_candidate_summaries'
             )
             self.metrics.add(
                 'dwa_gpu_event', self._kernel_begin.elapsed_time(self._kernel_end) / 1000
@@ -136,7 +134,7 @@ class DeviceDwaBatch:
         return scores
 
     def evaluate(self, controller, scene, model, groups, grid, dynamic, choices,
-                 start, initial, pending, feedback, age, dt, path, prepared, progress):
+                 start, initial, path, prepared, progress):
         import torch
 
         if (self.snapshot is None or
@@ -164,7 +162,7 @@ class DeviceDwaBatch:
             raise ValueError('Unexpected device map dtypes')
 
         parameters = self._parameters(
-            controller, grid, model, start, initial, pending, feedback, age, dt, progress
+            controller, grid, model, start, initial, progress
         )
         rotating = not len(prepared[2])
         if rotating and not hasattr(self.lib,'sn_dwa_supports_rotation'):
@@ -197,20 +195,18 @@ class DeviceDwaBatch:
         settings = controller.settings
         steps = max(2, int(np.ceil(settings['prediction_s'] / settings['sample_s'])))
         self.poses = self._buffer('poses', (count, steps + 1, 4), torch.float64)
-        self.brakes = self._buffer('brakes', (count, _BRAKE_CAPACITY, 4), torch.float64)
-        output = self._buffer('output', (count * (_SCORE_BYTES + _COUNT_BYTES),), torch.uint8)
+        output = self._buffer('output', (count * _SCORE_BYTES,), torch.uint8)
         score_bytes = count * _SCORE_BYTES
         scores = output[:score_bytes].view(torch.float64)
-        counts = output[score_bytes:].view(torch.int32)
 
         self._kernel_begin.record()
-        code = self.lib.sn_dwa_evaluate(
+        code = self.lib.sn_dwa_predict(
             _pointer(targets), count, _pointer(reference), _pointer(arc), len(path),
             _pointer(state), _pointer(occupancy), _pointer(clearance), *occupancy.shape,
             _pointer(footprint), len(controller.geometry.footprint),
             _pointer(people), len(people), _pointer(pairs), len(pairs), _pointer(social),
-            _pointer(self.poses), _pointer(self.brakes), _pointer(counts), _pointer(scores),
-            steps, _BRAKE_CAPACITY, torch.cuda.current_stream(self.device).cuda_stream,
+            _pointer(self.poses), _pointer(scores),
+            steps, torch.cuda.current_stream(self.device).cuda_stream,
         )
         if code:
             raise RuntimeError('CUDA DWA kernel failed: ' + str(code))
@@ -222,10 +218,8 @@ class DeviceDwaBatch:
                   for index, score in enumerate(result) if finite[index]]
         return ranked, int(np.count_nonzero(~finite))
 
-    def trajectory(self, j, *, brake=False):
-        values = self.brakes[j, :self.counts[j]] if brake else self.poses[j]
-        out = values.cpu().numpy()
+    def trajectory(self, j):
+        out = self.poses[j].cpu().numpy()
         if self.metrics:
-            reason = 'dwa_selected_braking' if brake else 'dwa_selected_prediction'
-            self.metrics.transfer('d2h', out.nbytes, reason)
+            self.metrics.transfer('d2h', out.nbytes, 'dwa_selected_prediction')
         return out

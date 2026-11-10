@@ -70,6 +70,9 @@ class StaticEnvironmentMap:
                     not np.array_equal(mask,self.snapshot.layers['occupancy']==0) or
                     not np.isnan(times).all() or self.snapshot.metadata.get('free_space_supported') is not False):
                 raise ValueError('Assumed-free projection must preserve its mask and absence of observation times')
+        manual = self.snapshot.layers.get('manual_edit')
+        self.manual_free_cells = (int(np.count_nonzero(manual & (self.snapshot.layers['occupancy'] == 0)))
+                                  if manual is not None else 0)
         # Older packages may contain extra assets. Geometry loading never opens them.
 
     def close(self):
@@ -92,6 +95,8 @@ class StaticEnvironmentMap:
             geometry_status=self.snapshot.metadata['geometry_status'],
             ground_estimator=self.snapshot.metadata.get('ground_estimator'),
             free_recovery_policy=self.snapshot.metadata.get('dynamic_filter', {}).get('geometric_free_recovery_policy'),
+            manual_free_cells=self.manual_free_cells,
+            fusion=self.snapshot.metadata.get('fusion'),
             projection_strategy=self.snapshot.metadata.get('projection_strategy'),
             free_assumption=self.snapshot.metadata.get('free_assumption'),
             free_space_supported=self.snapshot.metadata.get('free_space_supported'),

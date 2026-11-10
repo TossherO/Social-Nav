@@ -46,7 +46,7 @@ class SafetyIsolationTests(unittest.TestCase):
 
         fixture=ShadowTests();fixture.setUp();fixture.geometry.assumed=False
         motion=dict(fixture.motion,parameters_assumed=False,
-            execution_response_bounds=dict(max_planar_speed_mps=fixture.motion['max_forward_mps'],max_stop_time_s=.1),
+            execution_max_longitudinal_speed_mps=fixture.motion['max_forward_mps'],
             execution_max_angular_rps=fixture.motion['max_angular_rps'])
         scene=assemble_scene(fixture.scene.geometry,clock_domain='runtime_live',settings=fixture.safety.scene_settings)
         planner=Planner(fixture.config,fixture.geometry,require_actual_start=True)

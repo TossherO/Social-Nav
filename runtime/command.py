@@ -17,6 +17,15 @@ class AgentState:
     def __init__(self):
         self.lock = threading.Lock()
         self.control = self.observation = self.image = self.updated_mono = None
+        self.vehicle_context = None
+
+    def configure_vehicle(self, geometry, motion):
+        keys = ('allow_reverse','allow_in_place_rotation','min_turning_radius_m','max_forward_mps','max_reverse_mps',
+                'max_angular_rps','max_acceleration_mps2','max_angular_acceleration_rps2','parameters_assumed')
+        with self.lock:
+            self.vehicle_context = dict(footprint=geometry.footprint.tolist(),base_from_lidar=geometry.base_from_lidar.tolist(),
+                source=copy.deepcopy(geometry.source),assumed=geometry.assumed,
+                motion={k:copy.deepcopy(motion.get(k)) for k in keys})
 
     def publish_control(self, packet, localization=None, *, map_binding=None, cancelled_request=None):
         value = dict(request=copy.deepcopy(packet.get('request')), stamp_s=packet['stamp_s'], clock_domain=packet['clock_domain'],
@@ -42,6 +51,7 @@ class AgentState:
         with self.lock:
             return dict(status='waiting_for_control' if self.control is None else 'available', control=copy.deepcopy(self.control),
                 observation=copy.deepcopy(self.observation), image_base64=self.image if with_image else None,
+                vehicle_context=copy.deepcopy(self.vehicle_context),
                 received_age_s=None if self.updated_mono is None else max(0., time.monotonic()-self.updated_mono),
                 scope='shadow_recommendation_not_execution', executable=False, execution_feedback=False)
 
@@ -115,6 +125,12 @@ class CommandInbox:
                     if not isinstance(value,dict) or set(value)!={'with_image'} or type(value['with_image']) is not bool:
                         raise ValueError('State query requires a Boolean with_image')
                     connection.send(self.agent_state.snapshot(with_image=value['with_image']));continue
+                if request['kind'] in ('agent_shadow_goal','agent_shadow_cancel'):
+                    if self.session is not None and self.session.execute:
+                        raise ValueError('Agent shadow commands are disabled when hardware execution is enabled')
+                    kind = 'goal' if request['kind']=='agent_shadow_goal' else 'cancel'
+                    self.offer(kind,request['value'])
+                    connection.send(dict(accepted=True,executable=False,execution_feedback=False));continue
                 self.offer(request['kind'],request['value'])
                 connection.send(dict(accepted=True,executable=False,execution_feedback=False))
             except Exception as error:

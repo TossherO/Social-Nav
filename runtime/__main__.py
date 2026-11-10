@@ -219,10 +219,11 @@ def main():
         from .session import InteractiveSession
         interactive=InteractiveSession(live=args.live,safety=safety,output=output,execute=args.execute)
     commands=CommandInbox(output/'commands.sock',safety,session=interactive)
+    commands.agent_state.configure_vehicle(geometry,motion)
     agent_observer=None
     if args.agent_observations:
         from decision.agent.adapters.runtime import ObservationWorker
-        agent_observer=ObservationWorker(commands.agent_state.publish_observation,metrics=metrics)
+        agent_observer=ObservationWorker(commands.agent_state.publish_observation,metrics=metrics,geometry=geometry)
     schedule=[] if args.commands is None else json.loads(Path(args.commands).read_text())
     if not isinstance(schedule,list) or any(set(v)!={'offset_s','kind','value'} or not np.isfinite(v['offset_s']) or v['offset_s']<0 for v in schedule):
         raise ValueError('Command schedule requires finite offset_s, kind and value')

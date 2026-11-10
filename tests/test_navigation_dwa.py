@@ -34,6 +34,9 @@ class DwaTests(unittest.TestCase):
         self.assertEqual(r['status'],'candidate',r);self.assertGreater(r['velocity'][0],0.)
         self.assertLessEqual(r['velocity'][0],self.motion['max_acceleration_mps2']*.1+1e-9)
         self.assertLessEqual(r['candidate_count'],24);self.assertAlmostEqual(r['velocity'][1],0.)
+        self.assertEqual(r['valid_candidates'],1)
+        self.assertEqual(r['ranked_candidates'],r['certification_attempts']+r['unattempted_candidates'])
+        self.assertEqual(r['selection_stopped_early'],r['unattempted_candidates']>0)
         self.assertFalse(r['executable']);self.assertEqual(self.controller.result['trajectory']['initialization'],'dwa')
         self.assertEqual(self.reference['result']['search_backend'],'bounded_curvature_hybrid_astar')
         from navigation.planning.continuity import content_valid
@@ -60,6 +63,8 @@ class DwaTests(unittest.TestCase):
         self.assertEqual(result['reason'],'certification_work_budget_exceeded')
         self.assertEqual(result['certification']['exact_checks'],2)
         self.assertEqual(result['certification_attempts'],2);self.assertIsNone(self.controller.result)
+        self.assertEqual(result['ranked_candidates'],result['certification_attempts']+result['unattempted_candidates'])
+        self.assertFalse(result['selection_stopped_early'])
 
     def test_late_people_check_cannot_publish_a_previously_free_candidate(self):
         model=self.controller._model(self.scene);original=model.check;clock=[0.]
@@ -218,14 +223,14 @@ class DwaTests(unittest.TestCase):
                 for e in runtime.drain_events()))
         finally:runtime.close()
 
-    def test_batched_stopping_matches_scalar_model_with_delay_and_unequal_stop_times(self):
-        from navigation.safety.guard import stopping_trajectory,stopping_trajectories
-        settings=self.controller.safety_settings;f=dict(self.feedback,velocity=[.45,.1])
-        targets=np.array([[0,0],[.3,.05],[.48,.12],[.2,-.05]])
-        batch=stopping_trajectories(f,targets,self.motion,settings,.1,pending=[.5,.1],observation_age_s=.07)
-        for desired,actual in zip(targets,batch):
-            expected=stopping_trajectory(f,desired,self.motion,settings,.1,pending=[.5,.1],observation_age_s=.07)
-            np.testing.assert_allclose(actual,expected,atol=2e-12)
+    def test_safety_prediction_keeps_feedback_age_and_fixed_horizon(self):
+        from navigation.safety.guard import predicted_trajectory
+        settings=self.controller.safety_settings;f=dict(self.feedback,velocity=[.45,0.])
+        points=predicted_trajectory(f,[.3,0.],self.motion,settings,pending=[.45,0.],observation_age_s=.07)
+        np.testing.assert_allclose(points[0,1:],f['pose'])
+        self.assertAlmostEqual(points[-1,0],.07+settings['prediction_s'])
+        self.assertTrue(np.all(np.diff(points[:,0])>0))
+        self.assertGreater(points[-1,1],points[0,1])
 
     def test_vector_interpolation_preserves_scalar_samples_and_error(self):
         from navigation.planning.motion import interpolate_se2,twists
@@ -249,7 +254,7 @@ class DwaTests(unittest.TestCase):
         f=dict(self.feedback,velocity=[.2,0.])
         r=control.step(self.req,self.scene,f,now=10.03,clock_domain='synthetic',dt=.1,result=self.reference)
         self.assertEqual(r['command']['state'],'allowed',r)
-        self.assertEqual(r['command']['stopping_sweep']['prediction_start_s'],10.)
+        self.assertEqual(r['command']['motion_sweep']['prediction_start_s'],10.)
         self.assertEqual(r['proposal']['trajectory_as_of'],10.)
         self.assertEqual(len(r['command']['velocity_filter']['attempts']),1)
         self.assertFalse(r['goal']['task_completed'])

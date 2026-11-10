@@ -161,14 +161,25 @@ class AsyncScanJournal:
         if self.error is not None:raise RuntimeError('Scan archive failed: '+self.error)
 
 
-def read_scans(path):
+def read_scans(path, *, stamps=None):
     db = sqlite3.connect(Path(path).resolve().as_uri()+'?mode=ro', uri=True)
     try:
         sealed = db.execute("SELECT value FROM metadata WHERE key='sealed'").fetchone()
         if (db.execute("SELECT 1 FROM metadata WHERE key='failed'").fetchone() is not None or
                 sealed is None or json.loads(sealed[0])['records'] != db.execute('SELECT COUNT(*) FROM scans').fetchone()[0]):
             raise ValueError('Scan journal was not sealed cleanly')
-        for stamp, raw, payload in db.execute('SELECT stamp_ns,record_json,payload FROM scans ORDER BY stamp_ns'):
+        if stamps is None:
+            records = db.execute('SELECT stamp_ns,record_json,payload FROM scans ORDER BY stamp_ns')
+        else:
+            # Indexed primary-key lookups avoid loading/decompressing irrelevant scans.
+            def selected():
+                for stamp in sorted(stamps):
+                    row = db.execute('SELECT stamp_ns,record_json,payload FROM scans WHERE stamp_ns=?', (int(stamp),)).fetchone()
+                    if row is None:
+                        raise ValueError('Indexed scan is missing from the sealed journal')
+                    yield row
+            records = selected()
+        for stamp, raw, payload in records:
             with np.load(io.BytesIO(payload), allow_pickle=False) as data:
                 arrays = {name: data[name] for name in data.files}
             metadata = json.loads(raw)

@@ -107,8 +107,6 @@ def run_case(kind,planning,motion,geometry,*,max_s=75.,progress=False,global_per
     control=DwaNavigationControl(planning,motion,geometry,simulation=True)
     tracker,safety=control.controller,control.safety
     goal_settings=tracker.goal_settings
-    if goal_settings['goal_reaction_s']+1e-8<safety.settings['reaction_s']+safety.settings['actuator_delay_s']:
-        raise ValueError('Goal approach delay must cover the assumed watchdog and actuator delay')
     reference=None;last_reference=-np.inf;scene=None;history=[];references=[];reasons=Counter();compute=[];control_compute=[];policy_compute=[]
     delay_ticks=int(np.ceil(plant_delay_s/dt));queue=[np.zeros(2) for _ in range(delay_ticks)];cancelled=False;resume=False;follow_held=False
     plant_motion=dict(motion)
@@ -252,7 +250,7 @@ def write_review(data,out,geometry):
         stream=io.BytesIO();Image.fromarray(pixels[::-1]).save(stream,format='PNG')
         payload.append(dict(case=case['case'],history=history,goal=case['request']['goal'],
             actors=[world.actor_position(h['t']) for h in history],background=base64.b64encode(stream.getvalue()).decode()))
-    fig.suptitle('Synthetic closed-loop feedback; assumed geometry / braking; NOT real robot execution')
+    fig.suptitle('Synthetic closed-loop feedback; assumed geometry and plant; NOT real robot execution')
     fig.savefig(Path(out)/'overview.png',dpi=140);plt.close(fig)
     encoded=json.dumps(dict(cases=payload,footprint=geometry.footprint.tolist()),ensure_ascii=False,allow_nan=False).replace('</','<'+chr(92)+'/')
     html='''<!doctype html><html lang="zh"><meta charset="utf-8"><title>有反馈运动学仿真</title><style>body{font:16px system-ui;max-width:1200px;margin:auto;padding:20px;background:#eef3f6;color:#223540}canvas{width:100%;background:white}button,select{padding:8px}input{width:60%}pre{white-space:pre-wrap}</style>

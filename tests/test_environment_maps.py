@@ -52,6 +52,26 @@ class PoseTimelineTests(unittest.TestCase):
 
 
 class StaticMapTests(unittest.TestCase):
+    def test_ground_relative_defaults_preserve_sparse_clusters_without_changing_online_support(self):
+        from perception.environment.projection import ground_relative_projection
+        config=load_config()
+        cloud=np.array([[.05,.05,.5],[.23,.05,.5],[.24,.05,.5],[1.35,.05,.5]],np.float32)
+        floor=np.zeros((1,15),np.float32)
+        base=GridSnapshot(dict(shape=[1,15],origin_xy=[0.,0.],resolution=.1,snapshot_id='base'),
+            dict(ground_z=floor,ground_support=np.ones_like(floor,dtype=bool),
+                 obstacle_min_z=np.full_like(floor,np.nan),obstacle_max_z=np.full_like(floor,np.nan)))
+        with patch('perception.environment.projection.static_geometry',return_value=base) as geometry:
+            result=ground_relative_projection(cloud,[[0,0,1]],config,map_id='test',frame='map',stamp=1.)
+        self.assertEqual(result.metadata['projection_counts']['radius_filtered_points'],3)
+        self.assertEqual(result.metadata['projection_settings']['min_neighbors'],2)
+        self.assertEqual(result.metadata['projection_settings']['radius_m'],.2)
+        self.assertEqual(result.metadata['projection_settings']['ground_support_radius_m'],.75)
+        self.assertEqual(geometry.call_args.args[2]['ground_support_radius_m'],.75)
+        self.assertEqual(config['ground_support_radius_m'],.55)
+        self.assertEqual(result.layers['occupancy'][0,13],0)
+        self.assertTrue(result.layers['assumed_free'][0,13])
+        self.assertTrue(np.isnan(result.layers['last_observed']).all())
+
     def test_ground_relative_projection_filters_height_and_keeps_unsupported_points(self):
         from perception.environment.projection import ground_relative_projection
         config = load_config()

@@ -88,6 +88,39 @@ class PredictionTests(unittest.TestCase):
         result=guard.gate(p,req,scene,f,now=10.,clock_domain='synthetic',dt=.1)
         self.assertEqual(result['reason'],'predicted_people_collision');self.assertEqual(result['velocity'],[0.,0.])
 
+    def test_safety_people_cutoff_starts_at_now_and_keeps_future_diagnostics(self):
+        motion=load_motion_config();req=request('local')
+        feedback=dict(status='valid',source='synthetic',pose=[2.,2.,0.],velocity=[.3,0.],stamp_s=10.,
+            clock_domain='synthetic',local_identity=['test',0,'odom'])
+        def check(person,age):
+            scene=tracked_scene([person])
+            proposal=dict(status='candidate',control_mode='dwa',velocity=[.336,0.],request_binding=fingerprint(req),
+                scene_binding=scene.record['input_fingerprint'],trajectory_as_of=10.,trajectory_binding='synthetic')
+            guard=LocalSafety(self.geometry,motion,.05,people_settings=self.cfg,shadow=True)
+            return guard.gate(proposal,req,scene,feedback,now=10.+age,clock_domain='synthetic',dt=.1)
+        for age in (0.,.1):
+            far=check(track(3.,3.5,(0.,-1.,0.)),age)
+            self.assertEqual(far['state'],'allowed',far)
+            self.assertAlmostEqual(far['people_check']['hard_horizon_s'],age+1.)
+            self.assertFalse(far['people_check']['full_forecast_clear'])
+            self.assertGreater(far['people_check']['future_conflict_duration_s'],0.)
+            near=check(track(2.8,3.,(0.,-1.5,0.)),age)
+            self.assertEqual(near['reason'],'predicted_people_collision')
+            self.assertEqual(near['velocity'],[0.,0.])
+
+    def test_safety_still_checks_static_obstacles_beyond_people_cutoff(self):
+        from tests.navigation_fixtures import bundle
+        cells=np.zeros((60,60),np.int8);cells[20,33]=100;scene=bundle(cells)
+        motion=load_motion_config();req=request('local')
+        feedback=dict(status='valid',source='synthetic',pose=[2.,2.,0.],velocity=[.8,0.],stamp_s=10.,
+            clock_domain='synthetic',local_identity=['test',0,'odom'])
+        proposal=dict(status='candidate',control_mode='dwa',velocity=[.8,0.],request_binding=fingerprint(req),
+            scene_binding=scene.record['input_fingerprint'],trajectory_as_of=10.,trajectory_binding='synthetic')
+        result=LocalSafety(self.geometry,motion,.05,people_settings=self.cfg,shadow=True).gate(
+            proposal,req,scene,feedback,now=10.,clock_domain='synthetic',dt=.1)
+        self.assertEqual(result['reason'],'motion_sweep_occupied')
+        self.assertEqual(result['velocity'],[0.,0.])
+
     def test_independent_gate_rejects_people_collision_without_changing_the_selected_velocity(self):
         geometry=self.geometry;motion=load_motion_config()
         scene=tracked_scene([track(2.8,3.5,(0.,-1.5,0.))]);req=request('local')
@@ -107,7 +140,7 @@ class PredictionTests(unittest.TestCase):
         cells=np.zeros((60,60),np.int8);cells[20,20]=100;occupied=bundle(cells)
         blocked_proposal=dict(proposal,scene_binding=occupied.record['input_fingerprint'])
         blocked=guard.gate(blocked_proposal,req,occupied,feedback,now=10.,clock_domain='synthetic',dt=.1)
-        self.assertEqual(blocked['state'],'stop_request');self.assertEqual(blocked['reason'],'stopping_sweep_occupied')
+        self.assertEqual(blocked['state'],'stop_request');self.assertEqual(blocked['reason'],'motion_sweep_occupied')
 
     def test_deterministic_body_does_not_grow_with_box_covariance_or_prediction_time(self):
         target=track(4.,2.,(.5,0.,0.));target['box'][3:5]=[2.,3.]
@@ -178,7 +211,7 @@ class PredictionTests(unittest.TestCase):
         again=guard.gate(proposal,req,scene,feedback,now=10.01,clock_domain='synthetic',dt=.1)
         self.assertIs(guard._people_cache[2],cached);self.assertIs(guard.sweep.snapshot,derived)
         self.assertLess(again['dynamic_geometry']['projection_margin_m'],.1)
-        self.assertEqual(again['stopping_sweep']['prediction_start_s'],10.)
+        self.assertEqual(again['motion_sweep']['prediction_start_s'],10.)
         guard.people_settings=dict(self.cfg,body_radius_m=.31)
         guard.gate(proposal,req,scene,feedback,now=10.,clock_domain='synthetic',dt=.1)
         self.assertIsNot(guard._people_cache[2],cached)
@@ -190,7 +223,7 @@ class PredictionTests(unittest.TestCase):
         self.assertEqual(corrupt['reason'],'scene_binding_invalid');self.assertEqual(corrupt['velocity'],[0.,0.])
         occupied_feedback=dict(feedback,pose=[2.7,2.,0.])
         result=guard.gate(proposal,req,scene,occupied_feedback,now=10.,clock_domain='synthetic',dt=.1)
-        self.assertEqual(result['reason'],'stopping_sweep_occupied')
+        self.assertEqual(result['reason'],'motion_sweep_occupied')
 
     def test_cropped_distance_field_matches_full_map_including_exterior_and_conditional_risk(self):
         from scipy.ndimage import distance_transform_edt

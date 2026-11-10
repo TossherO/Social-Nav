@@ -112,6 +112,16 @@ class OccupancyTree:
         if method(self.ptr, interval, margin) < 0:
             raise RuntimeError(self.lib.sn_occupancy_error().decode())
 
+    def enable_static_retention(self):
+        """Skip redundant expiry scans only for fixed-bounds full-survey fusion."""
+        if self.backend != 'cpu' or not hasattr(self.lib, 'sn_occupancy_enable_static_retention'):
+            return False  # Older native libraries retain the exact original behavior.
+        method = self.lib.sn_occupancy_enable_static_retention
+        method.argtypes = [C.c_void_p]
+        if method(self.ptr) < 0:
+            raise RuntimeError(self.lib.sn_occupancy_error().decode())
+        return True
+
     def static_votes(self, points):
         points = np.ascontiguousarray(points, dtype=np.float32)
         if points.ndim != 2 or points.shape[1] != 3 or not np.isfinite(points).all():

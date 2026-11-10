@@ -1,60 +1,27 @@
-"""Independent simulation/shadow gate with current geometry and stopping sweep."""
+"""Independent simulation/shadow gate with finite-horizon motion checks."""
 import time
 import numpy as np
 from perception.environment.context import fingerprint
-from navigation.kinematics import ramp_path,braking_path,turning_residual,advance,velocity_step
+from navigation.kinematics import ramp_path,turning_residual
 from navigation.planning.motion import interpolate_se2,motion_uncertainty_margin
 from navigation.planning.people import PeopleModel
 from navigation.planning.inputs import request_status
 from navigation.planning.collision import SweepChecker
 from navigation.planning.footprint import footprint_status
 from perception.environment.navigation import navigation_geometry
-from .response import execution_response_enclosure, execution_enclosure_geometry, validate_execution_motion
 
 
-def stopping_trajectory(feedback,desired,motion,settings,dt,*,pending=None,braking_motion=None,observation_age_s=0.):
-    """Shared hypothetical actuator delay, response and braking; not execution."""
-    velocity=np.asarray(feedback['velocity'])
-    if pending is None:pending=velocity
-    if braking_motion is None:
-        braking_motion=dict(motion)
-        for key in ('max_acceleration_mps2','max_angular_acceleration_rps2'):
-            braking_motion[key]*=motion['brake_deceleration_scale']
-    delay,v=ramp_path(feedback['pose'],velocity,pending,motion,settings['actuator_delay_s']+observation_age_s,dt,timed=True)
-    reaction,v=ramp_path(delay[-1,1:],v,desired,motion,settings['reaction_s']+dt,dt,timed=True)
-    braking=braking_path(reaction[-1,1:],v,braking_motion,0.,timed=True)
-    reaction[:,0]+=delay[-1,0];braking[:,0]+=reaction[-1,0]
-    points=np.vstack([delay,reaction[1:],braking[1:]])
-    return points[np.r_[True,np.diff(points[:,0])>1e-10]]
-
-
-def stopping_trajectories(feedback,desired,motion,settings,dt,*,pending=None,observation_age_s=0.):
-    """Same scalar stopping model for a batch, including unequal stop times.
-
-    Braking scales both velocity components together. Its exact integrated arc
-    is v0*T*(u-u*u/2), eliminating a Python loop for each candidate.
-    """
-    desired=np.asarray(desired,float);velocity=np.asarray(feedback['velocity'],float)
+def predicted_trajectory(feedback, desired, motion, settings, *, pending=None, observation_age_s=0.):
+    """Recompute a finite-horizon motion from the original feedback timestamp."""
+    velocity=np.asarray(feedback['velocity'],float)
     pending=velocity if pending is None else pending
-    delay,v=ramp_path(feedback['pose'],velocity,pending,motion,settings['actuator_delay_s']+observation_age_s,dt,timed=True)
-    duration=settings['reaction_s']+dt;n=max(1,int(np.ceil(duration/dt)));step=duration/n
-    poses=[np.broadcast_to(delay[-1,1:],(len(desired),3)).copy()]
-    velocities=np.broadcast_to(v,desired.shape).copy()
-    for _ in range(n):
-        after=velocity_step(velocities,desired,motion,step)
-        poses.append(advance(poses[-1],(velocities+after)/2,step));velocities=after
-    poses=np.asarray(poses);times=np.arange(n+1)*step+delay[-1,0]
-    limits=np.array([motion['max_acceleration_mps2'],motion['max_angular_acceleration_rps2']])*motion['brake_deceleration_scale']
-    durations=np.max(abs(velocities)/limits,axis=1);counts=np.maximum(1,np.ceil(durations/dt).astype(int))
-    indices=np.arange(counts.max()+1)[:,None];fraction=np.minimum(indices/counts[None],1.)
-    braking=advance(poses[-1][None],velocities[None],durations[None]*(fraction-fraction**2/2))
-    results=[]
-    for j,count in enumerate(counts):
-        response=np.c_[times,poses[:,j]]
-        stop=np.c_[np.arange(count+1)*durations[j]/count+times[-1],braking[:count+1,j]]
-        points=np.vstack([delay,response[1:],stop[1:]])
-        results.append(points[np.r_[True,np.diff(points[:,0])>1e-10]])
-    return results
+    step=settings['sample_s']
+    aged,initial=ramp_path(feedback['pose'],velocity,pending,motion,observation_age_s,step,timed=True)
+    future,_=ramp_path(aged[-1,1:],initial,desired,motion,settings['prediction_s'],
+                       min(step,settings['prediction_s']/2),timed=True)
+    future[:,0]+=observation_age_s
+    points=np.vstack([aged,future[1:]])
+    return points[np.r_[True,np.diff(points[:,0])>1e-10]]
 
 
 class LocalSafety:
@@ -63,18 +30,18 @@ class LocalSafety:
         if execution and (geometry.assumed or motion.get('parameters_assumed',True)):
             raise ValueError('Execution requires measured vehicle geometry and motion')
         if execution:
-            validate_execution_motion(motion)
+            for key,minimum in (('execution_max_longitudinal_speed_mps',max(motion['max_forward_mps'],motion['max_reverse_mps'])),
+                                ('execution_max_angular_rps',motion['max_angular_rps'])):
+                value=motion.get(key)
+                if type(value) not in (int,float) or not np.isfinite(value) or value<minimum:
+                    raise ValueError('Execution requires explicit feedback speed bounds covering commands')
         self.execution=execution
         self.shadow=shadow
         self.asset=asset
         self.geometry=geometry;self.motion=motion;self.margin=margin
-        from .config import load_stopping_config
-        self.settings=settings if settings is not None else load_stopping_config(motion)
+        from .config import load_safety_config
+        self.settings=settings if settings is not None else load_safety_config()
         if any(not np.isfinite(v) or v<=0 for v in self.settings.values()):raise ValueError('Invalid safety setting')
-        if not 0<motion['brake_deceleration_scale']<=1:raise ValueError('Invalid braking assumption')
-        self.braking_motion=dict(motion)
-        for key in ('max_acceleration_mps2','max_angular_acceleration_rps2'):
-            self.braking_motion[key]*=motion['brake_deceleration_scale']
         self.last_target=np.zeros(2)
         if people_settings is None:
             from navigation.planning.inputs import load_config
@@ -119,10 +86,10 @@ class LocalSafety:
                 turning_residual(velocity,self.motion)<-1e-7):
             self.last_target=np.zeros(2)
             return dict(result,reason='feedback_outside_motion_model',state='stop_request')
-        if self.execution and (abs(velocity[0])>self.motion['execution_response_bounds']['max_planar_speed_mps'] or
+        if self.execution and (abs(velocity[0])>self.motion['execution_max_longitudinal_speed_mps'] or
                 abs(velocity[1])>self.motion['execution_max_angular_rps']):
             self.last_target=np.zeros(2)
-            return dict(result,reason='feedback_exceeds_execution_response_bound',state='stop_request')
+            return dict(result,reason='feedback_exceeds_execution_speed_bound',state='stop_request')
         reason=None;desired=np.zeros(2)
         if emergency_stop:reason='emergency_stop'
         elif manual_override:reason='manual_override'
@@ -152,10 +119,9 @@ class LocalSafety:
         except (ValueError,KeyError,TypeError):
             self.last_target=np.zeros(2)
             return dict(result,reason='scene_binding_invalid',state='stop_request')
-        # A target is not an instantaneous velocity. Model the outstanding target,
-        # bounded actuator response, watchdog reaction interval, and actual braking.
-        # A shadow recommendation was never sent to an actuator. Hold the
-        # observed velocity through delay, never invent an outstanding command.
+        # Account for feedback age before predicting the selected target.
+        # A shadow recommendation was never sent to an actuator; propagate
+        # feedback age using observed velocity instead of an imagined command.
         pending=velocity if self.shadow else self.last_target
         people=self._people(scene);requested=desired.copy();attempts=[]
         grid,grid_binding,dynamic=people.navigation_grid(scene)
@@ -165,11 +131,12 @@ class LocalSafety:
         current=footprint_status(contact_grid,self.geometry,feedback['pose'],self.margin)
         if current!='free':
             self.last_target=np.zeros(2)
-            return dict(result,state='stop_request',reason='stopping_sweep_'+current)
-        points=stopping_trajectory(feedback,desired,self.motion,self.settings,dt,pending=pending,braking_motion=self.braking_motion,
-            observation_age_s=now-feedback['stamp_s'])
+            return dict(result,state='stop_request',reason='motion_sweep_'+current)
+        age=now-feedback['stamp_s']
+        points=predicted_trajectory(feedback,desired,self.motion,self.settings,pending=pending,
+                                   observation_age_s=age)
         prediction_start=feedback['stamp_s']
-        result['stopping_sweep']=dict(points=points.tolist(),frame_id=r['frame_id'],prediction_start_s=float(prediction_start),
+        result['motion_sweep']=dict(points=points.tolist(),frame_id=r['frame_id'],prediction_start_s=float(prediction_start),
             feedback_stamp_s=feedback['stamp_s'],scope='hypothetical_not_executed')
         dense,error=interpolate_se2(points[:,1:],scene.geometry.metadata['resolution'],self.settings['max_sweep_samples'])
         uncertainty=motion_uncertainty_margin(feedback,self.geometry,float(points[-1,0]))
@@ -177,26 +144,14 @@ class LocalSafety:
         from navigation.planning.collision import CertificationBudget
         budget=CertificationBudget(began+dt,self.settings['max_sweep_samples'])
         check=self.sweep.check(grid,self.geometry,dense,self.margin+error+uncertainty,self.settings['max_sweep_samples'],binding=grid_binding,budget=budget)
-        reason='stopping_sweep_'+check['status'] if check['status']!='free' else None
-        prediction=None if reason else people.check(points,self.geometry,self.margin+uncertainty+dynamic.get('projection_margin_m',0.),start_time=prediction_start)
+        reason='motion_sweep_'+check['status'] if check['status']!='free' else None
+        # PeopleModel measures cutoff from the feedback timestamp. Include the
+        # feedback age so the configured horizon starts at this check's now.
+        people_horizon=age+people.config.get('hard_horizon_s',people.config['horizon_s'])
+        prediction=None if reason else people.check(points,self.geometry,self.margin+uncertainty+dynamic.get('projection_margin_m',0.),
+            start_time=prediction_start,hard_until=people_horizon)
         if prediction is not None and not prediction['valid']:reason=prediction['reason']
-        if self.execution and reason is None:
-            envelope=execution_response_enclosure(feedback,self.geometry,self.motion,self.settings,dt,now-feedback['stamp_s'])
-            # A single inflated footprint encloses the complete uncertain
-            # spatial sweep. The stationary time path tests people over the
-            # entire interval with the same conservative expansion.
-            envelope_geometry=execution_enclosure_geometry(self.geometry,envelope)
-            envelope_uncertainty=motion_uncertainty_margin(feedback,self.geometry,envelope['duration_s'])
-            expanded=self.margin+max(uncertainty,envelope_uncertainty)+envelope['additional_margin_m']
-            enclosure_check=self.sweep.check(grid,envelope_geometry,envelope['points'][:,1:],expanded,
-                self.settings['max_sweep_samples'],binding=grid_binding,budget=budget)
-            reason='response_envelope_'+enclosure_check['status'] if enclosure_check['status']!='free' else None
-            enclosure_people=None if reason else people.check(envelope['points'],envelope_geometry,
-                expanded+dynamic.get('projection_margin_m',0.),start_time=prediction_start)
-            if enclosure_people is not None and not enclosure_people['valid']:reason=enclosure_people['reason']
-            result['response_envelope']={k:v for k,v in envelope.items() if k!='points'}
-            result['response_envelope'].update(check=enclosure_check,people_check=enclosure_people)
-        if not budget.check():reason='stopping_'+budget.reason
+        if not budget.check():reason='motion_'+budget.reason
         result['certification']=budget.summary()
         attempts.append(dict(scale=1.,reason=reason,minimum_clearance_m=None if prediction is None else prediction.get('minimum_clearance_m')))
         result.update(check=check,people_check=prediction,velocity_filter=dict(requested_velocity=requested.tolist(),

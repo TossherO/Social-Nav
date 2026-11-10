@@ -11,8 +11,8 @@ from ..tools.observations import Observation
 
 
 class ObservationWorker:
-    def __init__(self, publish, *, metrics=None):
-        self.publish, self.metrics = publish, metrics
+    def __init__(self, publish, *, metrics=None, geometry=None):
+        self.publish, self.metrics, self.geometry = publish, metrics, geometry
         self.queue = queue.Queue(1)
         self.next_stamp = -float('inf')
         self.identity = None
@@ -44,7 +44,7 @@ class ObservationWorker:
                 if item is None:
                     return
                 scene, image, stamp, frame = item
-                observation = Observation.from_scene(scene, rgb=dict(pixels=image, stamp_s=stamp, frame_id=frame,
+                observation = Observation.from_scene(scene, geometry=self.geometry, rgb=dict(pixels=image, stamp_s=stamp, frame_id=frame,
                     source=dict(kind='runtime_shared_host_rgb_copy', observation_id=scene.record['observation_id'])))
                 self.publish(observation.record, observation.image)
         except Exception as error:
@@ -76,7 +76,8 @@ class RuntimeClient:
         try:
             sock.connect(str(self.path.resolve()))
             connection = Connection(sock)
-            connection.send(dict(kind=kind, value=value))
+            wire_kind = {'goal':'agent_shadow_goal','cancel':'agent_shadow_cancel'}.get(kind,kind)
+            connection.send(dict(kind=wire_kind, value=value))
             result = connection.recv()
         finally:
             sock.close()

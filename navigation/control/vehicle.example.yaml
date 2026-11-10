@@ -31,28 +31,12 @@ measured_limits:
   max_acceleration_mps2: null
   # 规划使用的最大角加速度，单位为弧度每二次方秒。
   max_angular_acceleration_rps2: null
-  # 声明的最小线制动减速度，单位为米每二次方秒。
-  minimum_braking_mps2: null
-  # 声明的最小角制动减速度，单位为弧度每二次方秒。
-  minimum_angular_braking_rps2: null
-  # 声明的执行器最大延迟，单位为秒。
-  maximum_actuator_delay_s: null
-  # 档案采用的固件失联超时预算，单位为秒。
-  firmware_watchdog_s: null
 # 19200 baud; zero/mode3 -> zero/mode1 -> targets; zero/mode3 to disarm.
 # Confirm feedback payload-byte checksum and both joystick neutral fields as well.
 # 底盘通信协议标识。
 protocol: null  # af01_12_bf01_32_payload_sum_mode1_3
-# Physical bounds for all operating conditions of the selected trial:
-# planar speed includes sideways motion of the base reference point;
-# stop time bounds both active-zero and communication-loss stops from
-# the last nonzero command or first zero, including controller response.
-# 实机执行安全检查使用的响应范围。
-execution_response_bounds: null  # {max_planar_speed_mps: ..., max_stop_time_s: ...}
-# Optional per-vehicle stopping budgets. Only these two model times can be
-# increased; input freshness and the independent process watchdog stay fixed.
-# 停车判断使用的本车反应和延迟预算。
-stopping_model: null  # {reaction_s: ..., actuator_delay_s: ...}
+# 定位反馈的平面速度上限，单位米每秒。
+execution_max_longitudinal_speed_mps: null
 # Raw wire field meaning must be verified on this controller. Feedback bounds
 # are independent from the enforced host command caps.
 # 底盘控制帧与反馈范围设置。
