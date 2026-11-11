@@ -233,7 +233,8 @@ def semantic_label_layout(entries, font, frame, ratio):
 
 
 def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_local=None, tracks=(), geometry=None,
-           size=(896,768), detailed=False, trajectory=(), local_view=False, sensors=None):
+           size=(896,768), detailed=False, trajectory=(), local_view=False, sensors=None, static_crop=False,
+           candidate_preview=None, route_preview=None):
     annotations = catalog.annotations()
     legend = []
     if detailed:
@@ -244,6 +245,11 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
                 legend.append(item['display_id']+' '+item.get('name',item.get('description','')))
     captions = ['Pale: prior free | cyan: observed free | dark: occupied | grey: unknown',
                 'Orange robot | blue trail | red P/people | green R']
+    if local_view and candidate_preview is not None:
+        captions.append('Magenta candidate | lines to targets: not visibility')
+    if local_view and route_preview is not None:
+        captions.append('Red: region intersection | amber: static occupied/unknown | blue: other')
+        captions.append('Route lines are not planned paths or proof of clearance')
     layout = reference_layout(bounds,[*captions,'    '.join(legend)]) if size is None else None
     width,height = layout['size'] if layout else size
     ratio = layout['ratio'] if layout else width/896
@@ -259,7 +265,7 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
             lines[-1] = candidate
         else:
             lines.append(item)
-    legend_height = layout['legend_height'] if layout else (80+len(lines)*24)*ratio
+    legend_height = layout['legend_height'] if layout else (80+max(0,len(captions)-2)*24+len(lines)*24)*ratio
     x0,y0,x1,y1 = map(float,bounds)
     top = layout['top'] if layout else round(58*ratio)
     if local_view and sensors and (sensors.get('camera') or {}).get('view',{}).get('status') == 'approximate_pinhole':
@@ -377,6 +383,40 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
         side = 4*ratio*np.array([-direction[1],direction[0]])
         draw.polygon([tuple(tip),tuple(rear+side),tuple(rear-side)],fill='#cc6600')
         label(pose,'ROBOT','#ad5200',below=math.sin(pose[2])>=0)
+    if local_view and candidate_preview is not None:
+        candidate = candidate_preview['pose']
+        camera_xy = candidate_preview.get('camera_xy_m')
+        if camera_xy is not None:
+            for point in candidate_preview.get('points',[]):
+                target = catalog.places.get(point['point_id'],{}).get('pose')
+                if target is not None:
+                    draw.line([pixel(camera_xy),pixel(target)],fill='#b427b5',width=max(1,round(ratio)))
+            cx,cy = pixel(camera_xy)
+            draw.ellipse((cx-3*ratio,cy-3*ratio,cx+3*ratio,cy+3*ratio),fill='#b427b5')
+        if geometry is not None:
+            polygon=geometry.polygon(candidate)
+            draw.line([pixel(p) for p in [*polygon,polygon[0]]],fill='#b427b5',width=max(2,round(3*ratio)))
+        x,y=pixel(candidate)
+        direction=np.array([math.cos(candidate[2]),-math.sin(candidate[2])])
+        tip=np.array([x,y])+max(.6*scale,20*ratio)*direction
+        draw.line([(x,y),tuple(tip)],fill='#b427b5',width=max(2,round(3*ratio)))
+        label(candidate,'CANDIDATE','#8c168e',below=math.sin(candidate[2])>=0)
+    if local_view and route_preview is not None:
+        points=route_preview['waypoints']
+        crossing=set(route_preview['diagnostics']['intersecting_segment_indices'])
+        static=route_preview['diagnostics'].get('static_lines',{}).get('segments',[])
+        for i,(a,b) in enumerate(zip(points,points[1:])):
+            evidence=static[i] if i<len(static) else {}
+            warning=(evidence.get('occupied_samples',0) or evidence.get('unknown_samples',0) or
+                     evidence.get('outside_samples',0) or evidence.get('status')=='outside_sample_range')
+            color='#cf3030' if i in crossing else '#ca7900' if warning else '#1669c1'
+            draw.line([pixel(a),pixel(b)],fill=color,width=max(2,round(3*ratio)))
+        for i,point in enumerate(points):
+            x,y=pixel(point)
+            if left<=x<=left+w and top<=y<=top+h:
+                r=4*ratio
+                draw.ellipse((x-r,y-r,x+r,y+r),fill='#1669c1')
+                draw.text((x+4*ratio,y-16*ratio),str(i),font=label_font,fill='#133b92',stroke_width=1,stroke_fill='#ffffff')
     clipped = Image.new('RGB',(width,height),'#f2f4f7')
     left,top = int(left),int(top)
     clipped.paste(canvas.crop((left,top,left+w,top+h)),(left,top))
@@ -393,7 +433,8 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
     for i,line in enumerate(headers):
         draw.text((18*ratio,(10+i*(20 if layout else 24))*ratio),line,font=font,fill='#162c43')
     if local_view and local_grid is None:
-        draw.text((18*ratio,34*ratio),'STATIC PRIOR ONLY | no current local grid',font=small,fill='#8b4c15')
+        caption = 'STATIC PRIOR ONLY | local occupancy not overlaid' if static_crop else 'STATIC PRIOR ONLY | no current local grid'
+        draw.text((18*ratio,34*ratio),caption,font=small,fill='#8b4c15')
     if local_view and sensors and (sensors.get('camera') or {}).get('view',{}).get('status') == 'approximate_pinhole':
         draw.text((18*ratio,48*ratio),'Purple: approximate camera FOV, not visibility',font=small,fill='#7848bf')
     footer = height-legend_height+15*ratio
@@ -458,7 +499,7 @@ class SpatialView:
         return measured is None or 0 <= stamp-measured <= max_age
 
     @classmethod
-    def build(cls, catalog, inputs, bounds=None, *, trajectory=()):
+    def build(cls, catalog, inputs, bounds=None, *, trajectory=(), static_crop=False, candidate_preview=None,route_preview=None):
         catalog.require_complete()
         global_grid = inputs['global_grid']
         pose = inputs.get('pose')
@@ -492,20 +533,46 @@ class SpatialView:
             bounds = [*(centre-3.),*(centre+3.)]
         if np.shape(bounds)!=(4,) or not np.isfinite(bounds).all() or bounds[2]<=bounds[0] or bounds[3]<=bounds[1]:
             raise ValueError('Expected finite nonempty metric crop bounds')
+        requested_bounds = list(bounds)
+        bounds = list(bounds)
+        if candidate_preview is not None and candidate_preview['static_footprint'] != 'outside':
+            candidate = np.asarray(candidate_preview['pose'],dtype=float)
+            geom = inputs.get('geometry')
+            points = candidate[None,:2] if geom is None else geom.polygon(candidate)
+            low = points.min(axis=0)-.35
+            high = points.max(axis=0)+.35
+            bounds = [min(bounds[0],float(low[0])),min(bounds[1],float(low[1])),
+                      max(bounds[2],float(high[0])),max(bounds[3],float(high[1]))]
+        candidate_expanded=bounds != requested_bounds
+        if route_preview is not None:
+            points=np.asarray(route_preview['waypoints'],dtype=float)
+            asset=display['asset_bounds']
+            inside_asset=((points[:,0]>=asset[0])&(points[:,0]<=asset[2])&
+                          (points[:,1]>=asset[1])&(points[:,1]<=asset[3]))
+            if inside_asset.any():
+                low=points[inside_asset].min(axis=0)-.35;high=points[inside_asset].max(axis=0)+.35
+                bounds=[min(bounds[0],float(low[0])),min(bounds[1],float(low[1])),
+                        max(bounds[2],float(high[0])),max(bounds[3],float(high[1]))]
         if global_grid.metadata['frame_id'] != catalog.value['frame_id']:
             raise ValueError('Map view and annotation coordinate frames differ')
         images = (render(catalog,global_grid,full,pose,geometry=inputs.get('geometry'),size=(768,640),trajectory=trajectory),
-                  render(catalog,global_grid,bounds,pose,local_grid=local,map_from_local=transform,
-                         tracks=tracks,geometry=inputs.get('geometry'),local_view=True,sensors=inputs.get('sensors')))
+                  render(catalog,global_grid,bounds,pose,local_grid=None if static_crop else local,
+                         map_from_local=None if static_crop else transform,tracks=() if static_crop else tracks,
+                         geometry=inputs.get('geometry'),local_view=True,sensors=inputs.get('sensors'),static_crop=static_crop,
+                         candidate_preview=candidate_preview,route_preview=route_preview))
         record = dict(catalog_fingerprint=catalog.fingerprint,map_condition=catalog.condition,
             frame_id=catalog.value['frame_id'],target_reference='base_link',units=dict(position='metres',angle='radians'),
             full_bounds=display['asset_bounds'],overview_bounds=full,display_crop=display,
-            local_bounds=list(bounds),pose=copy.deepcopy(pose),input_source_binding=spatial_source_binding(inputs),
+            local_bounds=list(bounds),requested_local_bounds=requested_bounds,
+            candidate_display_expanded=candidate_expanded,display_expanded_for_preview=bounds != requested_bounds,
+            pose=copy.deepcopy(pose),input_source_binding=spatial_source_binding(inputs),
             source_stamp_s=inputs.get('stamp_s'),clock_domain=inputs.get('clock_domain'),
             global_binding=layer_binding(global_grid),local_binding=None if local is None else layer_binding(local),
             local_observation_id=inputs.get('local_grid_observation_id') if scene is None else scene.record['observation_id'],
             map_from_local=None if transform is None else transform.tolist(),
-            local_source='current_measurement' if local is not None else 'static_prior_only',
+            local_source='current_measurement' if local is not None and not static_crop else 'static_prior_only',
+            candidate_preview=copy.deepcopy(candidate_preview),
+            route_preview=copy.deepcopy(route_preview),
             annotations=catalog.annotations(),
             robot_footprint=None if inputs.get('geometry') is None else inputs['geometry'].footprint.tolist(),
             geometry_assumed=None if inputs.get('geometry') is None else inputs['geometry'].assumed,

@@ -33,7 +33,7 @@ class AgentState:
                 source=copy.deepcopy(geometry.source),assumed=geometry.assumed,
                 motion={k:copy.deepcopy(motion.get(k)) for k in keys})
 
-    def publish_control(self, packet, localization=None, *, map_binding=None, cancelled_request=None):
+    def publish_control(self, packet, localization=None, *, map_binding=None, cancelled_request=None, idle_feedback=None):
         value = dict(request=copy.deepcopy(packet.get('request')), stamp_s=packet['stamp_s'], clock_domain=packet['clock_domain'],
             scene_binding=packet.get('scene_binding'), feedback=copy.deepcopy(packet.get('feedback') or {}),
             reason=packet.get('reason'), reference_accepted=packet.get('result_accepted', False),
@@ -41,6 +41,10 @@ class AgentState:
             execution_feedback=False, task_completed=False, executable=False)
         value['map_binding'] = copy.deepcopy(map_binding)
         value['cancelled_request'] = copy.deepcopy(cancelled_request)
+        value['idle_feedback'] = copy.deepcopy(idle_feedback)
+        proposal=packet.get('proposal') or {}
+        value['planning_status']=proposal.get('status')
+        value['planning_reason']=proposal.get('reason')
         value['localization'] = None if localization is None else {k: copy.deepcopy(localization.get(k)) for k in
             ('stamp_s', 'session_id', 'generation', 'frame_id', 'health', 'source', 'position', 'quaternion_xyzw')}
         with self.lock:
@@ -115,9 +119,13 @@ def validate(kind,value):
 
 
 class CommandInbox:
-    def __init__(self,path,safety,*,session=None):
+    def __init__(self,path,safety,*,session=None,agent_execution=False):
         self.agent_state=AgentState()
         self.path=Path(path);self.safety=safety;self.session=session;self.pending=deque();self.lock=threading.Lock();self.done=False
+        if agent_execution and (session is None or not session.live or not session.execute):
+            raise ValueError('Agent execution requires an explicitly enabled live interactive session')
+        self.agent_execution=agent_execution
+        self.agent_owner=None
         self.route_preempted=False
         if self.path.exists():raise FileExistsError(self.path)
         # Linux sockaddr_un limits the address length even before symlink
@@ -138,9 +146,86 @@ class CommandInbox:
         value=validate(kind,value)
         with self.lock:
             if len(self.pending)>=64:raise RuntimeError('Command inbox is full')
+            self.agent_owner=None
             self.route_preempted=True
             if self.session is not None:self.session.note_command(kind,value)
             self.safety.command(kind,value);self.pending.append((kind,value))
+
+    def agent_live(self, kind, value):
+        """Admit only owned goal/cancel intents into the ordinary safety path."""
+        if not self.agent_execution:
+            raise ValueError('Agent execution is not enabled')
+        value=validate('cancel' if kind=='hold' else kind,value)
+        with self.lock:
+            if len(self.pending)>=64:raise RuntimeError('Command inbox is full')
+            state=self.agent_state.snapshot()
+            control=state.get('control') or {}
+            active=control.get('request')
+            if kind=='goal':
+                chassis=self.session.status().get('chassis') or {}
+                if chassis.get('state')!='armed' or not chassis.get('status_fresh'):
+                    raise ValueError('manual_arming_required')
+                if state.get('received_age_s') is None or state['received_age_s']>.5 or not (control.get('map_binding') or {}).get('valid'):
+                    raise ValueError('live_navigation_state_unavailable')
+                owner=self.agent_owner
+                if owner is None:
+                    if active is not None:raise ValueError('another_goal_is_active')
+                else:
+                    evidence=control.get('goal_observation') or {}
+                    held=owner.get('held') is True and self._held_goal_stopped(control,owner)
+                    active_complete=(not owner.get('held') and isinstance(active,dict) and active.get('request_id')==owner['request_id'] and
+                        evidence.get('status')=='criteria_held' and evidence.get('task_id')==owner['task_id'] and
+                        evidence.get('goal_revision')==owner['goal_revision'])
+                    if (chassis.get('arm_revision')!=owner['arm_revision'] or not (held or active_complete) or
+                            value['task_id']!=owner['task_id'] or value['goal_revision']<=owner['goal_revision']):
+                        raise ValueError('previous_agent_goal_not_completed_or_preempted')
+                if value['mode']!='mapped':raise ValueError('Agent execution requires a mapped goal')
+                self.agent_owner=dict(request_id=value['request_id'],task_id=value['task_id'],
+                                      goal_revision=value['goal_revision'],arm_revision=chassis.get('arm_revision'))
+            else:
+                owner=self.agent_owner
+                if (owner is None or value['task_id']!=owner['task_id'] or
+                        value['goal_revision']!=owner['goal_revision']):
+                    raise ValueError('agent_goal_ownership_lost')
+                if kind=='hold':
+                    chassis=self.session.status().get('chassis') or {}
+                    evidence=control.get('goal_observation') or {}
+                    if (owner.get('held') or chassis.get('state')!='armed' or not chassis.get('status_fresh') or
+                            chassis.get('arm_revision')!=owner['arm_revision'] or
+                            state.get('received_age_s') is None or state['received_age_s']>.5 or
+                            not (control.get('map_binding') or {}).get('valid') or
+                            not isinstance(active,dict) or active.get('request_id')!=owner['request_id'] or
+                            evidence.get('status')!='criteria_held' or evidence.get('task_id')!=owner['task_id'] or
+                            evidence.get('goal_revision')!=owner['goal_revision']):
+                        raise ValueError('agent_goal_not_ready_for_hold')
+                    owner['held']=True
+                else:self.agent_owner=None
+            self.route_preempted=True
+            command='cancel' if kind=='hold' else kind
+            self.session.note_command(command,value)
+            self.safety.command('goal_hold' if kind=='hold' else command,value)
+            self.pending.append((command,value))
+        return dict(accepted=True,scope='live_goal_intent',execution_feedback=False)
+
+    @staticmethod
+    def _held_goal_stopped(control,owner):
+        from navigation.control.tracking import load_config
+        from numbers import Real
+        cancelled=control.get('cancelled_request') or {}
+        feedback=control.get('idle_feedback') or {}
+        velocity=feedback.get('velocity')
+        stamp=feedback.get('stamp_s');now=control.get('stamp_s')
+        settings=load_config()
+        return (control.get('request') is None and cancelled.get('task_id')==owner['task_id'] and
+            cancelled.get('goal_revision')==owner['goal_revision'] and
+            (control.get('localization') or {}).get('health')==0 and
+            feedback.get('local_identity')==[(control.get('localization') or {}).get(k)
+                                            for k in ('session_id','generation','frame_id')] and
+            feedback.get('status')=='valid' and feedback.get('source')=='causal_algorithm_poses_not_chassis_feedback' and
+            isinstance(stamp,Real) and isinstance(now,Real) and math.isfinite(stamp) and math.isfinite(now) and
+            0<=now-stamp<=settings['feedback_max_age_s'] and isinstance(velocity,list) and len(velocity)==2 and
+            all(isinstance(v,Real) and math.isfinite(v) for v in velocity) and
+            abs(velocity[0])<=settings['stopped_linear_mps'] and abs(velocity[1])<=settings['stopped_angular_rps'])
 
     def route_command(self,kind,value):
         """A manual intent permanently preempts the optional recorded route."""
@@ -170,6 +255,18 @@ class CommandInbox:
                     if not isinstance(value,dict) or set(value)!={'with_image'} or type(value['with_image']) is not bool:
                         raise ValueError('State query requires a Boolean with_image')
                     connection.send(self.agent_state.snapshot(with_image=value['with_image']));continue
+                if request['kind']=='agent_live_state':
+                    if not self.agent_execution:raise ValueError('Agent execution is not enabled')
+                    value=request['value']
+                    if not isinstance(value,dict) or set(value)!={'with_image'} or type(value['with_image']) is not bool:
+                        raise ValueError('State query requires a Boolean with_image')
+                    state=self.agent_state.snapshot(with_image=value['with_image'])
+                    with self.lock:owner=copy.deepcopy(self.agent_owner)
+                    state.update(scope='live_observation',chassis=self.session.status().get('chassis'),agent_owner=owner)
+                    connection.send(state);continue
+                if request['kind'] in ('agent_live_goal','agent_live_cancel','agent_live_hold'):
+                    kind={'agent_live_goal':'goal','agent_live_cancel':'cancel','agent_live_hold':'hold'}[request['kind']]
+                    connection.send(self.agent_live(kind,request['value']));continue
                 if request['kind'] in ('agent_shadow_goal','agent_shadow_cancel'):
                     if self.session is not None and self.session.execute:
                         raise ValueError('Agent shadow commands are disabled when hardware execution is enabled')

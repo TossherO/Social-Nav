@@ -22,6 +22,13 @@ from tests.chassis_fixtures import frame
 
 
 class PlaybackTests(unittest.TestCase):
+    def test_live_localization_gravity_override_is_forwarded(self):
+        from runtime.interactive import parser,runtime_command
+        args=parser().parse_args(['--live','--output','/tmp/example','--roll-gravity-deg','6'])
+        config=dict(map='map',static_map='prior',coverage='coverage',motion_config='motion')
+        command=runtime_command(args,config,[0.,0.,0.,0.,0.,0.])
+        self.assertEqual(command[command.index('--roll-gravity-deg')+1],'6.0')
+
     def test_local_window_override_reaches_runtime(self):
         from runtime.interactive import parser,runtime_command
         args=parser().parse_args(['--live','--output','/tmp/example','--environment-window-m','12'])

@@ -89,8 +89,8 @@ class TaskGoals:
                 if target and target not in self.catalog.regions and (target not in self.catalog.places or
                         self.catalog.places[target].get('pose') is None):
                     raise ValueError('Reference is not bound in this map')
-                if not goal.get('semantic_conditions') and 'max_distance_m' not in goal:
-                    raise ValueError('Reference needs a geometric distance or an observable original task condition')
+                if not goal.get('semantic_conditions') and not goal.get('visual_preferences') and 'max_distance_m' not in goal:
+                    raise ValueError('Reference needs a geometric distance or an observable original task condition or visual preference')
                 if 'max_distance_m' in goal and not target:
                     raise ValueError('A geometric distance needs an annotated reference')
             elif target:

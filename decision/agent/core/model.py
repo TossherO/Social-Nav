@@ -119,10 +119,16 @@ def observation_context(messages, source, key, record):
 class Model:
     model = 'qwen3.8-flash'
 
-    def __init__(self, private_config, budget, store, *, transport=None, cache_mode='implicit'):
+    def __init__(self, private_config, budget, store, *, transport=None, cache_mode='implicit', thinking_mode='off', output_limit=None):
         if cache_mode not in ('implicit','explicit'):
             raise ValueError('Choose an explicit cache policy; no automatic fallback')
+        if thinking_mode not in ('off','low'):
+            raise ValueError('Choose off or low thinking; no automatic fallback')
+        if output_limit is not None and (type(output_limit) is not int or not 1 <= output_limit <= 8192):
+            raise ValueError('Output limit must be between 1 and 8192 tokens')
         self.cache_mode = cache_mode
+        self.thinking_mode = thinking_mode
+        self.output_limit = output_limit
         # Read credentials only for an explicitly requested API operation.
         self._private = json.loads(Path(private_config).read_text())
         self._key = os.environ.get('SOCIAL_NAV_AGENT_API_KEY') or self._private['api_key']
@@ -136,10 +142,18 @@ class Model:
     def request(self, system, messages, *, observation_id=None, max_tokens=2048):
         tools = native_tools()
         body = dict(model=self.model,messages=cache_messages(system,messages,self.cache_mode),tools=tools,
-                    tool_choice='auto',parallel_tool_calls=False,enable_thinking=False,temperature=0,
-                    max_tokens=max_tokens,stream=True,stream_options=dict(include_usage=True))
+                    tool_choice='auto',parallel_tool_calls=False,enable_thinking=self.thinking_mode=='low',temperature=0,
+                    stream=True,stream_options=dict(include_usage=True))
+        if self.thinking_mode == 'low':
+            # Bound reasoning and final output together, including reservation.
+            # Historical thinking is not used as dialogue context.
+            output_bound = self.output_limit or 6144
+            body.update(reasoning_effort='low',preserve_thinking=False,max_completion_tokens=output_bound)
+        else:
+            output_bound = self.output_limit or max_tokens
+            body['max_tokens'] = output_bound
         bound = input_bound(body['messages'],tools)
-        call_id = self.budget.reserve(bound,max_tokens)
+        call_id = self.budget.reserve(bound,output_bound)
         self.store.event('api_request',dict(call_id=call_id,purpose='native_tool_decision',model=self.model,
             observation_id=observation_id,request=body,input_token_reservation=bound,cache_mode=self.cache_mode))
         began = time.perf_counter()
@@ -211,7 +225,7 @@ class Model:
             self.budget.finish(call_id,record)
             self.store.event('api_response',record)
             expected = 'tool_calls' if calls else 'stop'
-            if returned_model!=self.model or finish_reason!=expected or record['reasoning']:
+            if returned_model!=self.model or finish_reason!=expected or self.thinking_mode=='off' and record['reasoning']:
                 raise ApiError('Unexpected model, finish reason or thinking output')
             return Reply.parse(message)
         except (httpx.HTTPError,ValueError,KeyError,TypeError,jsonschema.ValidationError,ApiError) as error:
@@ -221,6 +235,10 @@ class Model:
 
     def decide(self, payload, *, observation=None, spatial_view=None):
         system = (ROOT/'decision/agent/configs/system_prompt.txt').read_text().strip()
+        if payload.get('current_state',{}).get('execution_mode',{}).get('mode') == 'operator_driven':
+            system += ('\n\n当前是人工驾驶测试：navigate 只向操作者提供目标位姿，轮椅由操作者使用原车手柄驾驶。'
+                       'Agent 不控制底盘、不负责行驶路径；提交目标后等待人工确认及当前定位停稳反馈。'
+                       '不能把目标接收或人工确认单独说成到达，也不能声称自动导航成功。')
         reference = payload.get('reference_map')
         messages = project_dialogue(payload['messages'],reference)
         state = copy.deepcopy(payload['current_state'])
@@ -275,11 +293,11 @@ class Model:
         return self.request(system,messages,observation_id=None if observation is None else observation.record['observation_id'])
 
 
-def api_work(config, session, payload, observation=None, spatial_view=None, *, cache_mode='implicit'):
+def api_work(config, session, payload, observation=None, spatial_view=None, *, cache_mode='implicit', thinking_mode='off'):
     # Background operations own their database connections and credentials.
     store, budget = Store(session), shared_budget()
     try:
-        return Model(config,budget,store,cache_mode=cache_mode).decide(payload,observation=observation,spatial_view=spatial_view)
+        return Model(config,budget,store,cache_mode=cache_mode,thinking_mode=thinking_mode).decide(payload,observation=observation,spatial_view=spatial_view)
     finally:
         budget.close()
         store.close()

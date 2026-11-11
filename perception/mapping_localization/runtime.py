@@ -24,9 +24,9 @@ def quaternion(rotation):
 
 
 class LocalizationSession:
-    def __init__(self,config_path,*,mode='odometry',coverage=None,allow_local_only=False,metrics=None,association_ready=None):
+    def __init__(self,config_path,*,mode='odometry',coverage=None,allow_local_only=False,metrics=None,association_ready=None,latest_matching=False):
         if mode not in ('mapping','localization','odometry'):raise ValueError('Unsupported native localization mode')
-        self.mode=mode;self.session=uuid.uuid4().hex;self.config=yaml.safe_load(Path(config_path).read_text());self.metrics=metrics
+        self.mode=mode;self.latest_matching=bool(latest_matching and mode=='localization');self.session=uuid.uuid4().hex;self.config=yaml.safe_load(Path(config_path).read_text());self.metrics=metrics
         self.frontend=NativeFrontend(config_path);self.matcher=None
         self.map_id='';self.asset_fingerprint=''
         if mode!='odometry':self.matcher=NativeRoll(config_path)
@@ -44,7 +44,10 @@ class LocalizationSession:
             max_map_age=association_config['association_max_age_s'],
             confirm_matches=association_config['association_confirm_matches'])
         self.context_lock=threading.Lock();self.association_ready=association_ready
-        self.jobs=queue.Queue(64);self.completed=queue.Queue(64);self.error=None;self.worker=None
+        # Live/fixed-map localization uses the newest causal scans; an old
+        # matching backlog cannot become current localization evidence. Mapping
+        # keeps its original lossless queue because every scan may affect export.
+        self.jobs=queue.Queue(2 if self.latest_matching else 64);self.completed=queue.Queue(64);self.error=None;self.worker=None
         if self.matcher is not None:
             self.worker=threading.Thread(target=self._match,name='native-roll',daemon=True);self.worker.start()
 
@@ -66,7 +69,11 @@ class LocalizationSession:
                 try:
                     if self.metrics is not None:self.metrics.trace('match_start',measurement_stamp_s=row['stamp_s'])
                     begin=time.perf_counter();match=self.matcher.step(cloud[:,:4],pose,reference,row['stamp_s'])
-                    if self.metrics is not None:self.metrics.trace('match_done',measurement_stamp_s=row['stamp_s'],available=bool(match['available']),valid=bool(match['valid']))
+                    if self.metrics is not None:self.metrics.trace('match_done',measurement_stamp_s=row['stamp_s'],
+                        available=bool(match['available']),valid=bool(match['valid']),
+                        inlier_ratio=match['inlier_ratio'] if np.isfinite(match['inlier_ratio']) else None,
+                        registration_error=match['registration_error'] if np.isfinite(match['registration_error']) else None,
+                        gate_diagnostics=match.get('gate_diagnostics'))
                     if self.metrics is not None:
                         self.metrics.add('roll_processing',time.perf_counter()-begin)
                         stages=match.get('stages')
@@ -106,12 +113,31 @@ class LocalizationSession:
         with self.context_lock:state,association=self.context.update(row)
         if self.matcher is not None and len(cloud) and result['reason'] in (0,4):
             if self.metrics is not None:self.metrics.trace('match_submit',measurement_stamp_s=stamp)
-            try:self.jobs.put_nowait(('scan',cloud,pose,result['initial_lidar_pose'],row))
-            except queue.Full:raise RuntimeError('Native map matching backlog exceeded 64 scans')
+            self.submit_match(('scan',cloud,pose,result['initial_lidar_pose'],row))
         association=self._association(association,stamp)
         if 'map_matrix' in state:
             mapped=state.pop('map_matrix');state.update(map_position=mapped[:3,3].tolist(),map_quaternion_xyzw=quaternion(mapped[:3,:3]).tolist())
         return state,association,cloud,result,match
+
+    def submit_match(self, job):
+        try:
+            self.jobs.put_nowait(job)
+            return
+        except queue.Full:
+            if not self.latest_matching:
+                raise RuntimeError('Native map matching backlog exceeded 64 scans')
+        try:
+            replaced=self.jobs.get_nowait()
+        except queue.Empty:
+            replaced=None  # The worker freed the slot concurrently.
+        if replaced is not None:
+            if replaced[0]!='scan':
+                raise RuntimeError('Cannot replace a non-scan localization job')
+            if self.metrics is not None:
+                self.metrics.event('localization_match_scans_replaced')
+                self.metrics.trace('match_replaced',measurement_stamp_s=replaced[4]['stamp_s'],
+                                   replacement_stamp_s=job[4]['stamp_s'])
+        self.jobs.put_nowait(job)
 
     def _association(self,association,stamp):
         association.update(stamp_s=stamp,stamp_ns=round(stamp*1e9),local_frame='odom',local_session_id=self.session,

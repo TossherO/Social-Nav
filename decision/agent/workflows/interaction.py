@@ -25,11 +25,11 @@ class Console:
 
 
 def dispatch(command, actor):
-    if command in ('continue', 'pause', 'resume', 'cancel'):
+    if command in ('continue', 'pause', 'resume', 'cancel', 'arrived'):
         actor.event(command)
         return
     for prefix, name in (('replace ', 'replace'), ('answer ', 'answer')):
         if command.startswith(prefix) and command[len(prefix):].strip():
             actor.event(name, command[len(prefix):].strip())
             return
-    raise ValueError('continue / pause / resume / cancel / answer 补充说明 / replace 新指令')
+    raise ValueError('continue / pause / resume / cancel / arrived（手动模式） / answer 补充说明 / replace 新指令')

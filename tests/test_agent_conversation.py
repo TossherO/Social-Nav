@@ -166,6 +166,48 @@ class ConversationTests(unittest.TestCase):
             finally:actor.close()
             self.session.event('answer','继续检查')
 
+    def test_accepted_goal_waits_for_feedback_before_next_model_request(self):
+        self.session.call('record_task',goals=[point_goal('elevator')])
+        query_map(self.session)
+        calls=[]
+        def work(_payload,_observation,view):
+            calls.append(1)
+            if len(calls)==1:
+                return reply('navigate',goal_id='elevator',pose=[5,4,0],
+                             view_id=view.record['view_id'],orientation_source='autonomous')
+            return reply('check_goal',goal_id='elevator')
+        actor=AgentLoop(self.session,work)
+        try:
+            actor.tick();actor.model.thread.join(1);actor.tick()
+            self.assertEqual(self.session.state['status'],'waiting_navigation')
+            self.assertEqual(self.nav.state['status'],'running')
+            for _ in range(5):actor.tick()
+            self.assertEqual(len(calls),1)
+            self.assertEqual(self.session.skill.record['completed'],[])
+            self.nav.arrive()
+            actor.tick();actor.model.thread.join(1)
+            self.assertEqual(len(calls),2)
+            actor.tick()
+            self.assertEqual(self.session.task_goals.goals[0]['status'],'completed')
+        finally:
+            actor.close()
+
+    def test_user_cancel_still_cancels_while_waiting_for_navigation(self):
+        self.session.call('record_task',goals=[point_goal('elevator')])
+        query_map(self.session)
+        actor=AgentLoop(self.session,lambda _payload,_observation,view:reply('navigate',goal_id='elevator',
+                        pose=[5,4,0],view_id=view.record['view_id'],orientation_source='autonomous'))
+        try:
+            actor.tick();actor.model.thread.join(1);actor.tick()
+            self.assertEqual(self.session.state['status'],'waiting_navigation')
+            actor.event('cancel')
+            self.assertEqual(self.nav.state['status'],'stopping')
+            self.nav.stopped();actor.tick()
+            self.assertEqual(self.session.state['status'],'cancelled')
+            self.assertFalse(self.session.state['completed_revisions'])
+        finally:
+            actor.close()
+
     def test_reused_call_identity_is_rejected_before_second_tool_execution(self):
         response=reply('get_navigation_state')
         actor=AgentLoop(self.session,lambda *_:response)

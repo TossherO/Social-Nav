@@ -1,13 +1,15 @@
 """Agent-selected routes and circuit evidence, using synthetic feedback only."""
 import copy
+import io
 import math
 import tempfile
 import unittest
 from unittest.mock import patch
 from pathlib import Path
 import numpy as np
+from PIL import Image
 from decision.agent import CONFIG_DIR,ROOT
-from decision.agent.core.route import circuit_evidence,path_outside_region
+from decision.agent.core.route import circuit_evidence,path_outside_region,static_route_line_diagnostics
 from decision.agent.core.session import AgentSession
 from decision.agent.core.store import Store
 from decision.agent.core.tasks import centroid
@@ -79,10 +81,44 @@ class AgentRouteTests(unittest.TestCase):
         self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
                                                      direction='clockwise',description='绕一圈')])
         view=query_map(self.session);points=self.points()
-        self.assertEqual(self.session.call('navigate_route',goal_id='loop',view_id=view,orientation_source='autonomous',
-            waypoints=[points[0],points[4],points[0]],final_yaw=0.)['reason'],'proposed_route_intersects_task_region')
+        bad=[points[0],points[4],points[0]]
+        result=self.session.call('navigate_route',goal_id='loop',view_id=view,orientation_source='autonomous',
+            waypoints=bad,final_yaw=0.)
+        self.assertEqual(result['reason'],'proposed_route_intersects_task_region')
+        self.assertEqual(result['diagnostics']['intersecting_segment_indices'],[0,1])
+        self.assertEqual(result['diagnostics']['closure_distance_m'],0.)
+        self.assertEqual(result['diagnostics']['scope'],'task_region_geometry_only_not_obstacle_route_or_execution_check')
+        self.assertTrue(all(s['occupied_samples']==0 for s in result['diagnostics']['static_lines']['segments']))
+        state=self.session.prompt()['current_state']
+        self.assertEqual(state['last_tool_feedback']['diagnostics']['intersecting_segment_indices'],[0,1])
+        self.assertEqual(self.session.spatial_view.record['route_preview']['waypoints'],bad)
+        pixels=np.asarray(Image.open(io.BytesIO(self.session.spatial_view.images[1])))
+        self.assertTrue(np.any(np.all(pixels==[207,48,48],axis=2)))
+        self.assertIsNone(self.session.skill.record['handle'])
+        view=self.session.spatial_view.record['view_id']
         self.assertEqual(self.session.call('navigate_route',goal_id='loop',view_id=view,orientation_source='autonomous',
             waypoints=points[:-1],final_yaw=0.)['reason'],'circuit_route_must_return_to_its_start')
+
+    def test_static_line_feedback_distinguishes_occupied_unknown_and_outside(self):
+        from perception.environment.layers import GridSnapshot
+        cells=np.zeros((10,10),np.int8);cells[0,4]=100;cells[0,7]=-1
+        grid=GridSnapshot(dict(frame_id='sim_odom',shape=[10,10],resolution=.1,
+                               origin_xy=[0.,0.],snapshot_id='unit-static'),dict(occupancy=cells))
+        result=static_route_line_diagnostics(grid,[[.05,.05],[.85,.05],[1.2,.05]])
+        self.assertGreater(result['segments'][0]['occupied_samples'],0)
+        self.assertGreater(result['segments'][0]['unknown_samples'],0)
+        self.assertGreater(result['segments'][1]['outside_samples'],0)
+        self.assertEqual(result['scope'],'static_centerline_only_not_vehicle_or_actual_planned_path')
+
+    def test_route_rejects_changed_source_instead_of_using_old_view(self):
+        self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
+                                                     direction='clockwise',description='绕一圈')])
+        inputs=self.nav.spatial_inputs();self.nav.spatial_inputs=lambda:inputs
+        view=query_map(self.session);inputs['stamp_s']+=.1
+        result=self.session.call('navigate_route',goal_id='loop',view_id=view,orientation_source='autonomous',
+                                 waypoints=self.points(),final_yaw=0.)
+        self.assertEqual(result['reason'],'spatial_source_changed')
+        self.assertIsNone(self.session.skill.record['handle'])
 
     def test_unspecified_direction_is_agent_choice_not_user_requirement(self):
         goal=dict(goal_id='loop',kind='circuit',target_id='lobby_area',description='绕一圈')
@@ -113,6 +149,16 @@ class AgentRouteTests(unittest.TestCase):
         self.assertEqual(circuit_evidence([dict(samples=samples[:3]),dict(samples=samples[3:])],polygon,
                                          'clockwise',0.,.8,.12)['status'],'unproven')
         self.assertFalse(path_outside_region([points[0],points[4]],polygon))
+
+    def test_circuit_plan_rejects_reverse_winding_hidden_by_net_one_circle(self):
+        from decision.agent.core.route import circuit_plan_diagnostics
+        polygon=[[-1,-1],[1,-1],[1,1],[-1,1]]
+        angles=np.r_[np.linspace(0,-4*math.pi,17),np.linspace(-4*math.pi,-2*math.pi,9)[1:]]
+        points=np.column_stack((3*np.cos(angles),3*np.sin(angles)))
+        result=circuit_plan_diagnostics(points,polygon,'clockwise',.12)
+        self.assertEqual(result['reason'],'proposed_route_excessive_reverse_winding')
+        self.assertAlmostEqual(result['signed_winding_rad'],2*math.pi)
+        self.assertAlmostEqual(result['reverse_winding_rad'],2*math.pi)
 
     def test_adapter_without_route_support_is_explicitly_refused(self):
         self.nav.start_route=None

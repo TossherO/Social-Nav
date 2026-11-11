@@ -28,6 +28,7 @@ def parser():
     p.add_argument('--mode',choices=['mapping','localization','odometry'])
     p.add_argument('--lio-backend',choices=['cpu','cuda'],help='Override module CUDA default for FAST-LIO matching')
     p.add_argument('--roll-backend',choices=['cpu','cuda'],help='Override module CUDA default for ROLL; unused by pure odometry')
+    p.add_argument('--roll-gravity-deg',type=float,help='Explicit live fixed-map gravity correction limit in degrees')
     p.add_argument('--deskew-backend',choices=['cpu','cuda'],help='Override module CUDA default for deskew')
     p.add_argument('--linearization-backend',choices=['cpu','cuda'],help='Experimental CUDA observation reduction; CPU by default')
     p.add_argument('--map',dest='map_directory');p.add_argument('--pose',nargs=6,type=float);p.add_argument('--pose-file')
@@ -41,6 +42,7 @@ def parser():
     p.add_argument('--trace-timing',action='store_true',help='Bounded scalar timing events, flushed at shutdown; no map/image recording or scheduling change')
     p.add_argument('--record-decision-inputs',action='store_true',help='Optional VLM worker: prepare YOLO associations and freeze causal three-frame task windows; no VLM request')
     p.add_argument('--agent-observations',action='store_true',help='Bounded optional Agent RGB/scene outlet; no YOLO, API or chassis output')
+    p.add_argument('--agent-execution',action='store_true',help='Allow owned Agent goal intents through the existing safety path; requires manual arming')
     p.add_argument('--no-image',action='store_true',help='Compatibility flag: the core never loads YOLO; disallows optional VLM image preparation')
     p.add_argument('--runtime-config',default=str(ROOT/'configs/runtime.yaml'))
     p.add_argument('--environment-update-hz',type=float,help='Override the environment update rate without changing observation age limits')
@@ -65,6 +67,8 @@ def main():
     args=parser().parse_args()
     if args.execute and (not args.live or not args.interactive_session or not args.vehicle_profile or not args.chassis_port):
         raise ValueError('--execute requires --live --interactive-session --vehicle-profile and --chassis-port')
+    if args.agent_execution and not (args.execute and args.agent_observations):
+        raise ValueError('--agent-execution requires --execute and --agent-observations')
     if args.chassis_port and not args.execute:raise ValueError('--chassis-port requires --execute')
     if args.record_decision_inputs and args.no_image:
         raise ValueError('--record-decision-inputs explicitly enables VLM image preparation; remove --no-image')
@@ -95,6 +99,10 @@ def main():
     config,run=algorithm_config(mode=mode,source_run=source,map_directory=args.map_directory,pose=args.pose,pose_file=args.pose_file,
         bag=bag,start=args.start,calibration=args.lidar_imu_calibration,coverage=args.coverage,lio_backend=args.lio_backend,
         roll_backend=args.roll_backend,deskew_backend=args.deskew_backend,linearization_backend=args.linearization_backend)
+    if args.roll_gravity_deg is not None:
+        if not args.live or mode!='localization' or not np.isfinite(args.roll_gravity_deg) or not 0<args.roll_gravity_deg<=15:
+            raise ValueError('--roll-gravity-deg requires live localization and a finite value in (0,15] degrees')
+        config['roll']['coverageGate']['maxGravity']=float(np.deg2rad(args.roll_gravity_deg))
     if args.rate<=0:raise ValueError('Integrated timing/independent safety requires positive real-time replay rate')
     if args.goal is not None and len(args.goal) not in (2,3):raise ValueError('Goal requires x y [yaw]')
     if args.environment_update_hz is not None and (not np.isfinite(args.environment_update_hz) or not 0<args.environment_update_hz<=10):
@@ -218,7 +226,7 @@ def main():
     if args.interactive_session:
         from .session import InteractiveSession
         interactive=InteractiveSession(live=args.live,safety=safety,output=output,execute=args.execute)
-    commands=CommandInbox(output/'commands.sock',safety,session=interactive)
+    commands=CommandInbox(output/'commands.sock',safety,session=interactive,agent_execution=args.agent_execution)
     commands.agent_state.configure_vehicle(geometry,motion)
     agent_observer=None
     if args.agent_observations:

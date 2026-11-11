@@ -9,7 +9,7 @@ from .trajectory import Trajectory
 from .context import robot_context
 from ..tools.framework import TOOL_SPECS, validate_call
 from ..tools.navigation import NavigationSkill, spatial_context
-from ..tools.spatial import SpatialView, ReferenceMap, spatial_source_binding
+from ..tools.spatial import SpatialView, ReferenceMap, spatial_source_binding, layer_binding
 from perception.environment.context import fingerprint
 
 TERMINAL = {'succeeded', 'failed', 'cancelled'}
@@ -25,14 +25,22 @@ class AgentSession:
         self.reference_catalog = catalog
         self.trajectory = Trajectory()
         self.requested_bounds = None
+        self.requested_static_crop = False
+        self.candidate_checks = []
+        self.candidate_source = None
+        self.candidate_space = None
+        self.route_preview = None
         self.input_status = dict(rgb='not_provided',maps='not_provided')
         self._applying_context = None
+        self._revalidated_view = None
         task_id = uuid.uuid4().hex
         self.catalog = catalog.bind_start(navigation.snapshot(), task_id)
         self.keyframes = Keyframes(store,task_id)
         if hasattr(navigation, 'catalog'):
             navigation.catalog = self.catalog
         self.task_goals = TaskGoals(self.catalog)
+        if navigation.scope == 'manual':
+            self.task_goals.settings['goal_position_tolerance_m'] = navigation.settings['goal_position_tolerance_m']
         self.conversation = Conversation(instruction,self.catalog.prompt(),store.event)
         self.state = dict(task_id=task_id, revision=1, instruction=instruction, status='ready', reason=None,
                           scope=navigation.scope, history=[], clarifications=[], completed_revisions=[], waiting_binding=None,
@@ -48,6 +56,8 @@ class AgentSession:
         self.state['task_goals'] = self.task_goals.snapshot()
         self.state['spatial_view'] = None if self.spatial_view is None else copy.deepcopy(self.spatial_view.record)
         self.state['conversation'] = self.conversation.snapshot()
+        self.state['candidate_checks'] = copy.deepcopy(self.candidate_checks)
+        self.state['route_preview'] = copy.deepcopy(self.route_preview)
         self.store.save(self.state, kind, {} if value is None else value)
 
     def _history(self, kind, value):
@@ -66,6 +76,8 @@ class AgentSession:
             value['spatial_view_id'] = self.spatial_view.record['view_id']
         value['reference_map_id'] = None if self.reference_map is None else self.reference_map.record['reference_map_id']
         value['task_requirements'] = fingerprint([g['requirement'] for g in self.task_goals.goals])
+        value['candidate_checks'] = fingerprint(self.candidate_checks)
+        value['route_preview'] = fingerprint(self.route_preview)
         value['conversation_revision'] = self.conversation.revision
         return value
 
@@ -81,6 +93,79 @@ class AgentSession:
                 0 <= current['stamp_s']-self.observation.record['stamp_s'] <= 3 and
                 current.get('localization_status', 'valid') == 'valid')
 
+    def valid_expired_context(self, context):
+        """Permit bounded, non-actuating processing without refreshing evidence timestamps."""
+        if (context != self.context() or self.state['status'] != 'ready' or
+                self.skill.record['context_lost'] or not self.skill.record['connected']):
+            return False
+        current = self.navigation.snapshot()
+        stamp = context.get('source_stamp_s')
+        if stamp is None and self.spatial_view is not None:
+            stamp = self.spatial_view.record.get('source_stamp_s')
+        return (not current.get('input_stale') and current.get('localization_status', 'valid') == 'valid' and
+                isinstance(stamp, (int, float)) and 0 <= current['stamp_s']-stamp <= 30)
+
+    def revalidate_delayed_navigation(self, call, context):
+        """Recheck a geometric target with a new view; retain the model's original call."""
+        import math
+        import numpy as np
+        args = call['arguments']
+        old = self.spatial_view
+        try:
+            goal = self.task_goals.current(args['goal_id'])['requirement']
+        except (KeyError, ValueError):
+            return dict(status='refused', reason='model_input_expired_request_fresh_observation')
+        if (old is None or args['view_id'] != old.record['view_id'] or
+                goal['kind'] not in ('point', 'region') or goal.get('facing') or goal.get('semantic_conditions') or
+                goal.get('visual_preferences')):
+            return dict(status='refused', reason='model_input_expired_request_fresh_observation')
+        before = old.record.get('pose')
+        self.prepare_current_images()
+        current, view = self.navigation.snapshot(), self.spatial_view
+        if (view is None or spatial_context(current) != {k: context.get(k) for k in ('clock_domain','local_identity','map_binding')} or
+                current.get('input_stale') or current.get('localization_status', 'valid') != 'valid' or
+                view.record.get('source_stamp_s') is None or not view.current(current['stamp_s']) or
+                view.record.get('pose') is None or before is None):
+            return dict(status='refused', reason='fresh_navigation_view_unavailable')
+        after = view.record['pose']
+        if (np.shape(before) != (3,) or np.shape(after) != (3,) or
+                not np.isfinite(before).all() or not np.isfinite(after).all() or
+                np.linalg.norm(np.asarray(before[:2])-after[:2]) > .3 or
+                abs((before[2]-after[2]+math.pi)%(2*math.pi)-math.pi) > .4):
+            return dict(status='refused', reason='robot_pose_changed_since_model_input')
+        audit = dict(model_view_id=old.record['view_id'], model_source_stamp_s=old.record['source_stamp_s'],
+                     checked_view_id=view.record['view_id'], checked_source_stamp_s=view.record['source_stamp_s'])
+        self.store.event('delayed_navigation_revalidation', audit)
+        self._revalidated_view = (old.record['view_id'], view.record['view_id'])
+        try:
+            result = self.call('navigate', _context=context, **args)
+        finally:
+            self._revalidated_view = None
+        result['revalidation'] = audit
+        return result
+
+    def revalidate_delayed_candidate(self, call, context):
+        """Recompute a candidate against a current source without rewriting its call."""
+        old = self.spatial_view
+        if old is None or call['arguments']['view_id'] != old.record['view_id']:
+            return dict(status='refused', reason='model_input_expired_request_fresh_observation')
+        self.prepare_current_images()
+        current, view = self.navigation.snapshot(), self.spatial_view
+        if (view is None or spatial_context(current) != {k: context.get(k) for k in ('clock_domain','local_identity','map_binding')} or
+                current.get('input_stale') or current.get('localization_status', 'valid') != 'valid' or
+                view.record.get('source_stamp_s') is None or not view.current(current['stamp_s'])):
+            return dict(status='refused', reason='fresh_navigation_view_unavailable')
+        audit = dict(model_view_id=old.record['view_id'], model_source_stamp_s=old.record['source_stamp_s'],
+                     checked_view_id=view.record['view_id'], checked_source_stamp_s=view.record['source_stamp_s'])
+        self.store.event('delayed_candidate_revalidation', audit)
+        self._revalidated_view = (old.record['view_id'], view.record['view_id'])
+        try:
+            result = self.call('check_candidate', _context=context, **call['arguments'])
+        finally:
+            self._revalidated_view = None
+        result['revalidation'] = audit
+        return result
+
     def call(self, tool_name, *, _context=None, **arguments):
         call = validate_call(dict(tool=tool_name, arguments=arguments))
         if self.state['status'] != 'ready':
@@ -95,9 +180,60 @@ class AgentSession:
                          automatically_retried=False)
         finally:
             self._applying_context = None
+        if tool_name == 'check_candidate' and value.get('status') == 'available':
+            self._remember_candidate(value)
+        if tool_name == 'navigate_route' and value.get('status') == 'refused' and value.get('diagnostics'):
+            self.route_preview = dict(waypoints=copy.deepcopy(arguments['waypoints']),
+                goal_id=arguments['goal_id'],view_id=arguments['view_id'],
+                source_binding=self.spatial_view.record['input_source_binding'],
+                diagnostics=copy.deepcopy(value['diagnostics']))
         self._history('tool', dict(call=call, result=value))
         self._save('tool_result', dict(call=call, value=value))
         return value
+
+    def _remember_candidate(self, result):
+        view = self.spatial_view.record
+        source = view['input_source_binding']
+        if self.candidate_source != source:
+            raise ValueError('Candidate source changed before recording')
+        camera = result['camera_view']
+        entry = dict(pose=copy.deepcopy(result['pose']),view_id=result['view_id'],source_stamp_s=view['source_stamp_s'],
+                     source_binding=source,historical_only=False,
+                     static_footprint=result['static_footprint']['status'],local_footprint=result['local_footprint']['status'],
+                     camera_status=camera['status'],camera_xy_m=copy.deepcopy(camera.get('camera_xy_m')),
+                     points=copy.deepcopy(camera.get('points',[])),occlusion_checked=False,
+                     actual_visibility_verified=False,checks=1)
+        identity = (entry['pose'],sorted(p['point_id'] for p in entry['points']))
+        for old in self.candidate_checks:
+            if (old['pose'],sorted(p['point_id'] for p in old['points'])) == identity:
+                entry['checks'] = old['checks']+1
+                self.candidate_checks.remove(old)
+                break
+        self.candidate_checks = (self.candidate_checks+[entry])[-8:]
+
+    def _clear_candidates(self):
+        self.candidate_checks = []
+        self.candidate_source = self.candidate_space = None
+        self.route_preview = None
+
+    def _sync_candidates(self, inputs):
+        source = spatial_source_binding(inputs)
+        space = fingerprint(dict(context=spatial_context(self.navigation.snapshot()),
+                                 global_binding=layer_binding(inputs['global_grid'])))
+        if self.candidate_space is not None and self.candidate_space != space:
+            self.candidate_checks = []
+            self.route_preview = None
+        elif self.candidate_source is not None and self.candidate_source != source:
+            for entry in self.candidate_checks:
+                entry['historical_only'] = True
+            self.route_preview = None
+        self.candidate_space, self.candidate_source = space, source
+        return source
+
+    def _candidate_preview(self):
+        if self.candidate_checks and not self.candidate_checks[-1]['historical_only']:
+            return self.candidate_checks[-1]
+        return None
 
     def lookup_places(self, name):
         fields = ('place_id', 'name', 'aliases', 'pose', 'reference', 'status')
@@ -116,8 +252,9 @@ class AgentSession:
     def query_map(self, bounds=None):
         self.catalog.require_complete()
         inputs = self.navigation.spatial_inputs()
-        result = self._build_map(inputs,bounds)
+        result = self._build_map(inputs,bounds,static_crop=True)
         self.requested_bounds = copy.deepcopy(bounds)
+        self.requested_static_crop = True
         return result
 
     def check_candidate(self, pose, view_id, point_ids=None):
@@ -127,6 +264,8 @@ class AgentSession:
         from navigation.planning.inputs import load_config
         from navigation.planning.reference import planning_config
         self.catalog.require_complete()
+        if self._revalidated_view is not None and view_id == self._revalidated_view[0]:
+            view_id = self._revalidated_view[1]
         state = self.navigation.snapshot()
         if (self.spatial_view is None or self.spatial_view.record['view_id'] != view_id or
                 not self.spatial_view.current(state['stamp_s']) or state.get('input_stale') or
@@ -208,13 +347,17 @@ class AgentSession:
                     local_footprint=local_result,camera_view=fov,
                     executable=False,execution_feedback=False)
 
-    def _build_map(self, inputs, bounds):
+    def _build_map(self, inputs, bounds, *, static_crop=False):
         self.prepare_reference(inputs['global_grid'])
         now = self.navigation.snapshot()
         self.trajectory.update(now,self.catalog.value['frame_id'],map_snapshot_id=self.catalog.value.get('map_snapshot_id'))
         trajectory = [] if inputs['stamp_s'] is None else self.trajectory.snapshot(
             frame_id=self.catalog.value['frame_id'],clock_domain=inputs['clock_domain'],now=inputs['stamp_s'])
-        self.spatial_view = SpatialView.build(self.catalog,inputs,bounds,trajectory=trajectory)
+        self._sync_candidates(inputs)
+        preview = self._candidate_preview()
+        self.spatial_view = SpatialView.build(self.catalog,inputs,bounds,trajectory=trajectory,
+                                              static_crop=static_crop,candidate_preview=preview,
+                                              route_preview=self.route_preview)
         self.store.spatial_view(self.spatial_view)
         self.store.event('trajectory_snapshot',dict(view_id=self.spatial_view.record['view_id'],segments=trajectory))
         return dict(status='available', view=self.spatial_view.record, target_candidates_generated=False)
@@ -239,20 +382,26 @@ class AgentSession:
             if (current.get('localization_status','valid')!='valid' or current.get('input_stale') or
                     self.skill.record['context_lost']):
                 self.spatial_view = None
+                self._clear_candidates()
                 self.input_status['maps'] = 'localization_invalid_or_stale'
                 return
             # Keep an explicitly requested crop while its source observation is
             # unchanged; otherwise regenerate both current maps from the source.
             try:
                 inputs = self.navigation.spatial_inputs()
+                source = self._sync_candidates(inputs)
                 if self.spatial_view is not None:
                     self.spatial_view.verify()
-                    if self.spatial_view.record.get('input_source_binding')==spatial_source_binding(inputs):
+                    preview = self._candidate_preview()
+                    if (self.spatial_view.record.get('input_source_binding') == source and
+                            self.spatial_view.record.get('candidate_preview') == preview and
+                            self.spatial_view.record.get('route_preview') == self.route_preview):
                         return
-                self._build_map(inputs,self.requested_bounds)
+                self._build_map(inputs,self.requested_bounds,static_crop=self.requested_static_crop)
                 self.input_status['maps'] = None
             except (OSError,ValueError,KeyError) as error:
                 self.spatial_view = None
+                self._clear_candidates()
                 self.input_status['maps'] = 'current_map_source_unavailable'
                 self.store.event('current_maps_unavailable',dict(error_type=type(error).__name__))
 
@@ -292,6 +441,8 @@ class AgentSession:
 
     def navigate(self, goal_id, view_id, orientation_source, pose=None, point_id=None, yaw=None):
         self.catalog.require_complete()
+        if self._revalidated_view is not None and view_id == self._revalidated_view[0]:
+            view_id = self._revalidated_view[1]
         if self.task_goals.current(goal_id)['requirement']['kind'] in ('circuit','sequence'):
             return dict(status='refused',reason='task_requires_a_route')
         now = self.navigation.snapshot()['stamp_s']
@@ -323,6 +474,8 @@ class AgentSession:
             self.task_goals.current(goal_id)['selected']['handle'] = copy.deepcopy(result['handle'])
             self.spatial_view = self.observation = None
             self.requested_bounds = None
+            self.requested_static_crop = False
+            self._clear_candidates()
         return result
 
     def navigate_route(self, goal_id, view_id, orientation_source, waypoints, final_yaw, direction=None):
@@ -335,6 +488,9 @@ class AgentSession:
                 not self.spatial_view.current(state['stamp_s'])):
             return dict(status='refused',reason='query_a_current_spatial_view_first')
         self.spatial_view.verify()
+        inputs=self.navigation.spatial_inputs()
+        if spatial_source_binding(inputs)!=self.spatial_view.record['input_source_binding']:
+            return dict(status='refused',reason='spatial_source_changed')
         points=np.asarray(waypoints,dtype=float)
         if points.ndim!=2 or points.shape[1]!=2 or not np.isfinite(points).all() or not math.isfinite(final_yaw):
             return dict(status='refused',reason='route_waypoints_must_be_finite')
@@ -345,15 +501,17 @@ class AgentSession:
         if direction is not None and requirement['kind']!='circuit':
             return dict(status='refused',reason='direction_only_applies_to_circuit')
         if requirement['kind']=='circuit':
-            from .route import circuit_plan_status
+            from .route import circuit_plan_diagnostics,static_route_line_diagnostics
             if requirement.get('direction') and direction and requirement['direction']!=direction:
                 return dict(status='refused',reason='route_direction_conflicts_with_user_requirement')
             direction=requirement.get('direction') or direction
             if direction is None:
                 return dict(status='refused',reason='choose_a_circuit_direction')
             polygon=self.catalog.regions[requirement['target_id']]['polygon']
-            reason=circuit_plan_status(points,polygon,direction,self.task_goals.settings['goal_position_tolerance_m'])
-            if reason:return dict(status='refused',reason=reason)
+            diagnostics=circuit_plan_diagnostics(points,polygon,direction,self.task_goals.settings['goal_position_tolerance_m'])
+            diagnostics['static_lines']=static_route_line_diagnostics(inputs['global_grid'],points)
+            if diagnostics['reason']:
+                return dict(status='refused',reason=diagnostics['reason'],diagnostics=diagnostics)
         if requirement['kind']=='sequence':
             index=0
             for point in points:
@@ -369,28 +527,46 @@ class AgentSession:
         selected['destination']['route']=route
         current['selected']['route']=copy.deepcopy(route)
         result=self.skill.start(selected['destination'],self.state['revision'])
+        if requirement['kind']=='circuit' and result.get('status')=='refused':
+            result['diagnostics']=diagnostics
         if result['status'] in ('accepted','uncertain'):
             current['selected']['handle']=copy.deepcopy(result['handle'])
             self.spatial_view=self.observation=None
             self.requested_bounds=None
+            self.requested_static_crop=False
+            self._clear_candidates()
         return result
 
     def check_goal(self, goal_id, observation_id=None, semantic_result=None, evidence=None,
-                   facing_result=None, facing_evidence=None):
+                   facing_result=None, facing_evidence=None, preference_result=None, preference_evidence=None):
         goal = self.task_goals.current(goal_id)
         proofs = [p for p in self.skill.record['completed'] if p['goal_id'] == goal_id]
         selected = goal['selected'] or {}
         state = self.navigation.snapshot()
-        if (self.skill.record['handle'] is not None or not proofs or
+        live_arrival = (self.navigation.scope == 'live' and state.get('stop_observation') is True and
+                        state.get('chassis_state') == 'armed' and state.get('chassis_status_fresh') is True and
+                        state.get('origin_frame_id') == self.catalog.value['frame_id'] and
+                        state.get('origin_stamp_s') is not None and
+                        0 <= state['stamp_s']-state['origin_stamp_s'] <= .5)
+        simulation_arrival = (self.navigation.scope == 'simulation' and state.get('execution_feedback') is True and
+                              state.get('frame_id') == self.catalog.value['frame_id'])
+        manual_arrival = (self.navigation.scope == 'manual' and state.get('manual_arrival_observation') is True and
+                          state.get('origin_frame_id') == self.catalog.value['frame_id'] and
+                          state.get('origin_stamp_s') is not None and
+                          0 <= state['stamp_s']-state['origin_stamp_s'] <= .5 and
+                          bool(proofs) and (state.get('manual_confirmation') or {}).get('handle') == proofs[-1]['handle'])
+        held = self.navigation.scope == 'live' and self.skill.record['status'] == 'held'
+        if ((self.skill.record['handle'] is not None and not held) or not proofs or
                 proofs[-1]['handle'] != selected.get('handle') or
+                (held and self.skill.record['handle'] != proofs[-1]['handle']) or
                 proofs[-1]['handle']['plan_revision'] != self.state['revision'] or
-                self.navigation.scope != 'simulation' or state.get('execution_feedback') is not True or
+                not (simulation_arrival or live_arrival or manual_arrival) or
                 not state.get('stopped') or state.get('input_stale') or
-                state.get('localization_status','valid') != 'valid' or
-                state.get('frame_id') != self.catalog.value['frame_id']):
+                state.get('localization_status','valid') != 'valid'):
             return dict(status='unproven', reason='matching_task_navigation_and_stop_not_proven')
         proof = proofs[-1]
-        checks = self.task_goals.geometry(goal['requirement'], state.get('pose'))
+        measured_pose = state.get('origin_pose') if live_arrival or manual_arrival else state.get('pose')
+        checks = self.task_goals.geometry(goal['requirement'], measured_pose)
         if goal['requirement']['kind']=='circuit':
             from .route import circuit_evidence
             start=proof.get('route_start_stamp_s')
@@ -415,7 +591,7 @@ class AgentSession:
             checks['sequence_evidence']=sequence
         if goal['requirement']['kind']=='reference':
             import numpy as np
-            actual=np.asarray(state.get('pose'),float);chosen=np.asarray(selected.get('pose'),float)
+            actual=np.asarray(measured_pose,float);chosen=np.asarray(selected.get('pose'),float)
             checks['selected_position_met']=bool(actual.shape==(3,) and chosen.shape==(3,) and
                 np.isfinite(actual).all() and np.isfinite(chosen).all() and
                 np.linalg.norm(actual[:2]-chosen[:2])<=self.task_goals.settings['goal_position_tolerance_m'])
@@ -425,7 +601,7 @@ class AgentSession:
         facing = goal['requirement'].get('facing')
         if facing:
             from .tasks import angle_error
-            actual,chosen=state.get('pose'),selected.get('pose')
+            actual,chosen=measured_pose,selected.get('pose')
             if (actual is None or chosen is None or
                     angle_error(actual[2],chosen[2]) > self.task_goals.settings['goal_yaw_tolerance_rad']):
                 return dict(status='not_met',reason='actual_heading_differs_from_selected_heading',checks=checks)
@@ -468,9 +644,29 @@ class AgentSession:
                             source='same_agent_visual_judgement_not_independent_ground_truth')
             if semantic_result != 'satisfied':
                 return dict(status='unknown' if semantic_result == 'unknown' else 'not_met', checks=checks, semantic=semantic)
+        preferences = goal['requirement'].get('visual_preferences', [])
+        if preference_result is not None or preference_evidence is not None:
+            if not preferences:
+                return dict(status='refused',reason='visual_preference_not_registered')
+            context=self._applying_context or {}
+            observation=self.observation
+            if (observation is None or observation_id != observation.record['observation_id'] or
+                    context.get('observation_id') != observation_id or not self.valid_context(context) or
+                    observation.record['rgb']['stamp_s'] < proof['stamp_s'] or
+                    preference_result is None or not preference_evidence or not preference_evidence.strip()):
+                return dict(status='needs_preference_evidence',checks=checks,preferences=preferences,
+                            reason='read_a_fresh_post_arrival_rgb_then_judge_preference')
+            semantic['visual_preferences']=dict(status=preference_result,evidence=preference_evidence,
+                conditions=copy.deepcopy(preferences),observation_id=observation_id,
+                input_binding=observation.record['input_fingerprint'],stamp_s=observation.record['stamp_s'],
+                source='same_agent_visual_judgement_not_independent_ground_truth')
+        elif preferences:
+            semantic['visual_preferences']=dict(status='not_assessed',conditions=copy.deepcopy(preferences))
         self.task_goals.complete(goal_id,proof,checks,semantic)
         return dict(status='completed', goal_id=goal_id, checks=checks, semantic=semantic,
-                    scope='simulation', real_robot_success=False)
+                    scope=self.navigation.scope, real_robot_success=False,
+                    evidence_kind=('operator_confirmation_and_localization_estimate' if manual_arrival else
+                                   'localization_estimate' if live_arrival else 'simulation'))
 
     def get_navigation_state(self):
         return self.navigation_summary()
@@ -518,22 +714,33 @@ class AgentSession:
             return dict(status=self.state['status'], reason=evidence)
         revision = self.state['revision']
         f = self.navigation.snapshot()
-        if (self.navigation.scope != 'simulation' or r['handle'] is not None or r['context_lost'] or
+        live_arrival = (self.navigation.scope == 'live' and f.get('stop_observation') is True and
+                        f.get('chassis_state') == 'armed' and f.get('chassis_status_fresh') is True)
+        simulation_arrival = self.navigation.scope == 'simulation' and f.get('execution_feedback') is True
+        manual_arrival = (self.navigation.scope == 'manual' and f.get('manual_arrival_observation') is True and
+                          bool(r['completed']) and (f.get('manual_confirmation') or {}).get('handle') == r['completed'][-1]['handle'])
+        held = self.navigation.scope == 'live' and r['status'] == 'held'
+        if (not (simulation_arrival or live_arrival or manual_arrival) or (r['handle'] is not None and not held) or r['context_lost'] or
                 not r['connected'] or not self.task_goals.finished() or
-                not f.get('stopped') or f.get('execution_feedback') is not True or f.get('input_stale') or
+                not f.get('stopped') or f.get('input_stale') or
                 f.get('localization_status', 'valid') != 'valid'):
             return dict(status='refused', reason='task_execution_not_proven',
                         uncompleted_goals=[g['requirement']['goal_id'] for g in self.task_goals.goals if g['status']!='completed'])
         self.state.update(status='succeeded', reason=evidence)
         self.state['completed_revisions'].append(revision)
-        return dict(status='succeeded', scope='simulation', real_robot_success=False,
+        return dict(status='succeeded', scope=self.navigation.scope, real_robot_success=False,
+                    evidence_kind=('operator_confirmation_and_localization_estimate' if manual_arrival else
+                                   'localization_estimate' if live_arrival else 'simulation'),
                     completed_goals=[g['requirement']['goal_id'] for g in self.task_goals.goals])
 
     def stop(self, target, reason):
         self.state.update(stop_target=target, reason=reason)
+        if self.skill.record.get('pending_completion') is not None:
+            self.skill.record['pending_completion'] = None
         if self.skill.record['handle'] is not None:
             self.state['status'] = 'stopping'
-            self.skill.cancel(reason=reason)
+            if self.skill.record['status'] != 'stopping':
+                self.skill.cancel(reason=reason)
         else:
             self.state['status'] = target
         self._save('task_stop_requested')
@@ -543,7 +750,12 @@ class AgentSession:
         previous_revision = s['revision']
         if s['status'] in TERMINAL:
             raise ValueError('Task already terminal')
-        if name in ('pause', 'cancel'):
+        if name == 'arrived' and self.navigation.scope == 'manual':
+            confirmation=self.navigation.confirm_arrival()
+            self._history('user',dict(event='manual_arrival_confirmation',confirmation=confirmation))
+            self.conversation.notice('manual_arrival_confirmation',confirmation=confirmation)
+            self._save('manual_arrival_confirmation',confirmation)
+        elif name in ('pause', 'cancel'):
             self.stop('paused' if name == 'pause' else 'cancelled', name)
         elif name == 'resume' and s['status'] == 'paused' and not self.skill.record['context_lost']:
             s.update(status='ready', reason=None)
@@ -577,6 +789,8 @@ class AgentSession:
             self.observation = None
             self.spatial_view = None
             self.requested_bounds = None
+            self.requested_static_crop = False
+            self._clear_candidates()
             self.task_goals = TaskGoals(self.catalog)
             self.conversation = Conversation(s['instruction'],self.catalog.prompt(),self.store.event)
             s['assistant_text'] = None
@@ -591,13 +805,14 @@ class AgentSession:
         if not r['connected'] and s['status'] == 'ready':
             s.update(status='waiting_navigation' if r['handle'] else 'needs_clarification', reason='navigation_connection_lost')
             self._save('task_connection_lost')
-        if r['context_lost'] and s['status'] not in TERMINAL and s.get('reason') != 'spatial_context_changed':
+        lost_reason = r.get('reason') if r.get('reason') in ('chassis_disarmed_or_status_unavailable','operator_goal_preempted_agent') else 'spatial_context_changed'
+        if r['context_lost'] and s['status'] not in TERMINAL and s.get('reason') != lost_reason:
             if self.memory is not None:
                 self.memory.invalidate(**spatial_context(self.navigation.snapshot()))
             # Navigation has already requested cancellation. Never resend it.
             target = 'cancelled' if s.get('stop_target') == 'cancelled' else 'needs_clarification'
             s.update(status='stopping' if r['handle'] else target,
-                     stop_target=target, reason='spatial_context_changed')
+                     stop_target=target, reason=lost_reason)
             self._save('task_context_lost')
         if s['status'] == 'stopping' and r['handle'] is None:
             s['status'] = s['stop_target']
@@ -625,7 +840,7 @@ class AgentSession:
         feedback = self.navigation.snapshot()
         fields = ('stamp_s','clock_domain','source','session_id','generation','frame_id','pose','velocity',
                   'origin_pose','origin_frame_id','map_binding','localization_status','input_stale','stopped','execution_feedback',
-                  'route_index','route_count')
+                  'route_index','route_count','planning_status','planning_reason')
         return dict({key:copy.deepcopy(record[key]) for key in
                     ('status','goal_id','handle','selected_pose','reason','context_lost','connected')},
                     feedback={key:copy.deepcopy(feedback[key]) for key in fields if key in feedback},
@@ -645,7 +860,11 @@ class AgentSession:
                      catalog_fingerprint=self.catalog.fingerprint),
             recent_model_tool_choices=[] if self.memory is None else self.memory.recall(
                 place_ids=[*self.catalog.places,''],now=now['stamp_s'],clock_domain=now['clock_domain']))
+        if self.navigation.scope == 'manual':
+            current['execution_mode'] = dict(mode='operator_driven',
+                meaning='目标交给操作者使用原车手柄移动，程序不控制底盘；必须等待操作者确认和当前定位停稳检查。')
         current['keyframes'] = self.keyframes.index(s['revision'])
+        current['recent_candidate_checks'] = copy.deepcopy(self.candidate_checks)
         current['requirements_registered'] = bool(goals)
         current['robot_context'] = robot_context(self.navigation)
         current['selected_goal'] = next((dict(goal_id=g['requirement']['goal_id'],
@@ -659,7 +878,7 @@ class AgentSession:
             if entry['kind']=='tool' and entry['revision']==s['revision']:
                 value = entry['value'];result = value['result']
                 current['last_tool_feedback'] = dict(tool=value['call']['tool'],
-                    **{k:copy.deepcopy(result[k]) for k in ('status','reason','error_type','checks','conditions') if k in result})
+                    **{k:copy.deepcopy(result[k]) for k in ('status','reason','error_type','checks','conditions','diagnostics') if k in result})
                 break
         origin = copy.deepcopy(s['task_start']) if self.catalog.condition=='complete' else None
         if origin is not None:

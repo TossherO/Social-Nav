@@ -240,6 +240,30 @@ class ObservationLoopTests(unittest.TestCase):
         self.assertFalse(self.tools.valid_context(context))
         self.assertEqual(context['source_stamp_s'], 10.)
 
+    def test_delayed_static_lookup_is_kept_but_old_motion_intent_is_refused(self):
+        actor = AgentLoop(self.tools, lambda *_: reply('lookup_places', name=''))
+        try:
+            actor.tick(); actor.model.thread.join(1)
+            self.nav.t = 4.
+            actor.tick()
+            self.assertEqual(self.tools.state['history'][-1]['value']['result']['status'], 'available')
+            self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM events WHERE kind='model_result_discarded'").fetchone()[0], 0)
+        finally:
+            actor.close()
+        # A separate late motion reply must never be silently rebound to a new view.
+        self.nav.t = 0.
+        self.nav.state['stamp_s'] = 10.
+        actor = AgentLoop(self.tools, lambda *_: reply('navigate', goal_id='elevator', pose=[5,4,0], view_id='old', orientation_source='autonomous'))
+        try:
+            actor.tick(); actor.model.thread.join(1)
+            self.nav.t = 4.
+            actor.tick()
+            result = self.tools.state['history'][-1]['value']['result']
+            self.assertEqual(result['reason'], 'model_input_expired_request_fresh_observation')
+            self.assertEqual(self.tools.skill.record['attempts'], [])
+        finally:
+            actor.close()
+
     def test_localization_reset_revokes_spatial_memory_but_keeps_semantics(self):
         self.tools.call('observe_scene')
         context = self.tools.context()

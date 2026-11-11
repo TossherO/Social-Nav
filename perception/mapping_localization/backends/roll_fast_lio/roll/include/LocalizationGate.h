@@ -15,6 +15,9 @@ public:
     double consistencyDistance = .25, consistencyAngle = .035;
     int confirmationMatches = 5;
     std::string reason;
+    // Diagnostic fields do not alter the acceptance thresholds.
+    unsigned rejectionMask = 0;
+    double candidateClearance = NAN, correctionStep = NAN, correctionAngle = NAN, gravityAngle = NAN;
 
     void reset() { tracking = false; outside = false; pending = 0; anchorReady = false; }
     float clearance(const Eigen::Vector3f& position) const {
@@ -37,11 +40,13 @@ public:
     }
     bool begin(const Eigen::Affine3f& prediction) {
         reason.clear();
+        rejectionMask = 0;
+        candidateClearance = correctionStep = correctionAngle = gravityAngle = NAN;
         if (!enabled) return true;
         const float distance = clearance(prediction.translation());
         if (distance < -1e-5f) { outside = true; tracking = false; pending = 0; }
         if (outside && distance < reentryMargin) {
-            reason = "outside_prior_coverage"; return false;
+            rejectionMask = 64; reason = "outside_prior_coverage"; return false;
         }
         return true;
     }
@@ -53,10 +58,18 @@ public:
         const float angle = Eigen::AngleAxisf(prediction.linear().transpose()*candidate.linear()).angle();
         const float gravity = std::acos(std::max(-1.f, std::min(1.f,
             (anchor.linear()*Eigen::Vector3f::UnitZ()).dot(correction.linear()*Eigen::Vector3f::UnitZ()))));
-        if (!candidate.matrix().allFinite() || !std::isfinite(inlier) || !std::isfinite(residual) || residual < 0 ||
-                residual > maxResidual || inlier < minInlier || clearance(candidate.translation()) < -1e-5f ||
-                (candidate.translation()-prediction.translation()).norm() > maxStep ||
-                angle > maxAngle || gravity > maxGravity) {
+        const bool finiteCandidate = candidate.matrix().allFinite();
+        if (finiteCandidate) candidateClearance = clearance(candidate.translation());
+        correctionStep = (candidate.translation()-prediction.translation()).norm();
+        correctionAngle = angle; gravityAngle = gravity;
+        if (!finiteCandidate) rejectionMask |= 1;
+        if (!std::isfinite(inlier) || inlier < minInlier) rejectionMask |= 2;
+        if (!std::isfinite(residual) || residual < 0 || residual > maxResidual) rejectionMask |= 4;
+        if (finiteCandidate && candidateClearance < -1e-5f) rejectionMask |= 8;
+        if (correctionStep > maxStep) rejectionMask |= 16;
+        if (angle > maxAngle) rejectionMask |= 32;
+        if (gravity > maxGravity) rejectionMask |= 128;
+        if (rejectionMask) {
             tracking = false; pending = 0; reason = "coverage_match_quality_rejected"; return false;
         }
         if (!tracking) {

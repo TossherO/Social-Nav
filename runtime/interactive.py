@@ -62,6 +62,39 @@ def selected_initial_pose(frame, position, quaternion, hint, *, initial_z=None):
     return [roll, pitch, yaw, float(position[0]), float(position[1]), float(z)]
 
 
+def selected_initial_height(grid, hint, position, *, initial_z=None, observed_height=None, height_range=(.2,2.2)):
+    """Choose a LiDAR map-Z seed and retain its source, never a localization result."""
+    if initial_z is not None:
+        if not math.isfinite(initial_z):raise ValueError('Initial map Z must be finite')
+        return dict(status='available',method='explicit_initial_z',lidar_z_m=float(initial_z))
+    from perception.mapping_localization.initial_pose import map_ground_initial_height, supported_ground_height
+    if observed_height is not None:
+        try:
+            ground=supported_ground_height(grid,position[:2])
+            height=float(observed_height['height_m'])
+            if (observed_height.get('status')=='available' and observed_height.get('source')=='current_lidar_ground_tracker' and
+                    type(observed_height.get('source_stamp_s')) in (int,float) and math.isfinite(observed_height['source_stamp_s']) and
+                    grid.metadata.get('frame_id') == hint['map']['frame_id'] and ground['status']=='available' and
+                    math.isfinite(height) and height_range[0] <= height <= height_range[1]):
+                return dict(status='available',method='static_ground_plus_current_lidar_ground',
+                    lidar_z_m=ground['ground_z_m']+height,target_ground=ground,
+                    static_snapshot_id=grid.metadata.get('snapshot_id'),observed_height=observed_height)
+        except (KeyError, TypeError, ValueError):
+            pass
+    try:
+        result=map_ground_initial_height(grid,hint,position[:2],min_offset_m=height_range[0],max_offset_m=height_range[1])
+    except (KeyError, TypeError, ValueError) as error:
+        result=dict(status='unavailable',reason='invalid_static_ground_or_height_hint',error_type=type(error).__name__)
+    if result['status'] == 'available':
+        result['reference_source']=hint.get('source')
+        return result
+    fallback=float(hint['pose']['position_m'][2])
+    if not math.isfinite(fallback):raise ValueError('Initial map Z must be finite')
+    return dict(status='fallback',method='fixed_map_bound_hint',lidar_z_m=fallback,
+                reason=result.get('reason','ground_estimate_unavailable'),ground_diagnostic=result,
+                reference_source=hint.get('source'))
+
+
 def bag_initial_pose(path, config, *, bag, start, live=False):
     """Reuse the existing seed validator; a saved bag pose never initializes live input."""
     from perception.mapping_localization.initial_pose import load_seed
@@ -126,6 +159,12 @@ def runtime_command(args, config, pose):
         command += ['--runtime-config', str(resolve(args.runtime_config))]
     if getattr(args,'agent_observations',False):
         command += ['--agent-observations']
+    if getattr(args,'agent_execution',False):
+        command += ['--agent-execution']
+    if getattr(args,'trace_timing',False):
+        command += ['--trace-timing']
+    if getattr(args,'roll_gravity_deg',None) is not None:
+        command += ['--roll-gravity-deg',str(args.roll_gravity_deg)]
     if args.environment_update_hz is not None:
         command += ['--environment-update-hz', str(args.environment_update_hz)]
     if args.environment_window_m is not None:
@@ -154,6 +193,9 @@ def parser():
     p.add_argument('--motion-profile')
     p.add_argument('--runtime-config', help='Same machine scheduling override inspected by runtime.preflight')
     p.add_argument('--agent-observations', action='store_true', help='Publish bounded RGB observations for the nonexecuting Agent')
+    p.add_argument('--agent-execution', action='store_true', help='Allow Agent goal intents in this manually armed execution session')
+    p.add_argument('--trace-timing', action='store_true', help='Record bounded scalar stage timings for diagnosis')
+    p.add_argument('--roll-gravity-deg', type=float, help='Explicit live fixed-map gravity correction limit in degrees')
     p.add_argument('--environment-update-hz', type=float, help='Override environment update rate (at most 10 Hz)')
     p.add_argument('--environment-window-m', type=float, help='Override the square local environment window in metres')
     p.add_argument('--vehicle-profile')
@@ -171,12 +213,16 @@ def main(argv=None):
         p.error('Environment update rate must be finite and in (0,10] Hz')
     if args.environment_window_m is not None and (not math.isfinite(args.environment_window_m) or not 0 < args.environment_window_m <= 60):
         p.error('Environment window must be finite and in (0,60] metres')
+    if args.roll_gravity_deg is not None and (not args.live or not math.isfinite(args.roll_gravity_deg) or not 0 < args.roll_gravity_deg <= 15):
+        p.error('--roll-gravity-deg requires live input and a finite value in (0,15] degrees')
     if args.live and (args.start != 0 or args.rate != 1 or args.pause_at is not None):
         p.error('Live input does not accept bag playback options')
     if args.pause_at is not None and (not math.isfinite(args.pause_at) or args.pause_at < 0):
         p.error('--pause-at must be finite and nonnegative')
     if args.execute and not (args.live and args.vehicle_profile and args.chassis_port):
         p.error('--execute requires --live, --vehicle-profile and --chassis-port')
+    if args.agent_execution and not (args.execute and args.agent_observations):
+        p.error('--agent-execution requires --execute and --agent-observations')
     if args.chassis_port and not args.execute:
         p.error('--chassis-port is only used with explicit --execute')
     if not args.no_rviz:require_rviz_tools()
@@ -236,11 +282,16 @@ def main(argv=None):
     from perception.visualization.surface import ground_cloud,annotation_height
     terrain_pub.publish(ground_cloud(grid,offset=-.015))
     runtime = rviz = log = None
-    from .initial_preview import PreviewState, preview_points
+    from .initial_preview import PreviewState, PreviewGroundEstimator, preview_points
     from perception.visualization.scans import pointcloud_message
     from perception.detection_tracking.inference.config import load_config as detection_config
     sensor_settings = detection_config()['ros']
     initial_preview = PreviewState()
+    from perception.mapping_localization.initial_pose import quaternion_rpy
+    from perception.environment.layers import load_config as environment_config
+    initial_roll,initial_pitch,_ = quaternion_rpy(hint['pose']['quaternion_xyzw'])
+    ground_config=environment_config() if args.live else None
+    initial_ground = PreviewGroundEstimator(initial_roll,initial_pitch,ground_config) if args.live and args.initial_z is None else None
     preview_visible = False
     socket_path = output/'run/commands.sock'
     # Instructions live in map itself, so they remain visible when localization fails.
@@ -313,8 +364,11 @@ def main(argv=None):
         label.action=Marker.ADD;label.type=Marker.TEXT_VIEW_FACING;label.pose.orientation.w=1.
         label.pose.position=Point(pose[3],pose[4],pose[5]+1.2);label.scale.z=.25
         label.color.r,label.color.g,label.color.b,label.color.a=0.,1.,1.,1.
+        seed=initial_preview.height_seed or {}
+        height=('HEIGHT FALLBACK: '+str(seed.get('reason')) if seed.get('status')=='fallback' else
+                'Z %.3f m (%s)' % (pose[5],seed.get('method','fixed hint')))
         label.text=('CONFIRMATION FAILED: '+error if error else
-                    'UNVERIFIED INITIAL GUESS\nCyan: raw scan preview; confirm to start')
+                    'UNVERIFIED INITIAL GUESS\n'+height+'\nCyan: raw scan preview; confirm to start')
         initial_marker_pub.publish(MarkerArray(markers=[marker,label]))
 
     def initial(message):
@@ -323,12 +377,18 @@ def main(argv=None):
                 if runtime is not None or selection:
                     raise ValueError('This session is already initialized; stop and restart to change the initial pose')
                 pose = message.pose.pose
+                height_seed=(selected_initial_height(grid,hint,[pose.position.x,pose.position.y],initial_z=args.initial_z,
+                    observed_height=None if initial_ground is None else initial_ground.current(time.monotonic()),
+                    height_range=(ground_config['ground_min_below_sensor_m'],ground_config['ground_max_below_sensor_m']))
+                             if args.live else None)
                 value = selected_initial_pose(message.header.frame_id,
                     [pose.position.x, pose.position.y, pose.position.z],
-                    [pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w], hint, initial_z=args.initial_z)
+                    [pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w], hint,
+                    initial_z=height_seed['lidar_z_m'] if height_seed is not None else args.initial_z)
                 if args.live:
-                    initial_preview.select(value, message.header.stamp.to_sec())
+                    initial_preview.select(value, message.header.stamp.to_sec(),height_seed=height_seed)
                     show_initial_candidate(value)
+                    print('[initial_height] '+json.dumps(height_seed,ensure_ascii=False,allow_nan=False),flush=True)
                     return dict(accepted=True, state='initial_pose_preview', executable=False,
                                 preview_revision=initial_preview.revision)
                 selection.append(value)
@@ -344,8 +404,11 @@ def main(argv=None):
         with lock:
             if selection or runtime is not None:
                 return
-            try: initial_preview.scan(message, time.monotonic(), now_source=rospy.Time.now().to_sec())
-            except ValueError as error: rospy.logwarn_throttle(5., 'Initial preview scan: %s', error)
+            try:
+                now=time.monotonic()
+                if initial_preview.scan(message,now,now_source=rospy.Time.now().to_sec()) and initial_ground is not None:
+                    initial_ground.scan(message,now,sensor_frame=sensor_settings['localization_child_frame'])
+            except (ValueError, np.linalg.LinAlgError) as error: rospy.logwarn_throttle(5., 'Initial preview scan: %s', error)
 
     def draw_initial_preview():
         nonlocal preview_visible
@@ -377,6 +440,7 @@ def main(argv=None):
             (output/'initial_pose.json').write_text(json.dumps(dict(source='confirmed_rviz_initialpose',
                 reference='rslidar', map=config['map'], pose_rpy_xyz=initial_preview.pose,
                 intent_stamp_s=initial_preview.intent_stamp, preview_scan_stamp_s=initial_preview.rendered[1],
+                height_seed=initial_preview.height_seed,
                 registration_verified=False), indent=2))
             selection.append(list(initial_preview.pose))
             clear=Marker();clear.action=Marker.DELETEALL

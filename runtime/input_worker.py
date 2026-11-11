@@ -48,6 +48,7 @@ def main():
         from .playback import BagPlayback
         playback=BagPlayback(socket.socket(fileno=args.playback_fd),rate=args.rate,pause_at=args.pause_at)
     pending={};first=None;anchor=None;count=0;cpu_start=time.process_time();positions=deque(maxlen=64)
+    trace_written=False
     def release():
         ack=wire.recv();key=(ack['slot'],ack['epoch']);ref=pending.pop(key)
         pool.release(ref,'gpu')
@@ -58,7 +59,7 @@ def main():
         image_topics=dict(rgb='/camera/color/image_raw',camera_info='/camera/color/camera_info') if args.with_rgb else None
         raw_source=selected_messages(args.bag,config,duration=args.duration,start=args.start,messages=source,image_topics=image_topics)
         session=LocalizationSession(args.config,mode=args.mode,coverage=args.coverage,
-            allow_local_only=True,metrics=metrics,association_ready=association_ready)
+            allow_local_only=True,metrics=metrics,association_ready=association_ready,latest_matching=args.live)
         iterator=bag_observations(None,config,messages=raw_source,image_topics=image_topics)
         for batch in iterator:
             if playback is not None:
@@ -130,14 +131,21 @@ def main():
         source_metrics['stop_requested']=stop.is_set()
         wire.send(dict(kind='end',scans=count,metrics=source_metrics))
     except Exception as error:
+        # The parent terminates the worker after receiving an error. Snapshot
+        # timing before notifying it, even if the matcher cannot drain.
+        metrics.trace('input_worker_failure',error_type=type(error).__name__,error=str(error)[:240])
+        if args.timing_output:
+            metrics.write_trace();trace_written=True
         wire.send(dict(kind='error',error=type(error).__name__+': '+str(error)));raise
     finally:
-        if session is not None:session.close()
-        if playback is not None:playback.close()
-        association_channel.close()
-        metrics.write_trace()
-        for ref in pending.values():pool.release(ref,'gpu')
-        pool.close();wire.close();states.close();main_pose.close()
+        try:
+            if session is not None:session.close()
+        finally:
+            if playback is not None:playback.close()
+            association_channel.close()
+            if not trace_written:metrics.write_trace()
+            for ref in pending.values():pool.release(ref,'gpu')
+            pool.close();wire.close();states.close();main_pose.close()
 
 
 if __name__=='__main__':main()

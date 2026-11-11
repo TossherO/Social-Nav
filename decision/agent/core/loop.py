@@ -91,7 +91,7 @@ class AgentLoop:
         deadline = time.monotonic()+timeout_s
         while session.skill.record['handle'] is not None and time.monotonic() < deadline:
             session.tick()
-            if session.navigation.scope == 'shadow':
+            if session.navigation.scope in ('shadow','live'):
                 time.sleep(.02)
         session._save('session_checkpoint', dict(stop_confirmed=session.skill.record['handle'] is None))
 
@@ -99,7 +99,9 @@ class AgentLoop:
         s = self.session.tick()
         result = self.model.poll()
         if result is not None:
-            if result['stale'] or not self.session.valid_context(result['context']):
+            valid = not result['stale'] and self.session.valid_context(result['context'])
+            expired = not valid and not result['stale'] and self.session.valid_expired_context(result['context'])
+            if not valid and not expired:
                 self.session.store.event('model_result_discarded', dict(context=result['context'], reason='cancelled_expired_or_superseded'))
                 if s['status'] == 'ready' and self.session.observation is not None:
                     self.session.observation = None
@@ -124,7 +126,30 @@ class AgentLoop:
                         self.session._save('assistant_message',dict(message=reply.message,task_success=False))
                         return s
                     value = reply.action
-                    output = self.session.call(value['tool'], _context=result['context'], **value['arguments'])
+                    # Delayed model decisions may still register the user's task
+                    # or query static state. Image-based judgments and motion
+                    # proposals must consume fresh evidence; expose the refusal
+                    # to the model instead of silently resending the request.
+                    if expired and value['tool'] == 'navigate':
+                        output = self.session.revalidate_delayed_navigation(value, result['context'])
+                        if output.get('status') == 'refused' and not output.get('revalidation'):
+                            self.session._history('tool', dict(call=value, result=output))
+                    elif expired and value['tool'] == 'check_candidate':
+                        output = self.session.revalidate_delayed_candidate(value, result['context'])
+                        if output.get('status') == 'refused' and not output.get('revalidation'):
+                            self.session._history('tool', dict(call=value, result=output))
+                    elif (expired and value['tool'] == 'check_goal' and not any(
+                            value['arguments'].get(key) for key in ('observation_id','semantic_result','evidence',
+                                'facing_result','facing_evidence','preference_result','preference_evidence'))):
+                        output = self.session.call(value['tool'], _context=result['context'], **value['arguments'])
+                    elif expired and value['tool'] not in ('record_task', 'lookup_places', 'query_map', 'get_navigation_state',
+                                                           'ask_user', 'cancel_navigation', 'wait_for_event', 'finish_task'):
+                        output = dict(status='refused', reason='model_input_expired_request_fresh_observation',
+                                      execution_completed=False)
+                        self.session.store.event('expired_tool_refused', dict(call=value, context=result['context']))
+                        self.session._history('tool', dict(call=value, result=output))
+                    else:
+                        output = self.session.call(value['tool'], _context=result['context'], **value['arguments'])
                     keyframe = output.get('keyframe') if value['tool'] in ('save_keyframe','read_keyframe') and output.get('status') in ('saved','available') else None
                     self.session.conversation.commit(reply,output,keyframe=keyframe)
                     if self.session.memory is not None and 'observation_id' in result['context']:
@@ -133,6 +158,14 @@ class AgentLoop:
                             place_id=value['arguments'].get('place_id') or self.session.skill.record['place_id'] or '',
                             clock_domain=result['context']['clock_domain'], map_binding=result['context']['map_binding'])
                     self.session._save('model_action_applied', dict(call=value, result=output, context=result['context']))
+                    if (value['tool'] in ('navigate', 'navigate_route') and
+                            output.get('status') == 'accepted' and
+                            self.session.skill.record['handle'] is not None):
+                        # Do not ask the model to restate that it is waiting:
+                        # a text-only reply has ambiguous intent and otherwise
+                        # triggers clarification and cancels the active goal.
+                        self.session.wait_for_event('navigation')
+                        self.session._save('await_navigation_after_acceptance')
                 except (ValueError, KeyError, TypeError, jsonschema.ValidationError) as error:
                     self.session.stop('needs_clarification', 'model_protocol_rejected')
                     self.session._save('model_protocol_rejected', dict(error_type=type(error).__name__))

@@ -100,3 +100,54 @@ class RuntimeClient:
         if record is None or record['rgb']['status'] == 'valid' and image is None:
             return None
         return Observation(copy.deepcopy(record), None if image is None else base64.b64decode(image, validate=True)).verify()
+
+
+class LiveRuntimeClient(RuntimeClient):
+    """Explicit live intent channel; it cannot arm or manage safety."""
+    def exchange(self, kind, value):
+        if kind not in ('agent_state', 'goal', 'cancel', 'hold'):
+            raise ValueError('Live Agent cannot arm or manage safety')
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(.5)
+        try:
+            sock.connect(str(self.path.resolve()))
+            connection = Connection(sock)
+            wire_kind = {'agent_state':'agent_live_state', 'goal':'agent_live_goal', 'cancel':'agent_live_cancel',
+                         'hold':'agent_live_hold'}[kind]
+            connection.send(dict(kind=wire_kind, value=value))
+            result = connection.recv()
+        finally:
+            sock.close()
+        if result.get('accepted') is False:
+            from ..tools.navigation import IntentRejected
+            raise IntentRejected(result.get('error', 'Live intent rejected'))
+        if result.get('execution_feedback') is True:
+            raise ValueError('IPC acknowledgements are not execution evidence')
+        return result
+
+    def snapshot(self, *, with_image=False):
+        result = self.exchange('agent_state', dict(with_image=with_image))
+        if result.get('scope') != 'live_observation':
+            raise ValueError('Unexpected live runtime scope')
+        return result
+
+
+class ManualRuntimeClient(RuntimeClient):
+    """Read-only observation channel; never send any navigation intent."""
+    def exchange(self, kind, value):
+        if kind != 'agent_state':
+            raise ValueError('Manual Agent client is read-only')
+        return super().exchange(kind,value)
+
+    def require_observation_only(self):
+        sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+        sock.settimeout(.5)
+        try:
+            sock.connect(str(self.path.resolve()))
+            connection=Connection(sock)
+            connection.send(dict(kind='session_status',value={}))
+            status=connection.recv()
+        finally:
+            sock.close()
+        if status.get('live') is not True or status.get('hardware_enabled') is not False:
+            raise ValueError('Manual Agent requires a live observation session without chassis output')

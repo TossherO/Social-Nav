@@ -217,6 +217,48 @@ class IndoorGoalTests(unittest.TestCase):
         self.assertEqual(result['status'],'completed')
         self.assertIn('not_independent_ground_truth',result['semantic']['source'])
 
+    def test_visual_preference_without_post_arrival_rgb_is_explicitly_unassessed(self):
+        goal=dict(goal_id='near',kind='reference',target_id='front_window',description='Near window; prefer a view',
+                  max_distance_m=5.,visual_preferences=['Prefer to see all targets'])
+        self.assertEqual(self.select(goal,[5.,4.,0.])['status'],'accepted')
+        self.arrived()
+        result=self.session.call('check_goal',goal_id='near')
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(result['semantic']['visual_preferences']['status'],'not_assessed')
+        self.assertFalse(result['real_robot_success'])
+
+    def test_visual_preference_judgement_needs_current_post_arrival_rgb(self):
+        self.select(dict(point_goal('elevator'),visual_preferences=['Prefer to see all targets']),[5,4,0])
+        self.arrived()
+        self.session.observation=self.rgb(self.nav.state['stamp_s']-.01)
+        args=dict(goal_id='elevator',observation_id=self.session.observation.record['observation_id'],
+                  preference_result='partly_satisfied',preference_evidence='Two targets visible in fixture')
+        result=self.session.call('check_goal',_context=self.session.context(),**args)
+        self.assertEqual(result['status'],'needs_preference_evidence')
+        self.session.tick();self.session.observation=self.rgb()
+        args['observation_id']=self.session.observation.record['observation_id']
+        result=self.session.call('check_goal',_context=self.session.context(),**args)
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(result['semantic']['visual_preferences']['status'],'partly_satisfied')
+        self.assertIn('not_independent_ground_truth',result['semantic']['visual_preferences']['source'])
+
+    def test_reference_can_register_visual_preference_without_invented_radius(self):
+        goal=dict(goal_id='view',kind='reference',target_id='elevator',description='尽量看见电梯口',
+                  visual_preferences=['尽量看见电梯口'])
+        result=self.session.call('record_task',goals=[goal])
+        self.assertEqual(result['status'],'recorded')
+        registered=self.session.task_goals.current('view')['requirement']
+        self.assertNotIn('max_distance_m',registered)
+        self.assertNotIn('semantic_conditions',registered)
+
+    def test_soft_preference_does_not_weaken_hard_visual_conditions(self):
+        self.select(dict(point_goal('elevator'),semantic_conditions=['Entrance must be visible'],
+                         visual_preferences=['Prefer to see all targets']),[5,4,0])
+        self.arrived()
+        result=self.session.call('check_goal',goal_id='elevator')
+        self.assertEqual(result['status'],'needs_semantic_evidence')
+        self.assertFalse(self.session.task_goals.finished())
+
     def test_scene_after_arrival_cannot_make_pre_arrival_rgb_current(self):
         self.select(dict(point_goal('elevator'),semantic_conditions=['Entrance is visible']),[5,4,0])
         self.arrived()

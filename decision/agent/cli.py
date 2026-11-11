@@ -8,14 +8,14 @@ from .workflows.common import emit
 
 
 def main():
-    parser = argparse.ArgumentParser(description='单VLM工具循环：仿真与真实观察影子测试，无底盘输出')
+    parser = argparse.ArgumentParser(description='单VLM工具循环：仿真、观察及显式开启的实机目标执行')
     sub = parser.add_subparsers(dest='command', required=True)
     p = sub.add_parser('catalog', help='只读查看地点，不读取API凭证')
     p.add_argument('--catalog', default=str(CONFIG_DIR/'floor1.json'))
     p.add_argument('--map-condition', choices=('complete','simple','none'))
     p = sub.add_parser('status', help='只读检查任务，不自动恢复执行')
     p.add_argument('--session', required=True)
-    for name in ('run', 'shadow'):
+    for name in ('run', 'shadow', 'execute', 'manual'):
         p = sub.add_parser(name)
         p.add_argument('--instruction', required=True)
         p.add_argument('--catalog', default=str(CONFIG_DIR/('simulation.json' if name == 'run' else 'floor1.json')))
@@ -26,17 +26,22 @@ def main():
         p.add_argument('--api-config', default=str(ROOT/'configs/agent_api.local.json'))
         p.add_argument('--cache-mode',choices=('explicit','implicit'),default='implicit',
                        help='默认隐式缓存；explicit显式标记稳定前缀，不自动降级或重试')
+        p.add_argument('--thinking-mode',choices=('off','low'),default='off',
+                       help='可选 low 思考用于对照；默认关闭，不自动切换或重试')
         p.add_argument('--interactive', action='store_true')
         p.add_argument('--no-memory', action='store_true', help='关闭附加证据记忆，仍保留原任务与有界工具历史')
         if name == 'run':
             p.add_argument('--max-s', type=float, default=180)
             p.add_argument('--scripted-user-events', action='store_true', help='仅合成测试显式生成并记录继续事件')
-        else:
+        elif name == 'shadow':
             group = p.add_mutually_exclusive_group(required=True)
             group.add_argument('--observations')
             group.add_argument('--runtime-socket')
             p.add_argument('--sequences', nargs='+', type=int)
             p.add_argument('--duration', type=float, default=60)
+        else:
+            p.add_argument('--runtime-socket', required=True)
+            p.add_argument('--duration', type=float, default=600)
     p = sub.add_parser('evaluate', help='运行少量合成工具反馈场景，不调用API')
     p.add_argument('--output', required=True)
     args = parser.parse_args()
@@ -62,8 +67,14 @@ def main():
                 raise ValueError('Positive simulation time required')
             from .workflows.run import run_simulation
             run_simulation(args)
-        else:
+        elif args.command == 'shadow':
             from .workflows.shadow import run
+            run(args)
+        elif args.command == 'execute':
+            from .workflows.live import run
+            run(args)
+        else:
+            from .workflows.manual import run
             run(args)
 
 

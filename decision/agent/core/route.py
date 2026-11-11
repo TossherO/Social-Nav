@@ -29,18 +29,63 @@ def path_outside_region(path, polygon):
     return not any(_touches(a,b,c,d) for a,b in zip(points,points[1:]) for c,d in edges)
 
 
-def circuit_plan_status(points,polygon,direction,position_tolerance):
+def circuit_plan_diagnostics(points,polygon,direction,position_tolerance):
     points=np.asarray(points,dtype=float)
-    if not path_outside_region(points,polygon):return 'proposed_route_intersects_task_region'
-    if np.linalg.norm(points[-1]-points[0])>2*position_tolerance:return 'circuit_route_must_return_to_its_start'
+    vertices=np.asarray(polygon,dtype=float)
+    if (points.ndim!=2 or points.shape[1]!=2 or len(points)<2 or not np.isfinite(points).all() or
+            vertices.ndim!=2 or vertices.shape[1]!=2 or len(vertices)<3 or not np.isfinite(vertices).all() or
+            direction not in ('clockwise','counterclockwise') or not math.isfinite(position_tolerance) or position_tolerance<=0):
+        raise ValueError('Invalid circuit plan geometry or direction')
+    inside_indices=[i for i,p in enumerate(points) if inside(p,vertices)]
+    edges=list(zip(vertices,np.roll(vertices,-1,axis=0)))
+    crossing=[i for i,(a,b) in enumerate(zip(points,points[1:]))
+              if i in inside_indices or i+1 in inside_indices or any(_touches(a,b,c,d) for c,d in edges)]
+    closure=float(np.linalg.norm(points[-1]-points[0]))
     center=centroid(polygon)
-    if not inside(center,polygon):return 'region_centroid_outside_region'
-    angles=np.arctan2(points[:,1]-center[1],points[:,0]-center[0])
-    change=np.arctan2(np.sin(np.diff(angles)),np.cos(np.diff(angles)))
-    sign=-1 if direction=='clockwise' else 1
-    if not 2*math.pi-.2 <= sign*float(change.sum()) <= 2*math.pi+.2:
-        return 'proposed_route_does_not_make_requested_circuit'
-    return None
+    valid_center=inside(center,polygon)
+    winding=reverse=None
+    if valid_center:
+        angles=np.arctan2(points[:,1]-center[1],points[:,0]-center[0])
+        change=np.arctan2(np.sin(np.diff(angles)),np.cos(np.diff(angles)))
+        sign=-1 if direction=='clockwise' else 1
+        winding=sign*float(change.sum())
+        reverse=float(np.maximum(-sign*change,0).sum())
+    if crossing or inside_indices:reason='proposed_route_intersects_task_region'
+    elif closure>2*position_tolerance:reason='circuit_route_must_return_to_its_start'
+    elif not valid_center:reason='region_centroid_outside_region'
+    elif not 2*math.pi-.2 <= winding <= 2*math.pi+.2:reason='proposed_route_does_not_make_requested_circuit'
+    elif reverse>math.pi/2:reason='proposed_route_excessive_reverse_winding'
+    else:reason=None
+    return dict(reason=reason,inside_waypoint_indices=inside_indices,intersecting_segment_indices=crossing,
+                segment_index_reference='zero_based_segment_i_connects_waypoints_i_and_i_plus_1',
+                closure_distance_m=closure,closure_tolerance_m=2*position_tolerance,
+                requested_direction=direction,signed_winding_rad=winding,reverse_winding_rad=reverse,
+                scope='task_region_geometry_only_not_obstacle_route_or_execution_check')
+
+
+def circuit_plan_status(points,polygon,direction,position_tolerance):
+    return circuit_plan_diagnostics(points,polygon,direction,position_tolerance)['reason']
+
+
+def static_route_line_diagnostics(grid,points):
+    """Describe the submitted straight segments; never certify a planned path."""
+    from ..tools.spatial import sample
+    points=np.asarray(points,dtype=float)
+    spacing=min(.05,float(grid.metadata['resolution'])/2)
+    if not math.isfinite(spacing) or spacing<=0:raise ValueError('Invalid static grid resolution')
+    segments=[]
+    for index,(a,b) in enumerate(zip(points,points[1:])):
+        length=float(np.linalg.norm(b-a))
+        if not math.isfinite(length) or np.abs(np.r_[a,b]).max()>1e8:
+            segments.append(dict(segment=index,status='outside_sample_range'))
+            continue
+        count=min(4097,max(2,math.ceil(length/spacing)+1))
+        xy=a[None,:]+np.linspace(0.,1.,count)[:,None]*(b-a)[None,:]
+        values,valid=sample(grid,xy)
+        segments.append(dict(segment=index,occupied_samples=int(((values==100)&valid).sum()),
+            unknown_samples=int(((values==-1)&valid).sum()),outside_samples=int((~valid).sum()),
+            sample_step_m=length/(count-1)))
+    return dict(segments=segments,scope='static_centerline_only_not_vehicle_or_actual_planned_path')
 
 
 def sequence_evidence(segments, checkpoints, checkpoint_met, start_stamp, end_stamp):

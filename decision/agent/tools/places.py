@@ -121,7 +121,8 @@ class Catalog:
         p = self.places[place_id]
         synthetic = self.value['scope'] == scope == 'simulation' and p.get('status') == 'simulation'
         shadow = scope == 'shadow' and self.value['scope'] == 'development_prior' and p.get('allow_shadow') is True
-        if not synthetic and not shadow:
+        live = scope in ('live','manual') and self.value['scope'] == 'development_prior' and p.get('status') in ('manual_annotation','task_start_bound')
+        if not synthetic and not shadow and not live:
             raise ValueError('Destination is neither synthetic nor an explicit nonexecuting shadow candidate')
         if p.get('pose') is None or p.get('room_interior', False):
             raise ValueError('Unbound or excluded destination')

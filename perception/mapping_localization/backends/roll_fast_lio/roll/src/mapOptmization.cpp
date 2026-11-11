@@ -850,7 +850,9 @@ public:
                     
                     float optTime = opt.toc();
                     matchingMs = optTime;
-                    if (localizationMode && !matchingValid) cachedLocalKeyframes.clear();
+                    // Fixed submaps are immutable and refresh on predicted motion;
+                    // a failed match does not itself change their geometry.
+                    if (localizationMode && !matchingValid && !fixedSubmap) cachedLocalKeyframes.clear();
                     if(debugMode)  cout<<"optimization: "<<optTime<<endl; // > 90% of the total time
                     
                     TicToc optPose;

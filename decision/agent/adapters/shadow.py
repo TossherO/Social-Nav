@@ -1,5 +1,6 @@
 """Nonexecuting adapters for causal saved observations and runtime shadow IPC."""
 import copy
+import math
 from .. import ROOT
 
 
@@ -255,3 +256,78 @@ class RuntimeShadowNavigation:
         if ack.get('accepted') is not True:
             self.cancel_requested = False
             raise ValueError('Runtime cancellation was not accepted')
+
+
+class RuntimeLiveNavigation(RuntimeShadowNavigation):
+    """Live intents with localization-derived arrival, never hardware certification."""
+    scope = 'live'
+
+    def __init__(self, catalog, client):
+        from navigation.control.tracking import load_config
+        self.tracking = load_config()
+        super().__init__(catalog, client)
+
+    def start(self, place, handle):
+        from ..tools.navigation import IntentRejected
+        previous=(self.handle,self.request,self.cancel_requested)
+        try:
+            return super().start(place,handle)
+        except IntentRejected:
+            self.handle,self.request,self.cancel_requested=previous
+            raise
+
+    def hold(self, handle):
+        if self.handle != handle:
+            raise ValueError('Wrong live navigation call')
+        # A hold clears the goal without arming anything. The gateway verifies
+        # the current owned arrival before forwarding it to independent safety.
+        self.cancel_requested = True
+        ack = self.client.exchange('hold', {k:handle[k] for k in ('task_id','goal_revision')})
+        if ack.get('accepted') is not True:
+            raise ValueError('Runtime hold was not accepted')
+
+    def snapshot(self):
+        result = super().snapshot()
+        control = self.value['control']
+        chassis = self.value.get('chassis') or {}
+        owner = self.value.get('agent_owner') or {}
+        active = control.get('request') or {}
+        match = (self.handle is not None and active.get('request_id') == self.handle['call_id'] and
+                 owner.get('request_id') == self.handle['call_id'] and
+                 owner.get('arm_revision') == chassis.get('arm_revision'))
+        enabled = chassis.get('state') == 'armed' and chassis.get('status_fresh') is True
+        evidence = control.get('goal_observation') or {}
+        arrival = (match and enabled and evidence.get('status') == 'criteria_held' and
+                   evidence.get('task_id') == self.handle['task_id'] and
+                   evidence.get('goal_revision') == self.handle['goal_revision'] and
+                   evidence.get('source') == 'causal_algorithm_poses_not_chassis_feedback' and
+                   result.get('origin_pose') is not None and not result['input_stale'] and
+                   result['localization_status'] == 'valid')
+        cancelled = bool(result.get('proposal_cancelled'))
+        feedback = (control.get('idle_feedback') if cancelled else control.get('feedback')) or {}
+        velocity = feedback.get('velocity')
+        settings = self.tracking
+        stopped = (isinstance(velocity, list) and len(velocity) == 2 and
+                   all(isinstance(v, (int, float)) and math.isfinite(v) for v in velocity) and
+                   abs(velocity[0]) <= settings['stopped_linear_mps'] and
+                   abs(velocity[1]) <= settings['stopped_angular_rps'] and
+                   feedback.get('status') == 'valid' and
+                   feedback.get('source') == 'causal_algorithm_poses_not_chassis_feedback' and
+                   0 <= control['stamp_s']-feedback.get('stamp_s', -float('inf')) <= settings['feedback_max_age_s'])
+        if self.handle is not None and not self.cancel_requested and not match and owner.get('request_id') != self.handle['call_id']:
+            status = 'preempted'
+        elif (self.handle is not None and not self.cancel_requested and owner.get('request_id') == self.handle['call_id'] and
+              owner.get('arm_revision') != chassis.get('arm_revision')):
+            status = 'interrupted'
+        elif self.handle is not None and not self.cancel_requested and not enabled:
+            status = 'interrupted'
+        else:
+            status = 'arrived' if arrival else 'stopped' if cancelled and stopped else 'running' if match else 'pending'
+        result.update(scope='live',source='runtime_live_observer',status=status,
+                      handle=copy.deepcopy(self.handle) if match or cancelled or status in ('preempted','interrupted') else None,
+                      stopped=bool(stopped),arrival_observation=bool(arrival),
+                      stop_observation=bool(cancelled and stopped),physical_acceptance=False,
+                      chassis_state=chassis.get('state'),chassis_status_fresh=chassis.get('status_fresh') is True,
+                      planning_status=control.get('planning_status'),planning_reason=control.get('planning_reason'),
+                      goal=dict(task_id=evidence.get('task_id'),goal_revision=evidence.get('goal_revision')) if arrival else None)
+        return result

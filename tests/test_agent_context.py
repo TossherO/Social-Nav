@@ -84,6 +84,31 @@ class AgentContextTests(unittest.TestCase):
         self.assertNotEqual(self.session.spatial_view.record['view_id'],original)
         self.assertEqual(self.session.spatial_view.record['source_stamp_s'],10.2)
 
+    def test_delayed_point_goal_rechecks_new_view_without_changing_model_call(self):
+        self.session.call('record_task',goals=[dict(goal_id='target',kind='point',target_id='elevator',description='到电梯')])
+        self.session.prompt();context=self.session.context()
+        old=self.session.spatial_view.record['view_id']
+        call=dict(tool='navigate',arguments=dict(goal_id='target',pose=[5.,4.,0.],view_id=old,orientation_source='autonomous'))
+        self.fixture.nav.state['stamp_s']=14.
+        self.assertTrue(self.session.valid_expired_context(context))
+        result=self.session.revalidate_delayed_navigation(call,context)
+        self.assertEqual(result['status'],'accepted')
+        self.assertEqual(call['arguments']['view_id'],old)
+        self.assertEqual(result['revalidation']['model_view_id'],old)
+        self.assertNotEqual(result['revalidation']['checked_view_id'],old)
+        self.assertEqual(result['revalidation']['model_source_stamp_s'],10.)
+        self.assertEqual(result['revalidation']['checked_source_stamp_s'],14.)
+
+    def test_delayed_target_refused_after_robot_moves(self):
+        self.session.call('record_task',goals=[dict(goal_id='target',kind='point',target_id='elevator',description='到电梯')])
+        self.session.prompt();context=self.session.context()
+        old=self.session.spatial_view.record['view_id']
+        self.fixture.nav.state.update(stamp_s=14.,pose=[5.,4.,0.])
+        result=self.session.revalidate_delayed_navigation(dict(tool='navigate',arguments=dict(
+            goal_id='target',pose=[5.,4.,0.],view_id=old,orientation_source='autonomous')),context)
+        self.assertEqual(result['reason'],'robot_pose_changed_since_model_input')
+        self.assertEqual(self.session.skill.record['attempts'],[])
+
     def test_accepted_clarifications_survive_history_trimming_and_overflow_is_explicit(self):
         self.session.conversation.max_exchanges=1
         for index in range(10):
@@ -134,6 +159,51 @@ class AgentContextTests(unittest.TestCase):
         inputs['stamp_s']=10.1
         self.assertEqual(self.session.call('check_candidate',pose=[4.,4.,0.],view_id=view)['reason'],'spatial_source_changed')
 
+    def test_candidate_summary_and_preview_survive_trimming_and_expire_with_source(self):
+        geometry=VehicleGeometry([[-.2,-.3],[.8,-.3],[.8,.3],[-.2,.3]],np.eye(4),source='fixture',assumed=False)
+        sensors=dict(status='configured',camera=dict(position_m=[.5,0.,0.],view=dict(
+            status='approximate_pinhole',edge_yaw_rad=[.5,-.5])))
+        inputs=dict(global_grid=self.fixture.grid,scene=None,pose=[4.,4.,0.],stamp_s=10.,
+                    clock_domain=self.fixture.nav.clock_domain,geometry=geometry,sensors=sensors)
+        self.fixture.nav.spatial_inputs=lambda:inputs
+        self.session.prompt();original=self.session.spatial_view.record['view_id']
+        for _ in range(2):
+            result=self.session.call('check_candidate',pose=[4.,4.,0.],view_id=original,point_ids=['elevator'])
+            self.assertEqual(result['status'],'available')
+        self.session.conversation.max_exchanges=1
+        self.session.conversation.notice('trim_fixture',number=1)
+        self.session.conversation.notice('trim_fixture',number=2)
+        payload=self.session.prompt();entries=payload['current_state']['recent_candidate_checks']
+        self.assertEqual(len(entries),1);self.assertEqual(entries[0]['checks'],2)
+        self.assertEqual(entries[0]['source_stamp_s'],10.)
+        self.assertEqual(entries[0]['static_footprint'],'free')
+        self.assertFalse(entries[0]['occlusion_checked'])
+        preview=self.session.spatial_view.record['candidate_preview']
+        self.assertEqual(preview,entries[0]);self.assertNotEqual(self.session.spatial_view.record['view_id'],original)
+        pixels=np.asarray(Image.open(io.BytesIO(self.session.spatial_view.images[1])))
+        self.assertTrue(np.any(np.all(pixels==[180,39,181],axis=2)))
+        view=self.session.spatial_view.record['view_id']
+        result=self.session.call('check_candidate',pose=[8.,4.,0.],view_id=view,point_ids=['elevator'])
+        self.assertEqual(result['status'],'available')
+        self.session.prompt()
+        self.assertTrue(self.session.spatial_view.record['candidate_display_expanded'])
+        self.assertLess(self.session.spatial_view.record['requested_local_bounds'][2],8.)
+        self.assertGreater(self.session.spatial_view.record['local_bounds'][2],8.)
+        inputs['stamp_s']=10.1;self.fixture.nav.state['stamp_s']=10.1
+        payload=self.session.prompt()
+        history=payload['current_state']['recent_candidate_checks']
+        self.assertEqual(len(history),2)
+        self.assertTrue(all(entry['historical_only'] for entry in history))
+        self.assertTrue(all(entry['source_stamp_s']==10. for entry in history))
+        self.assertIsNone(self.session.spatial_view.record['candidate_preview'])
+        view=self.session.spatial_view.record['view_id']
+        self.session.call('check_candidate',pose=[8.,4.,0.],view_id=view,point_ids=['elevator'])
+        payload=self.session.prompt();history=payload['current_state']['recent_candidate_checks']
+        self.assertFalse(history[-1]['historical_only']);self.assertEqual(history[-1]['source_stamp_s'],10.1)
+        self.fixture.nav.state['generation']+=1
+        payload=self.session.prompt()
+        self.assertEqual(payload['current_state']['recent_candidate_checks'],[])
+
     def test_candidate_preserves_occupied_unknown_and_missing_camera(self):
         from perception.environment.layers import GridSnapshot
         geometry=VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],np.eye(4),source='fixture')
@@ -164,6 +234,36 @@ class AgentContextTests(unittest.TestCase):
         self.assertEqual(result['local_footprint']['status'],'occupied')
         result=self.session.call('check_candidate',pose=[8.,8.,0.],view_id=view)
         self.assertEqual(result['local_footprint']['status'],'not_covered')
+
+    def test_query_map_static_crop_does_not_hide_prior_or_weaken_local_candidate_check(self):
+        from perception.environment.layers import GridSnapshot
+        geometry=VehicleGeometry([[-.1,-.1],[.1,-.1],[.1,.1],[-.1,.1]],np.eye(4),source='fixture')
+        cells=np.full((100,140),-1,np.int8);cells[40,40]=100
+        local=GridSnapshot(dict(self.fixture.grid.metadata,frame_id='odom',snapshot_id='local'),dict(occupancy=cells))
+        inputs=dict(global_grid=self.fixture.grid,scene=None,local_grid=local,local_grid_observation_id='obs',
+                    local_grid_map_from_local=np.eye(4).tolist(),pose=[4.,4.,0.],stamp_s=10.,
+                    clock_domain=self.fixture.nav.clock_domain,geometry=geometry)
+        self.fixture.nav.spatial_inputs=lambda:inputs
+        self.session.prompt()
+        default=self.session.spatial_view
+        self.assertEqual(default.record['local_source'],'current_measurement')
+        pixels=np.asarray(Image.open(io.BytesIO(default.images[1])))
+        self.assertTrue(np.any(np.all(pixels==[130,151,168],axis=2)))
+        result=self.session.call('query_map',bounds=[2.,2.,6.,6.])
+        view=self.session.spatial_view
+        self.assertEqual(result['view']['local_source'],'static_prior_only')
+        self.assertIsNotNone(view.record['local_binding'])
+        self.assertNotEqual(view.record['view_id'],default.record['view_id'])
+        pixels=np.asarray(Image.open(io.BytesIO(view.images[1])))
+        self.assertFalse(np.any(np.all(pixels==[130,151,168],axis=2)))
+        self.assertTrue(np.any(np.all(pixels==[246,246,239],axis=2)))
+        candidate=self.session.call('check_candidate',pose=[4.,4.,0.],view_id=view.record['view_id'])
+        self.assertEqual(candidate['static_footprint']['status'],'free')
+        self.assertEqual(candidate['local_footprint']['status'],'occupied')
+        self.fixture.nav.state['stamp_s']=10.2;inputs['stamp_s']=10.2
+        self.session.prompt()
+        self.assertEqual(self.session.spatial_view.record['local_bounds'],[2.,2.,6.,6.])
+        self.assertEqual(self.session.spatial_view.record['local_source'],'static_prior_only')
 
     def test_navigation_checks_final_orientation_not_only_model_candidate(self):
         from perception.environment.layers import GridSnapshot

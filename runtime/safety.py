@@ -14,6 +14,21 @@ from interfaces.shared import SharedArrayReader
 from perception.environment.shared_scene import ScenePool,read_scene
 
 
+def _apply_command(engine, arm, chassis, kind, value):
+    if kind == 'arm':
+        if chassis is None or type(value.get('enabled')) is not bool:
+            raise ValueError('No live chassis or invalid arming request')
+        arm.update(enabled=value['enabled'],revision=arm['revision']+1)
+    elif kind == 'goal_hold':
+        if chassis is None:
+            raise ValueError('Goal hold requires live chassis')
+        engine.command('cancel',value)
+    else:
+        engine.command(kind,value)
+        if kind in ('cancel','override'):
+            arm.update(enabled=False,revision=arm['revision']+1)
+
+
 def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,motion,geometry,clock_domain,asset_path,shadow_settings,chassis_fd=None):
     signal.signal(signal.SIGINT,signal.SIG_IGN)
     os.environ['CUDA_VISIBLE_DEVICES']=''
@@ -60,14 +75,7 @@ def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,mot
                                 if people is not None:engine.push_people(people)
                             elif message['kind']=='packet':engine.push_packet(message['packet'])
                             elif message['kind']=='command':
-                                if message['command']=='arm':
-                                    if chassis is None or type(message['value'].get('enabled')) is not bool:
-                                        raise ValueError('No live chassis or invalid arming request')
-                                    arm.update(enabled=message['value']['enabled'],revision=arm['revision']+1)
-                                else:
-                                    engine.command(message['command'],message['value'])
-                                    if message['command'] in ('cancel','override'):
-                                        arm.update(enabled=False,revision=arm['revision']+1)
+                                _apply_command(engine,arm,chassis,message['command'],message['value'])
                     except (ValueError,KeyError,TypeError) as error:
                         with engine.lock:engine.barrier='input_rejected:'+str(error);engine.wake.set()
         except Exception as error:

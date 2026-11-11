@@ -371,7 +371,10 @@ public:
 #endif
             stage_begin=omp_get_wtime();
             if(!localizationMode){saveKeyFramesAndFactor();correctPoses();}
-            else if(!matchingValid)cachedLocalKeyframes.clear();
+            // Immutable fixed submaps already refresh when the predicted pose
+            // moves outside their reuse budget. Invalid registration must not
+            // synchronously rebuild the same geometry on every subsequent scan.
+            else if(!matchingValid && !fixedSubmap)cachedLocalKeyframes.clear();
             stages.graph_ms=(omp_get_wtime()-stage_begin)*1000;}
         affine_odom_to_map=affine_imu_to_map*frontend.inverse();
         for(int i=0;i<4;++i)for(int j=0;j<4;++j)out[4*i+j]=affine_imu_to_map.matrix()(i,j);
@@ -405,3 +408,8 @@ extern "C" int sn_roll_step(void* p,const float* cloud,size_t n,const double* po
     try{return static_cast<NativeRoll*>(p)->step(cloud,n,pose,reference,stamp,out);}catch(const exception& e){rollError=e.what();return -1;}}
 extern "C" int sn_roll_save(void* p,const char* dir){try{static_cast<NativeRoll*>(p)->save(dir);return 0;}catch(const exception& e){rollError=e.what();return -1;}}
 extern "C" int sn_roll_stages(void* p,SnRollStages* out){return static_cast<NativeRoll*>(p)->stage_stats(*out);}
+extern "C" int sn_roll_gate_diagnostics(void* p,double* out){
+    const auto& gate=static_cast<NativeRoll*>(p)->localizationGate;
+    out[0]=gate.rejectionMask;out[1]=gate.candidateClearance;out[2]=gate.correctionStep;
+    out[3]=gate.correctionAngle;out[4]=gate.gravityAngle;return 0;
+}

@@ -111,6 +111,7 @@ class NativeRoll:
         lib.sn_roll_step.argtypes=[C.c_void_p,C.c_void_p,C.c_size_t,C.c_void_p,C.c_void_p,C.c_double,C.c_void_p]
         lib.sn_roll_save.argtypes=[C.c_void_p,C.c_char_p]
         if hasattr(lib,'sn_roll_stages'):lib.sn_roll_stages.argtypes=[C.c_void_p,C.POINTER(RollStages)]
+        if hasattr(lib,'sn_roll_gate_diagnostics'):lib.sn_roll_gate_diagnostics.argtypes=[C.c_void_p,C.c_void_p]
         self.ptr=lib.sn_roll_create(str(config).encode())
         if not self.ptr:raise RuntimeError(lib.sn_roll_error().decode())
 
@@ -126,7 +127,12 @@ class NativeRoll:
         stages=None
         if hasattr(self.lib,'sn_roll_stages'):
             s=RollStages();self.lib.sn_roll_stages(self.ptr,C.byref(s));stages={k:getattr(s,k) for k,_ in s._fields_}
-        return dict(map_from_lidar=out[:16].reshape(4,4),available=valid!=2,valid=valid==1,inlier_ratio=float(out[16]),registration_error=float(out[17]),map_revision=int(out[18]),stages=stages)
+        diagnostics=None
+        if valid!=2 and hasattr(self.lib,'sn_roll_gate_diagnostics'):
+            d=np.empty(5,np.float64);self.lib.sn_roll_gate_diagnostics(self.ptr,d.ctypes.data)
+            diagnostics=dict(rejection_mask=int(d[0]),**{key:(float(value) if np.isfinite(value) else None)
+                for key,value in zip(('candidate_clearance_m','correction_step_m','correction_angle_rad','gravity_angle_rad'),d[1:])})
+        return dict(map_from_lidar=out[:16].reshape(4,4),available=valid!=2,valid=valid==1,inlier_ratio=float(out[16]),registration_error=float(out[17]),map_revision=int(out[18]),stages=stages,gate_diagnostics=diagnostics)
 
     def save(self,directory):
         # The shared legacy writer expects a newly created empty destination.

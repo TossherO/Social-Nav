@@ -165,7 +165,12 @@ class ControlLoop:
                     prior=None if self.scene is None else self.scene.record['prior']
                     binding=None if prior is None else {k:prior.get(k) for k in
                         ('valid','map_id','map_frame','map_revision','association_session','association_generation')}
-                    self.commands.agent_state.publish_control(packet,self.rows[-1],map_binding=binding,cancelled_request=self.cancelled_request)
+                    idle_feedback=None
+                    if self.request is None and self.scene is not None and self.commands.agent_state.goal_evidence is not None:
+                        from navigation.control.shadow import observed_feedback
+                        idle_feedback=observed_feedback(list(self.rows),self.scene,self.controller.geometry,self.controller.motion,now=now)
+                    self.commands.agent_state.publish_control(packet,self.rows[-1],map_binding=binding,
+                        cancelled_request=self.cancelled_request,idle_feedback=idle_feedback)
                     if self.display is not None:
                         self.display.navigation(self.controller.controller.result,self.reference.current,self.request,self.scene,
                             self.rows[-1],packet,self.reference.reason,now=now,clock_domain=self.clock_domain,

@@ -16,22 +16,34 @@ cd "$SOCIAL_NAV_LOCAL_ROOT"
 SOCIAL_NAV_LAUNCH_KIND="${1:-}"
 if [[ $# -gt 0 ]]; then shift; fi
 SOCIAL_NAV_AGENT_OBSERVATIONS=0
+SOCIAL_NAV_AGENT_EXECUTION=0
+SOCIAL_NAV_TRACE_TIMING=0
+SOCIAL_NAV_INITIAL_Z=''
+SOCIAL_NAV_INITIAL_Z_SET=0
 SOCIAL_NAV_MODE_ARG=''
-for SOCIAL_NAV_ARG in "$@"; do
-  if [[ "$SOCIAL_NAV_ARG" == --agent-observations ]]; then
-    SOCIAL_NAV_AGENT_OBSERVATIONS=1
-  elif [[ -z "$SOCIAL_NAV_MODE_ARG" ]]; then
-    SOCIAL_NAV_MODE_ARG="$SOCIAL_NAV_ARG"
-  else
-    echo '参数过多，请使用 --help 查看用法。' >&2; exit 2
-  fi
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --agent-observations) SOCIAL_NAV_AGENT_OBSERVATIONS=1 ;;
+    --agent-execution) SOCIAL_NAV_AGENT_EXECUTION=1 ;;
+    --trace-timing) SOCIAL_NAV_TRACE_TIMING=1 ;;
+    --initial-z)
+      if [[ $# -lt 2 || "$SOCIAL_NAV_INITIAL_Z_SET" == 1 || -z "$2" ]]; then echo '--initial-z 需要一个高度值且只能指定一次。' >&2; exit 2; fi
+      SOCIAL_NAV_INITIAL_Z="$2"; SOCIAL_NAV_INITIAL_Z_SET=1; shift ;;
+    --initial-z=*)
+      if [[ "$SOCIAL_NAV_INITIAL_Z_SET" == 1 || -z "${1#--initial-z=}" ]]; then echo '--initial-z 需要一个高度值且只能指定一次。' >&2; exit 2; fi
+      SOCIAL_NAV_INITIAL_Z="${1#--initial-z=}"; SOCIAL_NAV_INITIAL_Z_SET=1 ;;
+    *)
+      if [[ -z "$SOCIAL_NAV_MODE_ARG" ]]; then SOCIAL_NAV_MODE_ARG="$1"
+      else echo '参数过多，请使用 --help 查看用法。' >&2; exit 2; fi ;;
+  esac
+  shift
 done
 case "$SOCIAL_NAV_LAUNCH_KIND" in
   observe)
     SOCIAL_NAV_LAUNCH_MODE="${SOCIAL_NAV_MODE_ARG:---start}"
     case "$SOCIAL_NAV_LAUNCH_MODE" in
       --help)
-        printf '%s\n' '用法：bash scripts/interactive.sh observe [--dry-run] [--agent-observations]' \
+        printf '%s\n' '用法：bash scripts/interactive.sh observe [--dry-run] [--agent-observations] [--initial-z 米]' \
           '先运行传感器入口。本入口打开 RViz 进行在线观察与规划，不连接底盘。'
         exit 0;;
       --start|--dry-run) ;;
@@ -44,7 +56,7 @@ case "$SOCIAL_NAV_LAUNCH_KIND" in
     SOCIAL_NAV_LAUNCH_MODE="${SOCIAL_NAV_MODE_ARG:---dry-run}"
     case "$SOCIAL_NAV_LAUNCH_MODE" in
       --help)
-        printf '%s\n' '用法：bash scripts/interactive.sh execute [--dry-run|--check|--execute] [--agent-observations]' \
+        printf '%s\n' '用法：bash scripts/interactive.sh execute [--dry-run|--check|--execute] [--agent-observations] [--agent-execution] [--initial-z 米]' \
           '默认只打印命令；--check 只检查车辆档案；--execute 启动实机会话，仍需单独人工使能。' \
           '档案检查只验证字段和数值一致性，不验证实际制动或失联停车。'
         exit 0;;
@@ -55,11 +67,11 @@ case "$SOCIAL_NAV_LAUNCH_KIND" in
     SOCIAL_NAV_LAUNCH_OUTPUT=live_execution
     ;;
   preflight)
-    if [[ $# -eq 1 && "$1" == --help ]]; then
+    if [[ "$SOCIAL_NAV_MODE_ARG" == --help && "$SOCIAL_NAV_INITIAL_Z_SET" == 0 && "$SOCIAL_NAV_AGENT_OBSERVATIONS" == 0 && "$SOCIAL_NAV_AGENT_EXECUTION" == 0 && "$SOCIAL_NAV_TRACE_TIMING" == 0 ]]; then
       printf '%s\n' '用法：bash scripts/interactive.sh preflight' '只读检查地图、ROS、RViz、原生库与 GPU，不连接底盘。'
       exit 0
     fi
-    if [[ $# -ne 0 ]]; then echo '此检查入口不接受其他参数。' >&2; exit 2; fi
+    if [[ -n "$SOCIAL_NAV_MODE_ARG" || "$SOCIAL_NAV_INITIAL_Z_SET" == 1 || "$SOCIAL_NAV_AGENT_OBSERVATIONS" == 1 || "$SOCIAL_NAV_AGENT_EXECUTION" == 1 || "$SOCIAL_NAV_TRACE_TIMING" == 1 ]]; then echo '此检查入口不接受其他参数。' >&2; exit 2; fi
     SOCIAL_NAV_LAUNCH_MODE=--check
     ;;
   *) echo '请通过观察、执行或部署检查入口启动。' >&2; exit 2;;
@@ -95,9 +107,22 @@ SOCIAL_NAV_SESSION_DIR="outputs/navigation/$SOCIAL_NAV_LAUNCH_OUTPUT/$(date +%Y%
 SOCIAL_NAV_LAUNCH_COMMAND=(taskset -c "$SOCIAL_NAV_COMMISSIONING_CPU_LIST" "$SOCIAL_NAV_LAUNCH_PYTHON" -B -m runtime.interactive
   --live --gpu "${GPU_ID:-0}" --config "$SOCIAL_NAV_LAUNCH_CONFIG" --motion-profile trial
   --environment-update-hz "$SOCIAL_NAV_COMMISSIONING_ENVIRONMENT_HZ" --environment-window-m "$SOCIAL_NAV_COMMISSIONING_WINDOW_M"
+  --roll-gravity-deg "$SOCIAL_NAV_COMMISSIONING_ROLL_GRAVITY_DEG"
   --vehicle-profile configs/wheelchair_vehicle.yaml)
 if [[ "$SOCIAL_NAV_AGENT_OBSERVATIONS" == 1 ]]; then
   SOCIAL_NAV_LAUNCH_COMMAND+=(--agent-observations)
+fi
+if [[ "$SOCIAL_NAV_AGENT_EXECUTION" == 1 ]]; then
+  if [[ "$SOCIAL_NAV_LAUNCH_KIND" != execute || "$SOCIAL_NAV_AGENT_OBSERVATIONS" != 1 ]]; then
+    echo '--agent-execution 要求执行入口并同时启用 --agent-observations。' >&2; exit 2
+  fi
+  SOCIAL_NAV_LAUNCH_COMMAND+=(--agent-execution)
+fi
+if [[ "$SOCIAL_NAV_TRACE_TIMING" == 1 ]]; then
+  SOCIAL_NAV_LAUNCH_COMMAND+=(--trace-timing)
+fi
+if [[ -n "$SOCIAL_NAV_INITIAL_Z" ]]; then
+  SOCIAL_NAV_LAUNCH_COMMAND+=(--initial-z "$SOCIAL_NAV_INITIAL_Z")
 fi
 if [[ "$SOCIAL_NAV_LAUNCH_KIND" == execute ]]; then
   SOCIAL_NAV_LAUNCH_COMMAND+=(--execute --chassis-port /dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0)

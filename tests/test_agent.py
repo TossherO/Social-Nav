@@ -288,6 +288,34 @@ class AgentTests(unittest.TestCase):
         finally:
             budget.close()
 
+    def test_low_thinking_stream_accepts_tool_and_reserves_full_output(self):
+        import json
+        native = reply('lookup_places',name='').message['tool_calls'][0]
+        chunks = [dict(model='qwen3.8-flash',choices=[dict(delta=dict(reasoning_content='fixture thought'),finish_reason=None)]),
+                  dict(model='qwen3.8-flash',choices=[dict(delta=dict(tool_calls=[dict(native,index=0)]),finish_reason='tool_calls')]),
+                  dict(choices=[],usage=dict(prompt_tokens=100,completion_tokens=80))]
+        wire=''.join('data: '+json.dumps(v)+'\n\n' for v in chunks)+'data: [DONE]\n\n'
+        requests=[]
+        def respond(request):
+            requests.append(json.loads(request.content))
+            return httpx.Response(200,text=wire)
+        config=self.root/'private.json';config.write_text(json.dumps(dict(base_url='https://example.invalid/v1',api_key='test-secret')))
+        budget=Budget(self.root/'low.sqlite')
+        try:
+            model=Model(config,budget,self.store,transport=httpx.MockTransport(respond),thinking_mode='low')
+            result=model.decide(self.tools.prompt())
+            self.assertEqual(result.action,action('lookup_places',name=''))
+            self.assertNotIn('reasoning_content',result.message)
+            self.assertEqual(requests[0]['reasoning_effort'],'low')
+            self.assertFalse(requests[0]['preserve_thinking'])
+            self.assertEqual(requests[0]['max_completion_tokens'],6144)
+            self.assertNotIn('max_tokens',requests[0])
+            reservation=budget.db.execute('SELECT reserved FROM calls').fetchone()[0]
+            event=json.loads(self.store.db.execute("SELECT value FROM events WHERE kind='api_request' ORDER BY seq DESC LIMIT 1").fetchone()[0])
+            self.assertAlmostEqual(reservation,(event['input_token_reservation']*1.2+6144*4)/1e6)
+        finally:
+            budget.close()
+
     def test_bad_native_tool_arguments_remain_raw_without_unwrapping(self):
         for arguments in ([{}],dict(question='wrong argument')):
             with self.subTest(arguments=arguments):

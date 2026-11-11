@@ -4,6 +4,10 @@ import math
 import uuid
 
 
+class IntentRejected(ValueError):
+    """The runtime explicitly rejected an intent before accepting it."""
+
+
 def spatial_context(value):
     return dict(clock_domain=value.get('clock_domain'),
                 local_identity=[value.get(k) for k in ('session_id', 'generation', 'frame_id')],
@@ -12,14 +16,17 @@ def spatial_context(value):
 
 class NavigationSkill:
     def __init__(self, navigation, catalog, task_id, emit):
-        if navigation.scope not in ('simulation', 'shadow'):
-            raise ValueError('Only simulation and nonexecuting shadow adapters are implemented')
+        if navigation.scope not in ('simulation', 'shadow', 'live', 'manual'):
+            raise ValueError('Unknown navigation adapter scope')
         self.navigation, self.catalog, self.task_id, self.emit = navigation, catalog, task_id, emit
         self.initial = navigation.snapshot()
         self.context = spatial_context(self.initial)
         self.record = dict(status='idle', handle=None, place_id=None, reason=None, context_lost=False,
-                           connected=True, completed=[], attempts=[], goal_revision=0, goal_id=None, selected_pose=None)
+                           connected=True, completed=[], attempts=[], goal_revision=0, goal_id=None, selected_pose=None,
+                           pending_completion=None)
         self.last_stamp = None
+        self.blocked_since = None
+        self.blocked_notified = False
 
     def _emit(self, event):
         self.emit(event, copy.deepcopy(self.record))
@@ -32,14 +39,14 @@ class NavigationSkill:
         state = self.navigation.snapshot()
         if r['context_lost'] or not r['connected'] or state.get('input_stale') or state.get('localization_status', 'valid') != 'valid':
             return dict(status='refused', reason='navigation_context_unavailable')
-        if r['handle'] is not None:
+        if r['handle'] is not None and not (self.navigation.scope == 'live' and r['status'] == 'held'):
             return dict(status='refused', reason='cancel_and_confirm_existing_call_first')
         if 'route' in destination and not callable(getattr(self.navigation,'start_route',None)):
             return dict(status='refused',reason='route_execution_not_supported_by_adapter')
         attempt = dict(goal_id=goal_id, place_id=place_id, revision=revision, status='refused')
         r['attempts'].append(attempt)
         if ((self.navigation.scope == 'simulation') != (self.catalog.value['scope'] == 'simulation') or
-                self.navigation.scope == 'shadow' and self.catalog.value['scope'] != 'development_prior' or
+                self.navigation.scope in ('shadow','live','manual') and self.catalog.value['scope'] != 'development_prior' or
                 destination['frame_id'] != self.catalog.value['frame_id']):
             return dict(status='refused', reason='destination_scope_or_frame_mismatch')
         requirement = destination['requirement']
@@ -52,27 +59,39 @@ class NavigationSkill:
                     self.catalog.destination(ident,self.navigation.scope)
         place = copy.deepcopy(destination)
         route = self.navigation.check_route(place)
-        if not route['reference_found'] and not (self.navigation.scope == 'shadow' and route.get('proposal_allowed')):
+        if not route['reference_found'] and not (self.navigation.scope in ('shadow','live','manual') and route.get('proposal_allowed')):
             return dict(status='refused', reason=route.get('reason') or route['status'], route=route)
         r['goal_revision'] += 1
         handle = dict(task_id=self.task_id, plan_revision=revision, goal_revision=r['goal_revision'],
                       call_id=uuid.uuid4().hex, catalog_fingerprint=self.catalog.fingerprint,
                       goal_id=goal_id, task_goal_binding=destination['task_goal_binding'], view_id=destination['view_id'])
+        previous_hold = ({key:copy.deepcopy(r[key]) for key in ('status','handle','place_id','goal_id','selected_pose','reason')}
+                         if self.navigation.scope == 'live' and r['status'] == 'held' else None)
         r.update(status='submitting', handle=handle, place_id=place_id, goal_id=goal_id,
                  selected_pose=copy.deepcopy(destination['pose']),reason=None)
         attempt.update(status='active', call_id=handle['call_id'])
         self.last_stamp = None
+        self.blocked_since = None
+        self.blocked_notified = False
         self._emit('navigation_intent')
         try:
             ack = (self.navigation.start_route(place, handle) if 'route' in place
                    else self.navigation.start(place, handle))
             if ack.get('accepted') is not True or ack.get('handle') != handle:
                 raise ValueError('Navigation ACK rejected or belongs to another call')
+        except IntentRejected as error:
+            if previous_hold is None:
+                r.update(status='refused', handle=None, reason=str(error))
+            else:
+                r.update(previous_hold)
+            self._mark_attempt(handle, 'refused')
+            self._emit('navigation_refused')
+            return dict(status='refused', reason=str(error))
         except (OSError, EOFError, ValueError) as error:
             r['reason'] = 'submission_uncertain_'+type(error).__name__
             self.cancel(reason=r['reason'])
             return dict(status='uncertain', handle=handle, reason=r['reason'])
-        r['status'] = 'running' if self.navigation.scope == 'simulation' else 'shadow_proposed'
+        r['status'] = 'shadow_proposed' if self.navigation.scope == 'shadow' else 'running'
         self._emit('navigation_ack')
         return dict(status='accepted', handle=handle, scope=self.navigation.scope, execution_completed=False, route=route)
 
@@ -100,6 +119,13 @@ class NavigationSkill:
                 self.emit('navigation_connection_lost', dict(error_type=type(error).__name__, automatically_retried=False))
             return False
         r['connected'] = True
+        if (self.navigation.scope == 'live' and
+                (feedback.get('chassis_state') != 'armed' or feedback.get('chassis_status_fresh') is not True) and
+                not r['context_lost']):
+            r.update(context_lost=True, reason='chassis_disarmed_or_status_unavailable')
+            if r['handle'] is not None and r['status'] != 'stopping':
+                self.cancel(reason=r['reason'])
+            self._emit('navigation_interrupted')
         current = spatial_context(feedback)
         if current != self.context and not r['context_lost']:
             r['context_lost'] = True
@@ -127,29 +153,82 @@ class NavigationSkill:
                  (stamp < self.last_stamp or stamp == self.last_stamp and not same_cancel))):
             return False
         self.last_stamp = stamp
+        if self.navigation.scope == 'live' and feedback.get('status') == 'preempted':
+            r.update(status='interrupted', handle=None, context_lost=True, reason='operator_goal_preempted_agent')
+            self._mark_attempt(handle, 'interrupted')
+            self._emit('navigation_interrupted')
+            return True
+        if self.navigation.scope == 'live' and feedback.get('status') == 'interrupted' and r['status'] != 'stopping':
+            self.cancel(reason='chassis_disarmed_or_status_unavailable')
+            return False
         if feedback.get('collision') and r['status'] != 'stopping':
             self.cancel(reason='simulation_collision')
             return False
+        if r['status'] == 'held':
+            return False
+        if r['status'] == 'holding':
+            if feedback.get('stop_observation') is True and feedback.get('status') == 'stopped':
+                proof = r.get('pending_completion')
+                if proof is not None:
+                    r['completed'].append(proof)
+                    r.update(status='held', pending_completion=None, reason=None)
+                    self._mark_attempt(handle, 'succeeded')
+                    self._emit('navigation_completed')
+                    return True
+            return False
         if r['status'] == 'stopping':
             stopped = (feedback.get('stopped') and feedback.get('execution_feedback') is True if self.navigation.scope == 'simulation'
+                       else feedback.get('stop_observation') is True if self.navigation.scope == 'live'
                        else feedback.get('proposal_cancelled') is True)
             if stopped and feedback.get('status') in ('stopped', 'failed'):
-                r.update(status='cancelled', handle=None)
+                r.update(status='cancelled', handle=None, pending_completion=None)
                 self._mark_attempt(handle, 'cancelled')
                 self._emit('navigation_cancel_confirmed')
                 return True
             return False
+        if self.navigation.scope == 'live':
+            if feedback.get('planning_reason') == 'no_admissible_velocity':
+                if self.blocked_since is None:self.blocked_since=stamp
+                if not self.blocked_notified and stamp-self.blocked_since >= 10.:
+                    self.blocked_notified=True
+                    r.update(status='blocked',reason='no_admissible_velocity')
+                    self._emit('navigation_blocked')
+                    return True
+            else:
+                self.blocked_since=None
+                if self.blocked_notified:
+                    self.blocked_notified=False
+                    r.update(status='running',reason=None)
+                    self._emit('navigation_unblocked')
+                    return True
         goal = feedback.get('goal') or {}
-        if (feedback.get('status') == 'arrived' and self.navigation.scope == 'simulation' and
-                feedback.get('execution_feedback') is True and feedback.get('stopped') and
-                goal.get('task_completed') and goal.get('task_id') == self.task_id and
+        arrived = ((self.navigation.scope == 'simulation' and feedback.get('execution_feedback') is True and goal.get('task_completed')) or
+                   (self.navigation.scope == 'live' and feedback.get('arrival_observation') is True) or
+                   (self.navigation.scope == 'manual' and feedback.get('manual_arrival_observation') is True))
+        if (feedback.get('status') == 'arrived' and arrived and feedback.get('stopped') and
+                goal.get('task_id') == self.task_id and
                 goal.get('goal_revision') == handle['goal_revision']):
             proof = dict(goal_id=r['goal_id'], place_id=r['place_id'], handle=copy.deepcopy(handle), stamp_s=stamp,
                          scope=self.navigation.scope, source=feedback['source'], context=current,
-                         pose=copy.deepcopy(feedback.get('pose')),frame_id=feedback.get('frame_id'),
-                         execution_feedback=True, stopped=True)
+                         pose=copy.deepcopy(feedback.get('origin_pose') if self.navigation.scope in ('live','manual') else feedback.get('pose')),
+                         frame_id=feedback.get('origin_frame_id') if self.navigation.scope in ('live','manual') else feedback.get('frame_id'),
+                         execution_feedback=self.navigation.scope == 'simulation', stopped=True,
+                         physical_acceptance=False, evidence_kind=('operator_confirmation_and_localization_estimate' if self.navigation.scope == 'manual'
+                             else 'localization_estimate' if self.navigation.scope == 'live' else 'simulation'))
+            if self.navigation.scope == 'manual':
+                proof['operator_confirmation']=copy.deepcopy(feedback.get('manual_confirmation'))
             if feedback.get('route_start_stamp_s') is not None:
                 proof['route_start_stamp_s']=feedback['route_start_stamp_s']
+            if self.navigation.scope == 'live':
+                r['pending_completion'] = proof
+                r.update(status='holding',reason='goal_arrival_hold')
+                self._emit('navigation_hold_intent')
+                try:
+                    self.navigation.hold(handle)
+                except (OSError, EOFError, ValueError) as error:
+                    r['pending_completion'] = None
+                    self.cancel(reason='arrival_hold_unconfirmed_'+type(error).__name__)
+                return False
             r['completed'].append(proof)
             r.update(status='succeeded', handle=None)
             self._mark_attempt(handle, 'succeeded')
