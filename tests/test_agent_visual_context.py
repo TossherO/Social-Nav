@@ -41,7 +41,7 @@ class VisualContextTests(unittest.TestCase):
         self.requests = []
         def handle(request):
             self.requests.append(json.loads(request.content))
-            return httpx.Response(200,text=wire(reply('get_navigation_state').message['tool_calls']))
+            return httpx.Response(200,text=wire(reply('lookup_places',name='').message['tool_calls']))
         self.client = Model(config,self.budget,self.store,transport=httpx.MockTransport(handle))
 
     def tearDown(self):

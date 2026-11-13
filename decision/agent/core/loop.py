@@ -132,8 +132,11 @@ class AgentLoop:
                     s['assistant_text'] = reply.message.get('content')
                     if reply.action is None:
                         self.session.conversation.commit(reply)
-                        self.session.stop('needs_clarification',s['assistant_text'])
-                        self.session._save('assistant_message',dict(message=reply.message,task_success=False))
+                        unregistered=not self.session.task_goals.goals
+                        reason='model_text_without_task_registration' if unregistered else s['assistant_text']
+                        self.session.stop('needs_clarification',reason)
+                        self.session._save('assistant_message',dict(message=reply.message,task_success=False,
+                            unregistered_task=unregistered,automatically_retried=False))
                         return s
                     value = reply.action
                     # Delayed model decisions may still register the user's task

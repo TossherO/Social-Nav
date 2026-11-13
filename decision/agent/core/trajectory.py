@@ -10,12 +10,13 @@ class Trajectory:
         self.capacity = capacity
         self.interrupted = True
 
-    def update(self, state, frame_id, *, map_snapshot_id=None):
+    def update(self, state, frame_id, *, map_snapshot_id=None, localization_map_id=None):
         if map_snapshot_id is not None:
             binding = state.get('map_binding') or {}
             map_id = binding.get('map_id')
             if not (binding.get('valid') and map_id and
-                    (map_snapshot_id==map_id or map_snapshot_id.startswith(map_id+':scan_fusion:'))):
+                    (map_id == localization_map_id if localization_map_id else
+                     map_snapshot_id==map_id or map_snapshot_id.startswith(map_id+':scan_fusion:'))):
                 self.segments = []
                 self.interrupted = True
                 return

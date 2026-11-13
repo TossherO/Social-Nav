@@ -326,6 +326,7 @@ class IndoorGoalTests(unittest.TestCase):
         self.assertIsNone(inputs['stamp_s'])
 
     def test_three_source_bound_images_reach_same_model_request(self):
+        self.session.call('record_task',goals=[point_goal('elevator')])
         query_map(self.session)
         view = self.session.spatial_view
         rows = self.store.db.execute('SELECT role,sha256,png FROM map_images WHERE view_id=? ORDER BY role',(view.record['view_id'],)).fetchall()

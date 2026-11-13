@@ -118,7 +118,7 @@ class ConversationTests(unittest.TestCase):
         seen=[]
         def handle(request):
             seen.append(json.loads(request.content))
-            return httpx.Response(200,text=wire(reply('get_navigation_state').message['tool_calls']))
+            return httpx.Response(200,text=wire(reply('lookup_places',name='').message['tool_calls']))
         client=self.client(handle)
         client.decide(self.session.prompt(),spatial_view=view)
         self.session.conversation.max_exchanges=1

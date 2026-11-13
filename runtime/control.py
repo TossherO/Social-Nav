@@ -14,6 +14,7 @@ class ControlLoop:
         self.route_replay=route_replay
         self.planning_recorder=planning_recorder;self.offered_mono=None
         self.session=session;self.session_epoch=0;self.preview_token=None
+        self.manual_preview_key=None
         self.lock=threading.Lock();self.pending=(None,None);self.rows=deque(maxlen=256)
         self.device=None;self.scene=None;self.done=threading.Event();self.error=None;self.count=0;self.clock=None
         self.cancelled_request=None
@@ -173,14 +174,23 @@ class ControlLoop:
                                 command_accepted=accepted if action is not None else None))
                     if self.scene is not None:
                         self.batch.bind(self.device)
+                    preview=self.commands.manual_preview_snapshot() if self.session is not None else None
+                    preview_request=None if preview is None or self.request is not None else preview['request']
+                    preview_key=None if preview_request is None else (preview['owner'],preview_request['request_id'])
+                    if self.request is None and preview_key!=self.manual_preview_key:
+                        self.reference.invalidate('manual_preview_changed')
+                    self.manual_preview_key=preview_key
+                    planning_request=self.request if self.request is not None else preview_request
                     status=None
-                    if self.request is not None and self.scene is not None:
-                        self.reference.update(self.request,self.scene,None,self.asset,now=now,clock_rate=self.clock['clock_rate'])
+                    if planning_request is not None and self.scene is not None:
+                        self.reference.update(planning_request,self.scene,None,self.asset,now=now,clock_rate=self.clock['clock_rate'])
                         with self.metrics.span('reference_tick'):status=self.reference.tick(now=now,clock_domain=self.clock_domain)
                         self.record('reference',dict(event='status',as_of=now,reason=status['reason'],blocked=self.reference.blocked,
                             waiting=status['waiting'],start_evidence=status['start_evidence']))
                     with self.metrics.span('dwa_control'):
-                        packet=self.controller.step(self.request,self.scene,list(self.rows),self.reference.reference,now=now,clock_domain=self.clock_domain,dt=dt)
+                        packet=self.controller.step(self.request,self.scene,list(self.rows),
+                            self.reference.reference if self.request is not None else None,
+                            now=now,clock_domain=self.clock_domain,dt=dt)
                     self.reference.note_control(packet,monotonic_s=mono)
                     self.safety.packet(packet);self.record('control',packet);self.count+=1
                     if self.metrics.trace_path is not None:
@@ -202,7 +212,8 @@ class ControlLoop:
                         if self.scene is not None:
                             ground=self.scene.geometry.metadata.get('ground_tracking',{})
                             capture_required|=bool(ground.get('history_suspended') or ground.get('reference_pending'))
-                        self.planning_recorder.submit(packet,self.scene,self.device,self.reference.reference,
+                        self.planning_recorder.submit(packet,self.scene,self.device,
+                            self.reference.reference if self.request is not None else None,
                             self.controller.controller.result,self.reference.worker.job,self.reference.last_reply,dt=dt,
                             capture_required=capture_required,
                             timing=dict(control_started_mono=mono,scene_offered_mono=offered_mono,
@@ -216,10 +227,19 @@ class ControlLoop:
                     if self.request is None and self.scene is not None and self.commands.agent_state.goal_evidence is not None:
                         from navigation.control.shadow import observed_feedback
                         idle_feedback=observed_feedback(list(self.rows),self.scene,self.controller.geometry,self.controller.motion,now=now)
+                    preview_status=None
+                    if preview is not None:
+                        preview_status=dict(owner=preview['owner'],request_id=preview['request']['request_id'],
+                            status=('blocked_by_observation_goal' if self.request is not None else
+                                    'waiting_for_observation' if status is None else status['status']),
+                            reason=('another_goal_active' if self.request is not None else
+                                    'observation_unavailable' if status is None else status.get('reason')),
+                            reference_stamp_s=None if self.reference.current is None or self.request is not None
+                                              else self.reference.current['as_of'],executable=False)
                     self.commands.agent_state.publish_control(packet,self.rows[-1],map_binding=binding,
-                        cancelled_request=self.cancelled_request,idle_feedback=idle_feedback)
+                        cancelled_request=self.cancelled_request,idle_feedback=idle_feedback,manual_preview=preview_status)
                     if self.display is not None:
-                        self.display.navigation(self.controller.controller.result,self.reference.current,self.request,self.scene,
+                        self.display.navigation(self.controller.controller.result,self.reference.current,planning_request,self.scene,
                             self.rows[-1],packet,self.reference.reason,now=now,clock_domain=self.clock_domain,
                             clock_rate=self.clock['clock_rate'],clock_mono=mono,grid=None if self.scene is None else self.device)
                     for event in self.reference.drain_events():self.record('reference',event)

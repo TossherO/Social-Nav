@@ -1,5 +1,6 @@
 """One task record, tool dispatch, user events and model context."""
 import copy
+import time
 import uuid
 from .memory import EvidenceMemory
 from .tasks import TaskGoals
@@ -404,7 +405,8 @@ class AgentSession:
     def _build_map(self, inputs, bounds, *, static_crop=False):
         self.prepare_reference(inputs['global_grid'])
         now = self.navigation.snapshot()
-        self.trajectory.update(now,self.catalog.value['frame_id'],map_snapshot_id=self.catalog.value.get('map_snapshot_id'))
+        self.trajectory.update(now,self.catalog.value['frame_id'],map_snapshot_id=self.catalog.value.get('map_snapshot_id'),
+                               localization_map_id=self.catalog.value.get('localization_map_id'))
         trajectory = [] if inputs['stamp_s'] is None else self.trajectory.snapshot(
             frame_id=self.catalog.value['frame_id'],clock_domain=inputs['clock_domain'],now=inputs['stamp_s'])
         self._sync_candidates(inputs)
@@ -884,7 +886,7 @@ class AgentSession:
     def _check_observation_stage(self, goal_id, goal, state, observation_id, semantic_result, evidence):
         import math
         import numpy as np
-        stopped = (self._confirmed_live_hold(state) or
+        stopped = (self._confirmed_live_hold(state) or self._confirmed_manual_idle(state) or
                    self.navigation.scope == 'live' and self.skill.record['handle'] is None and
                    state.get('idle_stop_observation') is True and state.get('stopped') is True and
                    state.get('chassis_state') == 'armed' and state.get('chassis_status_fresh') is True and
@@ -923,6 +925,53 @@ class AgentSession:
         self._complete_stage(goal_id, proof, dict(observation_after_stage_entry=True), semantic)
         return dict(status='completed', goal_id=goal_id, scope=self.navigation.scope, real_robot_success=False,
                     evidence_kind='agent_visual_judgement_and_stop_feedback')
+
+    def _manual_goal_evidence_issues(self, state, proofs, selected):
+        """Explain the same manual arrival prerequisites used by check_goal."""
+        issues = []
+        proof = proofs[-1] if proofs else None
+        confirmation = state.get('manual_confirmation') or {}
+        if self.skill.record['handle'] is not None: issues.append('navigation_handle_still_active')
+        if proof is None: issues.append('completion_record_missing')
+        elif proof.get('handle') != selected.get('handle'): issues.append('goal_handle_mismatch')
+        elif proof['handle'].get('plan_revision') != self.state['revision']: issues.append('task_revision_mismatch')
+        if proof is None or confirmation.get('handle') != proof.get('handle'):
+            issues.append('operator_confirmation_missing_or_mismatched')
+        if state.get('origin_frame_id') != self.catalog.value['frame_id']: issues.append('map_frame_unavailable_or_mismatched')
+        if state.get('origin_pose') is None: issues.append('mapped_pose_unavailable')
+        stamp = state.get('origin_stamp_s')
+        if stamp is None or not 0 <= state['stamp_s']-stamp <= .5: issues.append('mapped_pose_out_of_date')
+        if state.get('input_stale'): issues.append('runtime_input_stale')
+        if state.get('localization_status','valid') != 'valid': issues.append('localization_invalid')
+        if not state.get('stopped'): issues.append('stopped_estimate_unavailable')
+        if not issues and state.get('manual_arrival_observation') is not True:
+            issues.append('manual_arrival_observation_unavailable')
+        return issues
+
+    def _wait_for_manual_goal_evidence(self, goal_id, state, proofs, selected):
+        """Briefly refresh transiently unavailable evidence without another model call."""
+        issues = self._manual_goal_evidence_issues(state, proofs, selected)
+        transient = {'mapped_pose_unavailable', 'mapped_pose_out_of_date', 'runtime_input_stale',
+                     'localization_invalid', 'stopped_estimate_unavailable'}
+        if not issues or not set(issues) <= transient:
+            return state, issues
+        started = time.monotonic()
+        deadline = started + 1.0
+        attempts = 0
+        self.store.event('manual_goal_evidence_wait_started', dict(goal_id=goal_id, issues=issues, timeout_s=1.0))
+        while issues and set(issues) <= transient and time.monotonic() < deadline:
+            time.sleep(min(.05, max(0., deadline-time.monotonic())))
+            try:
+                state = self.navigation.tick()
+            except (OSError, EOFError, ValueError) as error:
+                issues = ['runtime_refresh_failed']
+                self.store.event('manual_goal_evidence_refresh_failed', dict(goal_id=goal_id, error_type=type(error).__name__))
+                break
+            attempts += 1
+            issues = self._manual_goal_evidence_issues(state, proofs, selected)
+        self.store.event('manual_goal_evidence_wait_finished', dict(goal_id=goal_id, issues=issues,
+            attempts=attempts, elapsed_s=time.monotonic()-started, ready=not issues))
+        return state, issues
 
     def check_goal(self, goal_id, observation_id=None, semantic_result=None, evidence=None,
                    facing_result=None, facing_evidence=None, preference_result=None, preference_evidence=None):
@@ -968,6 +1017,9 @@ class AgentSession:
             self._complete_stage(goal_id,proof,dict(follow_stopped=True),semantic)
             return dict(status='completed',goal_id=goal_id,scope='live',real_robot_success=False,
                         evidence_kind='agent_visual_judgement_and_localization_stop')
+        manual_issues = None
+        if self.navigation.scope == 'manual':
+            state, manual_issues = self._wait_for_manual_goal_evidence(goal_id, state, proofs, selected)
         live_arrival = (self.navigation.scope == 'live' and state.get('stop_observation') is True and
                         state.get('chassis_state') == 'armed' and state.get('chassis_status_fresh') is True and
                         state.get('origin_frame_id') == self.catalog.value['frame_id'] and
@@ -988,7 +1040,11 @@ class AgentSession:
                 not (simulation_arrival or live_arrival or manual_arrival) or
                 not state.get('stopped') or state.get('input_stale') or
                 state.get('localization_status','valid') != 'valid'):
-            return dict(status='unproven', reason='matching_task_navigation_and_stop_not_proven')
+            result = dict(status='unproven', reason='matching_task_navigation_and_stop_not_proven')
+            if manual_issues is not None:
+                result['details'] = manual_issues
+                self.store.event('manual_goal_evidence_unproven', dict(goal_id=goal_id, issues=manual_issues))
+            return result
         proof = proofs[-1]
         measured_pose = state.get('origin_pose') if live_arrival or manual_arrival else state.get('pose')
         checks = self.task_goals.geometry(goal['requirement'], measured_pose)
@@ -1127,6 +1183,12 @@ class AgentSession:
                 feedback.get('chassis_state') == 'armed' and feedback.get('chassis_status_fresh') is True and
                 not feedback.get('input_stale') and feedback.get('localization_status') == 'valid')
 
+    def _confirmed_manual_idle(self, feedback):
+        return (self.navigation.scope == 'manual' and self.skill.record['handle'] is None and
+                feedback.get('stopped') is True and not feedback.get('input_stale') and
+                feedback.get('localization_status') == 'valid' and feedback.get('origin_pose') is not None and
+                feedback.get('origin_frame_id') == self.catalog.value['frame_id'])
+
     def wait_for_event(self, event):
         if event == 'navigation':
             if self.skill.record['handle'] is None:
@@ -1136,7 +1198,7 @@ class AgentSession:
             self.state.update(status='waiting_observation', waiting_binding=self._observation_key())
         else:
             f = self.navigation.snapshot()
-            if not (self._confirmed_live_hold(f) or self.skill.record['handle'] is None and
+            if not (self._confirmed_live_hold(f) or self._confirmed_manual_idle(f) or self.skill.record['handle'] is None and
                     f.get('stopped') and f.get('execution_feedback') is True):
                 return dict(status='refused', reason='parking_not_confirmed')
             self.state['status'] = 'waiting_user'
@@ -1162,8 +1224,13 @@ class AgentSession:
         simulation_arrival = self.navigation.scope == 'simulation' and f.get('execution_feedback') is True
         manual_arrival = (self.navigation.scope == 'manual' and f.get('manual_arrival_observation') is True and
                           bool(r['completed']) and (f.get('manual_confirmation') or {}).get('handle') == r['completed'][-1]['handle'])
+        last_goal=self.task_goals.goals[-1] if self.task_goals.goals else None
+        manual_observation = (self._confirmed_manual_idle(f) and last_goal is not None and
+                              last_goal['status']=='completed' and
+                              last_goal['requirement'].get('stage_type')=='observation' and
+                              (last_goal.get('completion') or {}).get('proof',{}).get('scope')=='manual')
         held = self.navigation.scope == 'live' and r['status'] == 'held'
-        if (not (simulation_arrival or live_arrival or manual_arrival) or (r['handle'] is not None and not held) or r['context_lost'] or
+        if (not (simulation_arrival or live_arrival or manual_arrival or manual_observation) or (r['handle'] is not None and not held) or r['context_lost'] or
                 not r['connected'] or not self.task_goals.finished() or
                 not f.get('stopped') or f.get('input_stale') or
                 f.get('localization_status', 'valid') != 'valid'):
@@ -1172,7 +1239,8 @@ class AgentSession:
         self.state.update(status='succeeded', reason=evidence)
         self.state['completed_revisions'].append(revision)
         return dict(status='succeeded', scope=self.navigation.scope, real_robot_success=False,
-                    evidence_kind=('operator_confirmation_and_localization_estimate' if manual_arrival else
+                    evidence_kind=('agent_visual_judgement_and_localization_stop_estimate' if manual_observation else
+                                   'operator_confirmation_and_localization_estimate' if manual_arrival else
                                    'localization_estimate' if live_arrival else 'simulation'),
                     completed_goals=[g['requirement']['goal_id'] for g in self.task_goals.goals])
 
@@ -1205,6 +1273,37 @@ class AgentSession:
         if s['status'] in TERMINAL:
             raise ValueError('Task already terminal')
         if name == 'arrived' and self.navigation.scope == 'manual':
+            goal=next((g for g in self.task_goals.goals if g['status']!='completed'),None)
+            if goal is not None and goal['requirement']['kind'] in ('circuit','sequence'):
+                state=self.navigation.snapshot()
+                start=self.navigation.route_start_stamp_s
+                if start is None:
+                    raise ValueError('Route start has not been observed')
+                self.trajectory.update(state,self.catalog.value['frame_id'],
+                    map_snapshot_id=self.catalog.value.get('map_snapshot_id'),
+                    localization_map_id=self.catalog.value.get('localization_map_id'))
+                end=state.get('origin_stamp_s')
+                if end is None:raise ValueError('Current mapped trajectory is unavailable')
+                traces=self.trajectory.snapshot(frame_id=self.catalog.value['frame_id'],clock_domain=state['clock_domain'],now=end)
+                if goal['requirement']['kind']=='circuit':
+                    from .route import circuit_evidence
+                    evidence=circuit_evidence(traces,self.catalog.regions[goal['requirement']['target_id']]['polygon'],
+                        goal['selected']['route']['direction'],start,end,self.task_goals.settings['goal_position_tolerance_m'])
+                else:
+                    from .route import sequence_evidence
+                    evidence=sequence_evidence(traces,goal['requirement']['checkpoints'],
+                        self.task_goals.checkpoint_met,start,end)
+                captured=[]
+                for segment in traces:
+                    samples=[sample for sample in segment['samples'] if start <= sample['stamp_s'] <= end]
+                    if samples:
+                        captured.append(dict(segment,samples=samples))
+                self.store.event('manual_route_trace',dict(task_id=s['task_id'],revision=s['revision'],
+                    goal_id=goal['requirement']['goal_id'],handle=copy.deepcopy(self.skill.record['handle']),
+                    route_start_stamp_s=start,route_end_stamp_s=end,segments=captured,result=evidence,
+                    source='measured_localization_not_planned_route'))
+                if evidence['status']!='met':
+                    raise ValueError('Measured route not proven: '+evidence.get('reason',evidence['status']))
             confirmation=self.navigation.confirm_arrival()
             self._history('user',dict(event='manual_arrival_confirmation',confirmation=confirmation))
             self.conversation.notice('manual_arrival_confirmation',confirmation=confirmation)
@@ -1304,7 +1403,8 @@ class AgentSession:
         s = self.state
         changed = self.skill.tick()
         self.trajectory.update(self.navigation.snapshot(),self.catalog.value.get('frame_id'),
-                               map_snapshot_id=self.catalog.value.get('map_snapshot_id'))
+                               map_snapshot_id=self.catalog.value.get('map_snapshot_id'),
+                               localization_map_id=self.catalog.value.get('localization_map_id'))
         r = self.skill.record
         if r['stage_type']=='follow' and r['status']=='failed' and r['goal_id'] is not None:
             self._remember_follow_loss(r['goal_id'])
@@ -1371,7 +1471,7 @@ class AgentSession:
         self.prepare_current_images()
         s, now = self.state, self.navigation.snapshot()
         goals = self.task_goals.snapshot()
-        current = dict(task_id=s['task_id'],revision=s['revision'],status=s['status'],reason=s['reason'],
+        current = dict(task_id=s['task_id'],revision=s['revision'],status=s['status'],reason=s['reason'],scope=self.navigation.scope,
             clarifications=copy.deepcopy(s['clarifications']),
             task_goals=[dict(requirement=g['requirement'],status=g['status']) for g in goals],
             next_goal_id=next((g['requirement']['goal_id'] for g in goals if g['status']!='completed'),None),
@@ -1385,7 +1485,7 @@ class AgentSession:
                 place_ids=[*self.catalog.places,''],now=now['stamp_s'],clock_domain=now['clock_domain']))
         if self.navigation.scope == 'manual':
             current['execution_mode'] = dict(mode='operator_driven',
-                meaning='目标交给操作者使用原车手柄移动，程序不控制底盘；必须等待操作者确认和当前定位停稳检查。')
+                meaning='目标或少量有序途经点交给操作者使用原车手柄移动，程序不控制底盘；中间经过点无须停车或模型逐点决策，终点等待操作者确认和当前定位停稳检查，绕行及顺序要求按真实定位轨迹检查。')
         current['keyframes'] = self.keyframes.index(s['revision'])
         current['recent_candidate_checks'] = copy.deepcopy(self.candidate_checks)
         current['requirements_registered'] = bool(goals)

@@ -43,6 +43,19 @@ class SupportTests(unittest.TestCase):
         self.prior.snapshot.layers['occupancy'][20,20]=100
         with self.assertRaises(ValueError):navigation_geometry(scene(result),asset=self.prior,check_asset=True,now=10.)
 
+    def test_static_floor_overlap_uses_twenty_centimetre_limit(self):
+        for difference,expected in ((.19,0),(.21,-1)):
+            with self.subTest(difference=difference):
+                prior=prior_asset()
+                prior.snapshot.layers['ground_z'][20,21]=-.85+difference
+                raw=self.raw()
+                raw.metadata['association']['map_from_local'][0][3]=.025
+                result=NavigationSupport(self.config).apply(raw,prior,observation=points(raw))
+                self.assertEqual(result.metadata['navigation_fusion']['ground_tolerance_m'],.20)
+                self.assertEqual(result.layers['navigation_occupancy'][20,20],expected)
+                self.assertEqual(result.layers['occupancy'][20,20],-1)
+                navigation_geometry(scene(result),asset=prior,check_asset=True,now=10.)
+
     def test_assumed_free_without_observation_times_never_supports_safety(self):
         self.prior.snapshot.layers['occupancy'][:]=0
         self.prior.snapshot.layers['last_observed'][:]=np.nan

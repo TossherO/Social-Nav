@@ -23,6 +23,9 @@ class ApiError(RuntimeError):
     pass
 
 
+REGISTRATION_TOOLS=('record_task','lookup_places','query_map','observe_scene','wait_for_event','ask_user')
+
+
 def input_bound(messages, tools):
     """Count text conservatively; never count Base64 as text tokens."""
     material = copy.deepcopy(messages)
@@ -139,10 +142,13 @@ class Model:
         self._url = url if url.endswith('/chat/completions') else url+'/chat/completions'
         self.budget, self.store, self.transport = budget, store, transport
 
-    def request(self, system, messages, *, observation_id=None, max_tokens=2048):
-        tools = native_tools()
+    def request(self, system, messages, *, observation_id=None, max_tokens=2048, tool_names=None, tool_choice='auto'):
+        if tool_choice not in ('auto','required'):
+            raise ValueError('Unsupported tool choice')
+        tools = native_tools(tool_names)
+        offered={tool['function']['name'] for tool in tools}
         body = dict(model=self.model,messages=cache_messages(system,messages,self.cache_mode),tools=tools,
-                    tool_choice='auto',parallel_tool_calls=False,enable_thinking=self.thinking_mode=='low',temperature=0,
+                    tool_choice=tool_choice,parallel_tool_calls=False,enable_thinking=self.thinking_mode=='low',temperature=0,
                     stream=True,stream_options=dict(include_usage=True))
         if self.thinking_mode == 'low':
             # Bound reasoning and final output together, including reservation.
@@ -227,17 +233,24 @@ class Model:
             expected = 'tool_calls' if calls else 'stop'
             if returned_model!=self.model or finish_reason!=expected or self.thinking_mode=='off' and record['reasoning']:
                 raise ApiError('Unexpected model, finish reason or thinking output')
-            return Reply.parse(message)
+            reply=Reply.parse(message)
+            if reply.action is not None and reply.action['tool'] not in offered:
+                raise ValueError('Model called a tool not offered for this phase')
+            return reply
         except (httpx.HTTPError,ValueError,KeyError,TypeError,jsonschema.ValidationError,ApiError) as error:
             self.store.event('api_failure',dict(call_id=call_id,error_type=type(error).__name__,http_status=status,
                 full_return_s=time.perf_counter()-began,partial_chunks=chunks,automatically_retried=False))
             raise ApiError('Native tool request failed or response rejected; see session events, no retry performed') from None
 
     def decide(self, payload, *, observation=None, spatial_view=None):
-        system = (ROOT/'decision/agent/configs/system_prompt.txt').read_text().strip()
-        if payload.get('current_state',{}).get('execution_mode',{}).get('mode') == 'operator_driven':
+        registration=payload.get('current_state',{}).get('requirements_registered') is False
+        prompt='registration_prompt.txt' if registration else 'system_prompt.txt'
+        system = (ROOT/'decision/agent/configs'/prompt).read_text().strip()
+        if not registration and payload.get('current_state',{}).get('execution_mode',{}).get('mode') == 'operator_driven':
             system += ('\n\n当前是人工驾驶测试：navigate 只向操作者提供目标位姿，轮椅由操作者使用原车手柄驾驶。'
+                       'navigate_route 可一次提交少量途经点，操作者连续经过，中间不要求停车或模型逐点决策。'
                        'Agent 不控制底盘、不负责行驶路径；提交目标后等待人工确认及当前定位停稳反馈。'
+                       '绕行或顺序任务还须按实际定位轨迹检查；路线仅作参考，不证明通行安全。'
                        '不能把目标接收或人工确认单独说成到达，也不能声称自动导航成功。')
         reference = payload.get('reference_map')
         messages = project_dialogue(payload['messages'],reference)
@@ -309,7 +322,9 @@ class Model:
                 dict(type='text',text=encode(dict(source='static_reference_map',reference=reference.record))),
                 png_part(reference.image),dict(type='text',text='固定地图和全部固定标注；动态起点、实测轨迹与当前自车在本轮状态中。')]))
         messages.append(dict(role='user',content=content))
-        return self.request(system,messages,observation_id=None if observation is None else observation.record['observation_id'])
+        return self.request(system,messages,observation_id=None if observation is None else observation.record['observation_id'],
+                            tool_names=REGISTRATION_TOOLS if registration else None,
+                            tool_choice='required' if registration else 'auto')
 
 
 def api_work(config, session, payload, observation=None, spatial_view=None, *, cache_mode='implicit', thinking_mode='off'):

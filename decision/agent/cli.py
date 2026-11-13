@@ -42,6 +42,8 @@ def main():
         else:
             p.add_argument('--runtime-socket', required=True)
             p.add_argument('--duration', type=float, default=600)
+            if name == 'manual':
+                p.add_argument('--gui-commands', action='store_true', help=argparse.SUPPRESS)
     p = sub.add_parser('evaluate', help='运行少量合成工具反馈场景，不调用API')
     p.add_argument('--output', required=True)
     args = parser.parse_args()

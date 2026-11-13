@@ -11,6 +11,11 @@ Visualization Manager:
     Frame Rate: 20
   Displays:
     - Class: rviz/MarkerArray
+      Name: Agent manual route suggestion (not planned path)
+      Enabled: true
+      Marker Topic: /social_nav_agent/manual_route
+      Queue Size: 1
+    - Class: rviz/MarkerArray
       Name: Session instructions and localization status
       Enabled: true
       Marker Topic: /social_nav_interactive/session_markers

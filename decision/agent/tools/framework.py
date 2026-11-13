@@ -93,7 +93,7 @@ TOOL_SPECS = {
                              'orientation_source': dict(type='string',enum=['user','semantic','autonomous'],
                                 description='只从selected_goal.allowed_orientation_sources选择；user须有已登记required_yaw，否则用semantic或autonomous，不把资产旧yaw当用户要求。')},
                             ['goal_id', 'view_id', 'orientation_source'])),
-    'navigate_route': ('提交自主选择的有序地图途经点。绕区域需首尾相接、按要求的方向完整绕一圈，所有线段而非仅端点均不得穿过区域；拒绝反馈可列出相交线段与闭合距离。仿真中自动推进并在终点停车；仅预检首段。accepted不表示到达，影子与实车不支持执行。',
+    'navigate_route': ('提交自主选择的少量有序地图途经点。绕区域需首尾相接、按要求的方向完整绕一圈，所有线段而非仅端点均不得穿过区域；拒绝反馈可列出相交线段与闭合距离。仿真自动推进；人工模式由操作者驾驶，定位估计依次识别经过点，终点需人工确认停稳。accepted不表示到达，影子与实车自动执行不支持。',
                        parameters({'goal_id':dict(TEXT,description='当前next_goal_id。'),
                                    'view_id':dict(TEXT,description='当前地图view_id。'),
                                    'orientation_source':dict(type='string',enum=['user','semantic','autonomous'],description='终点朝向来源。'),
@@ -155,9 +155,13 @@ def validate_call(value):
     return value
 
 
-def native_tools():
+def native_tools(names=None):
+    if names is not None:
+        names=tuple(names)
+        if len(set(names))!=len(names) or any(name not in TOOL_SPECS for name in names):
+            raise ValueError('Unknown or duplicate tool in phase selection')
     return [dict(type='function', function=dict(name=name, description=description, parameters=schema))
-            for name, (description, schema) in TOOL_SPECS.items()]
+            for name, (description, schema) in TOOL_SPECS.items() if names is None or name in names]
 
 
 @dataclass(frozen=True)

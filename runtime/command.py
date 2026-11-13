@@ -34,7 +34,8 @@ class AgentState:
                 source=copy.deepcopy(geometry.source),assumed=geometry.assumed,
                 motion={k:copy.deepcopy(motion.get(k)) for k in keys})
 
-    def publish_control(self, packet, localization=None, *, map_binding=None, cancelled_request=None, idle_feedback=None):
+    def publish_control(self, packet, localization=None, *, map_binding=None, cancelled_request=None, idle_feedback=None,
+                        manual_preview=None):
         value = dict(request=copy.deepcopy(packet.get('request')), stamp_s=packet['stamp_s'], clock_domain=packet['clock_domain'],
             scene_binding=packet.get('scene_binding'), feedback=copy.deepcopy(packet.get('feedback') or {}),
             reason=packet.get('reason'), reference_accepted=packet.get('result_accepted', False),
@@ -43,6 +44,7 @@ class AgentState:
         value['map_binding'] = copy.deepcopy(map_binding)
         value['cancelled_request'] = copy.deepcopy(cancelled_request)
         value['idle_feedback'] = copy.deepcopy(idle_feedback)
+        value['manual_preview'] = copy.deepcopy(manual_preview)
         proposal=packet.get('proposal') or {}
         value['planning_status']=proposal.get('status')
         value['planning_reason']=proposal.get('reason')
@@ -131,6 +133,7 @@ class CommandInbox:
         self.agent_execution=agent_execution
         self.follow_enabled=follow_enabled
         self.agent_owner=None
+        self.manual_preview_owner=None
         self.route_preempted=False
         if self.path.exists():raise FileExistsError(self.path)
         # Linux sockaddr_un limits the address length even before symlink
@@ -155,6 +158,38 @@ class CommandInbox:
             self.route_preempted=True
             if self.session is not None:self.session.note_command(kind,value)
             self.safety.command(kind,value);self.pending.append((kind,value))
+
+    def manual_preview(self, value):
+        """Lease a display-only reference goal, never submit a safety or chassis command."""
+        if self.session is None or not self.session.live or self.session.execute:
+            raise ValueError('Manual preview requires a live session without hardware output')
+        if (not isinstance(value,dict) or set(value)!={'owner','request'} or
+                not isinstance(value['owner'],str) or not 1<=len(value['owner'])<=128):
+            raise ValueError('Invalid manual preview envelope')
+        owner=value['owner'];request=value['request']
+        if request is not None:
+            request=validate('goal',request)
+            if (request.get('mode')!='mapped' or request['request_id'].split(':',1)[0]!=owner):
+                raise ValueError('Manual preview must be a bound mapped goal')
+        now=time.monotonic()
+        with self.lock:
+            old=self.manual_preview_owner
+            if old is not None and old['expires_mono']<=now:old=self.manual_preview_owner=None
+            if old is not None and old['owner']!=owner:
+                raise ValueError('Manual preview owned by another session')
+            self.manual_preview_owner=(None if request is None else
+                dict(owner=owner,request=copy.deepcopy(request),expires_mono=now+3.))
+        return dict(accepted=True,executable=False,execution_feedback=False)
+
+    def manual_preview_snapshot(self):
+        if self.session is None or not self.session.live or self.session.execute:return None
+        with self.lock:
+            value=self.manual_preview_owner
+            if value is None:return None
+            if value['expires_mono']<=time.monotonic():
+                self.manual_preview_owner=None
+                return None
+            return copy.deepcopy(value)
 
     def agent_live(self, kind, value):
         """Admit only owned goal/cancel intents into the ordinary safety path."""
@@ -368,6 +403,8 @@ class CommandInbox:
                                 value.get('follow_call_id')==self.agent_owner['request_id']):
                             self.agent_owner['heartbeat_mono']=time.monotonic()
                     connection.send(state);continue
+                if request['kind']=='agent_manual_preview':
+                    connection.send(self.manual_preview(request['value']));continue
                 if request['kind']=='agent_live_state':
                     if not self.agent_execution:raise ValueError('Agent execution is not enabled')
                     value=request['value']
