@@ -16,8 +16,10 @@ def package_client(output):
     paths = [Path('decision/__init__.py'), Path('decision/vlm/__init__.py'), Path('decision/vlm/scene_inputs.py'),
              Path('decision/vlm/trajectory_inputs.py')]
     paths += [Path('decision/vlm/annotation') / name for name in FILES]
-    paths.append(Path('docs/decision/决策任务标注.md'))
+    guide = (ROOT / 'docs/decision/技术实现-VLM局部决策.md').read_text(encoding='utf-8')
+    guide = '# T1、T2 决策任务标注\n\n' + guide.split('## 决策任务标注\n', 1)[1]
     with zipfile.ZipFile(output, 'x', compression=zipfile.ZIP_DEFLATED) as archive:
         for path in paths:
             archive.write(ROOT / path, str(path))
-    return len(paths)
+        archive.writestr('使用说明.md', guide)
+    return len(paths) + 1

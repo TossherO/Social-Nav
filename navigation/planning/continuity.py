@@ -30,6 +30,7 @@ def goal_binding(request):
         'map_snapshot_id','target_reference','motion_intent','algorithm')}
     value['goal_behavior']=request.get('goal_behavior','pass_through')
     value['completion_policy']=request.get('completion_policy','goal')
+    if 'search_bounds' in request:value['search_bounds']=request['search_bounds']
     return fingerprint(value)
 
 

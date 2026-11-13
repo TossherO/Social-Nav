@@ -286,6 +286,9 @@ class ShadowSafety:
                     raise ValueError('feedback_expired_during_gate')
                 if not 0<=final_now-scene.record['as_of']<=self.guard.settings['max_input_age_s']:
                     raise ValueError('geometry_expired_during_gate')
+                from navigation.planning.inputs import request_status
+                reason=request_status(request,scene,final_now,self.clock_domain)
+                if reason:raise ValueError(reason+'_during_gate')
                 association_remaining=_association_remaining(scene,final_now)
                 out['remaining_trajectory_validity_s']=self.guard.settings['max_input_age_s']-(final_now-proposal['trajectory_as_of'])
                 out['remaining_validity_s']=min(out['remaining_trajectory_validity_s'],
@@ -295,6 +298,9 @@ class ShadowSafety:
                 if association_remaining is not None:
                     out['remaining_association_validity_s']=association_remaining
                     out['remaining_validity_s']=min(out['remaining_validity_s'],association_remaining)
+                if 'valid_until_s' in request:
+                    out['remaining_request_validity_s']=request['valid_until_s']-final_now
+                    out['remaining_validity_s']=min(out['remaining_validity_s'],out['remaining_request_validity_s'])
                 out['completion_freshness_checked']=True
             if time.perf_counter()-began>self.settings['period_s']:raise ValueError('gate_deadline_exceeded')
         except (ValueError,KeyError,TypeError,RuntimeError) as error:

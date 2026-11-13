@@ -48,6 +48,7 @@ class LocalSafety:
             people_settings=load_config()['people']
         self.people_settings=people_settings
         self._people_cache=None
+        self._search_planning=None
         self.sweep=SweepChecker(motion.get('collision_backend','cpu'),motion.get('collision_library'))
         if shadow:self.sweep.warmup()
 
@@ -141,6 +142,17 @@ class LocalSafety:
         dense,error=interpolate_se2(points[:,1:],scene.geometry.metadata['resolution'],self.settings['max_sweep_samples'])
         uncertainty=motion_uncertainty_margin(feedback,self.geometry,float(points[-1,0]))
         result['motion_uncertainty_margin_m']=uncertainty
+        if request.get('search_bounds') is not None:
+            from navigation.planning.inputs import load_config
+            from navigation.search import bounds_status
+            try:
+                if self._search_planning is None:self._search_planning=load_config()
+                reason=bounds_status(request,scene,self.asset,self._search_planning,dense,
+                                     margin=error+uncertainty,geometry=self.geometry)
+            except (ValueError,KeyError,TypeError):reason='follow_search_bounds_invalid'
+            if reason:
+                self.last_target=np.zeros(2)
+                return dict(result,reason=reason,state='stop_request')
         from navigation.planning.collision import CertificationBudget
         budget=CertificationBudget(began+dt,self.settings['max_sweep_samples'])
         check=self.sweep.check(grid,self.geometry,dense,self.margin+error+uncertainty,self.settings['max_sweep_samples'],binding=grid_binding,budget=budget)

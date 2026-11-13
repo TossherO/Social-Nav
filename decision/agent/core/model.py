@@ -244,13 +244,32 @@ class Model:
         state = copy.deepcopy(payload['current_state'])
         state['visual_inputs'] = visual_inputs(state,observation,spatial_view,reference,
             payload.get('keyframes',{}),payload.get('input_status',{}))
+        follow_image=payload.get('follow_reference_image')
+        if follow_image is not None:
+            follow_record,crop=follow_image
+            feedback=state['navigation']['feedback']
+            if (follow_record!=state.get('follow_reference') or
+                    follow_record['reference_id']!=fingerprint({k:v for k,v in follow_record.items() if k!='reference_id'}) or
+                    hashlib.sha256(crop).hexdigest()!=follow_record['crop_sha256'] or
+                    follow_record['clock_domain']!=feedback['clock_domain'] or follow_record['rgb_stamp_s']>feedback['stamp_s']):
+                raise ValueError('Follow reference image is invalid or noncausal')
+            state['visual_inputs']['follow_reference']=dict(reference_id=follow_record['reference_id'],
+                source_stamp_s=follow_record['rgb_stamp_s'],historical_only=True)
         content = [dict(type='text',text=encode(dict(source='runtime_current_state',
                     state=state)))]
+        if follow_image is not None:
+            content.extend([dict(type='text',text='历史目标参考裁剪，仅用于与当前候选比较，不代表当前可见。'),
+                            image_part(crop,512,'PNG')])
         if observation is not None:
             observation.verify()
+            rgb = observation.image
+            if observation.record.get('follow_candidates') is not None:
+                from decision.vlm.follow_target import annotated
+                rgb = annotated(observation)
+                content.append(dict(type='text',text='当前RGB中的黄色数字是本观察的跟随候选编号；原图和检测框另行绑定。'))
             content += [dict(type='text',text=encode(observation_context(messages,
                 'current_rgb_observation','observation',observation.prompt()))),
-                image_part(observation.image,768,'JPEG')]
+                image_part(rgb,768,'JPEG')]
         if spatial_view is not None:
             spatial_view.verify()
             content.append(dict(type='text',text=encode(observation_context(messages,

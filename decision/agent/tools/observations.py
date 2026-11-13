@@ -29,12 +29,19 @@ class Observation:
                 raise ValueError('Agent RGB asset changed')
             if not 0 <= r['stamp_s']-rgb['stamp_s'] <= .15:
                 raise ValueError('Future or stale RGB')
+            if rgb.get('stamp_ns') is not None and (type(rgb['stamp_ns']) is not int or
+                    abs(rgb['stamp_ns']/1e9-rgb['stamp_s']) > 1e-6):
+                raise ValueError('RGB nanoseconds do not match the source timestamp')
         elif self.image is not None:
             raise ValueError('Unavailable RGB cannot carry an image')
+        if 'follow_candidates' in r:
+            from decision.vlm.follow_target import verify_candidates
+            verify_candidates(r['follow_candidates'], self)
         return self
 
     @classmethod
-    def from_scene(cls, scene, *, rgb=None, source=None, geometry=None, sensors=None, include_local_grid=False):
+    def from_scene(cls, scene, *, rgb=None, source=None, geometry=None, sensors=None, include_local_grid=False,
+                   follow_candidates=None, follow_error=None):
         from navigation.planning.footprint import VehicleGeometry
         from .. import ROOT
         scene.verify()
@@ -65,6 +72,10 @@ class Observation:
             bound_rgb = dict(status='valid', stamp_s=rgb['stamp_s'], age_s=age, frame_id=rgb['frame_id'],
                              pixel_sha256=hashlib.sha256(pixels.tobytes()).hexdigest(), shape=list(pixels.shape),
                              encoded_sha256=hashlib.sha256(image).hexdigest(), source=rgb.get('source'))
+            if rgb.get('stamp_ns') is not None:
+                if type(rgb['stamp_ns']) is not int or abs(rgb['stamp_ns']/1e9-rgb['stamp_s']) > 1e-6:
+                    raise ValueError('RGB nanoseconds do not match the source timestamp')
+                bound_rgb['stamp_ns'] = rgb['stamp_ns']
         cells = scene.geometry.layers['occupancy']
         r = dict(observation_id=s['observation_id'], stamp_s=s['as_of'], clock_domain=s['clock_domain'],
                  local_identity=[s[k] for k in ('session_id', 'generation', 'frame_id')], scene_binding=s['input_fingerprint'],
@@ -78,6 +89,10 @@ class Observation:
                  rgb=bound_rgb, source=copy.deepcopy(source), scope='observed_input_not_execution_feedback')
         if sensors is not None:
             r['sensors'] = copy.deepcopy(sensors)
+        if follow_candidates is not None:
+            r['follow_candidates'] = copy.deepcopy(follow_candidates)
+        if follow_error is not None:
+            r['follow_candidates_error'] = str(follow_error)
         if include_local_grid and s['geometry']['status'] == 'valid' and prior.get('valid'):
             r['local_grid'] = local_grid_record(scene)
         r['input_fingerprint'] = fingerprint(r)
@@ -95,9 +110,16 @@ class Observation:
         if value['people']['status'] != 'valid':
             value['people']['count'] = None
         value['rgb'] = {k:copy.deepcopy(self.record['rgb'][k]) for k in
-            ('status','stamp_s','age_s','frame_id','shape','reason') if k in self.record['rgb']}
+            ('status','stamp_s','stamp_ns','age_s','frame_id','shape','reason') if k in self.record['rgb']}
         if 'sensors' in self.record:
             value['sensors'] = copy.deepcopy(self.record['sensors'])
+        if 'follow_candidates' in self.record:
+            candidates = self.record['follow_candidates']
+            value['follow_candidates'] = dict(binding=candidates['binding'], association_status=candidates['association_status'],
+                candidates=[dict(id=c['id'],box=copy.deepcopy(c['box']),has_3d_track=c['track'] is not None)
+                            for c in candidates['candidates']])
+        if 'follow_candidates_error' in self.record:
+            value['follow_candidates_error'] = self.record['follow_candidates_error']
         return value
 
     def local_grid(self):

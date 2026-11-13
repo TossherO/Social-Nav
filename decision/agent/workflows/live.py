@@ -15,7 +15,8 @@ def cleanup_goal(navigation, skill, *, timeout_s=2.):
     result = dict(requested=False, stop_observed=False)
     # A held arrival already cleared the motion goal, but still owns the
     # arming revision. Explicitly cancel it on exit to disarm the chassis.
-    held = skill.record['status'] == 'held'
+    held = (skill.record['status'] == 'held' or
+            skill.record['status']=='failed' and getattr(navigation,'follow_active',False))
     if navigation.handle is not None and (not navigation.cancel_requested or held):
         try:
             navigation.cancel(navigation.handle)

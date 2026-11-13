@@ -145,6 +145,7 @@ class RuntimeShadowNavigation:
             raise ValueError('Runtime has not published control state')
         self.clock_domain = self.value['control']['clock_domain']
         self.handle = self.request = None
+        self.follow_active = False
         self.cancel_requested = False
         self.connected = True
         self.t = 0.
@@ -170,7 +171,7 @@ class RuntimeShadowNavigation:
         return dict(global_grid=self._asset.snapshot,scene=None,local_grid=grid,
                     local_grid_observation_id=record.get('observation_id') if grid is not None else None,
                     local_grid_map_from_local=(record.get('local_grid') or {}).get('map_from_local') if grid is not None else None,
-                    pose=record.get('map_base_pose') if current else None,
+                    pose=record.get('map_base_pose') if current else None,local_pose=record.get('base_pose') if current else None,
                     stamp_s=record.get('stamp_s') if current else None,clock_domain=self.clock_domain,
                     geometry=getattr(self,'geometry',None) or VehicleGeometry.historical(ROOT/'configs/wheelchair_geometry_reference.json'),
                     sensors=copy.deepcopy(record.get('sensors')) if current else None)
@@ -186,9 +187,15 @@ class RuntimeShadowNavigation:
         active = p.get('request')
         matches = self.handle is not None and active is not None and active.get('request_id') == self.handle['call_id']
         cancellation = p.get('cancelled_request') or {}
+        follow = self.value.get('follow') or {}
+        follow_match = self.follow_active and self.handle is not None and follow.get('handle') == self.handle
         cancelled = (self.cancel_requested and active is None and self.handle is not None and
-                     cancellation.get('task_id') == self.handle['task_id'] and
-                     cancellation.get('goal_revision') == self.handle['goal_revision'])
+                     (cancellation.get('task_id') == 'follow:'+self.handle['call_id'] if self.follow_active else
+                      cancellation.get('task_id') == self.handle['task_id'] and
+                      cancellation.get('goal_revision') == self.handle['goal_revision']))
+        if (follow_match and follow.get('status')=='failed' and active is None and
+                isinstance(follow.get('cancelled_request'),dict) and cancellation==follow['cancelled_request']):
+            cancelled=True
         observation = self.value.get('observation') or {}
         spatial = mapped_origin(self.catalog, observation)
         if 'map_binding' in p:
@@ -199,15 +206,20 @@ class RuntimeShadowNavigation:
             spatial['origin_pose'] = None
         return dict(scope=self.scope, source='runtime_shadow_observer', clock_domain=p['clock_domain'], stamp_s=p['stamp_s'],
                     session_id=identity[0], generation=identity[1], frame_id=identity[2], pose=f.get('pose'), velocity=f.get('velocity'),
-                    stopped=None, handle=copy.deepcopy(self.handle) if matches or cancelled else None,
-                    status='stopped' if cancelled else 'proposed' if matches else 'pending', collision=False, goal=None,
+                    stopped=None, handle=copy.deepcopy(self.handle) if matches or cancelled or follow_match else None,
+                    status=('failed' if follow_match and follow.get('status')=='failed' else
+                            'preempted' if follow_match and follow.get('status')=='preempted' else
+                            'stopped' if cancelled else 'proposed' if matches else 'pending'), collision=False, goal=None,
+                    follow_status=copy.deepcopy(follow) if follow_match else None,
                     execution_feedback=False, executable=False, proposal_cancelled=cancelled,
                     localization_status='valid' if loc.get('health') == 0 else 'invalid',
                     input_stale=not self.connected or self.value.get('received_age_s') is None or self.value['received_age_s'] > 1., **spatial)
 
     def tick(self):
         try:
-            value = self.client.snapshot(with_image=True)
+            options=dict(with_image=True)
+            if self.follow_active and self.handle is not None:options['follow_call_id']=self.handle['call_id']
+            value = self.client.snapshot(**options)
             if not isinstance(value.get('control'), dict):
                 raise ValueError('Runtime has no control state')
         except (OSError, EOFError, ValueError):
@@ -242,7 +254,11 @@ class RuntimeShadowNavigation:
         request = dict(request_id=handle['call_id'], task_id=handle['task_id'], goal_revision=handle['goal_revision'],
                        mode='mapped', frame_id=self.catalog.value['frame_id'], target_reference='base_link', goal=place['pose'], goal_behavior='stop',
                        map_snapshot_id=self.catalog.value['map_snapshot_id'])
+        if 'search_bounds' in place:
+            request['search_bounds']=copy.deepcopy(place['search_bounds'])
+            request['valid_until_s']=place['valid_until_s']
         self.handle, self.request, self.cancel_requested = copy.deepcopy(handle), request, False
+        self.follow_active=False
         ack = self.client.exchange('goal', request)
         return dict(accepted=ack.get('accepted') is True, handle=copy.deepcopy(handle), executable=False, execution_feedback=False)
 
@@ -252,10 +268,41 @@ class RuntimeShadowNavigation:
         # Persist intent before I/O. A lost ACK can be reconciled by a later
         # read-only query, without automatically resending the goal or cancel.
         self.cancel_requested = True
-        ack = self.client.exchange('cancel', {k: handle[k] for k in ('task_id', 'goal_revision')})
+        ack = (self.client.exchange('follow_cancel',dict(call_id=handle['call_id'])) if self.follow_active else
+               self.client.exchange('cancel', {k: handle[k] for k in ('task_id', 'goal_revision')}))
         if ack.get('accepted') is not True:
             self.cancel_requested = False
             raise ValueError('Runtime cancellation was not accepted')
+
+    def start_follow(self, reference, handle):
+        from ..tools.navigation import IntentRejected
+        previous=(self.handle,self.request,self.cancel_requested,getattr(self,'follow_active',False))
+        self.handle,self.request,self.cancel_requested,self.follow_active=copy.deepcopy(handle),None,False,True
+        try:
+            ack=self.client.exchange('follow_start',dict(handle=handle,reference=reference))
+            if ack.get('accepted') is not True:raise IntentRejected(ack.get('error','follow_start_rejected'))
+        except IntentRejected:
+            self.handle,self.request,self.cancel_requested,self.follow_active=previous
+            raise
+        return dict(accepted=True,handle=copy.deepcopy(handle),execution_feedback=False)
+
+    def finish_follow(self, handle):
+        if self.handle!=handle or not self.follow_active:raise ValueError('Wrong follow call')
+        self.cancel_requested=True
+        ack=self.client.exchange('follow_finish',dict(call_id=handle['call_id']))
+        if ack.get('accepted') is not True:raise ValueError('Follow finish was not accepted')
+
+    def review_follow(self, handle, value):
+        if self.handle!=handle or not self.follow_active:raise ValueError('Wrong follow call')
+        ack=self.client.exchange('follow_visual',dict(call_id=handle['call_id'],**value))
+        if ack.get('accepted') is not True:raise ValueError('Follow visual review was not accepted')
+        return dict(status='submitted',execution_completed=False)
+
+    def lose_follow(self, handle, reason):
+        if self.handle!=handle or not self.follow_active:raise ValueError('Wrong follow call')
+        self.cancel_requested=True
+        ack=self.client.exchange('follow_lost',dict(call_id=handle['call_id'],reason=reason))
+        if ack.get('accepted') is not True:raise ValueError('Follow loss was not accepted')
 
 
 class RuntimeLiveNavigation(RuntimeShadowNavigation):
@@ -269,11 +316,11 @@ class RuntimeLiveNavigation(RuntimeShadowNavigation):
 
     def start(self, place, handle):
         from ..tools.navigation import IntentRejected
-        previous=(self.handle,self.request,self.cancel_requested)
+        previous=(self.handle,self.request,self.cancel_requested,getattr(self,'follow_active',False))
         try:
             return super().start(place,handle)
         except IntentRejected:
-            self.handle,self.request,self.cancel_requested=previous
+            self.handle,self.request,self.cancel_requested,self.follow_active=previous
             raise
 
     def hold(self, handle):
@@ -289,6 +336,7 @@ class RuntimeLiveNavigation(RuntimeShadowNavigation):
     def snapshot(self):
         result = super().snapshot()
         control = self.value['control']
+        follow=result.get('follow_status') or {}
         chassis = self.value.get('chassis') or {}
         owner = self.value.get('agent_owner') or {}
         active = control.get('request') or {}
@@ -303,8 +351,12 @@ class RuntimeLiveNavigation(RuntimeShadowNavigation):
                    evidence.get('source') == 'causal_algorithm_poses_not_chassis_feedback' and
                    result.get('origin_pose') is not None and not result['input_stale'] and
                    result['localization_status'] == 'valid')
-        cancelled = bool(result.get('proposal_cancelled'))
-        feedback = (control.get('idle_feedback') if cancelled else control.get('feedback')) or {}
+        failed_follow=bool(self.follow_active and follow.get('status')=='failed')
+        cancellation=control.get('cancelled_request') or {}
+        cancelled = bool(result.get('proposal_cancelled') or failed_follow and not active and
+                         cancellation==follow.get('cancelled_request'))
+        idle = self.handle is None and not active and not owner
+        feedback = (control.get('idle_feedback') if cancelled or idle else control.get('feedback')) or {}
         velocity = feedback.get('velocity')
         settings = self.tracking
         stopped = (isinstance(velocity, list) and len(velocity) == 2 and
@@ -313,8 +365,12 @@ class RuntimeLiveNavigation(RuntimeShadowNavigation):
                    abs(velocity[1]) <= settings['stopped_angular_rps'] and
                    feedback.get('status') == 'valid' and
                    feedback.get('source') == 'causal_algorithm_poses_not_chassis_feedback' and
+                   feedback.get('local_identity')==[result.get(k) for k in ('session_id','generation','frame_id')] and
+                   result.get('localization_status')=='valid' and
                    0 <= control['stamp_s']-feedback.get('stamp_s', -float('inf')) <= settings['feedback_max_age_s'])
-        if self.handle is not None and not self.cancel_requested and not match and owner.get('request_id') != self.handle['call_id']:
+        if failed_follow:
+            status='failed' if cancelled and stopped else 'stopping'
+        elif self.handle is not None and not self.cancel_requested and not match and owner.get('request_id') != self.handle['call_id']:
             status = 'preempted'
         elif (self.handle is not None and not self.cancel_requested and owner.get('request_id') == self.handle['call_id'] and
               owner.get('arm_revision') != chassis.get('arm_revision')):
@@ -324,9 +380,12 @@ class RuntimeLiveNavigation(RuntimeShadowNavigation):
         else:
             status = 'arrived' if arrival else 'stopped' if cancelled and stopped else 'running' if match else 'pending'
         result.update(scope='live',source='runtime_live_observer',status=status,
-                      handle=copy.deepcopy(self.handle) if match or cancelled or status in ('preempted','interrupted') else None,
+                      handle=copy.deepcopy(self.handle) if match or cancelled or follow or status in ('preempted','interrupted') else None,
+                      pose=copy.deepcopy(feedback.get('pose')),velocity=copy.deepcopy(feedback.get('velocity')),
                       stopped=bool(stopped),arrival_observation=bool(arrival),
                       stop_observation=bool(cancelled and stopped),physical_acceptance=False,
+                      idle_stop_observation=bool(idle and stopped and enabled and not result['input_stale']),
+                      stop_reason=follow.get('reason') if failed_follow else None,
                       chassis_state=chassis.get('state'),chassis_status_fresh=chassis.get('status_fresh') is True,
                       planning_status=control.get('planning_status'),planning_reason=control.get('planning_reason'),
                       goal=dict(task_id=evidence.get('task_id'),goal_revision=evidence.get('goal_revision')) if arrival else None)

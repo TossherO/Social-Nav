@@ -68,7 +68,14 @@ class TaskGoals:
                 raise ValueError('Duplicate task goal identity')
             ids.add(goal['goal_id'])
             target = goal['target_id']
-            if goal['kind'] == 'region':
+            if goal['kind'] != 'skill' and goal.get('stage_type', 'navigation') != 'navigation':
+                raise ValueError('Non-navigation stage types require kind=skill')
+            if goal['kind'] == 'skill':
+                if (target or goal.get('stage_type') not in ('follow', 'observation', 'seating') or
+                        any(key in goal for key in ('position', 'required_yaw', 'facing', 'position_rule',
+                                                    'max_distance_m', 'direction', 'checkpoints'))):
+                    raise ValueError('A future skill stage requires its stage_type and an empty target, without navigation geometry')
+            elif goal['kind'] == 'region':
                 if target not in self.catalog.regions or 'position' in goal:
                     raise ValueError('Region requirements use an annotated region, not a selected position')
                 if goal.get('position_rule') == 'region_centroid' and not inside(centroid(self.catalog.regions[target]['polygon']),self.catalog.regions[target]['polygon']):
@@ -165,6 +172,9 @@ class TaskGoals:
     def select(self, goal_id, pose, orientation_source, view_id):
         self.catalog.require_complete()
         current = self.current(goal_id)
+        if current['requirement'].get('stage_type', 'navigation') != 'navigation':
+            return dict(status='refused', reason='stage_skill_not_available',
+                        stage_type=current['requirement']['stage_type'])
         checks = self.geometry(current['requirement'], pose)
         if any(value is False for value in checks.values()):
             return dict(status='refused', reason='selected_pose_violates_task_requirement', checks=checks)

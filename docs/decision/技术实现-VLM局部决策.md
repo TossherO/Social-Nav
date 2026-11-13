@@ -1,16 +1,18 @@
-# VLM 部署与调用
+# 技术实现：VLM 局部决策
 
 局部 VLM 用于三类任务：T1 识别行人群组关系，T2 匹配并持续核对跟随目标，T3 从候选中选择目标点，当前主要用于轮椅在桌边停靠。本文说明模型服务的访问方式、任务输入，以及结果怎样交给导航接口。
 
 模型、默认后端和各任务 Prompt 由 [project.json](../../decision/vlm/configs/project.json)登记。运行资源和已有结果见[本机记录](../../ENVIRONMENT.local.md)，新服务器从零安装见[SGLang 服务部署方案](SGLang服务部署方案.md)。
 
-外层 Agent 使用独立托管 API，当前优先完备地图下的室内点和区域导航。它通过单模型工具循环读取地图、自主选择连续位姿并检查完成，不采用本文局部 T3 的候选选点或模型服务。实现见[Agent 技术实现](Agent技术实现.md)，命令见[任务与测试](长程导航任务与评测计划.md#运行与测试操作)，研究与模型选型见[技术计划](Agent技术开发计划.md#模型与调用)。
+外层 Agent 使用独立托管 API，当前优先完备地图下的室内点和区域导航。它通过单模型工具循环读取地图、自主选择连续位姿并检查完成；局部 T1、T3 尚未接入该在线任务链。实现见[Agent 长程导航](技术实现-Agent长程导航.md)，命令见[系统运行手册](../系统运行手册.md)，后续事项见[开发测试汇总](../后续开发测试汇总.md)。
 
 ## 后端选择
 
 局部 T1、T2、T3 的在线推理，以及离线 Prompt、Schema 和语义调试，优先调用远程 SGLang＋DSPARK。只有远程服务不可用，或所需 GPU 被其他任务占用时，才考虑本地 Transformers＋XGrammar。
 
 切换后端必须记录原因。不能因为某次响应错误就静默换模型或重放请求。代码检查和输入准备不依赖模型服务；当前本地入口也不支持 T3。
+
+Agent 在跟随目标丢失后调用局部 T2 找回时，使用 `project.json` 中的服务地址和模型名，并检查服务是否启用 DSPARK。该路径当前没有本地后端切换；服务不可用或响应无效时报告失败，保留原始响应，不自动重试。首次选人与跟随中的视觉复核仍使用外层 Agent 的托管 VLM。
 
 ## 远程服务启停与访问（默认）
 
@@ -48,6 +50,14 @@ python -B -m decision.vlm.server --server-info
 T2 和 [T3](#t3目标选择与就座)的任务入口见后文。T1 冻结输入可以复用 [vlm_api_common.make_body](../../decision/vlm/vlm_api_common.py)构造相同的 OpenAI 兼容请求。通用工具负责图像、流式解析及当前响应检查，不再维护旧数据集专用基准。
 
 程序分别检查 JSON 格式、当前人物身份的语义、正常结束和非思考输出。原始响应始终保留，不修复格式、不补删身份，也不自动重试。
+
+### T1 与 T3 的内存调用接口
+
+[OnlineDecision](../../decision/vlm/online.py)为后续调度提供不落盘的 T1／T3 单次请求接口，目前没有接入运行时自动调度或实机执行。T1 调用方在 `DecisionBuffer.consume()` 的租约内使用 `observations.render_window()` 获取绑定的三帧记录和 PNG 字节，再调用 `OnlineDecision.social(scene, window, images, now=...)`。接口校验图片摘要、人物编号与源场景；租约释放后 PNG 字节仍可使用。
+
+T3 调用方提供当前场景、同源候选集，以及必要时独立传递的同源 Agent RGB 观察，通过 `OnlineDecision.seating(scene, candidates, now=..., observation=...)` 生成 RGB／占据图请求。候选必须由调用方依据实际当前数据提供；此入口拒绝历史拟合上下文，不自动识别桌面或生成候选。后续需要接入当前点云、桌沿依据和候选生成。
+
+上述两个方法只准备请求。显式调用 `infer()` 时才访问项目配置的远程 SGLang＋DSPARK；调用方须保留完整返回，失败可通过 `discard()` 释放本次请求，不自动重试。成功后 `accept()` 使用当前场景和原始源时间复核 Schema、身份和期限：T1 返回带原始时间的人群关系，T3 返回仍需几何验证的目标建议。调用方负责异步调度、将有效 T1 关系一致地送入控制及独立安全使用的请求，并按原导航、安全和真实反馈接口处理 T3；接口本身不发送运动命令或判断任务完成。T3 当前建议使用连续局部坐标，而实机 Agent 通道只接收有图目标；未来接入时还须使用同源有效的地图关联变换目标，并在提交前重新检查。
 
 ## 托管API对照（显式选用）
 
@@ -100,7 +110,7 @@ python -B -m decision.vlm.local_inference \
 
 ### 从感知观察生成三帧输入
 
-统一 runtime 默认不加载 YOLO。显式记录任务窗口时，它先保存原扫描、RGB、相机内参和人物位姿的只读历史，再由决策后台运行 YOLO、建立二维框与三维人物的对应关系，最后渲染三帧。启用方法见[感知导航运行手册](../感知导航运行手册.md#日常运行与回看)。
+统一 runtime 默认不加载 YOLO。显式记录任务窗口时，它先保存原扫描、RGB、相机内参和人物位姿的只读历史，再由决策后台运行 YOLO、建立二维框与三维人物的对应关系，最后渲染三帧。启用方法见[系统运行手册](../系统运行手册.md#日常运行与回看)。
 
 图像准备不会回写三维跟踪或环境地图，也不依赖低频 `--record-views`。准备输入本身不启动 VLM 服务或发送 VLM 请求。
 
@@ -129,7 +139,7 @@ python -B -m decision.vlm.local_inference \
 
 ## 实机T1群组输入
 
-T1 使用三帧 RGB 和全高度单帧扫描 BEV。标注审核与导出共用 `Store.model_image`，绘制来源和范围见[标注手册](决策任务标注.md#模型图像与输入审核)。
+T1 使用三帧 RGB 和全高度单帧扫描 BEV。标注审核与导出共用 `Store.model_image`；输入审核使用无损模型图，预览叠层不进入模型输入。
 
 当前 PID 覆盖已确认且有观测的全方向三维轨迹，不按相机视野筛选。缺少 RGB 或可靠图像框时，字段保持 `null`；浏览点云不能代替原始扫描。
 
@@ -150,6 +160,8 @@ T1 使用[默认英文 Prompt](../../decision/vlm/configs/prompts/wheelchair_t1_
 ## T2外观匹配与因果身份回放
 
 [follow.py](../../decision/vlm/follow.py)提供独立离线诊断，复用标注器的三帧 RGB、扫描 BEV 和 HTTP 工具，不调用 T1，也不控制底盘。
+
+Agent 的首次选人另用单帧 YOLO 候选和固定参考，由[follow_target.py](../../decision/vlm/follow_target.py)保存原图、目标框、裁剪图和来源。它与本节三帧离线诊断是不同入口，不自动启动跟随；实时准备条件见[运行手册](../系统运行手册.md#可选图像与决策输入)。
 
 `prepare`只读标注工程中的固定事实，另存明确标记的开发输入及参考，不修改标签状态、人物关联或审核时使用的输入。描述参考必须来自同一采集，且不晚于当前观察。人工身份、合理候选及参考答案不会进入模型请求。
 
@@ -288,7 +300,7 @@ python -B -m decision.vlm.seating check-navigation \
 
 模型先判断 RGB 是否足以比较停靠位置，再选择候选。历史帧可以帮助确认桌子，但绿色先验轮廓不能替代当前视觉证据。朝向沙发等无关区域时可以返回证据不足；看到桌沿或桌下时，不要求完整桌面都可见。
 
-同一段开发数据的对照不能证明三帧必然优于单帧，也不能证明已找到全局最方便位置。评测范围见[数据与评测](../experiments/数据与评测.md#t3选点与就座阶段)。
+同一段开发数据的对照不能证明三帧必然优于单帧，也不能证明已找到全局最方便位置。后续评测见[开发测试汇总](../后续开发测试汇总.md)。
 
 ### 阶段与完成反馈
 
@@ -307,10 +319,62 @@ python -B -m decision.vlm.seating check-navigation \
 
 ### 闭环联调待办
 
-地图表示、参考规划、局部控制和独立安全已有实现，T3 也有同源数据检查、逐候选规划和阶段反馈适配。下一步是把这些接口接入持续任务执行，不再针对同一批窗口反复搜索 Prompt。T3接入要点由本节维护；[实机问题](../感知导航实机问题.md)只维护轮椅人工目标导航，不将VLM调度作为试车前置：
+地图表示、参考规划、局部控制和独立安全已有实现，T3 也有同源数据检查、逐候选规划和阶段反馈适配。下一步是把这些接口接入持续任务执行，不再针对同一批窗口反复搜索 Prompt。T3接入要点由本节维护；[实机问题](../系统实机问题.md)只维护轮椅人工目标导航，不将VLM调度作为试车前置：
 
 1. 接入人工地图桌子标注、地图身份和有效地图到局部坐标的变换，核对车体、脚踏、扶手和乘员包络，再检查净空、路径及到达方式。
 2. 接通观察位姿的导航执行和补充观察调度。现有 `observation_goals`只根据桌外位置、相机视野比例和直线距离提出假设，没有处理遮挡，必须用实拍检查观察收益。没有可达观察点或补充次数用尽时返回原因。
 3. 接 Agent 工具以及真实导航和停止反馈，验收成功、失败、取消和超时。目标调度采用事件触发：证据充分时主要做选点，取得新观察或原目标失效后才重选；正常运动由本地导航维持目标，不采用持续周期调用。
 
 后续测试分别评价候选生成、模型选择、主动观察和真实执行。同一 bag 的视角来自原驾驶过程，不能记为算法执行观察目标的成果。唯一的本机结果入口见[环境记录](../../ENVIRONMENT.local.md)。
+
+## 决策任务标注
+
+`decision.vlm.annotation` 读取已有感知结果和原 bag，分别标注 T1 人物关系与 T2 目标身份；服务和数据与行人中心标注器独立。Linux 工程保存源时间、模型和标定身份，原 bag、感知结果及人工标签不被覆盖。未审核草稿、漏检和未知身份不能当作金标准，也不能用未来信息或人工身份修改模型输入。
+
+在 Linux 选择尚不存在的工程目录：
+
+```bash
+python -B -m decision.vlm.annotation prepare \
+  --results /path/to/perception_run --root-group recording_id \
+  --output data/annotations/vlm_decision/new_project
+python -B -m decision.vlm.annotation open --project data/annotations/vlm_decision/new_project
+```
+
+工程只保存来源和时间索引，访问图像或点云仍需要原 bag；已有二维关联沿用原记录，不默认重跑模型。旧数据缺关联时需要显式指定 `--with-rgb-associations`。跨机器迁移先核对原来源、校准和时间，不改写冻结摘要。
+
+### RGB框来源
+
+二维框与三维轨迹的对应结果称为 RGB 关联。已有工程可以独立准备或恢复该阶段，不必重新定位和三维推理：
+
+```bash
+python -B -m decision.vlm.annotation prepare-rgb --project data/annotations/vlm_decision/new_project
+```
+
+程序优先复用完整兼容缓存，有保存的二维记录时只做 CPU 导入；旧来源没有缓存或记录时才运行 YOLO。明确重算时使用 `--recompute --output` 指定新目录。打开、服务和导出均读取工程登记来源；来源缺失、未完成或不匹配会报错，不静默切换。无关联来源的旧工程仍使用其原投影模式。
+
+只有可靠匹配到已有三维轨迹的二维框进入模型图。切换来源后重启窗口或服务；新框改变模型输入，已有标签须重新审核，过期输入不能正式导出。原始观察和人工标签不因此改写。
+
+Linux 可为 Windows 客户端提供服务；只读是默认行为，`--write` 表示允许编辑，应绑定可信网络：
+
+```bash
+python -B -m decision.vlm.annotation serve \
+  --project data/annotations/vlm_decision/new_project \
+  --project-id wheelchair-vlm --host LINUX_TAILSCALE_IP --port 8766 --write
+python -B -m decision.vlm.annotation package-client \
+  --output outputs/decision/annotation_client/client.zip
+```
+
+Windows 解压便携包，在已有 Python 3.11 环境安装 `decision/vlm/annotation/requirements-client.txt`，然后连接：
+
+```powershell
+python -B -m decision.vlm.annotation open --server http://LINUX_TAILSCALE_IP:8766 --project-id wheelchair-vlm
+```
+
+T1 按观察分别记录同行、交谈、拍照、其他活动与未知归属，不自动把未处理人物当作独行。T2 记录初始可见描述、实际人物与轨迹片段、可见性和覆盖；三维跟踪 ID 可能改变，人工身份不回填模型输入。未同步的客户端草稿不是服务器已保存结果。
+
+审核后在 Linux 导出到新目录；只有明确要求 `--include-inputs` 才复制不含标签答案的输入：
+
+```bash
+python -B -m decision.vlm.annotation export \
+  --project data/annotations/vlm_decision/new_project --output outputs/decision/annotations/new_export
+```

@@ -70,7 +70,10 @@ class AgentLoop:
             self.exit_reason = 'keyboard_interrupt'
         finally:
             self.model.invalidate()
-            if self.session.skill.record['handle'] is not None or self.state['status'] == 'ready':
+            held_follow = (self.session.navigation.scope == 'live' and
+                           self.session.skill.record['status'] == 'failed' and
+                           getattr(self.session.navigation, 'handle', None) is not None)
+            if self.session.skill.record['handle'] is not None or self.state['status'] == 'ready' or held_follow:
                 self.stop(reason=self.exit_reason)
             self.session._save('agent_run_finished', dict(reason=self.exit_reason))
         return self.state
@@ -105,8 +108,15 @@ class AgentLoop:
                 self.session.store.event('model_result_discarded', dict(context=result['context'], reason='cancelled_expired_or_superseded'))
                 if s['status'] == 'ready' and self.session.observation is not None:
                     self.session.observation = None
-                    self.session.wait_for_event('observation')
-                    self.session._save('await_fresh_observation')
+                    current = self.session.context()
+                    if (result['context'].get('handle') != current.get('handle') or
+                            result['context'].get('conversation_revision') != current.get('conversation_revision')):
+                        # A new event already supplies a reason to reconsider;
+                        # prompt preparation will request current observations.
+                        self.session._save('discard_observation_after_context_change')
+                    else:
+                        self.session.wait_for_event('observation')
+                        self.session._save('await_fresh_observation')
                 if self.session.spatial_view is not None and not self.session.spatial_view.current(self.session.navigation.snapshot()['stamp_s']):
                     self.session.spatial_view = None
                     self.session._save('spatial_view_expired')
@@ -143,7 +153,9 @@ class AgentLoop:
                                 'facing_result','facing_evidence','preference_result','preference_evidence'))):
                         output = self.session.call(value['tool'], _context=result['context'], **value['arguments'])
                     elif expired and value['tool'] not in ('record_task', 'lookup_places', 'query_map', 'get_navigation_state',
-                                                           'ask_user', 'cancel_navigation', 'wait_for_event', 'finish_task'):
+                                                           'ask_user', 'cancel_navigation', 'wait_for_event', 'finish_task',
+                                                           'select_follow_target','start_follow','review_follow_target','request_follow_recovery',
+                                                           'prepare_follow_search','execute_follow_search','finish_follow','check_goal'):
                         output = dict(status='refused', reason='model_input_expired_request_fresh_observation',
                                       execution_completed=False)
                         self.session.store.event('expired_tool_refused', dict(call=value, context=result['context']))
@@ -158,14 +170,18 @@ class AgentLoop:
                             place_id=value['arguments'].get('place_id') or self.session.skill.record['place_id'] or '',
                             clock_domain=result['context']['clock_domain'], map_binding=result['context']['map_binding'])
                     self.session._save('model_action_applied', dict(call=value, result=output, context=result['context']))
-                    if (value['tool'] in ('navigate', 'navigate_route') and
-                            output.get('status') == 'accepted' and
+                    if ((value['tool'] in ('navigate', 'navigate_route','start_follow','execute_follow_search') and output.get('status')=='accepted' or
+                         value['tool'] in ('finish_follow','review_follow_target') and output.get('status')=='stopping') and
                             self.session.skill.record['handle'] is not None):
                         # Do not ask the model to restate that it is waiting:
                         # a text-only reply has ambiguous intent and otherwise
                         # triggers clarification and cancels the active goal.
                         self.session.wait_for_event('navigation')
                         self.session._save('await_navigation_after_acceptance')
+                    elif (value['tool']=='review_follow_target' and output.get('status')=='submitted' and
+                          value['arguments']['state']=='occluded'):
+                        self.session.wait_for_event('observation')
+                        self.session._save('await_observation_after_occlusion')
                 except (ValueError, KeyError, TypeError, jsonschema.ValidationError) as error:
                     self.session.stop('needs_clarification', 'model_protocol_rejected')
                     self.session._save('model_protocol_rejected', dict(error_type=type(error).__name__))
@@ -191,5 +207,6 @@ class AgentLoop:
 
     def close(self):
         value = self.model.close()
+        self.session.follow_recovery_worker.close()
         self.session.store.event('model_worker_closed', value)
         return value

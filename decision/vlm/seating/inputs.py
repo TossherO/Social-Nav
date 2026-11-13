@@ -240,7 +240,7 @@ def freeze_window(observations, candidate_path, output, *, current_only=False):
     return record
 
 
-def render_scene(scene,candidate_set,path):
+def render_scene(scene,candidate_set,path,*,observation=None):
     """Neutral RGB+BEV, known/unknown geometry retained; no answers or endpoint."""
     from .inference import validate_candidate_set
     from matplotlib.figure import Figure
@@ -251,9 +251,22 @@ def render_scene(scene,candidate_set,path):
     for name in ['observation_id','frame_id','clock_domain','session_id','generation']:
         if candidate_set[name]!=record[name]:raise ValueError('Candidates belong to another observation')
     if candidate_set['stamp_s']!=record['as_of']:raise ValueError('Candidate cutoff mismatch')
-    if record['rgb']['status']!='valid' or record['localization']['status']!='valid':raise ValueError('Valid RGB/localization required')
+    if record['localization']['status']!='valid':raise ValueError('Valid RGB/localization required')
+    if observation is None:
+        if record['rgb']['status']!='valid':raise ValueError('Valid RGB/localization required')
+        pixels=scene.rgb
+    else:
+        import io
+        from PIL import Image
+        observation.verify();source=observation.record
+        if (source['rgb']['status']!='valid' or source['scene_binding']!=record['input_fingerprint'] or
+                source['stamp_s']!=record['as_of'] or source['clock_domain']!=record['clock_domain'] or
+                source['local_identity']!=[record[k] for k in ('session_id','generation','frame_id')]):
+            raise ValueError('RGB observation does not bind the seating scene')
+        with Image.open(io.BytesIO(observation.image)) as image:
+            pixels=np.asarray(image.convert('RGB'))
     fig=Figure(figsize=(12,5),dpi=130,constrained_layout=True);FigureCanvasAgg(fig)
-    rgb,bev=fig.subplots(1,2);rgb.imshow(scene.rgb);rgb.axis('off');rgb.set_title('Current RGB')
+    rgb,bev=fig.subplots(1,2);rgb.imshow(pixels);rgb.axis('off');rgb.set_title('Current RGB')
     meta=scene.geometry.metadata;cells=scene.geometry.layers['occupancy'];h,w=cells.shape;x,y=meta['origin_xy'];r=meta['resolution']
     bev.imshow(np.where(cells==-1,0,np.where(cells==0,1,2)),origin='lower',extent=[x,x+w*r,y,y+h*r],
                cmap=ListedColormap(['#b6c0c9','#f8f8f8','#34414d']),vmin=0,vmax=2,interpolation='nearest')

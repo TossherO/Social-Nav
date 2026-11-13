@@ -23,7 +23,7 @@ class NavigationSkill:
         self.context = spatial_context(self.initial)
         self.record = dict(status='idle', handle=None, place_id=None, reason=None, context_lost=False,
                            connected=True, completed=[], attempts=[], goal_revision=0, goal_id=None, selected_pose=None,
-                           pending_completion=None)
+                           pending_completion=None, stage_type='navigation',follow_ready=False,search_deadline_s=None)
         self.last_stamp = None
         self.blocked_since = None
         self.blocked_notified = False
@@ -65,10 +65,11 @@ class NavigationSkill:
         handle = dict(task_id=self.task_id, plan_revision=revision, goal_revision=r['goal_revision'],
                       call_id=uuid.uuid4().hex, catalog_fingerprint=self.catalog.fingerprint,
                       goal_id=goal_id, task_goal_binding=destination['task_goal_binding'], view_id=destination['view_id'])
-        previous_hold = ({key:copy.deepcopy(r[key]) for key in ('status','handle','place_id','goal_id','selected_pose','reason')}
+        previous_hold = ({key:copy.deepcopy(r[key]) for key in ('status','handle','place_id','goal_id','selected_pose','reason','stage_type','follow_ready','search_deadline_s')}
                          if self.navigation.scope == 'live' and r['status'] == 'held' else None)
         r.update(status='submitting', handle=handle, place_id=place_id, goal_id=goal_id,
-                 selected_pose=copy.deepcopy(destination['pose']),reason=None)
+                 selected_pose=copy.deepcopy(destination['pose']),reason=None,stage_type='navigation',
+                 search_deadline_s=destination.get('valid_until_s'))
         attempt.update(status='active', call_id=handle['call_id'])
         self.last_stamp = None
         self.blocked_since = None
@@ -95,6 +96,58 @@ class NavigationSkill:
         self._emit('navigation_ack')
         return dict(status='accepted', handle=handle, scope=self.navigation.scope, execution_completed=False, route=route)
 
+    def start_follow(self, goal_id, reference, revision, requirement):
+        r=self.record;state=self.navigation.snapshot()
+        if self.navigation.scope=='manual' or not callable(getattr(self.navigation,'start_follow',None)):
+            return dict(status='refused',reason='follow_not_supported_by_adapter')
+        if (r['context_lost'] or not r['connected'] or state.get('input_stale') or
+                state.get('localization_status','valid')!='valid'):
+            return dict(status='refused',reason='navigation_context_unavailable')
+        if r['handle'] is not None and not (self.navigation.scope=='live' and r['status']=='held'):
+            return dict(status='refused',reason='cancel_and_confirm_existing_call_first')
+        route=self.navigation.check_route({})
+        if not route.get('proposal_allowed'):
+            return dict(status='refused',reason=route.get('reason') or 'navigation_context_unavailable')
+        from perception.environment.context import fingerprint
+        r['goal_revision']+=1
+        handle=dict(task_id=self.task_id,plan_revision=revision,goal_revision=r['goal_revision'],
+            call_id=uuid.uuid4().hex,catalog_fingerprint=self.catalog.fingerprint,goal_id=goal_id,
+            task_goal_binding=fingerprint(requirement),view_id=None)
+        previous={key:copy.deepcopy(r[key]) for key in ('status','handle','place_id','goal_id','selected_pose','reason','stage_type','follow_ready','search_deadline_s')}
+        r.update(status='submitting',handle=handle,place_id=None,goal_id=goal_id,selected_pose=None,reason=None,
+                 stage_type='follow',follow_ready=False,search_deadline_s=None)
+        r['attempts'].append(dict(goal_id=goal_id,place_id=None,revision=revision,status='active',call_id=handle['call_id']))
+        self.last_stamp=None;self._emit('follow_intent')
+        try:
+            ack=self.navigation.start_follow(reference,handle)
+            if ack.get('accepted') is not True or ack.get('handle')!=handle:raise ValueError('Follow ACK identity invalid')
+        except IntentRejected as error:
+            r.update(previous);self._mark_attempt(handle,'refused');self._emit('follow_refused')
+            return dict(status='refused',reason=str(error))
+        except (OSError,EOFError,ValueError) as error:
+            r['reason']='submission_uncertain_'+type(error).__name__;self.cancel(reason=r['reason'])
+            return dict(status='uncertain',handle=handle,reason=r['reason'])
+        r['status']='shadow_proposed' if self.navigation.scope=='shadow' else 'running'
+        self._emit('follow_ack')
+        return dict(status='accepted',handle=copy.deepcopy(handle),scope=self.navigation.scope,execution_completed=False)
+
+    def finish_follow(self, semantic):
+        r=self.record;handle=r['handle'];state=self.navigation.snapshot()
+        if (r['stage_type']!='follow' or handle is None or r['status'] not in ('running','blocked','shadow_proposed') or
+                (state.get('follow_status') or {}).get('status')!='running' or state.get('input_stale') or
+                state.get('status') not in ('running','proposed')):
+            return dict(status='refused',reason='follow_not_running')
+        proof=dict(goal_id=r['goal_id'],place_id=None,handle=copy.deepcopy(handle),stamp_s=state['stamp_s'],
+            scope=self.navigation.scope,source=state['source'],context=spatial_context(state),stopped=True,
+            execution_feedback=False,physical_acceptance=False,evidence_kind='follow_condition_and_stop_observation',
+            semantic=copy.deepcopy(semantic))
+        r.update(status='holding',reason='follow_finish_requested',pending_completion=proof)
+        self._emit('follow_finish_intent')
+        try:self.navigation.finish_follow(handle)
+        except (OSError,EOFError,ValueError) as error:
+            r['pending_completion']=None;self.cancel(reason='follow_finish_unconfirmed_'+type(error).__name__)
+        return dict(status='stopping',handle=copy.deepcopy(handle),execution_completed=False)
+
     def cancel(self, *, reason='cancel_requested'):
         r = self.record
         if r['handle'] is None:
@@ -106,6 +159,18 @@ class NavigationSkill:
         except (OSError, EOFError, ValueError) as error:
             self.emit('navigation_stop_unconfirmed', dict(error_type=type(error).__name__, automatically_retried=False))
         return dict(status='stopping', handle=copy.deepcopy(r['handle']), execution_completed=False)
+
+    def lose_follow(self, reason):
+        r=self.record
+        if r['handle'] is None:return dict(status='idle',execution_completed=False)
+        if not callable(getattr(self.navigation,'lose_follow',None)):
+            return self.cancel(reason=reason)
+        r.update(status='stopping',reason=reason,pending_completion=None)
+        self._emit('follow_loss_intent')
+        try:self.navigation.lose_follow(r['handle'],reason)
+        except (OSError,EOFError,ValueError) as error:
+            self.emit('navigation_stop_unconfirmed',dict(error_type=type(error).__name__,automatically_retried=False))
+        return dict(status='stopping',handle=copy.deepcopy(r['handle']),execution_completed=False)
 
     def tick(self):
         r = self.record
@@ -119,6 +184,11 @@ class NavigationSkill:
                 self.emit('navigation_connection_lost', dict(error_type=type(error).__name__, automatically_retried=False))
             return False
         r['connected'] = True
+        follow=(feedback.get('follow_status') or {}) if r['stage_type']=='follow' else {}
+        if (r['handle'] is not None and follow.get('handle')==r['handle'] and follow.get('status')=='failed' and
+                r['status']!='stopping'):
+            r.update(status='stopping',reason=follow.get('reason') or 'follow_failed',pending_completion=None)
+            self._emit('follow_failed_stopping')
         if (self.navigation.scope == 'live' and
                 (feedback.get('chassis_state') != 'armed' or feedback.get('chassis_status_fresh') is not True) and
                 not r['context_lost']):
@@ -153,7 +223,14 @@ class NavigationSkill:
                  (stamp < self.last_stamp or stamp == self.last_stamp and not same_cancel))):
             return False
         self.last_stamp = stamp
-        if self.navigation.scope == 'live' and feedback.get('status') == 'preempted':
+        if (r.get('search_deadline_s') is not None and now>r['search_deadline_s'] and
+                r['status'] not in ('stopping','holding','held')):
+            self.cancel(reason='follow_search_timeout')
+            return False
+        if (r['stage_type']=='follow' and not r['follow_ready'] and follow.get('status')=='running' and
+                feedback.get('status') in ('running','proposed')):
+            r['follow_ready']=True;self._emit('follow_started');return True
+        if self.navigation.scope in ('live','shadow') and feedback.get('status') == 'preempted':
             r.update(status='interrupted', handle=None, context_lost=True, reason='operator_goal_preempted_agent')
             self._mark_attempt(handle, 'interrupted')
             self._emit('navigation_interrupted')
@@ -167,9 +244,11 @@ class NavigationSkill:
         if r['status'] == 'held':
             return False
         if r['status'] == 'holding':
-            if feedback.get('stop_observation') is True and feedback.get('status') == 'stopped':
+            if ((feedback.get('stop_observation') is True or self.navigation.scope=='shadow' and feedback.get('proposal_cancelled') is True)
+                    and feedback.get('status') == 'stopped'):
                 proof = r.get('pending_completion')
                 if proof is not None:
+                    if r['stage_type']=='follow':proof['stop_stamp_s']=stamp
                     r['completed'].append(proof)
                     r.update(status='held', pending_completion=None, reason=None)
                     self._mark_attempt(handle, 'succeeded')
@@ -181,8 +260,9 @@ class NavigationSkill:
                        else feedback.get('stop_observation') is True if self.navigation.scope == 'live'
                        else feedback.get('proposal_cancelled') is True)
             if stopped and feedback.get('status') in ('stopped', 'failed'):
-                r.update(status='cancelled', handle=None, pending_completion=None)
-                self._mark_attempt(handle, 'cancelled')
+                failed=bool(follow.get('status')=='failed')
+                r.update(status='failed' if failed else 'cancelled', handle=None, pending_completion=None)
+                self._mark_attempt(handle, 'failed' if failed else 'cancelled')
                 self._emit('navigation_cancel_confirmed')
                 return True
             return False

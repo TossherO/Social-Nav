@@ -66,7 +66,8 @@ class PlanarWorld:
             if actor is not None:
                 # Velocity comes only from past/current synthetic measurements.
                 previous=self.actor_position(max(0.,t-.1));velocity=None if t<.2 else ((np.asarray(actor)-previous)/.1).tolist()+[0.]
-                tracks=[dict(track_id=self.kind+'_person',box=actor+[0.,.5,.5,1.7,0.],confirmed=t>=.2,
+                tracks=[dict(track_id=self.kind+'_person',lifecycle_generation=0,state='observed',
+                    box=actor+[0.,.5,.5,1.7,0.],confirmed=t>=.2,
                     velocity_xyz_mps=velocity,last_observed_stamp_s=10.+t,
                     covariance=np.diag([.02**2]*3+[0.]*4+[.03**2]*3).ravel().tolist())]
             people=dict(observation_id='synthetic_people:'+str(t),stamp_s=10.+t,clock_domain='simulation',health='valid',

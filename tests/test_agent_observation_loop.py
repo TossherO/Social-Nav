@@ -233,6 +233,37 @@ class ObservationLoopTests(unittest.TestCase):
             gate.set()
             actor.close()
 
+    def test_arrival_during_monitor_inference_reconsiders_without_waiting_for_a_new_frame(self):
+        self.tools.call('record_task', goals=[dict(goal_id='elevator',kind='point',target_id='elevator',description='到电梯')])
+        self.tools.call('set_navigation_monitor', goal_id='elevator', focus='检查入口', interval_s=5)
+        navigate(self.tools, 'elevator')
+        self.tools.call('wait_for_event', event='navigation')
+        self.tools.tick()
+        grid = snapshot()
+        grid.metadata['stamp_s'] = 15.1
+        scene = assemble_scene(grid, clock_domain='synthetic', settings=load_config()['scene'])
+        self.observation = Observation.from_scene(scene, rgb=dict(pixels=np.zeros((20, 30, 3), np.uint8),
+            stamp_s=15.05, frame_id='camera'))
+        gate = threading.Event()
+        actor = AgentLoop(self.tools, lambda *_: (gate.wait(2), reply('wait_for_event',event='navigation'))[1])
+        try:
+            self.nav.t = 5.2
+            actor.tick()
+            self.assertEqual(actor.requests, 1)
+            self.nav.arrive()
+            actor.tick()
+            gate.set()
+            actor.model.thread.join(1)
+            actor.tick()
+            self.assertEqual(actor.requests, 2)
+            self.assertNotEqual(self.tools.state['status'], 'waiting_observation')
+            self.assertEqual(self.tools.skill.record['status'], 'succeeded')
+        finally:
+            gate.set()
+            if actor.model.thread is not None:
+                actor.model.thread.join(1)
+            actor.close()
+
     def test_expired_image_is_not_refreshed_by_query(self):
         self.tools.call('observe_scene')
         context = self.tools.context()

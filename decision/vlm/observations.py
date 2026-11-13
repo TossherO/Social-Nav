@@ -37,9 +37,8 @@ def frame(entry, arrays):
     return result
 
 
-def freeze_window(entries, history, read_arrays, output, *, extent, view_binding,image_preparation=None):
-    """Render a leased three-frame window with the same primitives as the annotator."""
-    from .vlm_api_common import save_json
+def render_window(entries, history, read_arrays, *, extent, view_binding, image_preparation=None):
+    """Render a leased window in memory; returned PNG bytes own their storage."""
     rows=[];assets={}
     for entry in entries:
         arrays=read_arrays(entry['buffer'])
@@ -50,14 +49,15 @@ def freeze_window(entries, history, read_arrays, output, *, extent, view_binding
     current=entries[-1]['people'];tracks={t['track_id']+'/g'+str(t['lifecycle_generation']):t for t in current['tracks']}
     identities={str(pid):list(stable_identity(current,tracks[key]))
                 for key,pid in window['mapping'].items()}
-    out=Path(output);out.mkdir(parents=True,exist_ok=False);images=[]
+    images=[];payloads=[]
     by_id={r['id']:r for r in rows}
     for index,ident in enumerate(window['frames']):
         arrays=assets[ident];rgb=io.BytesIO();Image.fromarray(arrays['rgb']).save(rgb,format='PNG')
         image=render_observation(by_id[ident],rgb.getvalue(),window['mapping'],window['fields']['dt'][index],extent,
             trajectories[ident],bev_background=pointcloud_background(arrays['raw'],extent))
-        name=f'frame_{index}.png';image.save(out/name)
-        images.append(dict(path=name,sha256=hashlib.sha256((out/name).read_bytes()).hexdigest()))
+        name=f'frame_{index}.png';encoded=io.BytesIO();image.save(encoded,format='PNG')
+        payload=encoded.getvalue();payloads.append(payload)
+        images.append(dict(path=name,sha256=hashlib.sha256(payload).hexdigest()))
     record=dict(kind='runtime_task_window',fields=window['fields'],mapping=window['mapping'],pid_to_track=identities,
         observation_id=current['observation_id'],stamp_s=current['stamp_s'],clock_domain=current['clock_domain'],
         localization_binding=current['localization_binding'],scene=copy.deepcopy(entries[-1].get('scene')),
@@ -70,5 +70,17 @@ def freeze_window(entries, history, read_arrays, output, *, extent, view_binding
         images=images,trajectories=trajectories,renderer=renderer_identity(),display_view=view_binding,
         scope='causal_runtime_input_no_human_labels_no_vlm_request')
     if image_preparation is not None:record['image_preparation']=image_preparation
-    record['input_fingerprint']=digest(record);save_json(out/'input.json',record)
+    record['input_fingerprint']=digest(record)
+    return record,tuple(payloads)
+
+
+def freeze_window(entries, history, read_arrays, output, *, extent, view_binding,image_preparation=None):
+    """Render the same leased window into a new offline input directory."""
+    from .vlm_api_common import save_json
+    record,images=render_window(entries,history,read_arrays,extent=extent,view_binding=view_binding,
+                                image_preparation=image_preparation)
+    out=Path(output);out.mkdir(parents=True,exist_ok=False)
+    for spec,payload in zip(record['images'],images):
+        (out/spec['path']).write_bytes(payload)
+    save_json(out/'input.json',record)
     return record

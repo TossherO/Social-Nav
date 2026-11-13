@@ -50,8 +50,8 @@ def usage_numbers(data):
             result.update({k: detail[k] for k in names if type(detail.get(k)) is int and detail[k] >= 0})
     return result
 
-def read_stream(response, started, timing):
-    chunks, usage, finish, model = [], {}, None, None
+def read_stream(response, started, timing, *, text_chunks=None):
+    chunks, usage, finish, model = ([] if text_chunks is None else text_chunks), {}, None, None
     reasoning, done = False, False
     for line in response.iter_lines():
         if not line.startswith("data:"):
@@ -92,6 +92,45 @@ def read_stream(response, started, timing):
     return {"raw_content": "".join(chunks), "usage": usage,
             "finish_reason": finish, "server_model": model,
             "reasoning_content_present": reasoning}
+
+
+def request_dspark(body, *, client_factory=None):
+    """One configured DSPARK request; retain partial output and never retry."""
+    import httpx
+    from .project_config import load_config
+    from .server import check_server
+    settings = load_config()
+    deployment = settings['deployment']
+    model = settings['model']['served_name']
+    if body.get('model') != model:
+        raise ValueError('Configured DSPARK model does not match request')
+    base = 'http://' + deployment['host'] + ':' + str(deployment['port']) + '/v1'
+    config = dict(base_url=base, origin=base[:-3], api_key='', model=model)
+    result = dict(status='unavailable', raw_content=None, automatically_retried=False)
+    chunks, timing = [], {}
+    factory = client_factory or httpx.Client
+    try:
+        with factory(timeout=90, trust_env=False, follow_redirects=False,
+                     limits=httpx.Limits(max_connections=1)) as client:
+            server = check_server(client, config, info=True)
+            if server['status'] != 'ready' or server.get('server_args', {}).get('speculative_algorithm') != 'DSPARK':
+                result['reason'] = 'remote_dspark_unavailable'
+                return result
+            began = time.perf_counter()
+            with client.stream('POST', base + '/chat/completions', json=body) as response:
+                if response.status_code != 200:
+                    raise ValueError('non_success_http_response')
+                reply = read_stream(response, began, timing, text_chunks=chunks)
+            result.update(raw_content=reply['raw_content'], timing=timing, usage=reply['usage'])
+            if (reply['server_model'] != model or reply['finish_reason'] != 'stop' or
+                    reply['reasoning_content_present'] or reply['usage'].get('reasoning_tokens', 0)):
+                raise ValueError('invalid_completion_metadata')
+            result['status'] = 'complete'
+    except Exception as error:
+        if result['raw_content'] is None and chunks:
+            result['raw_content'] = ''.join(chunks)
+        result['reason'] = type(error).__name__
+    return result
 
 def save_json(path, value, key=""):
     encoded = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)

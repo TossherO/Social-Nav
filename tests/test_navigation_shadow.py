@@ -195,6 +195,18 @@ class ShadowTests(unittest.TestCase):
         clock=iter([10.,10.51]);result=self.safety.tick(10.,mono=0.,clock_now=lambda:next(clock))
         self.assertEqual(result['reason'],'proposal_expired_during_gate');self.assertEqual(result['velocity'],[0.,0.])
 
+    def test_follow_request_deadline_limits_authorization_and_is_rechecked(self):
+        req=dict(self.req,valid_until_s=10.05)
+        packet=self.controller.step(req,self.scene,self.rows,self.reference,now=10.,clock_domain='synthetic',mono=0.)
+        self.safety.command('goal',req);self.safety.push_packet(packet,mono=0.)
+        result=self.safety.tick(10.,mono=0.,clock_now=lambda:10.02)
+        self.assertEqual(result['state'],'allowed',result)
+        self.assertAlmostEqual(result['remaining_request_validity_s'],.03)
+        self.assertLessEqual(result['remaining_validity_s'],.03+1e-9)
+        clock=iter([10.,10.06]);result=self.safety.tick(10.,mono=.01,clock_now=lambda:next(clock))
+        self.assertEqual(result['reason'],'request_expired_during_gate')
+        self.assertEqual(result['velocity'],[0.,0.])
+
     def test_new_valid_grid_during_check_can_be_recertified_without_unconditional_stop(self):
         original=self.safety.guard.gate;calls=[]
         def updating(*args,**kwargs):

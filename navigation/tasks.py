@@ -6,6 +6,7 @@ Only continuous local-frame candidates are accepted (not frozen camera/LiDAR
 coordinates). The caller supplies the PID mapping used to render that input.
 """
 import copy
+from collections import deque
 import numpy as np
 from perception.environment.context import fingerprint
 from navigation.planning.people import PeopleModel,social_groups
@@ -13,6 +14,82 @@ from navigation.planning.people import PeopleModel,social_groups
 
 def identity(scene):
     return [scene.record[k] for k in ('session_id','generation','frame_id')]
+
+
+class FollowTrackHistory:
+    """Bounded evidence connecting a visual selection to subsequent 3D tracks."""
+    def __init__(self, planning, *, seconds=30., capacity=600):
+        self.config=planning;self.seconds=seconds;self.rows=deque(maxlen=capacity)
+
+    def add(self, scene):
+        scene.verify();r=scene.record;model=PeopleModel(scene,self.config['people'])
+        from navigation.planning.inputs import scene_status
+        try:valid_scene=scene_status(scene,r['as_of'],r['clock_domain'],self.config,check_navigation=False) is None
+        except (ValueError,KeyError,TypeError):valid_scene=False
+        if self.rows and (r['clock_domain']!=self.rows[-1]['clock_domain'] or
+                identity(scene)!=self.rows[-1]['local_identity'] or r['as_of']<self.rows[-1]['stamp_s']):
+            self.rows.clear()
+        if self.rows and r['as_of']==self.rows[-1]['stamp_s']:
+            if r['input_fingerprint']!=self.rows[-1]['scene_binding']:self.rows.clear()
+            else:return
+        data=(r.get('people') or {}).get('data') or {}
+        tracks={}
+        if model.status=='valid' and valid_scene:
+            for raw in data.get('tracks',[]):
+                from navigation.planning.people import stable_identity
+                key=stable_identity(data,raw)
+                if key in model.ids and raw.get('confirmed') and type(raw.get('lifecycle_generation')) is int:
+                    tracks[key]=(raw['lifecycle_generation'],raw.get('state'),raw.get('last_observed_stamp_s'))
+        self.rows.append(dict(stamp_s=r['as_of'],clock_domain=r['clock_domain'],local_identity=identity(scene),
+            scene_binding=r['input_fingerprint'],people_fingerprint=model.source,people_stamp_s=model.origin,tracks=tracks))
+        while self.rows and r['as_of']-self.rows[0]['stamp_s']>self.seconds:self.rows.popleft()
+
+    def validate(self, reference, scene, *, now):
+        if (not isinstance(reference,dict) or reference.get('reference_id')!=
+                fingerprint({k:v for k,v in reference.items() if k!='reference_id'})):
+            raise ValueError('follow_reference_invalid')
+        track=reference.get('track')
+        if not isinstance(track,dict):raise ValueError('follow_reference_has_no_3d_track')
+        key=tuple(track.get('identity') or ());generation=track.get('lifecycle_generation')
+        rows=list(self.rows);start=next((i for i,row in enumerate(rows) if
+            row['scene_binding']==reference.get('scene_binding') and row['stamp_s']==reference.get('stamp_s')),None)
+        if start is None:raise ValueError('follow_reference_history_unavailable')
+        end=next((i for i,row in enumerate(rows) if row['scene_binding']==scene.record['input_fingerprint']),None)
+        if end is None or end<start:raise ValueError('follow_reference_history_unavailable')
+        rows=rows[start:end+1];r=scene.record
+        rgb=reference.get('rgb_stamp_s')
+        if (type(rgb) not in (int,float) or not np.isfinite(rgb) or not 0<=rows[0]['stamp_s']-rgb<=.15 or
+                rows[0]['people_fingerprint']!=track.get('people_fingerprint') or
+                rows[0]['people_stamp_s']!=track.get('people_stamp_s') or
+                reference.get('local_identity')!=identity(scene) or reference.get('clock_domain')!=r['clock_domain'] or
+                not rows or rows[-1]['scene_binding']!=r['input_fingerprint'] or
+                not 0<=now-r['as_of']<=self.config['max_geometry_age_s']):
+            raise ValueError('follow_reference_context_or_scene_invalid')
+        source=rows[0]['tracks'].get(key)
+        if (source is None or source[1]!='observed' or source[2]!=track.get('support_stamp_s')):
+            raise ValueError('follow_reference_support_mismatch')
+        self._check(rows,key,generation)
+        return key,generation
+
+    def continue_from(self, binding, key, generation, scene):
+        rows=list(self.rows)
+        start=next((i for i,row in enumerate(rows) if row['scene_binding']==binding),None)
+        end=next((i for i,row in enumerate(rows) if row['scene_binding']==scene.record['input_fingerprint']),None)
+        if start is None or end is None or end<start:
+            raise ValueError('follow_track_history_unavailable')
+        self._check(rows[start:end+1],key,generation)
+
+    def _check(self, rows, key, generation):
+        previous=None;last_support=None
+        for row in rows:
+            value=row['tracks'].get(key)
+            if (value is None or value[0]!=generation or value[1] not in ('observed','predicted') or
+                    type(value[2]) not in (int,float) or not np.isfinite(value[2]) or
+                    not 0<=row['stamp_s']-value[2]<=self.config['people']['max_track_age_s'] or
+                    last_support is not None and value[2]<last_support or
+                    previous is not None and row['stamp_s']-previous>self.config['people']['max_observation_age_s']):
+                raise ValueError('follow_track_continuity_unavailable')
+            previous=row['stamp_s'];last_support=value[2]
 
 
 class TaskPolicy:
@@ -30,6 +107,20 @@ class TaskPolicy:
         self.revision=0;self.request=None;self.raw=None;self.groups=None;self.cancelled=False
         self.consumed=None
         self.last_update=None;self.response_binding=None
+        self.tracked_generation=None;self.track_scene_binding=None
+
+    def start_continuous_follow(self, reference, scene, history, *, now):
+        """Start only after proving continuity from the original selected frame."""
+        if self.kind!='follow' or self.cancelled or self.target is not None:
+            raise ValueError('follow_policy_not_available')
+        if not isinstance(reference,dict) or reference.get('task_id')!=self.task_id:
+            raise ValueError('follow_reference_task_mismatch')
+        target,generation=history.validate(reference,scene,now=now)
+        self.observe(scene)
+        self.target=target;self.tracked_generation=generation
+        self.last_visual=reference['rgb_stamp_s'];self.response_stamp=reference['stamp_s']
+        self.response_binding=reference['reference_id'];self.raw=None;self.track_scene_binding=scene.record['input_fingerprint']
+        return self.update(scene,now=now,history=history)
 
     def observe(self,scene,*,pid_to_track=None,candidates=None):
         scene.verify();r=scene.record
@@ -78,6 +169,8 @@ class TaskPolicy:
         return dict(operation='stop',reason=reason,task_id=self.task_id,task_completed=False,executable=False)
 
     def respond(self,ticket,response,*,scene,now):
+        if self.kind=='follow' and self.tracked_generation is not None:
+            raise ValueError('continuous_follow_requires_separate_visual_revalidation')
         self._bound(ticket,scene,now);mapping=ticket['pid_to_track'];pids=[int(k) for k in mapping]
         # A malformed response is retained by the caller; it is not repaired or
         # silently resubmitted. A ticket permits one response attempt.
@@ -131,11 +224,12 @@ class TaskPolicy:
             completion_policy='continuous' if self.kind=='follow' else 'goal',
             local_identity=identity(scene),clock_domain=r['clock_domain'])
 
-    def update(self,scene,*,now):
+    def update(self,scene,*,now,history=None):
         """Re-evaluate a follow/hold on every input; this never calls the VLM."""
         scene.verify()
         if self.cancelled:return self._stop('task_cancelled')
         if self.latest is None or identity(scene)!=self.latest['local_identity'] or scene.record['clock_domain']!=self.latest['clock_domain']:
+            if self.tracked_generation is not None:self.target=None
             return self._stop('task_localization_changed')
         if self.kind=='social':
             if self.groups is None:return self._stop('no_social_context')
@@ -143,16 +237,40 @@ class TaskPolicy:
             return dict(operation='social_context',social=self.groups if status['status']=='valid' else None,status=status,executable=False)
         if self.kind!='follow':raise ValueError('Only follow and social have per-observation policy updates')
         if self.target is None:return self._stop('follow_target_unavailable')
-        if self.response_stamp is None or not 0<=now-self.response_stamp<=self.hold_s:
+        if self.tracked_generation is None and (self.response_stamp is None or not 0<=now-self.response_stamp<=self.hold_s):
             return self._stop('follow_decision_expired')
         model=PeopleModel(scene,self.config['people'])
         if self.target not in model.ids:
             self.target=None
             return self._stop('follow_track_lost')
         track=model.tracks[model.ids.index(self.target)]
-        if now-self.last_visual>self.hold_s:return self._stop('follow_visual_confirmation_expired')
-        if not 0<=now-scene.record['as_of']<=self.config['max_geometry_age_s']:return self._stop('follow_scene_future_or_stale')
+        if self.tracked_generation is None and now-self.last_visual>self.hold_s:return self._stop('follow_visual_confirmation_expired')
+        if not 0<=now-scene.record['as_of']<=self.config['max_geometry_age_s']:
+            if self.tracked_generation is not None:self.target=None
+            return self._stop('follow_scene_future_or_stale')
         stamp=scene.record['as_of']
+        if self.tracked_generation is not None:
+            from navigation.planning.inputs import scene_status
+            try:invalid=scene_status(scene,now,scene.record['clock_domain'],self.config,check_navigation=False)
+            except (ValueError,KeyError,TypeError):invalid='localization_or_geometry_invalid'
+            if invalid:
+                self.target=None
+                return self._stop('follow_'+invalid)
+            try:
+                if history is None:raise ValueError('follow_track_history_unavailable')
+                history.continue_from(self.track_scene_binding,self.target,self.tracked_generation,scene)
+            except ValueError:
+                self.target=None
+                return self._stop('follow_track_continuity_lost')
+            data=scene.record['people']['data']
+            from navigation.planning.people import stable_identity
+            raw=next((v for v in data['tracks'] if stable_identity(data,v)==self.target),None)
+            if (raw is None or raw.get('lifecycle_generation')!=self.tracked_generation or not raw.get('confirmed') or
+                    raw.get('state') not in ('observed','predicted') or
+                    not 0<=now-track['last_observed']<=self.config['people']['max_track_age_s']):
+                self.target=None
+                return self._stop('follow_track_continuity_lost')
+            self.track_scene_binding=scene.record['input_fingerprint']
         if self.last_update is not None and (stamp<self.last_update or
                 stamp-self.last_update>self.config['people']['max_observation_age_s']):
             self.target=None
@@ -165,6 +283,8 @@ class TaskPolicy:
         direction=np.asarray(direction)/max(np.linalg.norm(direction),1e-9)
         goal=position-self.distance*direction
         request=self._goal(goal,scene,source=self.response_binding,stop=True);self.request=request
-        request['valid_until_s']=min(self.response_stamp+self.hold_s,self.last_visual+self.hold_s)
+        request['valid_until_s']=(min(stamp+self.config['max_geometry_age_s'],
+            track['last_observed']+self.config['people']['max_track_age_s']) if self.tracked_generation is not None else
+            min(self.response_stamp+self.hold_s,self.last_visual+self.hold_s))
         return dict(operation='plan',request=copy.deepcopy(request),target_identity=list(self.target),
             raw_response=self.raw,task_completed=False,executable=False)

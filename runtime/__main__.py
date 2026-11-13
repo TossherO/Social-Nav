@@ -42,6 +42,7 @@ def parser():
     p.add_argument('--trace-timing',action='store_true',help='Bounded scalar timing events, flushed at shutdown; no map/image recording or scheduling change')
     p.add_argument('--record-decision-inputs',action='store_true',help='Optional VLM worker: prepare YOLO associations and freeze causal three-frame task windows; no VLM request')
     p.add_argument('--agent-observations',action='store_true',help='Bounded optional Agent RGB/scene outlet; no YOLO, API or chassis output')
+    p.add_argument('--agent-follow-candidates',action='store_true',help='Prepare optional YOLO person candidates for Agent target selection')
     p.add_argument('--agent-execution',action='store_true',help='Allow owned Agent goal intents through the existing safety path; requires manual arming')
     p.add_argument('--no-image',action='store_true',help='Compatibility flag: the core never loads YOLO; disallows optional VLM image preparation')
     p.add_argument('--runtime-config',default=str(ROOT/'configs/runtime.yaml'))
@@ -69,6 +70,8 @@ def main():
         raise ValueError('--execute requires --live --interactive-session --vehicle-profile and --chassis-port')
     if args.agent_execution and not (args.execute and args.agent_observations):
         raise ValueError('--agent-execution requires --execute and --agent-observations')
+    if args.agent_follow_candidates and (not args.agent_observations or args.no_image):
+        raise ValueError('--agent-follow-candidates requires --agent-observations and RGB input')
     if args.chassis_port and not args.execute:raise ValueError('--chassis-port requires --execute')
     if args.record_decision_inputs and args.no_image:
         raise ValueError('--record-decision-inputs explicitly enables VLM image preparation; remove --no-image')
@@ -226,13 +229,15 @@ def main():
     if args.interactive_session:
         from .session import InteractiveSession
         interactive=InteractiveSession(live=args.live,safety=safety,output=output,execute=args.execute)
-    commands=CommandInbox(output/'commands.sock',safety,session=interactive,agent_execution=args.agent_execution)
+    commands=CommandInbox(output/'commands.sock',safety,session=interactive,agent_execution=args.agent_execution,
+                          follow_enabled=args.agent_follow_candidates)
     commands.agent_state.configure_vehicle(geometry,motion)
     agent_observer=None
     if args.agent_observations:
         from decision.agent.adapters.runtime import ObservationWorker
         commands.agent_state.enable_goal_observations()
-        agent_observer=ObservationWorker(commands.agent_state.publish_observation,metrics=metrics,geometry=geometry)
+        agent_observer=ObservationWorker(commands.agent_state.publish_observation,metrics=metrics,geometry=geometry,
+                                         follow_candidates=args.agent_follow_candidates)
     schedule=[] if args.commands is None else json.loads(Path(args.commands).read_text())
     if not isinstance(schedule,list) or any(set(v)!={'offset_s','kind','value'} or not np.isfinite(v['offset_s']) or v['offset_s']<0 for v in schedule):
         raise ValueError('Command schedule requires finite offset_s, kind and value')
@@ -405,7 +410,7 @@ def main():
                             exporter.submit(last_device,people,rgb=rgb,name=packet['observation_id'])
                             next_export=stamp+1/settings['scene_export_hz']
                     if agent_observer is not None and scene is not None and abs(scene.record['as_of']-stamp)<1e-6:
-                        agent_observer.submit(scene,arrays.get('rgb'),packet['rgb_stamp'],packet['rgb_frame'],packet['camera_info'])
+                        agent_observer.submit(scene,arrays.get('rgb'),packet['rgb_stamp'],packet['rgb_frame'],packet['camera_info'],packet['rgb_stamp_ns'])
                     if decision_recorder is not None:
                         current_scene=scene if scene is not None and abs(scene.record['as_of']-stamp)<1e-6 else None
                         decision_recorder.submit(people,arrays,scene=current_scene,
@@ -440,7 +445,7 @@ def main():
             except subprocess.TimeoutExpired:worker.kill();worker.wait(timeout=2)
         process_cpu_s=None if cpu_start is None else time.process_time()-cpu_start
         run_wall_s=None if run_start is None else time.monotonic()-run_start
-        cleanup_errors=[];export_report=display_report=decision_report=planning_report=association_report=None
+        cleanup_errors=[];export_report=display_report=decision_report=planning_report=association_report=agent_report=None
         for name,close in [('scan_inbox',None if scan_inbox is None else scan_inbox.close),('map_worker',None if map_worker is None else map_worker.close),('commands',commands.close),('control',None if control_loop is None else control_loop.close),
                            ('agent_observations',None if agent_observer is None else agent_observer.close),
                            ('safety_telemetry',None if safety_telemetry is None else safety_telemetry.close),('safety',safety.close),('reference',reference.close),('environment',environment.close),('wire',wire.close),('pose_channel',main_pose.close),
@@ -457,6 +462,7 @@ def main():
                 if name=='exporter':export_report=result
                 if name=='planning_recorder':planning_report=result
                 if name=='associations':association_report=result
+                if name=='agent_observations':agent_report=result
                 if name=='decision_inputs':decision_report=result
                 if name=='display':
                     display_report=result
@@ -480,6 +486,7 @@ def main():
             scan_scheduling=dict(policy='synchronous_archive') if scan_inbox is None else dict(policy='one_active_one_latest_pending',received=scan_inbox.received,replaced=scan_inbox.replaced),
             main_process_cpu_s=process_cpu_s,run_wall_s=run_wall_s,cleanup_errors=cleanup_errors)
         report['route_replay']=None if route_replay is None else route_replay.summary()
+        report['agent_observations']=agent_report
         report['termination']='user_stop' if stop_requested else 'source_end'
         (output/'summary.json').write_text(json.dumps(report,allow_nan=False,indent=2)+'\n')
         manifest=dict(success=failure is None,source='live' if args.live else 'bag',clock_domain=clock_domain,backend='native_roll_fast_lio',mode=mode,bag=None if bag is None else str(bag),imu_time_calibration=timing,

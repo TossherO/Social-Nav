@@ -1,6 +1,6 @@
 # 感知导航ROS诊断命令
 
-以下保存可追溯的专项ROS工作流，日常推理与交互导航使用[当前运行手册](../感知导航运行手册.md)。归档不表示这些分支完成了本轮验证。
+以下保存可追溯的专项ROS工作流，日常推理与交互导航使用[当前运行手册](../系统运行手册.md)。归档不表示这些分支完成了本轮验证。
 
 ### ROS诊断准备
 
@@ -37,9 +37,9 @@ CUDACXX="$CUDA_COMPILER" CUDAHOSTCXX="$CUDA_HOST_COMPILER" \
 <details>
 <summary>展开隔离master中的建图、有图定位与无图定位</summary>
 
-本节使用 ROS 诊断入口，它会创建隔离 master 并回放，不需要额外播放同包。初值方式互斥，`--pose-file` 必须对应 bag、地图和起始偏移。只做定位时省略检测参数；常规联合推理仍优先使用[直接运行时](../感知导航运行手册.md#日常运行与回看)。
+本节使用 ROS 诊断入口，它会创建隔离 master 并回放，不需要额外播放同包。初值方式互斥，`--pose-file` 必须对应 bag、地图和起始偏移。只做定位时省略检测参数；常规联合推理仍优先使用[直接运行时](../系统运行手册.md#日常运行与回看)。
 
-先按[地图准备](../感知导航运行手册.md#地图准备)保存对应起点；下列三种任务分别选用。
+先按[地图准备](../系统运行手册.md#地图准备)保存对应起点；下列三种任务分别选用。
 
 ```bash
 source perception/scripts/ros1_env.sh
@@ -91,9 +91,9 @@ bash "perception/scripts/run_ros_diagnostic.sh" --mode localization --bag "$BAG"
 
 同一次回放并行运行定位、三维检测跟踪与 YOLO 关联，分别保存定位记录、`people.jsonl` 和 `rgb_associations.jsonl`。结束后将二维结果导入工程的 `rgb_association/` 并登记默认来源，不再运行 YOLO。
 
-人工标签留在 `DECISION_PROJECT`，不复制 bag、全量图像或点云。命令成功后按[决策标注手册](../decision/决策任务标注.md)打开或服务该工程。
+人工标签留在 `DECISION_PROJECT`，不复制 bag、全量图像或点云。命令成功后按[决策标注手册](../decision/技术实现-VLM局部决策.md#决策任务标注)打开或服务该工程。
 
-只有整条命令成功，才表示标注准备完成。`run.json` 保存联合状态、二维摘要、模型和标定，工程建立来源后不改写。未处理观察仍是 `not_processed`，不会自动补跑或换图。若仅导入失败，保留感知结果，按[恢复说明](../decision/决策任务标注.md#rgb框来源)处理。
+只有整条命令成功，才表示标注准备完成。`run.json` 保存联合状态、二维摘要、模型和标定，工程建立来源后不改写。未处理观察仍是 `not_processed`，不会自动补跑或换图。若仅导入失败，保留感知结果，按[恢复说明](../decision/技术实现-VLM局部决策.md#rgb框来源)处理。
 
 </details>
 
@@ -190,7 +190,7 @@ bash "perception/scripts/run_ros_diagnostic.sh" --mode localization --bag "$BAG"
   --rviz --out "$OUT/environment_run"
 ```
 
-需要检测时，在所选诊断命令中加`--people-python "$PEOPLE_PYTHON"`。可信区域通过[地图准备](../感知导航运行手册.md#划定地图可信区域)单独绘制。
+需要检测时，在所选诊断命令中加`--people-python "$PEOPLE_PYTHON"`。可信区域通过[地图准备](../系统运行手册.md#地图准备)单独绘制。
 
 ```bash
 # 建图并保存静态射线证据。
@@ -319,7 +319,7 @@ END_SECONDS=20
 <details>
 <summary>展开TensorRT引擎准备、离线缓存和ROS图像节点</summary>
 
-新bag或live先按[日常流程](../感知导航运行手册.md#可选图像与决策输入)显式启用所需图像支路。已有二维记录的标注工程直接导入，无需再次离线推理。以下工具用于引擎准备、旧来源补充二维或专项比较，输入为已登记原bag及三维结果的决策观察工程。
+新bag或live先按[日常流程](../系统运行手册.md#可选图像与决策输入)显式启用所需图像支路。已有二维记录的标注工程直接导入，无需再次离线推理。以下工具用于引擎准备、旧来源补充二维或专项比较，输入为已登记原bag及三维结果的决策观察工程。
 
 Linux二维与三维检测共用项目环境；Windows不装YOLO。缺依赖时按[图像依赖](../../perception/detection_tracking/inference/requirements-image.txt)补齐，Torch／TorchVision从官方匹配源安装，普通包优先中国镜像、TensorRT二进制用NVIDIA源，不为本功能升级既有Torch。权重来源及关联规则见[推理专题](../perception/技术实现-检测与跟踪推理.md#rgb人物框与三维身份)。
 
@@ -358,7 +358,7 @@ RGB_ASSOCIATIONS=outputs/perception/SESSION/rgb_association
   --project "$DECISION_PROJECT" --output "$RGB_ASSOCIATIONS"
 ```
 
-统一入口和标注`prepare-rgb`会登记工程默认来源，本机／远程标注及导出都从工程读取；切帧不推理，不复制全量图像或点云。来源切换与重审见[标注手册](../decision/决策任务标注.md#rgb框来源)。
+统一入口和标注`prepare-rgb`会登记工程默认来源，本机／远程标注及导出都从工程读取；切帧不推理，不复制全量图像或点云。来源切换与重审见[标注手册](../decision/技术实现-VLM局部决策.md#rgb框来源)。
 
 以下独立节点仅用于专项联调。旧ROS入口`run_ros_diagnostic.sh`显式加`--image-association`或请求`--decision-project`时才管理该节点，不要重复启动；默认直接运行时不启动此ROS支路。使用同一master／时钟，保留CameraInfo；原检测节点的`/perception/people/rgb`必须可达：
 

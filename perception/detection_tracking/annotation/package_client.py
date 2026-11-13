@@ -34,7 +34,7 @@ def package_client(output):
             for name in FILES:
                 archive.write(ROOT / name, name)
             guide = '# Windows远程标注客户端\n\n由项目当前操作手册生成；服务器需先完成工程登记并启动。\n\n'
-            guide += section('docs/感知导航运行手册.md', '### Windows客户端')
+            guide += section('docs/系统运行手册.md', '### Windows客户端')
             guide += '\n\n' + section('docs/perception/技术实现-检测训练.md', '### 远程标注与同步') + '\n'
             # The portable bundle does not ship repository documentation.
             guide = re.sub(r'\[([^\]]+)\]\((?!https?://)[^)]+\)', r'\1', guide)

@@ -19,6 +19,8 @@ class Store:
         self.db.execute('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, wall_s REAL, kind TEXT, value TEXT)')
         self.db.execute('CREATE TABLE IF NOT EXISTS map_images (view_id TEXT, role TEXT, sha256 TEXT, png BLOB, PRIMARY KEY(view_id,role))')
         self.db.execute('CREATE TABLE IF NOT EXISTS keyframes (keyframe_id TEXT PRIMARY KEY, task_id TEXT, revision INTEGER, metadata TEXT, image BLOB)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS follow_references (task_id TEXT, revision INTEGER, goal_id TEXT, metadata TEXT, image BLOB, crop BLOB, PRIMARY KEY(task_id,revision,goal_id))')
+        self.db.execute('CREATE TABLE IF NOT EXISTS follow_recoveries (reference_id TEXT PRIMARY KEY, task_id TEXT, revision INTEGER, goal_id TEXT, metadata TEXT, image BLOB, crop BLOB)')
         self.db.commit()
 
     def save(self, state, kind, value):
@@ -49,6 +51,43 @@ class Store:
             self.db.execute('INSERT OR IGNORE INTO map_images VALUES (?,?,?,?)',
                 (r['reference_map_id'],r['image_role'],r['image_sha256'],reference.image))
         self.event('reference_map_prepared',r)
+
+    def follow_reference(self, record, image, crop):
+        with self.db:
+            self.db.execute('INSERT INTO follow_references VALUES (?,?,?,?,?,?)',
+                (record['task_id'],record['task_revision'],record['goal_id'],encode(record),image,crop))
+
+    def read_follow_reference(self, task_id, revision, goal_id):
+        import hashlib
+        from perception.environment.context import fingerprint
+        row = self.db.execute('SELECT metadata,image,crop FROM follow_references WHERE task_id=? AND revision=? AND goal_id=?',
+                              (task_id,revision,goal_id)).fetchone()
+        if row is None:
+            return None
+        record, image, crop = json.loads(row[0]), bytes(row[1]), bytes(row[2])
+        if (record['reference_id'] != fingerprint({k:v for k,v in record.items() if k != 'reference_id'}) or
+                record['image_sha256'] != hashlib.sha256(image).hexdigest() or
+                record['crop_sha256'] != hashlib.sha256(crop).hexdigest()):
+            raise ValueError('Follow visual reference changed')
+        return record,image,crop
+
+    def follow_recovery(self, record, image, crop):
+        with self.db:
+            self.db.execute('INSERT INTO follow_recoveries VALUES (?,?,?,?,?,?,?)',
+                (record['reference_id'],record['task_id'],record['task_revision'],record['goal_id'],encode(record),image,crop))
+
+    def read_follow_recovery(self, reference_id, task_id, revision, goal_id):
+        import hashlib
+        from perception.environment.context import fingerprint
+        row=self.db.execute('SELECT metadata,image,crop FROM follow_recoveries WHERE reference_id=? AND task_id=? AND revision=? AND goal_id=?',
+                            (reference_id,task_id,revision,goal_id)).fetchone()
+        if row is None:return None
+        record,image,crop=json.loads(row[0]),bytes(row[1]),bytes(row[2])
+        if (record['reference_id']!=fingerprint({k:v for k,v in record.items() if k!='reference_id'}) or
+                record['image_sha256']!=hashlib.sha256(image).hexdigest() or
+                record['crop_sha256']!=hashlib.sha256(crop).hexdigest()):
+            raise ValueError('Follow recovery reference changed')
+        return record,image,crop
 
     def close(self):
         self.db.close()
