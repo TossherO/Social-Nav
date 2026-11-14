@@ -126,7 +126,7 @@ class SimulationNavigation:
     def _route_request(self):
         final=self.route_index==len(self.route['waypoints'])-1
         goal=list(self.route['waypoints'][self.route_index])
-        if final:goal.append(self.route['final_yaw'])
+        if final and self.route['final_yaw'] is not None:goal.append(self.route['final_yaw'])
         self.request=dict(request_id=self.handle['call_id']+':'+str(self.route_index),task_id=self.handle['task_id'],
             goal_revision=self.handle['goal_revision'],mode='local',frame_id='sim_odom',target_reference='base_link',
             goal=goal,goal_behavior='stop' if final else 'pass_through')

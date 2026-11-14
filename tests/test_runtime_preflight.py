@@ -2,7 +2,10 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -12,6 +15,35 @@ import yaml
 from runtime import preflight
 from navigation.planning.motion import load_motion_config
 from navigation.control.vehicle import load_vehicle_profile
+
+
+class RvizPluginTests(unittest.TestCase):
+    def test_panel_check_rejects_old_and_wrong_abi_and_accepts_current_library(self):
+        from runtime.rviz_tools import verify_rviz_tools
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);manifest=root/'plugins.xml';library=root/'libsocial_nav_rviz_tools.so'
+            manifest.write_text('<library><class name="social_nav_rviz/SessionPanel" '
+                'type="social_nav_rviz::SessionPanel" base_class_type="rviz::Panel"/></library>')
+            original_run=subprocess.run
+            def run(args,**kwargs):
+                if args[0]=='rospack':
+                    return SimpleNamespace(stdout='social_nav_rviz '+str(manifest)+'\n',returncode=0)
+                return original_run(args,**kwargs)
+            def build(source):
+                original_run(['/usr/bin/gcc','-shared','-fPIC','-x','c','-','-o',str(library)],
+                             input=source,text=True,check=True,capture_output=True)
+            with patch.dict(os.environ,{'LD_LIBRARY_PATH':folder}),patch('runtime.rviz_tools.subprocess.run',side_effect=run):
+                build('int old_plugin(void) { return 1; }')
+                with self.assertRaisesRegex(RuntimeError,'outdated or unloadable'):
+                    verify_rviz_tools(sys.executable)
+                build('int social_nav_rviz_session_panel_abi(void) { return 2; }')
+                with self.assertRaisesRegex(RuntimeError,'outdated or unloadable'):
+                    verify_rviz_tools(sys.executable)
+                build('int social_nav_rviz_session_panel_abi(void) { return 1; }')
+                self.assertEqual(verify_rviz_tools(sys.executable),library)
+                manifest.write_text('<library/>')
+                with self.assertRaisesRegex(RuntimeError,'missing from the plugin manifest'):
+                    verify_rviz_tools(sys.executable)
 
 
 class TrialConfigTests(unittest.TestCase):

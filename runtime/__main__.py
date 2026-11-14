@@ -83,7 +83,8 @@ def main():
     source=Path(args.source_run).resolve() if args.source_run else None
     run={} if source is None else json.loads((source/'run.json').read_text())
     args.start=(0. if args.live else float(run.get('start',0.) or 0.)) if args.start is None else args.start
-    args.coverage=args.coverage or run.get('association_coverage')
+    if args.coverage is None and args.map_directory is None:
+        args.coverage=run.get('association_coverage')
     if args.duration is None and source is not None and not args.live:args.duration=run.get('duration')
     mode=args.mode or run.get('mode','odometry')
     if args.live and (args.start or args.rate!=1. or args.pose_file):raise ValueError('Live input uses ROS time; bag offset/rate/pose file are not applicable')

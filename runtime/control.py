@@ -6,6 +6,24 @@ import threading
 import time
 
 
+def manual_preview_path(reference, request):
+    """Expose a bounded, identity-matched reference for task-level checking."""
+    if not isinstance(reference,dict) or not isinstance(request,dict):return None
+    result=reference.get('result')
+    if not isinstance(result,dict) or result.get('frame_id')!=request.get('frame_id'):
+        return None
+    from navigation.planning.continuity import goal_binding
+    if goal_binding(result.get('request',{}))!=goal_binding(request):return None
+    path=result.get('path')
+    if not isinstance(path,list) or not 2<=len(path)<=1024:return None
+    try:
+        import math
+        points=[[float(p[0]),float(p[1])] for p in path]
+        if not all(math.isfinite(x) and math.isfinite(y) for x,y in points):return None
+        return points
+    except (TypeError,ValueError,IndexError,KeyError):return None
+
+
 class ControlLoop:
     def __init__(self,reference,controller,batch,safety,pose_socket,commands,settings,scene_settings,metrics,record,*,asset=None,initial_goal=None,clock_domain='runtime_bag',display=None,route_replay=None,planning_recorder=None,session=None):
         self.reference,self.controller,self.batch,self.safety=reference,controller,batch,safety
@@ -236,6 +254,9 @@ class ControlLoop:
                                     'observation_unavailable' if status is None else status.get('reason')),
                             reference_stamp_s=None if self.reference.current is None or self.request is not None
                                               else self.reference.current['as_of'],executable=False)
+                        if self.request is None:
+                            preview_status['reference_path']=manual_preview_path(self.reference.current,preview['request'])
+                            preview_status['reference_frame']=preview['request']['frame_id']
                     self.commands.agent_state.publish_control(packet,self.rows[-1],map_binding=binding,
                         cancelled_request=self.cancelled_request,idle_feedback=idle_feedback,manual_preview=preview_status)
                     if self.display is not None:

@@ -67,6 +67,16 @@ with pathlib.Path(os.environ['TEST_LAUNCH_LOG']).open('a') as out: out.write('ta
             self.assertEqual(obs[obs.index(flag)+1],exe[exe.index(flag)+1])
         self.assertEqual(self.calls(),'')
 
+    def test_agent_observation_uses_agent_map_without_enabling_execution(self):
+        result=self.run_script('scripts/interactive.sh','observe','--dry-run','--agent-observations')
+        self.assertEqual(result.returncode,0,result.stderr)
+        command=shlex.split(result.stdout)
+        self.assertEqual(command[command.index('--config')+1],'navigation/commissioning/interactive_agent.yaml')
+        self.assertIn('--agent-observations',command)
+        self.assertNotIn('--execute',command)
+        self.assertNotIn('--chassis-port',command)
+        self.assertEqual(self.calls(),'')
+
     def test_check_uses_same_python_and_does_not_start_runtime(self):
         result=self.run_script('scripts/interactive.sh','execute','--check')
         self.assertEqual(result.returncode,0,result.stderr)

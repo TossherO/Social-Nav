@@ -2,7 +2,6 @@
 import argparse
 import json
 import math
-import os
 from pathlib import Path
 import signal
 import subprocess
@@ -26,11 +25,12 @@ def resolve(value):
 
 def session_inputs(config_path):
     from perception.environment.storage import StaticEnvironmentMap
-    from perception.mapping_localization.coverage import PriorCoverage, asset_digest
+    from perception.mapping_localization.coverage import PriorCoverage, asset_digest, full_map_coverage
     from perception.mapping_localization.results import map_fingerprint
     config = yaml.safe_load(Path(config_path).read_text())
     config = dict({key: str(resolve(config[key])) for key in
-              ('map', 'static_map', 'coverage', 'initial_pose_hint', 'motion_config')},
+              ('map', 'static_map', 'initial_pose_hint', 'motion_config')},
+              coverage=str(resolve(config['coverage'])) if config.get('coverage') else None,
               motion_profile=config.get('motion_profile'))
     if not Path(config['map'], 'COMPLETE').is_file():
         raise ValueError('Select a complete localization map')
@@ -38,7 +38,10 @@ def session_inputs(config_path):
     fingerprint = map_fingerprint(config['map'])
     if asset.manifest['source'].get('map_fingerprint') != fingerprint:
         raise ValueError('Static environment and localization map do not match')
-    PriorCoverage.load(config['coverage'], asset_fingerprint=asset_digest(config['map']))
+    if config['coverage']:
+        PriorCoverage.load(config['coverage'], asset_fingerprint=asset_digest(config['map']))
+    else:
+        full_map_coverage(config['map'])
     hint = json.loads(Path(config['initial_pose_hint']).read_text())
     if hint['map']['fingerprint'] != fingerprint:
         raise ValueError('Initial height/attitude hint belongs to another map')
@@ -103,11 +106,9 @@ def bag_initial_pose(path, config, *, bag, start, live=False):
     return load_seed(resolve(path), config['map'], resolve(bag), start)
 
 
-def require_rviz_tools():
-    declared=subprocess.run(['rospack','plugins','--attrib=plugin','rviz'],capture_output=True,text=True,check=True).stdout
-    libraries=[Path(prefix)/'libsocial_nav_rviz_tools.so' for prefix in os.environ.get('LD_LIBRARY_PATH','').split(':') if prefix]
-    if not any(line.startswith('social_nav_rviz ') for line in declared.splitlines()) or not any(p.is_file() for p in libraries):
-        raise RuntimeError('RViz ground pose tools are not built. Run: bash perception/scripts/build_ros1.sh visualization')
+def require_rviz_tools(python='/usr/bin/python3'):
+    from .rviz_tools import verify_rviz_tools
+    verify_rviz_tools(python)
 
 
 def session_notice(status, *, selected=False, candidate=False):
@@ -161,9 +162,10 @@ def runtime_command(args, config, pose):
     motion_path, profile = motion_selection(config, path=args.motion_config, profile=args.motion_profile)
     command = [sys.executable, '-B', '-m', 'runtime', '--mode', 'localization',
                '--map', config['map'], '--static-map', config['static_map'],
-               '--coverage', config['coverage'], '--pose', *map(str, pose),
+               '--pose', *map(str, pose),
                '--motion-config', str(motion_path),
                '--output', str(Path(args.output)/'run'), '--display', '--interactive-session', '--record-planning']
+    if config.get('coverage'):command += ['--coverage', config['coverage']]
     if profile is not None:command += ['--motion-profile', profile]
     if args.live:
         command += ['--live']
@@ -248,7 +250,9 @@ def main(argv=None):
         p.error('--agent-follow-candidates requires --agent-observations')
     if args.chassis_port and not args.execute:
         p.error('--chassis-port is only used with explicit --execute')
-    if not args.no_rviz:require_rviz_tools()
+    if not args.no_rviz:
+        from .config import runtime_settings
+        require_rviz_tools(runtime_settings(resolve(args.runtime_config or 'configs/runtime.yaml'))['input_python'])
     config, asset, hint = session_inputs(args.config)
     seed = None
     if args.pose_file:

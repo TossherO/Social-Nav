@@ -80,8 +80,10 @@ def inspect(config_path, *, motion_path=None, motion_profile=None, vehicle_profi
 
     config = check('interactive_config', lambda: yaml_file(config_path))
     if config is not None:
-        for key in ('map', 'static_map', 'coverage', 'initial_pose_hint', 'motion_config'):
+        for key in ('map', 'static_map', 'initial_pose_hint', 'motion_config'):
             check(key, lambda key=key: asset(key, config.get(key)))
+        if config.get('coverage'):
+            check('coverage', lambda: asset('coverage', config['coverage']))
 
         def map_pair():
             from .interactive import session_inputs
@@ -187,17 +189,12 @@ def inspect(config_path, *, motion_path=None, motion_profile=None, vehicle_profi
     def rviz():
         if not shutil.which('rviz'):
             raise RuntimeError('rviz executable unavailable')
-        result = subprocess.run(['rospack','plugins','--attrib=plugin','rviz'], capture_output=True, text=True, timeout=10, check=True)
-        if not any(line.startswith('social_nav_rviz ') for line in result.stdout.splitlines()):
-            raise RuntimeError('Ground pose plugin is not registered; build_ros1.sh visualization')
-        paths = [Path(p)/'libsocial_nav_rviz_tools.so' for p in os.environ.get('LD_LIBRARY_PATH','').split(':') if p]
-        library = next((path for path in paths if path.is_file()), None)
-        if library is None:
-            raise RuntimeError('Ground pose plugin library unavailable; source ros1_env.sh after building')
-        asset('rviz_ground_pose_library', library, 'build_on_target')
+        from .rviz_tools import verify_rviz_tools
         # RViz uses system ROS libraries, not the model interpreter's libffi/Qt.
         python = settings['input_python'] if settings is not None else '/usr/bin/python3'
-        return probe(python, 'import ctypes,json,sys; ctypes.CDLL(json.load(sys.stdin)); print("plugin loadable; GUI not opened")', str(library))
+        library = verify_rviz_tools(python)
+        asset('rviz_ground_pose_library', library, 'build_on_target')
+        return 'plugin loadable; session panel ABI verified; GUI not opened'
     check('rviz_ground_pose_plugin', rviz)
     check('sensor_calibration', lambda: asset('sensor_calibration', 'perception/sensors/calibration/lidar_imu.yaml'))
     return dict(scope='read_only_deployment_inspection', software_checks_passed=all(c['status']=='ok' for c in checks),

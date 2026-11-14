@@ -36,8 +36,8 @@ def bundle_main(argv):
     export_source = export.add_mutually_exclusive_group(required=True)
     export_source.add_argument('--run')
     export_source.add_argument('--localization-map', help='Target ROLL map: registered scan evidence, or explicit endpoint-only --dynamic-filter none')
-    export.add_argument('--evidence-run',help='Sealed scan run to project into --localization-map')
-    export.add_argument('--reference-run',help='Same-bag fixed-map localization for --evidence-run')
+    export.add_argument('--evidence-run',action='append',help='Sealed scan run; repeat with paired --reference-run for multiple surveys')
+    export.add_argument('--reference-run',action='append',help='Same-bag localization on target map; repeat in evidence-run order')
     export.add_argument('--out', required=True)
     export.add_argument('--config')
     export.add_argument('--resolution', type=float, help='Static output grid and fusion voxel resolution in metres')
@@ -109,8 +109,15 @@ def bundle_main(argv):
             if args.evidence_run or args.reference_run:
                 if not (args.evidence_run and args.reference_run) or args.bag or args.people or args.dynamic_filter not in (None,'geometric'):
                     parser.error('Registered ray export requires both runs and geometric filtering')
-                data=export_registered_environment(args.localization_map,args.evidence_run,args.reference_run,args.out,
-                    config=config,bounds=args.bounds,export_pgm=args.export_pgm,progress=progress)
+                if len(args.evidence_run) != len(args.reference_run):
+                    parser.error('Each --evidence-run needs one matching --reference-run in the same order')
+                if len(args.evidence_run) == 1:
+                    data=export_registered_environment(args.localization_map,args.evidence_run[0],args.reference_run[0],args.out,
+                        config=config,bounds=args.bounds,export_pgm=args.export_pgm,progress=progress)
+                else:
+                    from .multi_export import export_registered_multi_environment
+                    data=export_registered_multi_environment(args.localization_map,args.evidence_run,args.reference_run,args.out,
+                        config=config,bounds=args.bounds,export_pgm=args.export_pgm,progress=progress)
             elif args.dynamic_filter != 'none' or args.bag or args.people:
                 parser.error('--localization-map requires --dynamic-filter none and cannot accept --bag or --people')
             else:

@@ -27,16 +27,22 @@ class LocalizationSession:
     def __init__(self,config_path,*,mode='odometry',coverage=None,allow_local_only=False,metrics=None,association_ready=None,latest_matching=False):
         if mode not in ('mapping','localization','odometry'):raise ValueError('Unsupported native localization mode')
         self.mode=mode;self.latest_matching=bool(latest_matching and mode=='localization');self.session=uuid.uuid4().hex;self.config=yaml.safe_load(Path(config_path).read_text());self.metrics=metrics
-        self.frontend=NativeFrontend(config_path);self.matcher=None
         self.map_id='';self.asset_fingerprint=''
-        if mode!='odometry':self.matcher=NativeRoll(config_path)
         if mode=='localization':
             directory=Path(self.config['roll']['saveKeyframeMapDirectory']).parent
             self.asset_fingerprint=hashlib.sha256(json.dumps(map_fingerprint(directory),sort_keys=True).encode()).hexdigest()
             self.map_id='roll:'+self.asset_fingerprint
-        if coverage:
+        if mode=='localization':
             from .coverage import PriorCoverage
-            coverage=PriorCoverage.load(coverage,asset_fingerprint=self.asset_fingerprint)
+            record=self.config['roll'].get('localization_coverage')
+            if not record:
+                raise ValueError('Localization configuration must include map-bound coverage')
+            frozen=PriorCoverage(record,asset_fingerprint=self.asset_fingerprint)
+            if coverage and PriorCoverage.load(coverage,asset_fingerprint=self.asset_fingerprint).fingerprint != frozen.fingerprint:
+                raise ValueError('Coverage changed after localization configuration was prepared')
+            coverage=frozen
+        self.frontend=NativeFrontend(config_path);self.matcher=None
+        if mode!='odometry':self.matcher=NativeRoll(config_path)
         from perception.environment.layers import load_config as environment_config
         association_config=environment_config()
         self.context=LocalizationContext('fast_lio' if mode=='odometry' else 'roll_fast_lio',

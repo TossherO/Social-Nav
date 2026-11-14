@@ -9,6 +9,7 @@ from decision.agent import CONFIG_DIR
 from decision.agent.core.conversation import Conversation
 from decision.agent.core.loop import AgentLoop
 from decision.agent.core.model import ApiError, Model, cache_messages, cache_usage
+from decision.agent.core.model_projection import ModelProjection
 from decision.agent.core.session import AgentSession
 from decision.agent.core.store import Budget, Store
 from decision.agent.tools.framework import Reply
@@ -129,11 +130,11 @@ class ConversationTests(unittest.TestCase):
                         and p['text'].startswith('{') and json.loads(p['text']).get('source')=='current_spatial_view')
         referenced=context(seen[0]);full=context(seen[1])
         self.assertEqual(referenced['details_in_tool_call_id'],call.message['tool_calls'][0]['id'])
-        self.assertEqual(referenced['view']['view_id'],view_id)
+        self.assertEqual(referenced['view']['view_id'],ModelProjection().reference('view',view_id))
         self.assertNotIn('annotations',referenced['view'])
         self.assertNotIn('details_in_tool_call_id',full)
-        self.assertEqual(full['view']['view_id'],original['view_id'])
-        self.assertEqual(full['view']['annotation_reference']['reference_map_id'],self.session.reference_map.record['reference_map_id'])
+        self.assertEqual(full['view']['view_id'],ModelProjection().reference('view',original['view_id']))
+        self.assertEqual(full['view']['annotation_reference']['reference_map_id'],ModelProjection().reference('map',self.session.reference_map.record['reference_map_id']))
         self.assertNotIn('annotations',full['view'])
         self.assertEqual(view.record,original)
         self.assertLess(len(json.dumps(referenced)),len(json.dumps(full)))
@@ -248,10 +249,18 @@ class ConversationTests(unittest.TestCase):
         outputs=[reply('navigate',goal_id='elevator',pose=[5,4,0],view_id=view_id,orientation_source='autonomous'),
                  reply('wait_for_event',event='navigation')]
         def handle(request):
-            seen.append(json.loads(request.content))
-            return httpx.Response(200,text=wire(outputs[len(seen)-1].message['tool_calls']))
+            body=json.loads(request.content);seen.append(body)
+            selected=outputs[len(seen)-1].message['tool_calls']
+            if len(seen)==1:
+                selected=copy.deepcopy(selected)
+                args=json.loads(selected[0]['function']['arguments'])
+                state=json.loads(body['messages'][-1]['content'][0]['text'])['state']
+                args['view_id']=state['visual_inputs']['maps']['view_id']
+                selected[0]['function']['arguments']=json.dumps(args)
+            return httpx.Response(200,text=wire(selected))
         client=self.client(handle)
         first=client.decide(self.session.prompt(),spatial_view=self.session.spatial_view)
+        self.assertEqual(first.action['arguments']['view_id'],view_id)
         result=self.session.call(first.action['tool'],**first.action['arguments'])
         self.assertEqual(result['status'],'accepted')
         self.session.conversation.commit(first,result)

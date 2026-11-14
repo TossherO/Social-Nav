@@ -339,7 +339,8 @@ class IndoorGoalTests(unittest.TestCase):
         seen=[]
         def handle(request):
             body=json.loads(request.content);seen.append(body)
-            native=Reply.fixture(action('navigate',goal_id='a',pose=[5,4,.2],view_id=view.record['view_id'],orientation_source='semantic')).message['tool_calls'][0]
+            state=json.loads(body['messages'][-1]['content'][0]['text'])['state']
+            native=Reply.fixture(action('navigate',goal_id='a',pose=[5,4,.2],view_id=state['visual_inputs']['maps']['view_id'],orientation_source='semantic')).message['tool_calls'][0]
             parts=[dict(model='qwen3.8-flash',choices=[dict(delta=dict(tool_calls=[dict(native,index=0)]),finish_reason='tool_calls')]),
                    dict(model='qwen3.8-flash',choices=[],usage=dict(prompt_tokens=20,completion_tokens=10))]
             return httpx.Response(200,text=''.join('data: '+json.dumps(p)+'\n\n' for p in parts)+'data: [DONE]\n\n')
@@ -347,6 +348,7 @@ class IndoorGoalTests(unittest.TestCase):
             result=Model(config,budget,self.store,transport=httpx.MockTransport(handle)).decide(
                 self.session.prompt(),observation=observation,spatial_view=view)
             self.assertEqual(result.action['arguments']['pose'],[5,4,.2])
+            self.assertEqual(result.action['arguments']['view_id'],view.record['view_id'])
             images=[v for v in seen[0]['messages'][-1]['content'] if v['type']=='image_url']
             self.assertEqual(len(images),3)
             self.assertTrue(images[1]['image_url']['url'].startswith('data:image/png;'))

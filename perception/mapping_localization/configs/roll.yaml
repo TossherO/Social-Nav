@@ -214,7 +214,7 @@ roll:
   keyframeCacheMaxBytes: 134217728
   # 地图是否与重力方向对齐。
   gravityAlignedMap: true
-  # 仅指定 --association-coverage 时启用；距离单位为米，角度单位为弧度。
+  # 固定地图定位使用显式区域或自动全图区域；距离单位为米，角度单位为弧度。
   # 地图关联区域重进入与匹配确认条件。
   coverageGate:
     # 重新进入地图关联区域的边界余量，单位为米。

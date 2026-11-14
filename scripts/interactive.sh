@@ -52,6 +52,9 @@ case "$SOCIAL_NAV_LAUNCH_KIND" in
       *) echo '观察入口只支持 --help 或 --dry-run。' >&2; exit 2;;
     esac
     SOCIAL_NAV_LAUNCH_CONFIG=navigation/commissioning/interactive_observation.yaml
+    if [[ "$SOCIAL_NAV_AGENT_OBSERVATIONS" == 1 ]]; then
+      SOCIAL_NAV_LAUNCH_CONFIG=navigation/commissioning/interactive_agent.yaml
+    fi
     SOCIAL_NAV_LAUNCH_OUTPUT=live_observation
     ;;
   execute)

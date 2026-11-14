@@ -15,6 +15,7 @@ from .. import ROOT
 from .store import Store, encode, shared_budget
 from .media import image_part, png_part
 from .context import project_dialogue, view_context, visual_inputs
+from .model_projection import ModelProjection
 from perception.environment.context import fingerprint
 from ..tools.framework import Reply, native_tools
 
@@ -142,7 +143,7 @@ class Model:
         self._url = url if url.endswith('/chat/completions') else url+'/chat/completions'
         self.budget, self.store, self.transport = budget, store, transport
 
-    def request(self, system, messages, *, observation_id=None, max_tokens=2048, tool_names=None, tool_choice='auto'):
+    def request(self, system, messages, *, observation_id=None, max_tokens=2048, tool_names=None, tool_choice='auto', projection=None):
         if tool_choice not in ('auto','required'):
             raise ValueError('Unsupported tool choice')
         tools = native_tools(tool_names)
@@ -236,6 +237,11 @@ class Model:
             reply=Reply.parse(message)
             if reply.action is not None and reply.action['tool'] not in offered:
                 raise ValueError('Model called a tool not offered for this phase')
+            if reply.action is not None and projection is not None:
+                from ..tools.framework import validate_call
+                action=projection.resolve_action(reply.action)
+                validate_call(action)
+                reply=Reply(reply.message,action)
             return reply
         except (httpx.HTTPError,ValueError,KeyError,TypeError,jsonschema.ValidationError,ApiError) as error:
             self.store.event('api_failure',dict(call_id=call_id,error_type=type(error).__name__,http_status=status,
@@ -322,9 +328,11 @@ class Model:
                 dict(type='text',text=encode(dict(source='static_reference_map',reference=reference.record))),
                 png_part(reference.image),dict(type='text',text='固定地图和全部固定标注；动态起点、实测轨迹与当前自车在本轮状态中。')]))
         messages.append(dict(role='user',content=content))
+        projection=ModelProjection()
+        messages=projection.messages(messages,protected_indices=(1 if reference is not None else 0,))
         return self.request(system,messages,observation_id=None if observation is None else observation.record['observation_id'],
                             tool_names=REGISTRATION_TOOLS if registration else None,
-                            tool_choice='required' if registration else 'auto')
+                            tool_choice='required' if registration else 'auto',projection=projection)
 
 
 def api_work(config, session, payload, observation=None, spatial_view=None, *, cache_mode='implicit', thinking_mode='off'):

@@ -73,6 +73,12 @@ def main():
             if args.rate>0:
                 wait=0. if args.live else (batch['end']-first)/args.rate-(time.monotonic()-anchor)
                 if wait>0:time.sleep(wait)
+            if not args.live and args.mode=='localization':
+                # Offline archives must not outrun fixed-map matching and fail
+                # after silently accumulating a long queue of stale scans.
+                from perception.mapping_localization.build_map import wait_for_backend
+                with metrics.span('offline_map_backpressure'):
+                    wait_for_backend(session,stop,120.,max_pending=1)
             acquired=time.monotonic()
             if args.live:
                 import rospy

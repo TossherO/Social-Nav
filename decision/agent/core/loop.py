@@ -6,6 +6,7 @@ import jsonschema
 from .async_model import AsyncModel
 from .session import TERMINAL
 from ..tools.framework import Reply
+from perception.environment.context import fingerprint
 
 
 class AgentLoop:
@@ -14,6 +15,7 @@ class AgentLoop:
         self.model = AsyncModel()
         self.requests, self.max_requests = 0, max_requests
         self.exit_reason = None
+        self.route_refusal = None
 
     @property
     def state(self):
@@ -22,6 +24,31 @@ class AgentLoop:
     def event(self, name, text=None):
         self.session.event(name, text)
         self.model.invalidate()
+        self.route_refusal = None
+
+    def repeated_route_refusal(self, value, output):
+        if value['tool']!='navigate_route':
+            return False
+        if self.session.navigation.scope not in ('manual','simulation') or self.session.skill.record['handle'] is not None:
+            self.route_refusal=None
+            return False
+        if output.get('status') not in ('refused','unavailable'):
+            self.route_refusal=None
+            return False
+        args={k:copy.deepcopy(v) for k,v in value['arguments'].items() if k!='view_id'}
+        reason=output.get('reason')
+        # A changed terminal heading cannot fix the region geometry of a circuit.
+        if reason in ('circuit_waypoint_inside_region','circuit_requires_three_distinct_waypoints',
+                      'proposed_route_does_not_make_requested_circuit','proposed_route_excessive_reverse_winding'):
+            args.pop('final_yaw',None)
+        key=fingerprint(dict(revision=self.session.state['revision'],arguments=args,reason=reason))
+        previous=self.route_refusal
+        count=previous[1]+1 if previous is not None and previous[0]==key else 1
+        self.route_refusal=(key,count)
+        if count<3:return False
+        self.session.store.event('route_repeated_refusal',dict(goal_id=args.get('goal_id'),reason=reason,count=count,
+            action='await_user_before_retry',automatically_retried=False))
+        return True
 
     def run(self, *, console=None, driver=None, emit=None, on_tick=None, timeout_s=None):
         """Run one task; optional drivers supply inputs and test-time pacing.
@@ -151,6 +178,10 @@ class AgentLoop:
                         output = self.session.revalidate_delayed_candidate(value, result['context'])
                         if output.get('status') == 'refused' and not output.get('revalidation'):
                             self.session._history('tool', dict(call=value, result=output))
+                    elif expired and value['tool'] == 'navigate_route':
+                        output = self.session.revalidate_delayed_route(value, result['context'])
+                        if output.get('status') == 'refused' and not output.get('revalidation'):
+                            self.session._history('tool', dict(call=value, result=output))
                     elif (expired and value['tool'] == 'check_goal' and not any(
                             value['arguments'].get(key) for key in ('observation_id','semantic_result','evidence',
                                 'facing_result','facing_evidence','preference_result','preference_evidence'))):
@@ -173,6 +204,9 @@ class AgentLoop:
                             place_id=value['arguments'].get('place_id') or self.session.skill.record['place_id'] or '',
                             clock_domain=result['context']['clock_domain'], map_binding=result['context']['map_binding'])
                     self.session._save('model_action_applied', dict(call=value, result=output, context=result['context']))
+                    if self.repeated_route_refusal(value,output):
+                        self.session.stop('needs_clarification','repeated_route_refusal')
+                        return s
                     if ((value['tool'] in ('navigate', 'navigate_route','start_follow','execute_follow_search') and output.get('status')=='accepted' or
                          value['tool'] in ('finish_follow','review_follow_target') and output.get('status')=='stopping') and
                             self.session.skill.record['handle'] is not None):

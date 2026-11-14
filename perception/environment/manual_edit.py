@@ -16,7 +16,7 @@ def source_binding(directory):
     return {name: content_hash(directory/name) for name in ('manifest.yaml', 'layers.npz')}
 
 
-def save_manual_map(source, output, occupancy, *, expected_binding):
+def save_manual_map(source, output, occupancy, *, expected_binding, selection_provenance=None):
     source, output = Path(source).resolve(), Path(output).absolute()
     if output.exists() or output.is_symlink():
         raise FileExistsError('输出目录已存在，不能覆盖')
@@ -44,6 +44,8 @@ def save_manual_map(source, output, occupancy, *, expected_binding):
     assumed = layers.get('assumed_free', np.zeros(cells.shape, bool)).astype(bool, copy=True)
     assumed[changed] = cells[changed] == 0
     layers.update(manual_edit=manual, assumed_free=assumed)
+    if 'survey_index' in layers:
+        layers['survey_index'][changed] = -2
     derived = finish_evidence(layers['occupancy'], layers['observed'], layers['last_observed'],
         layers['coverage'], layers['obstacle_min_z'], layers['obstacle_max_z'],
         layers['ground_z'], layers['ground_support'], original.metadata['resolution'])
@@ -58,9 +60,13 @@ def save_manual_map(source, output, occupancy, *, expected_binding):
                   manual_occupied_cells=int((changed & (cells == 100)).sum()),
                   manual_unknown_cells=int((changed & (cells == -1)).sum()),
                   cell_selection='map_cell_center', manual_free_is_observation=False)
+    if selection_provenance is not None:
+        record['selection_provenance'] = copy.deepcopy(selection_provenance)
     digest = hashlib.sha256(json.dumps(record, sort_keys=True).encode()+cells.astype(np.int8).tobytes()).hexdigest()
     metadata = dict(original.metadata, snapshot_id='manual_static:'+digest, manual_edit=record,
                     manual_free_cells_total=int((manual & (cells == 0)).sum()))
+    if 'survey_index' in layers:
+        metadata['survey_index_meaning'] = 'zero_based_manifest_sources_minus_one_final_map_endpoints_minus_two_manual_edit'
     if 'conditional_obstacle' in layers:
         metadata['conditional_obstacle_cells'] = int(layers['conditional_obstacle'].sum())
     snapshot = GridSnapshot(metadata, layers)

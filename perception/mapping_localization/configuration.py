@@ -38,6 +38,8 @@ def algorithm_config(*,mode,source_run=None,map_directory=None,pose=None,pose_fi
     if mode=='odometry' and source_run is not None:config=merge_config(config,yaml.safe_load((ROOT/'perception/mapping_localization/configs/odometry.yaml').read_text()))
     config.setdefault('odometry',{})['publish_state']=mode=='odometry'
     roll=config.setdefault('roll',{});roll['localizationMode']=mode=='localization'
+    if mode!='localization':
+        roll.pop('localization_coverage',None)
     if mode=='localization':
         if map_directory is not None and source_run is not None and pose is None and pose_file is None:
             raise ValueError('A map override requires an explicitly bound pose or pose file')
@@ -49,10 +51,10 @@ def algorithm_config(*,mode,source_run=None,map_directory=None,pose=None,pose_fi
             pose=load_seed(pose_file,directory,bag,start)
         if pose is not None:roll['initialGuess']=list(pose)
         elif source_run is None:raise ValueError('Localization needs --pose or a bound --pose-file')
-        if coverage:
-            from perception.mapping_localization.coverage import PriorCoverage,asset_digest
-            region=PriorCoverage.load(coverage,asset_fingerprint=asset_digest(directory))
-            roll['localization_coverage']=dict(frame_id=region.record['frame_id'],regions_xy=region.record['regions_xy'])
+        from perception.mapping_localization.coverage import PriorCoverage,asset_digest,full_map_coverage
+        region=(PriorCoverage.load(coverage,asset_fingerprint=asset_digest(directory)) if coverage
+                else full_map_coverage(directory))
+        roll['localization_coverage']=region.record
     # Execution backends use current module policy, even for historical source
     # runs. Geometry, calibration and experimental math stay source-bound.
     for key,value in [('matching_backend',lio_backend),('deskew_backend',deskew_backend)]:

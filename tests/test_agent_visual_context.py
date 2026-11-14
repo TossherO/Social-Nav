@@ -85,12 +85,12 @@ class VisualContextTests(unittest.TestCase):
         self.assertEqual(sum(p['type']=='image_url' for m in body['messages'] if isinstance(m.get('content'),list)
                              for p in m['content']),4)
         view = self.session.spatial_view.record
-        self.assertEqual(view['image_roles'],['trajectory_global_overview','target_or_robot_local_map'])
+        self.assertEqual(view['image_roles'],['trajectory_global_overview','target_or_robot_static_crop'])
         self.assertEqual(view['source_stamp_s'],10.)
         self.assertEqual(view['trajectory']['sample_count'],1)
         self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM events WHERE kind='reference_map_prepared'").fetchone()[0],1)
 
-    def test_bound_local_grid_and_camera_view_are_drawn_without_claiming_visibility(self):
+    def test_static_crop_keeps_camera_view_and_local_grid_binding(self):
         from decision.agent.tools.sensors import sensor_context
         from navigation.planning.footprint import VehicleGeometry
         geometry=VehicleGeometry([[-.3,-.3],[.5,-.3],[.5,.3],[-.3,.3]],np.eye(4),source={'vehicle_id':'wheelchair_tl_local'},assumed=False)
@@ -102,7 +102,8 @@ class VisualContextTests(unittest.TestCase):
                     local_grid_map_from_local=np.eye(4).tolist(),geometry=geometry,sensors=sensors,
                     pose=[4.,4.,0.],stamp_s=10.,clock_domain='synthetic')
         view=SpatialView.build(self.session.catalog,inputs)
-        self.assertEqual(view.record['local_source'],'current_measurement')
+        self.assertEqual(view.record['local_source'],'static_prior_only')
+        self.assertTrue(view.record['local_grid_present'])
         self.assertEqual(view.record['local_observation_id'],'obs')
         self.assertEqual(view.record['camera_view']['status'],'approximate_pinhole')
         self.assertIn('not_occlusion',view.record['camera_view']['interpretation'])

@@ -11,7 +11,7 @@ from ..core.store import Store, shared_budget
 from ..tools.places import Catalog
 from .common import emit, make_loop
 from .interaction import Console
-from .manual_reference import ManualReference,reference_request
+from .manual_reference import ManualReference,reference_request,region_check
 
 
 class RouteDisplay:
@@ -69,6 +69,17 @@ def display_points(grid, points):
                 if not np.isfinite(z):heights[i]=fallback;approx.append(i)
     return ([[float(p[0]),float(p[1]),float(z) if np.isfinite(z) else None]
              for p,z in zip(points,heights)],approx)
+
+
+def cancel_region_conflict(session,reference,goal_id,index):
+    """Withdraw only the manual suggestion; the operator controls the chair."""
+    event=dict(event='manual_reference_region_conflict',goal_id=goal_id,
+        route_index=index,reason='planned_route_intersects_task_region',
+        instruction='参考路径穿过绕行区域，已撤销当前建议；请使用原车手柄停稳，等待重新规划。')
+    session.store.event('manual_reference_region_conflict',event)
+    session.conversation.notice('manual_reference_region_conflict',reason=event['reason'],
+        route_index=index,explanation='实际参考路径穿过绕行区域，请调整途经点或路线。')
+    session.skill.cancel(reason=event['reason']);reference.set(None,None);emit(event)
 
 
 def run(args):
@@ -136,9 +147,14 @@ def run(args):
                 index=0 if navigation.route is None else navigation.route_index
                 expected=handle['call_id']+':'+str(index)
                 if preview.get('owner')!=handle['call_id'] or preview.get('request_id')!=expected:preview={}
+                checked=region_check(preview,navigation.route,navigation.route_index,handle,
+                                     session.catalog.value['frame_id'],navigation.snapshot()['stamp_s'])
+                if checked=='crosses':
+                    cancel_region_conflict(session,reference,record['goal_id'],index)
+                    return
                 summary=dict(status='unavailable' if error else preview.get('status','waiting'),
-                    reason=error or preview.get('reason'),reference_stamp_s=preview.get('reference_stamp_s'))
-                key=(handle['call_id'],summary['status'],summary['reason'])
+                    reason=error or preview.get('reason'),reference_stamp_s=preview.get('reference_stamp_s'),region_check=checked)
+                key=(handle['call_id'],summary['status'],summary['reason'],checked)
                 if key!=last_reference:
                     last_reference=key
                     event=dict(event='manual_reference_status',goal_id=record['goal_id'],**summary)
@@ -156,7 +172,8 @@ def run(args):
                     input_stale=feedback.get('input_stale'),origin_pose=feedback.get('origin_pose'),
                     source_stamp_s=feedback.get('origin_stamp_s'),stopped=feedback.get('stopped'),
                     route_index=feedback.get('route_index'),route_count=feedback.get('route_count'),
-                    reference_preview=(navigation.value.get('control') or {}).get('manual_preview'),
+                    reference_preview={k:v for k,v in ((navigation.value.get('control') or {}).get('manual_preview') or {}).items()
+                                       if k!='reference_path'},
                     reference_preview_error=reference.status()))
             if last is not None and navigation.route is not None:
                 save_trace(force=handle is None or record['status']!='running')
@@ -179,7 +196,7 @@ def run(args):
                     preview.write_bytes(render(session.catalog,inputs['global_grid'],bounds,current,
                         geometry=navigation.geometry,local_view=True,static_crop=True,
                         candidate_preview=dict(pose=pose),
-                        route_preview=None if route is None else dict(waypoints=points,diagnostics=dict(intersecting_segment_indices=[]))))
+                        route_preview=None if route is None else dict(waypoints=points,diagnostics={})))
                     display_geometry,approximate_heights=display_points(inputs['global_grid'],points)
                     missing_heights=[i for i,point in enumerate(display_geometry) if point[2] is None]
                     display.send(display_geometry,navigation.route_index)

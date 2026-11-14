@@ -197,6 +197,41 @@ class AgentSession:
         result['revalidation'] = audit
         return result
 
+    def revalidate_delayed_route(self, call, context):
+        """Recheck an unchanged geometric route against a fresh manual/simulation view."""
+        import math
+        import numpy as np
+        args=call['arguments'];old=self.spatial_view
+        try:goal=self.task_goals.current(args['goal_id'])['requirement']
+        except (KeyError,ValueError):
+            return dict(status='refused',reason='model_input_expired_request_fresh_observation')
+        if (self.navigation.scope not in ('manual','simulation') or not self.valid_expired_context(context) or
+                old is None or args['view_id']!=old.record['view_id'] or
+                goal['kind'] not in ('circuit','sequence') or goal.get('facing') or
+                goal.get('semantic_conditions') or goal.get('visual_preferences')):
+            return dict(status='refused',reason='model_input_expired_request_fresh_observation')
+        before=old.record.get('pose')
+        self.prepare_current_images()
+        current,view=self.navigation.snapshot(),self.spatial_view
+        if (view is None or spatial_context(current)!={k:context.get(k) for k in ('clock_domain','local_identity','map_binding')} or
+                current.get('input_stale') or current.get('localization_status','valid')!='valid' or
+                view.record.get('source_stamp_s') is None or not view.current(current['stamp_s']) or
+                view.record.get('pose') is None or before is None):
+            return dict(status='refused',reason='fresh_navigation_view_unavailable')
+        after=view.record['pose']
+        if (np.shape(before)!=(3,) or np.shape(after)!=(3,) or not np.isfinite(before).all() or
+                not np.isfinite(after).all() or np.linalg.norm(np.asarray(before[:2])-after[:2])>.3 or
+                abs((before[2]-after[2]+math.pi)%(2*math.pi)-math.pi)>.4):
+            return dict(status='refused',reason='robot_pose_changed_since_model_input')
+        audit=dict(model_view_id=old.record['view_id'],model_source_stamp_s=old.record['source_stamp_s'],
+                   checked_view_id=view.record['view_id'],checked_source_stamp_s=view.record['source_stamp_s'])
+        self.store.event('delayed_route_revalidation',audit)
+        self._revalidated_view=(old.record['view_id'],view.record['view_id'])
+        try:result=self.call('navigate_route',_context=context,**args)
+        finally:self._revalidated_view=None
+        result['revalidation']=audit
+        return result
+
     def call(self, tool_name, *, _context=None, **arguments):
         call = validate_call(dict(tool=tool_name, arguments=arguments))
         if self.state['status'] != 'ready':
@@ -214,8 +249,11 @@ class AgentSession:
         if tool_name == 'check_candidate' and value.get('status') == 'available':
             self._remember_candidate(value)
         if tool_name == 'navigate_route' and value.get('status') == 'refused' and value.get('diagnostics'):
+            preview_view=arguments['view_id']
+            if self._revalidated_view is not None and preview_view==self._revalidated_view[0]:
+                preview_view=self._revalidated_view[1]
             self.route_preview = dict(waypoints=copy.deepcopy(arguments['waypoints']),
-                goal_id=arguments['goal_id'],view_id=arguments['view_id'],
+                goal_id=arguments['goal_id'],view_id=preview_view,
                 source_binding=self.spatial_view.record['input_source_binding'],
                 diagnostics=copy.deepcopy(value['diagnostics']))
         self._history('tool', dict(call=call, result=value))
@@ -819,7 +857,7 @@ class AgentSession:
             self._clear_candidates()
         return result
 
-    def navigate_route(self, goal_id, view_id, orientation_source, waypoints, final_yaw, direction=None):
+    def navigate_route(self, goal_id, view_id, orientation_source, waypoints, final_yaw=None, direction=None):
         stage_type = self.task_goals.current(goal_id)['requirement'].get('stage_type', 'navigation')
         if stage_type != 'navigation':
             return dict(status='refused', reason='stage_skill_not_available', stage_type=stage_type)
@@ -829,6 +867,8 @@ class AgentSession:
         import numpy as np
         self.catalog.require_complete()
         state=self.navigation.snapshot()
+        if self._revalidated_view is not None and view_id == self._revalidated_view[0]:
+            view_id=self._revalidated_view[1]
         if (self.spatial_view is None or self.spatial_view.record['view_id']!=view_id or
                 self.spatial_view.record.get('pose') is None or self.spatial_view.record.get('source_stamp_s') is None or
                 not self.spatial_view.current(state['stamp_s'])):
@@ -838,26 +878,34 @@ class AgentSession:
         if spatial_source_binding(inputs)!=self.spatial_view.record['input_source_binding']:
             return dict(status='refused',reason='spatial_source_changed')
         points=np.asarray(waypoints,dtype=float)
-        if points.ndim!=2 or points.shape[1]!=2 or not np.isfinite(points).all() or not math.isfinite(final_yaw):
+        if (points.ndim!=2 or points.shape[1]!=2 or not np.isfinite(points).all() or
+                final_yaw is not None and not math.isfinite(final_yaw)):
             return dict(status='refused',reason='route_waypoints_must_be_finite')
         if np.any(np.linalg.norm(np.diff(points,axis=0),axis=1)<1e-6):
             return dict(status='refused',reason='route_has_duplicate_consecutive_points')
         current=self.task_goals.current(goal_id)
         requirement=current['requirement']
+        if final_yaw is None and any(requirement.get(key) for key in ('facing','semantic_conditions','visual_preferences')):
+            return dict(status='refused',reason='route_final_yaw_required_for_semantic_goal')
+        if final_yaw is None and 'required_yaw' in requirement:
+            final_yaw=float(requirement['required_yaw'])
         if direction is not None and requirement['kind']!='circuit':
             return dict(status='refused',reason='direction_only_applies_to_circuit')
         if requirement['kind']=='circuit':
-            from .route import circuit_plan_diagnostics,static_route_line_diagnostics
+            from .route import circuit_plan_diagnostics
             if requirement.get('direction') and direction and requirement['direction']!=direction:
                 return dict(status='refused',reason='route_direction_conflicts_with_user_requirement')
             direction=requirement.get('direction') or direction
             if direction is None:
                 return dict(status='refused',reason='choose_a_circuit_direction')
             polygon=self.catalog.regions[requirement['target_id']]['polygon']
-            diagnostics=circuit_plan_diagnostics(points,polygon,direction,self.task_goals.settings['goal_position_tolerance_m'])
-            diagnostics['static_lines']=static_route_line_diagnostics(inputs['global_grid'],points)
+            try:diagnostics=circuit_plan_diagnostics(points,polygon,direction,self.task_goals.settings['goal_position_tolerance_m'])
+            except ValueError:
+                return dict(status='refused',reason='circuit_requires_three_distinct_waypoints')
             if diagnostics['reason']:
                 return dict(status='refused',reason=diagnostics['reason'],diagnostics=diagnostics)
+            if diagnostics['closure_added']:
+                points=np.vstack((points,points[0]))
         if requirement['kind']=='sequence':
             index=0
             for point in points:
@@ -865,14 +913,25 @@ class AgentSession:
                     index+=1
             if index!=len(requirement['checkpoints']) or not self.task_goals.checkpoint_met(requirement['checkpoints'][-1],points[-1]):
                 return dict(status='refused',reason='route_does_not_include_ordered_user_checkpoints')
-        selected=self.task_goals.select(goal_id,[*points[-1].tolist(),final_yaw],orientation_source,view_id)
+        from .route import waypoint_occupancy_diagnostics
+        from navigation.planning.inputs import load_config
+        from navigation.planning.reference import planning_config
+        checked_points=points[:-1] if requirement['kind']=='circuit' else points
+        waypoint_check=waypoint_occupancy_diagnostics(inputs,checked_points,float(planning_config(load_config())['safety_margin_m']))
+        blocked=next((item['reason'] for item in waypoint_check['waypoints'] if item['reason']),None)
+        if blocked:
+            return dict(status='refused',reason=blocked,diagnostics=waypoint_check)
+        selected_yaw=float(self.spatial_view.record['pose'][2] if final_yaw is None else final_yaw)
+        selected=self.task_goals.select(goal_id,[*points[-1].tolist(),selected_yaw],orientation_source,view_id)
         if selected['status']!='selected':return selected
-        route=dict(waypoints=points.tolist(),final_yaw=float(final_yaw),
+        route=dict(waypoints=points.tolist(),final_yaw=None if final_yaw is None else float(final_yaw),
+                   yaw_required=final_yaw is not None,
                    region_polygon=copy.deepcopy(polygon) if requirement['kind']=='circuit' else None,
                    direction=direction,direction_source=('user' if requirement.get('direction') else 'autonomous') if direction else None)
         selected['destination']['route']=route
         current['selected']['route']=copy.deepcopy(route)
         result=self.skill.start(selected['destination'],self.state['revision'])
+        result['waypoint_checks']=waypoint_check
         if requirement['kind']=='circuit' and result.get('status')=='refused':
             result['diagnostics']=diagnostics
         if result['status'] in ('accepted','uncertain'):

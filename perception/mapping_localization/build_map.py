@@ -70,9 +70,9 @@ def bag_metadata(path, config):
         return dict(lidar_scans=count, start_s=data.get_start_time(), end_s=data.get_end_time())
 
 
-def wait_for_backend(session, stop, timeout):
+def wait_for_backend(session, stop, timeout, *, max_pending=BACKEND_WINDOW):
     began = time.monotonic()
-    while session.jobs.qsize() >= BACKEND_WINDOW:
+    while session.jobs.qsize() >= max_pending:
         if session.error:
             raise RuntimeError('Mapping backend failed: '+session.error)
         if stop.is_set():

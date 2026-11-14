@@ -1,5 +1,6 @@
 """Latest-only leased reference previews; no goal or chassis control channel."""
 import copy
+import math
 import socket
 import threading
 import time
@@ -31,6 +32,22 @@ def reference_request(handle, pose, route, route_index, catalog, *, require_yaw=
         goal_revision=handle['goal_revision']*100+index,mode='mapped',
         frame_id=catalog.value['frame_id'],target_reference='base_link',goal=copy.deepcopy(target),
         goal_behavior='stop' if final else 'pass_through',map_snapshot_id=catalog.value['map_snapshot_id'])
+
+
+def region_check(preview, route, route_index, handle, frame, now):
+    """Check the matching, fresh planner output, never a line between waypoints."""
+    if not route or not route.get('region_polygon') or route_index is None or route_index<=0:return 'not_applicable'
+    if (preview.get('owner')!=handle['call_id'] or
+            preview.get('request_id')!=handle['call_id']+':'+str(route_index) or
+            preview.get('reference_frame')!=frame or preview.get('status')!='reference_ready'):
+        return 'unavailable'
+    stamp=preview.get('reference_stamp_s')
+    if (not isinstance(stamp,(int,float)) or not isinstance(now,(int,float)) or
+            not math.isfinite(stamp) or not math.isfinite(now) or not 0<=now-stamp<=3.):return 'unavailable'
+    path=preview.get('reference_path')
+    if not isinstance(path,list) or len(path)<2:return 'unavailable'
+    from ..core.route import path_outside_region
+    return 'clear' if path_outside_region(path,route['region_polygon']) else 'crosses'
 
 
 class ManualReference:

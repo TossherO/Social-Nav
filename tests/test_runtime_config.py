@@ -36,10 +36,17 @@ class RuntimeConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):algorithm_config(mode='localization',map_directory=path,pose=[0.]*6)
             (path/'COMPLETE').touch()
             with self.assertRaises(ValueError):algorithm_config(mode='localization',map_directory=path)
+            (path/'keyframes').mkdir()
+            (path/'keyframes/poses.txt').write_text('0 0 0 0 0 0 0 0 1\n')
+            (path/'manifest.yaml').write_text('frame: map\n')
+            (path/'GlobalMap.pcd').write_text('FIELDS x y z\nSIZE 4 4 4\nTYPE F F F\nCOUNT 1 1 1\nPOINTS 2\nDATA ascii\n0 0 0\n4 5 0\n')
             config,_=algorithm_config(mode='localization',map_directory=path,pose=[0.]*6)
             self.assertTrue(config['roll']['localizationMode'])
             self.assertEqual(config['roll']['initialGuess'],[0.]*6)
             self.assertEqual(config['roll']['saveKeyframeMapDirectory'],str(path/'keyframes'))
+            coverage=config['roll']['localization_coverage']
+            self.assertEqual(coverage['source'],'automatic_map_point_xy_envelope_1m_margin')
+            self.assertEqual(coverage['regions_xy'],[[[-1.,-1.],[5.,-1.],[5.,6.],[-1.,6.]]])
 
     def test_source_parameters_remain_bound_unless_calibration_is_explicit(self):
         with tempfile.TemporaryDirectory() as directory:

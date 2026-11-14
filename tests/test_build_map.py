@@ -227,6 +227,15 @@ class BuildMapTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'synthetic worker error'):
             build_map.wait_for_backend(session, threading.Event(), 1.)
 
+    def test_localization_can_wait_with_one_pending_scan(self):
+        queue = SimpleNamespace(pending=1)
+        queue.qsize = lambda: queue.pending
+        class Stop:
+            def is_set(self): return False
+            def wait(self, _): queue.pending = 0
+        build_map.wait_for_backend(SimpleNamespace(error=None,jobs=queue),Stop(),1.,max_pending=1)
+        self.assertEqual(queue.pending,0)
+
 
 if __name__ == '__main__':
     unittest.main()

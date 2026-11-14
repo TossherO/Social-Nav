@@ -8,11 +8,30 @@ import tempfile
 import numpy as np
 import yaml
 
-from .results import map_fingerprint
+from .results import map_fingerprint, read_pcd
 
 
 def asset_digest(map_path):
     return hashlib.sha256(json.dumps(map_fingerprint(map_path), sort_keys=True).encode()).hexdigest()
+
+
+def full_map_coverage(map_path):
+    """Construct a map-bound XY envelope, without asserting observed free space."""
+    map_path = Path(map_path)
+    manifest = yaml.safe_load((map_path/'manifest.yaml').read_text())
+    frame = manifest.get('frame')
+    if not isinstance(frame, str) or not frame:
+        raise ValueError('Localization map must declare its coordinate frame')
+    # No sampling: an extremal point must not disappear from the envelope.
+    points = read_pcd(map_path/'GlobalMap.pcd', limit=2**63-1)
+    if not len(points):
+        raise ValueError('Cannot derive full-map coverage from an empty map')
+    low, high = points[:, :2].min(axis=0)-1., points[:, :2].max(axis=0)+1.
+    record = dict(frame_id=frame, source='automatic_map_point_xy_envelope_1m_margin',
+                  map_asset_fingerprint=asset_digest(map_path),
+                  regions_xy=[[[float(low[0]), float(low[1])], [float(high[0]), float(low[1])],
+                               [float(high[0]), float(high[1])], [float(low[0]), float(high[1])]]])
+    return PriorCoverage(record, asset_fingerprint=record['map_asset_fingerprint'])
 
 
 def save_coverage(path, map_path, regions, *, source='manual_map_selection'):

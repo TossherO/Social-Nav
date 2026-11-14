@@ -9,12 +9,13 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 from decision.agent import CONFIG_DIR,ROOT
-from decision.agent.core.route import circuit_evidence,path_outside_region,static_route_line_diagnostics
+from decision.agent.core.route import circuit_evidence,circuit_plan_diagnostics,path_outside_region,static_route_line_diagnostics
+from decision.agent.core.loop import AgentLoop
 from decision.agent.core.session import AgentSession
 from decision.agent.core.store import Store
 from decision.agent.core.tasks import centroid
 from decision.agent.tools.places import Catalog
-from tests.test_agent import ScriptedFeedback,query_map
+from tests.test_agent import ScriptedFeedback,query_map,reply
 
 
 class RouteFeedback(ScriptedFeedback):
@@ -77,27 +78,198 @@ class AgentRouteTests(unittest.TestCase):
         self.assertFalse(outcome['real_robot_success'])
         self.assertTrue(outcome['checks']['circuit_met'])
 
-    def test_circuit_rejects_route_shortcut_and_nonclosed_route(self):
+    def test_delayed_route_rechecks_current_view_and_preserves_original_call(self):
+        self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
+                                                     direction='clockwise',description='绕一圈')])
+        view=query_map(self.session);context=self.session.context()
+        call=dict(tool='navigate_route',arguments=dict(goal_id='loop',view_id=view,orientation_source='autonomous',
+                  waypoints=self.points(),final_yaw=0.))
+        original=copy.deepcopy(call);self.nav.state['stamp_s']=14.
+        self.assertFalse(self.session.valid_context(context));self.assertTrue(self.session.valid_expired_context(context))
+        result=self.session.revalidate_delayed_route(call,context)
+        self.assertEqual(result['status'],'accepted');self.assertEqual(call,original)
+        self.assertEqual(result['revalidation']['model_view_id'],view)
+        self.assertEqual(result['revalidation']['model_source_stamp_s'],10.)
+        self.assertEqual(result['revalidation']['checked_source_stamp_s'],14.)
+        self.assertNotEqual(result['revalidation']['checked_view_id'],view)
+        self.assertEqual(self.session.skill.record['handle']['view_id'],result['revalidation']['checked_view_id'])
+
+    def test_delayed_route_refuses_when_pose_changed(self):
+        self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
+                                                     direction='clockwise',description='绕一圈')])
+        view=query_map(self.session);context=self.session.context()
+        self.nav.state.update(stamp_s=14.,pose=[5.,4.,0.])
+        call=dict(tool='navigate_route',arguments=dict(goal_id='loop',view_id=view,orientation_source='autonomous',
+                  waypoints=self.points(),final_yaw=0.))
+        self.assertEqual(self.session.revalidate_delayed_route(call,context)['reason'],'robot_pose_changed_since_model_input')
+        self.assertIsNone(self.session.skill.record['handle'])
+
+    def test_delayed_route_refuses_heading_or_localization_identity_change(self):
+        self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
+                                                     direction='clockwise',description='绕一圈')])
+        view=query_map(self.session);context=self.session.context()
+        call=dict(tool='navigate_route',arguments=dict(goal_id='loop',view_id=view,orientation_source='autonomous',
+                  waypoints=self.points(),final_yaw=0.))
+        self.nav.state.update(stamp_s=14.,pose=[4.,4.,.5])
+        self.assertEqual(self.session.revalidate_delayed_route(call,context)['reason'],'robot_pose_changed_since_model_input')
+        view=self.session.spatial_view.record['view_id'];context=self.session.context()
+        call['arguments']['view_id']=view
+        self.nav.state.update(stamp_s=18.,generation=1)
+        self.assertEqual(self.session.revalidate_delayed_route(call,context)['status'],'refused')
+        self.assertIsNone(self.session.skill.record['handle'])
+
+    def test_delayed_route_rejects_old_evidence_and_other_execution_scopes(self):
+        self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
+                                                     direction='clockwise',description='绕一圈')])
+        view=query_map(self.session);context=self.session.context()
+        call=dict(tool='navigate_route',arguments=dict(goal_id='loop',view_id=view,orientation_source='autonomous',
+                  waypoints=self.points(),final_yaw=0.))
+        self.nav.state['stamp_s']=41.
+        self.assertEqual(self.session.revalidate_delayed_route(call,context)['status'],'refused')
+        self.nav.state['stamp_s']=14.;self.nav.scope='live'
+        self.assertEqual(self.session.revalidate_delayed_route(call,context)['status'],'refused')
+        self.assertIsNone(self.session.skill.record['handle'])
+
+    def test_delayed_invalid_route_returns_current_geometry_feedback(self):
+        self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
+                                                     direction='clockwise',description='绕一圈')])
+        view=query_map(self.session);context=self.session.context();points=self.points()
+        call=dict(tool='navigate_route',arguments=dict(goal_id='loop',view_id=view,orientation_source='autonomous',
+                  waypoints=[points[0],centroid(self.catalog.regions['lobby_area']['polygon']).tolist(),points[4]],final_yaw=0.))
+        self.nav.state['stamp_s']=14.;result=self.session.revalidate_delayed_route(call,context)
+        self.assertEqual(result['reason'],'circuit_waypoint_inside_region')
+        self.assertIn('waypoint_inside_region',result['diagnostics']['issues'])
+        self.assertEqual(self.session.route_preview['view_id'],result['revalidation']['checked_view_id'])
+        self.assertIsNone(self.session.skill.record['handle'])
+
+    def test_route_feedback_reports_actual_direction_even_if_region_intersected(self):
+        polygon=self.catalog.regions['lobby_area']['polygon'];points=self.points('clockwise')
+        result=circuit_plan_diagnostics(points,polygon,'counterclockwise',.2)
+        self.assertEqual(result['actual_direction'],'clockwise')
+        self.assertIn('direction_opposite_to_requested',result['issues'])
+        points[2]=centroid(polygon).tolist()
+        result=circuit_plan_diagnostics(points,polygon,'counterclockwise',.2)
+        self.assertIn('waypoint_inside_region',result['issues'])
+
+    def test_repeated_failed_route_waits_for_user_instead_of_calling_model_32_times(self):
+        self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
+                                                     direction='clockwise',description='绕一圈')])
+        self.nav.tick=lambda:self.nav.snapshot()
+        points=self.points();bad=[points[0],centroid(self.catalog.regions['lobby_area']['polygon']).tolist(),points[4]]
+        def work(_payload,_observation,view):
+            self.nav.state['stamp_s']+=4.
+            return reply('navigate_route',goal_id='loop',view_id=view.record['view_id'],
+                         orientation_source='autonomous',waypoints=bad,final_yaw=0.)
+        actor=AgentLoop(self.session,work)
+        try:
+            for _ in range(6):
+                actor.tick()
+                if actor.model.thread is not None:actor.model.thread.join(2.)
+                if self.session.state['status']=='needs_clarification':break
+            self.assertEqual(actor.requests,3)
+            self.assertEqual(self.session.state['reason'],'repeated_route_refusal')
+            self.assertEqual(self.store.db.execute("select count(*) from events where kind='route_repeated_refusal'").fetchone()[0],1)
+            self.assertIsNone(self.session.skill.record['handle'])
+        finally:actor.close()
+
+    def test_repeated_refusal_guard_does_not_stop_an_active_navigation_handle(self):
+        actor=AgentLoop(self.session,lambda *_:None)
+        self.session.skill.record['handle']={'call_id':'active'}
+        value=dict(tool='navigate_route',arguments=dict(goal_id='loop',view_id='view',waypoints=[[1,1],[2,2]],
+                   orientation_source='autonomous',final_yaw=0.))
+        try:
+            for _ in range(4):
+                self.assertFalse(actor.repeated_route_refusal(value,dict(status='refused',reason='cancel_and_confirm_existing_call_first')))
+            self.assertEqual(self.session.skill.record['handle'],{'call_id':'active'})
+            self.assertEqual(self.store.db.execute("select count(*) from events where kind='route_repeated_refusal'").fetchone()[0],0)
+        finally:actor.close()
+
+    def test_circuit_adds_closure_and_rejects_waypoint_inside_region(self):
         self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
                                                      direction='clockwise',description='绕一圈')])
         view=query_map(self.session);points=self.points()
-        bad=[points[0],points[4],points[0]]
+        bad=[points[0],centroid(self.catalog.regions['lobby_area']['polygon']).tolist(),points[4]]
         result=self.session.call('navigate_route',goal_id='loop',view_id=view,orientation_source='autonomous',
             waypoints=bad,final_yaw=0.)
-        self.assertEqual(result['reason'],'proposed_route_intersects_task_region')
-        self.assertEqual(result['diagnostics']['intersecting_segment_indices'],[0,1])
-        self.assertEqual(result['diagnostics']['closure_distance_m'],0.)
-        self.assertEqual(result['diagnostics']['scope'],'task_region_geometry_only_not_obstacle_route_or_execution_check')
-        self.assertTrue(all(s['occupied_samples']==0 for s in result['diagnostics']['static_lines']['segments']))
+        self.assertEqual(result['reason'],'circuit_waypoint_inside_region')
+        self.assertEqual(result['diagnostics']['inside_waypoint_indices'],[1])
+        self.assertEqual(result['diagnostics']['scope'],'waypoint_order_only_not_planned_path_or_execution_check')
         state=self.session.prompt()['current_state']
-        self.assertEqual(state['last_tool_feedback']['diagnostics']['intersecting_segment_indices'],[0,1])
+        self.assertEqual(state['last_tool_feedback']['diagnostics']['inside_waypoint_indices'],[1])
         self.assertEqual(self.session.spatial_view.record['route_preview']['waypoints'],bad)
         pixels=np.asarray(Image.open(io.BytesIO(self.session.spatial_view.images[1])))
         self.assertTrue(np.any(np.all(pixels==[207,48,48],axis=2)))
         self.assertIsNone(self.session.skill.record['handle'])
         view=self.session.spatial_view.record['view_id']
-        self.assertEqual(self.session.call('navigate_route',goal_id='loop',view_id=view,orientation_source='autonomous',
-            waypoints=points[:-1],final_yaw=0.)['reason'],'circuit_route_must_return_to_its_start')
+        result=self.session.call('navigate_route',goal_id='loop',view_id=view,orientation_source='autonomous',
+            waypoints=[points[0],points[3],points[6]])
+        self.assertEqual(result['status'],'accepted')
+        route=self.session.task_goals.current('loop')['selected']['route']
+        self.assertEqual(route['waypoints'],[points[0],points[3],points[6],points[0]])
+        self.assertIsNone(route['final_yaw'])
+
+    def test_circuit_order_does_not_reject_imaginary_crossing_chords(self):
+        polygon=[[-1,-1],[1,-1],[1,1],[-1,1]]
+        points=[[2,0],[-1,-2],[-1,2]]
+        self.assertFalse(path_outside_region(points+[points[0]],polygon))
+        result=circuit_plan_diagnostics(points,polygon,'clockwise',.2)
+        self.assertIsNone(result['reason'])
+        self.assertTrue(result['closure_added'])
+
+    def test_manual_region_check_uses_matching_fresh_reference_only(self):
+        from decision.agent.workflows.manual_reference import region_check
+        handle={'call_id':'test'}
+        route={'region_polygon':[[-1,-1],[1,-1],[1,1],[-1,1]]}
+        preview=dict(owner='test',request_id='test:1',reference_frame='map',status='reference_ready',
+                     reference_stamp_s=10.,reference_path=[[-2,0],[2,0]])
+        self.assertEqual(region_check(preview,route,1,handle,'map',11.),'crosses')
+        self.assertEqual(region_check(preview,route,0,handle,'map',11.),'not_applicable')
+        self.assertEqual(region_check(preview,route,1,handle,'map',14.),'unavailable')
+        self.assertEqual(region_check(dict(preview,request_id='old'),route,1,handle,'map',11.),'unavailable')
+        self.assertEqual(region_check(dict(preview,reference_path=None),route,1,handle,'map',11.),'unavailable')
+        self.assertEqual(region_check(dict(preview,reference_path=[[-2,2],[2,2]]),route,1,handle,'map',11.),'clear')
+
+    def test_manual_preview_exposes_only_matching_reference(self):
+        from runtime.control import manual_preview_path
+        request=dict(task_id='t',goal_revision=1,goal=[1.,2.],mode='mapped',frame_id='map')
+        reference=dict(result=dict(frame_id='map',request=request,path=[[0,0,0],[1,2,0]]))
+        self.assertEqual(manual_preview_path(reference,request),[[0.,0.],[1.,2.]])
+        self.assertIsNone(manual_preview_path(reference,dict(request,goal=[2.,2.])))
+        self.assertIsNone(manual_preview_path(dict(result=dict(reference['result'],frame_id='odom')),request))
+        self.assertIsNone(manual_preview_path(dict(result=dict(reference['result'],path=[[0,0]]*1025)),request))
+
+    def test_manual_region_conflict_withdraws_suggestion_and_reports(self):
+        from unittest.mock import Mock
+        from types import SimpleNamespace
+        from decision.agent.workflows.manual import cancel_region_conflict
+        session=SimpleNamespace(store=Mock(),conversation=Mock(),skill=Mock())
+        reference=Mock()
+        with patch('decision.agent.workflows.manual.emit') as emit:
+            cancel_region_conflict(session,reference,'goal',1)
+        session.skill.cancel.assert_called_once_with(reason='planned_route_intersects_task_region')
+        reference.set.assert_called_once_with(None,None)
+        self.assertIn('手柄停稳',emit.call_args.args[0]['instruction'])
+        session.conversation.notice.assert_called_once()
+
+    def test_waypoint_checks_reject_occupied_and_unknown_without_current_evidence(self):
+        from decision.agent.core.route import waypoint_occupancy_diagnostics
+        from perception.environment.layers import GridSnapshot
+        metadata=dict(frame_id='map',shape=[10,10],resolution=1.,origin_xy=[0.,0.],snapshot_id='test')
+        cells=np.zeros((10,10),np.int8);cells[2,2]=100;cells[4,4]=-1
+        grid=GridSnapshot(metadata,dict(occupancy=cells))
+        result=waypoint_occupancy_diagnostics(dict(global_grid=grid),[[2.5,2.5],[4.5,4.5],[6.5,6.5]],0.)
+        self.assertEqual([item['reason'] for item in result['waypoints']],
+                         ['waypoint_statically_occupied','waypoint_unknown',None])
+        self.assertFalse(result['full_footprint_checked'])
+
+    def test_optional_final_yaw_is_not_added_to_reference(self):
+        from decision.agent.workflows.manual_reference import reference_request
+        catalog=type('Catalog',(),{'value':dict(frame_id='map',map_snapshot_id='map1')})()
+        handle=dict(call_id='c',task_id='t',goal_revision=1)
+        route=dict(waypoints=[[1,1],[2,2]],final_yaw=None)
+        result=reference_request(handle,[2,2,1],route,1,catalog,require_yaw=False)
+        self.assertEqual(result['goal'],[2,2])
+        self.assertEqual(result['goal_behavior'],'stop')
 
     def test_static_line_feedback_distinguishes_occupied_unknown_and_outside(self):
         from perception.environment.layers import GridSnapshot

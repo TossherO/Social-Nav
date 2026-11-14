@@ -1,0 +1,7 @@
+# Agent 人工驾驶观察使用的二楼定位图及静态环境图。
+map: outputs/perception/local_update_20261114_171537_336359/candidate/map
+static_map: outputs/perception/static_floor2_multisurvey_20261114_retry/static_map_previous_free_ground
+# 未指定 coverage 时，由当前定位图自动生成全图关联范围。
+initial_pose_hint: outputs/decision/agent/floor2_multisurvey_20261114/height_hint.json
+motion_config: navigation/planning/configs/motion.yaml
+motion_profile: trial

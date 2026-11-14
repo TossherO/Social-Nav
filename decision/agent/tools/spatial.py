@@ -243,13 +243,15 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
                 if kind=='points' and item.get('pose') is None:
                     continue
                 legend.append(item['display_id']+' '+item.get('name',item.get('description','')))
-    captions = ['Pale: prior free | cyan: observed free | dark: occupied | grey: unknown',
-                'Orange robot | blue trail | red P/people | green R']
+    captions = (['Pale: prior free | cyan: observed free | dark: occupied | grey: unknown',
+                 'Orange robot | blue trail | red P/people | green R'] if local_grid is not None else
+                ['Pale: prior free | dark: prior occupied | grey: unknown',
+                 'Orange robot | blue trail | red P | green R'])
     if local_view and candidate_preview is not None:
         captions.append('Magenta candidate | lines to targets: not visibility')
     if local_view and route_preview is not None:
-        captions.append('Red: region intersection | amber: static occupied/unknown | blue: other')
-        captions.append('Route lines are not planned paths or proof of clearance')
+        captions.append('Blue: waypoint order only | red point: rejected waypoint')
+        captions.append('Connecting lines are not planned paths or proof of clearance')
     layout = reference_layout(bounds,[*captions,'    '.join(legend)]) if size is None else None
     width,height = layout['size'] if layout else size
     ratio = layout['ratio'] if layout else width/896
@@ -403,19 +405,16 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
         label(candidate,'CANDIDATE','#8c168e',below=math.sin(candidate[2])>=0)
     if local_view and route_preview is not None:
         points=route_preview['waypoints']
-        crossing=set(route_preview['diagnostics']['intersecting_segment_indices'])
-        static=route_preview['diagnostics'].get('static_lines',{}).get('segments',[])
-        for i,(a,b) in enumerate(zip(points,points[1:])):
-            evidence=static[i] if i<len(static) else {}
-            warning=(evidence.get('occupied_samples',0) or evidence.get('unknown_samples',0) or
-                     evidence.get('outside_samples',0) or evidence.get('status')=='outside_sample_range')
-            color='#cf3030' if i in crossing else '#ca7900' if warning else '#1669c1'
-            draw.line([pixel(a),pixel(b)],fill=color,width=max(2,round(3*ratio)))
+        diagnostics=route_preview['diagnostics']
+        rejected=set(diagnostics.get('inside_waypoint_indices',[]))
+        rejected.update(row['index'] for row in diagnostics.get('waypoints',[]) if row.get('reason'))
+        for a,b in zip(points,points[1:]):
+            draw.line([pixel(a),pixel(b)],fill='#1669c1',width=max(2,round(2*ratio)))
         for i,point in enumerate(points):
             x,y=pixel(point)
             if left<=x<=left+w and top<=y<=top+h:
                 r=4*ratio
-                draw.ellipse((x-r,y-r,x+r,y+r),fill='#1669c1')
+                draw.ellipse((x-r,y-r,x+r,y+r),fill='#cf3030' if i in rejected else '#1669c1')
                 draw.text((x+4*ratio,y-16*ratio),str(i),font=label_font,fill='#133b92',stroke_width=1,stroke_fill='#ffffff')
     clipped = Image.new('RGB',(width,height),'#f2f4f7')
     left,top = int(left),int(top)
@@ -505,7 +504,6 @@ class SpatialView:
         pose = inputs.get('pose')
         scene = inputs.get('scene')
         local = transform = None
-        tracks = []
         if scene is not None:
             scene.verify()
             local = scene.geometry
@@ -513,9 +511,6 @@ class SpatialView:
                 if pose is None or inputs.get('local_pose') is None:
                     raise ValueError('Local map needs a measured map transform')
                 transform = se2(pose)@np.linalg.inv(se2(inputs['local_pose']))
-            people = scene.record['people']
-            if people['status']=='valid':
-                tracks = people['data']['tracks']
         elif inputs.get('local_grid') is not None:
             local=inputs['local_grid']
             matrix=np.asarray(inputs.get('local_grid_map_from_local'),dtype=float)
@@ -556,21 +551,21 @@ class SpatialView:
         if global_grid.metadata['frame_id'] != catalog.value['frame_id']:
             raise ValueError('Map view and annotation coordinate frames differ')
         images = (render(catalog,global_grid,full,pose,geometry=inputs.get('geometry'),size=(768,640),trajectory=trajectory),
-                  render(catalog,global_grid,bounds,pose,local_grid=None if static_crop else local,
-                         map_from_local=None if static_crop else transform,tracks=() if static_crop else tracks,
-                         geometry=inputs.get('geometry'),local_view=True,sensors=inputs.get('sensors'),static_crop=static_crop,
+                  render(catalog,global_grid,bounds,pose,
+                         geometry=inputs.get('geometry'),local_view=True,sensors=inputs.get('sensors'),static_crop=True,
                          candidate_preview=candidate_preview,route_preview=route_preview))
         record = dict(catalog_fingerprint=catalog.fingerprint,map_condition=catalog.condition,
             frame_id=catalog.value['frame_id'],target_reference='base_link',units=dict(position='metres',angle='radians'),
             full_bounds=display['asset_bounds'],overview_bounds=full,display_crop=display,
             local_bounds=list(bounds),requested_local_bounds=requested_bounds,
+            crop_requested_by_tool=bool(static_crop),
             candidate_display_expanded=candidate_expanded,display_expanded_for_preview=bounds != requested_bounds,
             pose=copy.deepcopy(pose),input_source_binding=spatial_source_binding(inputs),
             source_stamp_s=inputs.get('stamp_s'),clock_domain=inputs.get('clock_domain'),
             global_binding=layer_binding(global_grid),local_binding=None if local is None else layer_binding(local),
             local_observation_id=inputs.get('local_grid_observation_id') if scene is None else scene.record['observation_id'],
             map_from_local=None if transform is None else transform.tolist(),
-            local_source='current_measurement' if local is not None and not static_crop else 'static_prior_only',
+            local_source='static_prior_only',local_grid_present=local is not None,
             candidate_preview=copy.deepcopy(candidate_preview),
             route_preview=copy.deepcopy(route_preview),
             annotations=catalog.annotations(),
@@ -580,7 +575,7 @@ class SpatialView:
             camera_view=copy.deepcopy(((inputs.get('sensors') or {}).get('camera') or {}).get('view',dict(status='unavailable'))),
             trajectory=dict(segment_count=len(trajectory),sample_count=sum(len(s['samples']) for s in trajectory),
                             source_binding=fingerprint(trajectory),scope='measured_poses_only_not_planned_route'),
-            image_roles=['trajectory_global_overview','target_or_robot_local_map'],
+            image_roles=['trajectory_global_overview','target_or_robot_static_crop'],
             image_sha256=[hashlib.sha256(i).hexdigest() for i in images])
         record['view_id'] = fingerprint(record)
         return cls(record,images).verify()

@@ -108,6 +108,12 @@ class TaskArgumentsTests(unittest.TestCase):
         self.rejected('localization',extra=['--association-coverage','missing.yaml'])
         self.rejected('odometry',extra=['--environment','--allow-local-only'])
 
+    def test_generated_coverage_reaches_ros_localization_without_environment(self):
+        args=self.parse('localization')
+        coverage=self.root/'frozen.yaml'
+        command=algorithm_command(args,self.root/'new_run',self.map,True,coverage_path=coverage)
+        self.assertIn('association_coverage:='+str(coverage),command)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

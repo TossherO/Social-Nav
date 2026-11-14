@@ -254,3 +254,6 @@ PLUGINLIB_EXPORT_CLASS(social_nav_rviz::GroundGoalTool,rviz::Tool)
 PLUGINLIB_EXPORT_CLASS(social_nav_rviz::GroundInitialPoseTool,rviz::Tool)
 PLUGINLIB_EXPORT_CLASS(social_nav_rviz::ConfirmInitialPoseTool,rviz::Tool)
 PLUGINLIB_EXPORT_CLASS(social_nav_rviz::SessionPanel,rviz::Panel)
+
+// A stable C symbol lets startup checks detect a library built before the panel.
+extern "C" int social_nav_rviz_session_panel_abi() { return 1; }

@@ -115,18 +115,23 @@ class ManualMapEditTests(unittest.TestCase):
         layers['coverage'][y, x] = 1.
         layers['conditional_obstacle'] = np.zeros(cells.shape, bool)
         layers['conditional_obstacle'][y, x] = True
+        layers['survey_index'] = np.zeros(cells.shape, np.int16)
         snapshot = GridSnapshot(dict(snapshot.metadata, conditional_obstacle_cells=1), layers)
         source = self.root/'observed'
         _save_package(snapshot, source, {'map_fingerprint': {'test': 'original'}}, config, 'map', 0, True, [])
         edited = cells.copy(); edited[y, x] = 0
         output = self.root/'observed_edited'
-        static_edit.save_manual_map(source, output, edited, expected_binding=static_edit.source_binding(source))
+        selection=dict(rule='restore_previous_free',previous_snapshot_id='previous-map')
+        static_edit.save_manual_map(source, output, edited, expected_binding=static_edit.source_binding(source),
+                                    selection_provenance=selection)
         edited_map = StaticEnvironmentMap(output)
         layers = edited_map.snapshot.layers
         self.assertTrue(layers['assumed_free'][y, x])
         self.assertFalse(layers['observed'][y, x])
         self.assertTrue(np.isnan(layers['last_observed'][y, x]))
         self.assertEqual(layers['coverage'][y, x], 0.)
+        self.assertEqual(layers['survey_index'][y, x], -2)
+        self.assertEqual(edited_map.manifest['source']['manual_edit']['selection_provenance'], selection)
         self.assertEqual(edited_map.snapshot.metadata['conditional_obstacle_cells'], 0)
         self.assertEqual(edited_map.snapshot.metadata['manual_free_cells_total'], 1)
         self.assertEqual(edited_map.manual_free_cells, 1)

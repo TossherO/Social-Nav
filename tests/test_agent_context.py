@@ -7,6 +7,7 @@ import numpy as np
 from PIL import Image
 from decision.agent import CONFIG_DIR
 from decision.agent.core.context import project_dialogue, robot_context, view_context
+from decision.agent.core.model_projection import ModelProjection
 from decision.agent.core.session import AgentSession
 from decision.agent.tools.framework import native_tools
 from decision.agent.tools.places import Catalog
@@ -42,7 +43,7 @@ class AgentContextTests(unittest.TestCase):
         self.assertEqual(origin['place_id'],'mission_start');self.assertEqual(origin['display_id'],'P5')
         historical = next(json.loads(m['content'])['view'] for m in body['messages'] if m['role']=='tool')
         self.assertNotIn('annotations',historical)
-        self.assertEqual(historical['view_id'],original['view_id'])
+        self.assertEqual(historical['view_id'],ModelProjection().reference('view',original['view_id']))
         self.assertEqual(historical['record_representation'],'projection_of_original_view_id')
         self.assertEqual(self.session.spatial_view.record,original)
         recorded = json.loads(self.fixture.store.db.execute("SELECT value FROM events WHERE kind='tool_result' ORDER BY seq DESC LIMIT 1").fetchone()[0])
@@ -246,9 +247,14 @@ class AgentContextTests(unittest.TestCase):
         self.fixture.nav.spatial_inputs=lambda:inputs
         self.session.prompt()
         default=self.session.spatial_view
-        self.assertEqual(default.record['local_source'],'current_measurement')
+        self.assertEqual(default.record['local_source'],'static_prior_only')
+        self.assertTrue(default.record['local_grid_present'])
         pixels=np.asarray(Image.open(io.BytesIO(default.images[1])))
-        self.assertTrue(np.any(np.all(pixels==[130,151,168],axis=2)))
+        self.assertFalse(np.any(np.all(pixels==[130,151,168],axis=2)))
+        self.assertTrue(np.any(np.all(pixels==[246,246,239],axis=2)))
+        default_candidate=self.session.call('check_candidate',pose=[4.,4.,0.],view_id=default.record['view_id'])
+        self.assertEqual(default_candidate['local_footprint']['status'],'occupied')
+        self.assertEqual(default_candidate['static_footprint']['status'],'free')
         result=self.session.call('query_map',bounds=[2.,2.,6.,6.])
         view=self.session.spatial_view
         self.assertEqual(result['view']['local_source'],'static_prior_only')

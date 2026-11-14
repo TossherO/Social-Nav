@@ -449,10 +449,10 @@ def algorithm_command(args, output, map_path, use_sim_time, *, coverage_path=Non
             command += ['record_environment_scans:='+str(args.record_environment_scans).lower(),
                         'scene:='+str(args.scene).lower(),
                         'scene_people:='+str(bool(args.people_python)).lower()]
-            if args.association_coverage:
-                command += ['association_coverage:='+str(coverage_path or project_path(args.association_coverage))]
             if args.prior_map:
                 command += ['static_map:='+str(project_path(args.prior_map))]
+        if coverage_path or args.association_coverage:
+            command += ['association_coverage:='+str(coverage_path or project_path(args.association_coverage))]
     return command
 
 
@@ -530,11 +530,10 @@ def main():
         prior = StaticPriorView(project_path(args.prior_map),expected_map=settings['playback']['map_fingerprint'])
         settings['prior_package'] = dict(entity_type='map',map_type='static_environment_map',snapshot_id=prior.manifest['snapshot_id'],
             layers_sha256=prior.manifest['layers_sha256'],asset_fingerprint=prior.asset)
-    if args.association_coverage:
-        import hashlib
-        from perception.mapping_localization.coverage import PriorCoverage
-        digest = hashlib.sha256(json.dumps(settings['playback']['map_fingerprint'],sort_keys=True).encode()).hexdigest()
-        coverage = PriorCoverage.load(project_path(args.association_coverage),asset_fingerprint=digest)
+    if args.mode == 'localization' and not pin:
+        from perception.mapping_localization.coverage import PriorCoverage, asset_digest, full_map_coverage
+        coverage = (PriorCoverage.load(project_path(args.association_coverage),asset_fingerprint=asset_digest(map_path))
+                    if args.association_coverage else full_map_coverage(map_path))
         settings['association_coverage_record'] = coverage.record
         settings['association_coverage_fingerprint'] = coverage.fingerprint
     record_path = output / 'run.json'
@@ -555,7 +554,7 @@ def main():
     master = algorithm = frontend = people = image_node = playback = view = display = None
     with tempfile.TemporaryDirectory(prefix='social-nav-ros-replay-') as temporary:
         frozen_coverage = None
-        if args.association_coverage:
+        if 'association_coverage_record' in settings:
             import yaml
             frozen_coverage = Path(temporary) / 'localization_coverage.yaml'
             frozen_coverage.write_text(yaml.safe_dump(settings['association_coverage_record'], sort_keys=False))
