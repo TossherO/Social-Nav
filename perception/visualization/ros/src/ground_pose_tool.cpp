@@ -4,6 +4,18 @@
 #include <string>
 #include <QKeyEvent>
 #include <QTimer>
+#include <QApplication>
+#include <QGridLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QShortcut>
+#include <QTextEdit>
+#include <QAbstractSpinBox>
+#include <QVBoxLayout>
 #include <OgreCamera.h>
 #include <OgreRay.h>
 #include <OgreSceneNode.h>
@@ -15,11 +27,13 @@
 #include <sensor_msgs/PointCloud2.h>
 #include <sensor_msgs/point_cloud2_iterator.h>
 #include <std_msgs/Empty.h>
+#include <std_msgs/String.h>
 #include <rviz/display_context.h>
 #include <rviz/ogre_helpers/arrow.h>
 #include <rviz/properties/float_property.h>
 #include <rviz/properties/string_property.h>
 #include <rviz/tool.h>
+#include <rviz/panel.h>
 #include <rviz/tool_manager.h>
 #include <rviz/viewport_mouse_event.h>
 
@@ -180,8 +194,63 @@ class ConfirmInitialPoseTool : public rviz::Tool {
   ros::NodeHandle node_;
   ros::Publisher publisher_;
 };
+
+class SessionPanel : public rviz::Panel {
+ public:
+  explicit SessionPanel(QWidget* parent=nullptr):rviz::Panel(parent) {
+    publisher_=node_.advertise<std_msgs::String>("/social_nav_interactive/panel_command",10);
+    auto* layout=new QVBoxLayout(this);
+    auto* instructions=new QLabel(QString::fromUtf8("先选择实机起点。WASD 沿车体方向平移，Q/E 旋转。\n确认前请检查点云预览。"));
+    instructions->setWordWrap(true);layout->addWidget(instructions);
+    auto* grid=new QGridLayout();layout->addLayout(grid);
+    add(grid,"Q 左转","q",0,0);add(grid,"W 前移","w",0,1);add(grid,"E 右转","e",0,2);
+    add(grid,"A 左移","a",1,0);add(grid,"S 后移","s",1,1);add(grid,"D 右移","d",1,2);
+    add(grid,"轮椅使能","arm",2,0);add(grid,"取消 / 退出使能","cancel",2,1);
+    add(grid,"退出会话","exit",2,2);
+    status_=new QLabel(QString::fromUtf8("命令沿用现有会话检查。"));
+    status_->setWordWrap(true);layout->addWidget(status_);
+    state_=new QLabel(QString::fromUtf8("等待会话状态"));state_->setWordWrap(true);layout->addWidget(state_);
+    subscriber_=node_.subscribe<std_msgs::String>("/social_nav_interactive/state",1,
+        [this](const std_msgs::String::ConstPtr& message) {
+          const auto object=QJsonDocument::fromJson(QByteArray::fromStdString(message->data)).object();
+          QMetaObject::invokeMethod(this,[this,object]() {
+            if (object.contains("accepted")) {
+              status_->setText(object.value("accepted").toBool() ? QString::fromUtf8("会话已接收操作")
+                  : QString::fromUtf8("操作未接收：")+object.value("error").toString());
+            }
+            if (object.value("chassis").isObject()) {
+              const auto chassis=object.value("chassis").toObject();
+              state_->setText(QString::fromUtf8("底盘状态：")+chassis.value("state").toString(QString::fromUtf8("未知"))+
+                  (chassis.value("status_fresh").toBool() ? QString::fromUtf8("（新鲜）") : QString::fromUtf8("（不可用或过期）")));
+            }
+          },Qt::QueuedConnection);
+        });
+    for (const auto key : {"w","a","s","d","q","e"}) {
+      auto* shortcut=new QShortcut(QKeySequence(QString::fromLatin1(key)),this);
+      shortcut->setContext(Qt::WindowShortcut);
+      connect(shortcut,&QShortcut::activated,this,[this,key]() {
+        auto* focus=QApplication::focusWidget();
+        if (qobject_cast<QLineEdit*>(focus) || qobject_cast<QTextEdit*>(focus) ||
+            qobject_cast<QPlainTextEdit*>(focus) || qobject_cast<QAbstractSpinBox*>(focus)) return;
+        send(key);
+      });
+    }
+  }
+ private:
+  void add(QGridLayout* grid,const char* title,const char* command,int row,int col) {
+    auto* button=new QPushButton(QString::fromUtf8(title));grid->addWidget(button,row,col);
+    connect(button,&QPushButton::clicked,this,[this,command](){send(command);});
+  }
+  void send(const char* command) {
+    if (!publisher_.getNumSubscribers()) { status_->setText(QString::fromUtf8("会话不可用，命令未发送。"));return; }
+    std_msgs::String message;message.data=command;publisher_.publish(message);
+    status_->setText(QString::fromUtf8("已发送 %1，等待会话确认。").arg(command));
+  }
+  ros::NodeHandle node_;ros::Publisher publisher_;ros::Subscriber subscriber_;QLabel *status_,*state_;
+};
 } // namespace social_nav_rviz
 
 PLUGINLIB_EXPORT_CLASS(social_nav_rviz::GroundGoalTool,rviz::Tool)
 PLUGINLIB_EXPORT_CLASS(social_nav_rviz::GroundInitialPoseTool,rviz::Tool)
 PLUGINLIB_EXPORT_CLASS(social_nav_rviz::ConfirmInitialPoseTool,rviz::Tool)
+PLUGINLIB_EXPORT_CLASS(social_nav_rviz::SessionPanel,rviz::Panel)

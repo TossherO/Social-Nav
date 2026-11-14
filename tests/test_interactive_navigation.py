@@ -22,6 +22,15 @@ from tests.chassis_fixtures import frame
 
 
 class PlaybackTests(unittest.TestCase):
+    def test_initial_pose_keyboard_adjustments_are_local_and_bounded(self):
+        from runtime.interactive import adjust_initial_pose
+        pose=[.1,.2,np.pi/2,2.,3.,4.]
+        np.testing.assert_allclose(adjust_initial_pose(pose,'w'),[.1,.2,np.pi/2,2.,3.05,4.],atol=1e-12)
+        np.testing.assert_allclose(adjust_initial_pose(pose,'a'),[.1,.2,np.pi/2,1.95,3.,4.],atol=1e-12)
+        self.assertAlmostEqual(adjust_initial_pose(pose,'q')[2],np.pi/2+np.pi/36)
+        self.assertEqual(pose,[.1,.2,np.pi/2,2.,3.,4.])
+        with self.assertRaises(ValueError):adjust_initial_pose(pose,'invalid')
+
     def test_live_localization_gravity_override_is_forwarded(self):
         from runtime.interactive import parser,runtime_command
         args=parser().parse_args(['--live','--output','/tmp/example','--roll-gravity-deg','6'])

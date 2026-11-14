@@ -8,4 +8,7 @@
   <class name="social_nav_rviz/ConfirmInitialPose" type="social_nav_rviz::ConfirmInitialPoseTool" base_class_type="rviz::Tool">
     <description>Confirm the selected live initial pose after reviewing its scan preview.</description>
   </class>
+  <class name="social_nav_rviz/SessionPanel" type="social_nav_rviz::SessionPanel" base_class_type="rviz::Panel">
+    <description>Adjust the live initial pose and operate the interactive session.</description>
+  </class>
 </library>

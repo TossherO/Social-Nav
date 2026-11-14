@@ -1,4 +1,6 @@
 Panels:
+  - Class: social_nav_rviz/SessionPanel
+    Name: Social-Nav session
   - Class: rviz/Displays
     Name: Displays
   - Class: rviz/Views

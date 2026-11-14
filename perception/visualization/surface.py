@@ -111,6 +111,18 @@ def sample_poses(poses,spacing):
     return np.c_[np.interp(at,arc,poses[:,0]),np.interp(at,arc,poses[:,1]),np.interp(at,arc,np.unwrap(poses[:,2]))]
 
 
+def complete_display_heights(z, fallback):
+    """Fill display-only path gaps; no height here is navigation evidence."""
+    z=np.asarray(z,float).copy()
+    missing=~np.isfinite(z)
+    known=np.flatnonzero(~missing)
+    if known.size:
+        z[missing]=np.interp(np.flatnonzero(missing),known,z[known])
+    else:
+        z[:]=float(fallback)
+    return z,missing
+
+
 def line_segments(points):
     """Never draw a bridge across an unknown height."""
     points=np.asarray(points,float).reshape(-1,3)

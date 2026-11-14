@@ -39,7 +39,7 @@ if [[ "$PROFILE" == sensors || "$PROFILE" == all ]]; then
   cmake --build "$BUILD_ROOT/realsense" --target install -j"$JOBS"
 fi
 cd "$SOCIAL_NAV_ROS_OUTPUT/ros1_ws"
-catkin_make -j"$JOBS" -l"$JOBS" -DCMAKE_BUILD_TYPE=Release \
+catkin_make --force-cmake -j"$JOBS" -l"$JOBS" -DCMAKE_BUILD_TYPE=Release \
   -DCATKIN_WHITELIST_PACKAGES="$PACKAGES" -DPYTHON_EXECUTABLE=/usr/bin/python3 \
   -DPYTHON_INCLUDE_DIR=/usr/include/python3.8 -DPYTHON_LIBRARY=/usr/lib/x86_64-linux-gnu/libpython3.8.so \
   -DGTSAM_DIR="$SOCIAL_NAV_ROS_OUTPUT/dependencies/gtsam/lib/cmake/GTSAM" \

@@ -162,19 +162,37 @@ class NavigationDisplayTests(unittest.TestCase):
         self.assertTrue(np.allclose(second['footprint'][:,2],-1.93))
         self.assertEqual(second['raw_history'][1][1][2],-3.)
 
-    def test_slope_and_holes_are_sampled_between_sparse_reference_endpoints(self):
+    def test_reference_bridges_missing_display_heights_but_keeps_supported_slope(self):
         packet=self.packet();snapshot=ground_grid(np.arange(60)[None,:]*.1-3.)
         snapshot.layers['ground_support'][:,28:31]=False
         view=NavigationView(self.geometry,self.cfg).update(self.row,packet,grid=snapshot,mono=0.)
         path=view['reference'];self.assertIsNotNone(path)
         self.assertGreater(len(path['display_poses']),len(path['points']))
-        self.assertTrue(np.isnan(path['heights']).any())
+        self.assertTrue(np.isfinite(path['heights']).all())
+        self.assertTrue((path['height_sources']==5).any())
         indices=np.floor(path['display_poses'][:,0]/.1).astype(int)
-        valid=np.isfinite(path['heights'])
+        valid=path['height_sources']!=5
         np.testing.assert_allclose(path['heights'][valid],indices[valid]*.1-3.+.03,atol=1e-6)
         segments=line_segments(np.c_[path['display_poses'][:,:2],path['heights']]).reshape(-1,2,3)
         self.assertTrue(np.isfinite(segments).all())
-        self.assertFalse(np.any((segments[:,0,0]<2.8)&(segments[:,1,0]>=3.1)))
+        self.assertIn('approximate display heights',view['text'])
+
+    def test_reference_uses_static_floor_beyond_local_map_then_display_fallback(self):
+        local=ground_grid(-2.)
+        local.layers['ground_support'][:,30:]=False
+        static=asset();static.snapshot=ground_grid(-1.)
+        renderer=NavigationView(self.geometry,self.cfg,asset=static)
+        data=dict(points=np.array([[2.,2.,0.],[8.,2.,0.]]),stamp_s=10.,
+                  local_to_map=np.eye(3),map_from_local=np.eye(4))
+        output=dict(pose=None,goal=None,ground_source=0,text='',localization_row=self.row,
+                    reference=data,trajectory=None)
+        view=renderer._project(output,DisplaySurface(local,self.row))
+        path=view['reference']
+        self.assertTrue(np.isfinite(path['heights']).all())
+        self.assertTrue((path['height_sources']==4).any())
+        self.assertTrue((path['height_sources']==5).any())
+        self.assertAlmostEqual(path['display_poses'][-1,0],8.)
+        self.assertIn('approximate display heights',view['text'])
 
     def test_ground_unknown_stale_future_or_reset_never_becomes_zero_height(self):
         renderer=NavigationView(self.geometry,self.cfg)
@@ -248,15 +266,14 @@ class FrozenDisplayTests(unittest.TestCase):
         self.assertEqual(self.preview,original)
         json.dumps(view,allow_nan=False)
 
-    def test_unknown_static_and_local_heights_leave_gaps_without_zero_fill(self):
+    def test_reference_uses_approximate_display_heights_and_trajectory_keeps_gaps(self):
         self.asset.snapshot.layers['ground_support'][:,28:31]=False
         self.grid.layers['ground_support'][:]=False
         view=self.project(self.preview,self.grid,self.asset,self.settings)
         ref=view['curves']['reference'];dwa=view['curves']['trajectory']
-        self.assertLess(ref['height_count'],ref['point_count'])
-        segments=np.asarray(ref['segments']).reshape(-1,2,3)
-        self.assertFalse(np.any((segments[:,0,0]<2.8)&(segments[:,1,0]>=3.1)))
-        self.assertLessEqual(ref['prefix'][-1][0],2.8)
+        self.assertEqual(ref['height_count'],ref['point_count'])
+        self.assertGreater(ref['approximate_count'],0)
+        self.assertAlmostEqual(ref['prefix'][-1][0],4.)
         self.assertEqual(dwa['segments'],[]);self.assertEqual(dwa['prefix'],[])
         np.testing.assert_allclose(self.grid.layers['ground_z'],-2.)
 

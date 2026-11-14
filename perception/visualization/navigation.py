@@ -10,7 +10,7 @@ from navigation.planning.continuity import check_reference,content_valid,context
 from navigation.planning.inputs import request_status,scene_status
 from navigation.planning.planner import se2,transform_poses
 from perception.mapping_localization.context import pose_matrix
-from .surface import DisplaySurface,sample_poses
+from .surface import DisplaySurface,sample_ground,sample_poses,complete_display_heights
 
 
 IDENTITY=('session_id','generation','frame_id')
@@ -83,13 +83,16 @@ class NavigationView:
                 check_reference(reference,request,scene,self.asset,self.reference_max_age_s)
                 if not 0<=now-reference['as_of']<=self.reference_max_age_s:raise ValueError('reference_future_or_stale')
                 points=np.asarray(reference['result']['path'],float)
+                local_to_map=None
                 if request['mode']=='mapped':
                     # Exactly the same planar map-to-local convention as DWA.
                     world=np.asarray(record['localization']['world_from_lidar'])
                     mapped=self.geometry.pose(np.asarray(record['prior']['map_from_local'])@world)
                     transform=se2(self.geometry.pose(world))@np.linalg.inv(se2(mapped))
                     points=transform_poses(points,transform)
-                out['reference']=dict(points=points,stamp_s=reference['as_of'])
+                    local_to_map=np.linalg.inv(transform)
+                out['reference']=dict(points=points,stamp_s=reference['as_of'],local_to_map=local_to_map,
+                    map_from_local=copy.deepcopy(record['prior']['map_from_local']) if local_to_map is not None else None)
                 ref_reason='ready (age %.2fs)'%(now-reference['as_of'])
             except (ValueError,KeyError,TypeError) as error:ref_reason=str(error)
         result=packet['result']
@@ -129,6 +132,20 @@ class NavigationView:
             if data is not None:
                 data['display_poses']=sample_poses(data['points'],surface.resolution)
                 data['heights'],data['height_sources']=surface.sample(data['display_poses'][:,:2])
+                if key=='reference':
+                    if self.asset is not None and data.get('local_to_map') is not None:
+                        mapped=transform_poses(data['display_poses'],data['local_to_map'])
+                        heights,_=sample_ground(self.asset.snapshot,mapped[:,:2],self.z)
+                        missing=~np.isfinite(data['heights']) & np.isfinite(heights)
+                        if missing.any():
+                            points=np.c_[mapped[missing,:2],heights[missing],np.ones(missing.sum())]
+                            local=points@np.linalg.inv(np.asarray(data['map_from_local'],float)).T
+                            data['heights'][missing]=local[:,2]
+                            data['height_sources'][missing]=4
+                    fallback=out['localization_row']['position'][2]+self.z
+                    data['heights'],approx=complete_display_heights(data['heights'],fallback)
+                    data['height_sources'][approx]=5
+                    if approx.any():status+=' | reference approximate display heights %d'%int(approx.sum())
                 if key=='trajectory':data['heights']+=.02
                 status+=' | %s height %d/%d'%(key,int(np.isfinite(data['heights']).sum()),len(data['heights']))
         out['text']+='\nGROUND: '+status

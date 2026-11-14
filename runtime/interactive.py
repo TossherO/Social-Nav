@@ -139,6 +139,24 @@ def motion_selection(config, *, path=None, profile=None):
     return resolve(path or config['motion_config']), profile
 
 
+def adjust_initial_pose(pose, command, *, step_m=.05, step_rad=math.pi/36):
+    """Adjust the unconfirmed LiDAR pose in its forward/left frame."""
+    value=list(pose)
+    if len(value)!=6 or not all(math.isfinite(v) for v in value):
+        raise ValueError('Initial pose is unavailable or invalid')
+    if command in ('w','s','a','d'):
+        forward={'w':1,'s':-1}.get(command,0)*step_m
+        left={'a':1,'d':-1}.get(command,0)*step_m
+        yaw=value[2]
+        value[3]+=forward*math.cos(yaw)-left*math.sin(yaw)
+        value[4]+=forward*math.sin(yaw)+left*math.cos(yaw)
+    elif command in ('q','e'):
+        value[2]=math.atan2(math.sin(value[2]+(step_rad if command=='q' else -step_rad)),
+                            math.cos(value[2]+(step_rad if command=='q' else -step_rad)))
+    else:raise ValueError('Unknown initial pose adjustment')
+    return value
+
+
 def runtime_command(args, config, pose):
     motion_path, profile = motion_selection(config, path=args.motion_config, profile=args.motion_profile)
     command = [sys.executable, '-B', '-m', 'runtime', '--mode', 'localization',
@@ -473,10 +491,41 @@ def main(argv=None):
             position=[message.point.x, message.point.y, message.point.z], stamp_s=message.header.stamp.to_sec()))
 
     def cancel():
-        result = bridge.cancel() if bridge.last_submitted is not None else dict(accepted=True)
-        if args.execute:
-            send('arm', dict(enabled=False))
-        return result
+        try:
+            return bridge.cancel() if bridge.last_submitted is not None else dict(accepted=True)
+        finally:
+            if args.execute:
+                send('arm', dict(enabled=False))
+
+    def panel_command(message):
+        command=message.data
+        def act():
+            if command in ('w','a','s','d','q','e'):
+                with lock:
+                    if not args.live or runtime is not None or selection or initial_preview.pose is None:
+                        raise ValueError('Select an unconfirmed live initial pose first')
+                    value=adjust_initial_pose(initial_preview.pose,command)
+                    height=selected_initial_height(grid,hint,value[3:5],initial_z=args.initial_z,
+                        observed_height=None if initial_ground is None else initial_ground.current(time.monotonic()),
+                        height_range=(ground_config['ground_min_below_sensor_m'],ground_config['ground_max_below_sensor_m']))
+                    value[5]=height['lidar_z_m']
+                    initial_preview.select(value,rospy.Time.now().to_sec(),height_seed=height)
+                    show_initial_candidate(value)
+                    return dict(accepted=True,state='initial_pose_preview',preview_revision=initial_preview.revision)
+            if command=='confirm':return confirm_initial()
+            if command=='arm':
+                if not args.execute:raise ValueError('Execution is not enabled for this session')
+                return send('arm',dict(enabled=True))
+            if command=='cancel':
+                result=cancel()
+                if isinstance(result.get('reply'),dict):
+                    result['accepted']=result['reply'].get('accepted') is True
+                return result
+            if command=='exit':
+                stopped.set()
+                return dict(accepted=True,state='stopping')
+            raise ValueError('Unknown panel command')
+        report(act)
 
     last_goal = object()
     def show_goal(request):
@@ -516,6 +565,7 @@ def main(argv=None):
 
     subscribers = [rospy.Subscriber('/initialpose', PoseWithCovarianceStamped, initial, queue_size=1),
                    rospy.Subscriber('/social_nav_interactive/initial_pose_candidate', PoseWithCovarianceStamped, initial, queue_size=1),
+                   rospy.Subscriber('/social_nav_interactive/panel_command', String, panel_command, queue_size=10),
                    rospy.Subscriber('/move_base_simple/goal', PoseStamped, goal, queue_size=1),
                    rospy.Subscriber('/clicked_point', PointStamped, point, queue_size=1),
                    rospy.Subscriber('/social_nav_interactive/confirm_initial_pose', Empty, confirm_initial_topic, queue_size=1)]
@@ -616,6 +666,8 @@ def main(argv=None):
                             for name,curve in display.get('curves',{}).items():
                                 if curve['height_count']<curve['point_count']:
                                     marker.text+='\n%s height %d/%d (gaps omitted)'%(name,curve['height_count'],curve['point_count'])
+                                if curve.get('approximate_count'):
+                                    marker.text+='\n%s approximate heights: %d'%(name,curve['approximate_count'])
                             label_pub.publish(marker)
                     except (OSError, EOFError) as error:
                         rospy.logwarn_throttle(2., 'Waiting for runtime: %s', error)

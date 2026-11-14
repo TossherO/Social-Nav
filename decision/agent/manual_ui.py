@@ -10,28 +10,13 @@ import uuid
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 from . import ROOT
-from .ui_data import connect_readonly,event_detail,event_summary,poll_session
+from .ui_data import ContextTimeline,connect_readonly,event_detail,message_detail,poll_session
 
 STATUS={'ready':'准备决策','waiting_navigation':'等待人工驾驶或到达确认','waiting_observation':'等待新观察',
         'waiting_user':'等待用户继续','needs_clarification':'等待用户答复','paused':'已暂停',
         'stopping':'正在结束任务','cancelled':'已取消','succeeded':'已完成','failed':'未完成',
         'idle':'空闲','running':'进行中',
         'blocked':'受阻','refused':'未接收','pending':'待执行','completed':'已完成'}
-EVENT_LABELS={'conversation_exchange':'对话','conversation_trimmed':'上下文裁剪','tool_intent':'工具调用',
-              'model_action_applied':'工具结果','api_request':'模型请求','api_response':'模型返回',
-              'api_failure':'模型请求失败','model_failed':'模型错误','model_protocol_rejected':'模型格式错误',
-              'model_result_discarded':'过期模型结果','manual_arrival_confirmation':'人工到达确认',
-              'manual_goal_evidence_wait_started':'等待到达证据','manual_goal_evidence_wait_finished':'到达证据等待结果',
-              'manual_goal_evidence_refresh_failed':'到达证据读取失败','manual_goal_evidence_unproven':'到达证据不足',
-              'operator_command':'窗口操作结果',
-              'manual_reference_status':'参考路径预览',
-              'manual_route_progress':'路线进度','manual_route_trace':'路线检查',
-              'navigation_completed':'导航阶段完成','navigation_ack':'目标已接收',
-              'navigation_cancel_confirmed':'目标已取消','navigation_context_lost':'定位或地图变化',
-              'task_connection_lost':'连接中断','user_event':'用户操作','task_created':'创建任务',
-              'assistant_message':'模型文字回复','agent_run_finished':'会话结束'}
-
-
 class SessionReader(QtCore.QThread):
     update=QtCore.pyqtSignal(object,object)
     error=QtCore.pyqtSignal(str)
@@ -78,7 +63,7 @@ class DetailReader(QtCore.QThread):
 
 
 class DetailDialog(QtWidgets.QDialog):
-    def __init__(self,kind,value,images,parent=None):
+    def __init__(self,kind,value,images,parent=None,image_index=0):
         super().__init__(parent);self.setWindowTitle('事件详情 · '+kind);self.resize(1000,700)
         layout=QtWidgets.QVBoxLayout(self)
         if kind=='api_request':
@@ -94,10 +79,11 @@ class DetailDialog(QtWidgets.QDialog):
             for name,_ in images:choices.addItem(name)
             def show(row):
                 if row<0:return
-                pix=QtGui.QPixmap();pix.loadFromData(images[row][1])
+                pix=QtGui.QPixmap()
+                if images[row][1] is not None:pix.loadFromData(images[row][1])
                 if pix.isNull():picture.setText('无法解码该图像');return
                 picture.setPixmap(pix.scaled(560,480,QtCore.Qt.KeepAspectRatio,QtCore.Qt.SmoothTransformation))
-            choices.currentRowChanged.connect(show);choices.setCurrentRow(0);split.addWidget(panel)
+            choices.currentRowChanged.connect(show);choices.setCurrentRow(min(max(image_index,0),len(images)-1));split.addWidget(panel)
 
 
 class ManualWindow(QtWidgets.QMainWindow):
@@ -110,11 +96,22 @@ class ManualWindow(QtWidgets.QMainWindow):
         self.process.errorOccurred.connect(self.process_error)
         self.buffer=b'';self.reader=None;self.detail_reader=None;self.session_path=None
         self.state=None;self.status=None;self.status_received=0.;self.pending={};self.target=None
+        self.timeline=ContextTimeline();self.timeline_items=[];self.active_tools=[];self.detail_selection=None
         self._build(socket,catalog,duration)
         self.timer=QtCore.QTimer(self);self.timer.timeout.connect(self.refresh_status);self.timer.start(500)
 
     def _build(self,socket,catalog,duration):
         central=QtWidgets.QWidget();self.setCentralWidget(central);outer=QtWidgets.QVBoxLayout(central)
+        self.setStyleSheet("""
+            QMainWindow, QWidget { background: #f4f6fa; color: #243047; font-size: 13px; }
+            QLineEdit, QSpinBox, QTreeWidget, QPlainTextEdit, QListWidget {
+                background: white; border: 1px solid #d8dfeb; border-radius: 5px; padding: 4px;
+            }
+            QPushButton { background: #e8eef9; border: 1px solid #cbd8ed; border-radius: 5px; padding: 6px 10px; }
+            QPushButton:hover { background: #d7e5fb; }
+            QPushButton:disabled { color: #9ca7b8; background: #f0f2f6; }
+            QHeaderView::section { background: #e9eef6; border: 0; padding: 6px; font-weight: bold; }
+        """)
         self.banner=QtWidgets.QLabel('人工驾驶 · 观察会话不连接底盘 · 任务取消不会让手柄停车')
         self.banner.setStyleSheet('font-weight:bold;color:#8a4b00;padding:6px;background:#fff3d4')
         outer.addWidget(self.banner)
@@ -139,7 +136,7 @@ class ManualWindow(QtWidgets.QMainWindow):
         left=QtWidgets.QWidget();left.setMinimumWidth(380);left_layout=QtWidgets.QVBoxLayout(left)
         left_layout.addWidget(QtWidgets.QLabel('任务与进度'))
         self.current_task=QtWidgets.QLabel('当前任务：无');self.current_task.setWordWrap(True);left_layout.addWidget(self.current_task)
-        self.goals=QtWidgets.QTreeWidget();self.goals.setHeaderLabels(['阶段','状态'])
+        self.goals=QtWidgets.QTreeWidget();self.goals.setHeaderLabels(['子任务与要求','状态'])
         self.goals.header().setSectionResizeMode(0,QtWidgets.QHeaderView.Stretch)
         self.goals.header().setSectionResizeMode(1,QtWidgets.QHeaderView.ResizeToContents)
         self.goals.setWordWrap(True);self.goals.setTextElideMode(QtCore.Qt.ElideNone);left_layout.addWidget(self.goals,2)
@@ -148,10 +145,14 @@ class ManualWindow(QtWidgets.QMainWindow):
         self.target_image.setMinimumSize(300,220);left_layout.addWidget(self.target_image,2)
         split.addWidget(left)
         right=QtWidgets.QWidget();right_layout=QtWidgets.QVBoxLayout(right)
-        right_layout.addWidget(QtWidgets.QLabel('完整会话事件（双击查看详情；模型请求可查看该轮输入）'))
-        self.events=QtWidgets.QTreeWidget();self.events.setHeaderLabels(['时间','类型','摘要'])
-        self.events.setColumnWidth(0,85);self.events.setColumnWidth(1,190)
-        self.events.itemDoubleClicked.connect(self.open_detail);right_layout.addWidget(self.events,1)
+        header=QtWidgets.QHBoxLayout();right_layout.addLayout(header)
+        header.addWidget(QtWidgets.QLabel('Agent 对话与上下文'),1)
+        tools_button=QtWidgets.QPushButton('查看工具');tools_button.clicked.connect(self.show_tools);header.addWidget(tools_button)
+        self.context_tree=QtWidgets.QTreeWidget();self.context_tree.setHeaderLabels(['时间','类型','内容'])
+        self.context_tree.setColumnWidth(0,100);self.context_tree.setColumnWidth(1,110)
+        self.context_tree.itemDoubleClicked.connect(self.open_detail)
+        right_layout.addWidget(self.context_tree,1)
+        right_layout.addWidget(QtWidgets.QLabel('消息只记录一次；灰色表示已不在当前上下文，待确认表示尚未进入下一次请求。'))
         split.addWidget(right);split.setStretchFactor(1,2)
         self.notice=QtWidgets.QLabel('历史会话只读；Agent 不会因打开记录而恢复。');self.notice.setWordWrap(True);outer.addWidget(self.notice)
         controls=QtWidgets.QHBoxLayout();outer.addLayout(controls)
@@ -184,7 +185,8 @@ class ManualWindow(QtWidgets.QMainWindow):
             self.reader.requestInterruption()
             if not self.reader.wait(2000):
                 self.notice.setText('上一会话仍在读取，请稍后重试。');return False
-        self.session_path=Path(path);self.state=None;self.status=None;self.events.clear();self.goals.clear()
+        self.session_path=Path(path);self.state=None;self.status=None;self.goals.clear()
+        self.context_tree.clear();self.timeline=ContextTimeline();self.timeline_items=[];self.active_tools=[]
         self.current_task.setText('当前任务：无')
         self.target=None;self.target_text.setText('尚无目标');self.target_image.clear()
         self.reader=SessionReader(path);self.reader.update.connect(self.update_session);self.reader.error.connect(self.reader_error)
@@ -248,34 +250,111 @@ class ManualWindow(QtWidgets.QMainWindow):
         self.notice.setText('Agent 进程不可用：'+self.process.errorString());self.refresh_status()
 
     def update_session(self,state,events):
+        previous_goals=None if self.state is None else self.state.get('task_goals')
         self.state=state
         if state is not None:
             self.current_task.setText('当前任务：'+str(state.get('instruction') or ''))
+        if state is not None and state.get('task_goals')!=previous_goals:
             self.goals.clear()
             for goal in state.get('task_goals',[]):
                 req=goal.get('requirement') or {}
-                item=QtWidgets.QTreeWidgetItem([str(req.get('description') or req.get('goal_id')),
+                index=self.goals.topLevelItemCount()+1
+                title=f"{index}. {req.get('description') or req.get('goal_id')}"
+                item=QtWidgets.QTreeWidgetItem([title,
                     STATUS.get(goal.get('status'),str(goal.get('status','')))])
                 self.goals.addTopLevelItem(item)
+                fields={'goal_id':'编号','stage_type':'阶段','kind':'类型','target_id':'目标',
+                    'position':'位置','required_yaw':'要求朝向','facing':'面向','direction':'方向',
+                    'checkpoints':'途经点','semantic_conditions':'必须满足','visual_preferences':'视觉偏好'}
+                for key,label in fields.items():
+                    if req.get(key) not in (None,'',[]):item.addChild(QtWidgets.QTreeWidgetItem([label+': '+str(req[key]),'']))
+                item.setExpanded(True)
         for event in events:
             stamp=datetime.fromtimestamp(event['wall_s']).strftime('%H:%M:%S')
-            item=QtWidgets.QTreeWidgetItem([stamp,EVENT_LABELS.get(event['kind'],event['kind']),event_summary(event)])
-            item.setData(0,QtCore.Qt.UserRole,event['seq']);self.events.addTopLevelItem(item)
-        if events:self.events.scrollToBottom()
+            before=len(self.timeline.entries)
+            if event['kind']=='api_request' and 'context' in event:
+                self.active_tools=event['context']['tools']
+                self.timeline.request(event['context'],event['seq'])
+            elif event['kind']=='api_response':
+                self.timeline.response(event['value'].get('message'),event['seq'])
+            elif event['kind']=='conversation_exchange':
+                self.timeline.exchange(event['value'].get('messages',[]),event['seq'])
+            else:continue
+            self.update_timeline(stamp,before)
         self.refresh_status()
 
     def reader_error(self,message):self.notice.setText('会话读取暂不可用：'+message)
 
+    def update_timeline(self,stamp,before):
+        roles={'system':('系统提示','#7755aa'),'user':('用户 / 状态','#2673b8'),
+               'assistant':('模型输出','#b34838'),'tool':('工具输出','#118166')}
+        for message in self.timeline.entries[before:]:
+            label,color=roles.get(message['role'],(message['role'],'#566276'))
+            item=QtWidgets.QTreeWidgetItem([stamp,label,message['summary']])
+            item.setData(0,QtCore.Qt.UserRole,message['seq'])
+            item.setData(0,QtCore.Qt.UserRole+1,message['index'])
+            self.context_tree.addTopLevelItem(item)
+            self.timeline_items.append((item,label,color))
+        for (item,label,color),message in zip(self.timeline_items,self.timeline.entries):
+            signature=(message['seq'],message['index'],tuple(message['images']),tuple(message.get('image_names',[])))
+            if item.data(0,QtCore.Qt.UserRole+4)!=signature:
+                item.takeChildren()
+                item.setData(0,QtCore.Qt.UserRole+4,signature)
+                for number,image_index in enumerate(message['images']):
+                    name=message.get('image_names',[])
+                    title=name[number] if number<len(name) else '输入图像'
+                    image=QtWidgets.QTreeWidgetItem(['','图片',title+' · 双击预览'])
+                    image.setData(0,QtCore.Qt.UserRole,message['seq'])
+                    image.setData(0,QtCore.Qt.UserRole+1,message['index'])
+                    image.setData(0,QtCore.Qt.UserRole+2,image_index)
+                    item.addChild(image)
+                if message['images']:item.setExpanded(True)
+            brush=QtGui.QBrush(QtGui.QColor(color if message['active'] and not message['pending'] else '#9aa3b0'))
+            item.setText(1,label+(' · 待确认' if message['pending'] and message['active'] else ''))
+            item.setText(2,message['summary']+('（模型输入采用精简表示）' if message.get('representation_changed') else ''))
+            item.setData(0,QtCore.Qt.UserRole,message['seq'])
+            item.setData(0,QtCore.Qt.UserRole+1,message['index'])
+            for column in (0,1,2):item.setForeground(column,brush)
+            for index in range(item.childCount()):
+                for column in (0,1,2):item.child(index).setForeground(column,brush)
+        if len(self.timeline.entries)>before and self.process.state()==QtCore.QProcess.Running:
+            self.context_tree.scrollToBottom()
+
+    def show_tools(self):
+        from .tools.framework import native_tools
+        dialog=QtWidgets.QDialog(self);dialog.setWindowTitle('Agent 工具与参数');dialog.resize(950,650)
+        outer=QtWidgets.QVBoxLayout(dialog)
+        outer.addWidget(QtWidgets.QLabel('● 已包含于最近一次模型请求；○ 其他已实现工具。模型每轮可用工具可能不同。'))
+        layout=QtWidgets.QHBoxLayout();outer.addLayout(layout)
+        items=QtWidgets.QListWidget();detail=QtWidgets.QPlainTextEdit()
+        detail.setReadOnly(True);layout.addWidget(items,1);layout.addWidget(detail,3)
+        tools=native_tools()
+        for tool in tools:
+            name=tool['function']['name']
+            items.addItem(('● ' if name in self.active_tools else '○ ')+name)
+        items.currentRowChanged.connect(lambda row:detail.setPlainText(
+            json.dumps(tools[row]['function'],ensure_ascii=False,indent=2) if row>=0 else ''))
+        if tools:items.setCurrentRow(0)
+        dialog.exec_()
+
     def open_detail(self,item,_column):
         if self.session_path is None or self.detail_reader is not None:return
         seq=item.data(0,QtCore.Qt.UserRole)
+        self.detail_selection=(item.data(0,QtCore.Qt.UserRole+1),item.data(0,QtCore.Qt.UserRole+2))
         self.detail_reader=DetailReader(self.session_path,seq)
         self.detail_reader.ready.connect(self.show_detail)
         self.detail_reader.error.connect(lambda message:self.notice.setText('详情读取失败：'+message))
         self.detail_reader.finished.connect(self.detail_finished);self.detail_reader.start()
 
     def show_detail(self,kind,value,images):
-        dialog=DetailDialog(kind,value,images,self);dialog.exec_()
+        index,image_index=self.detail_selection or (None,None)
+        if kind=='api_request' and index is not None:
+            value=message_detail(value['request']['messages'][index])
+        elif kind=='api_response' and isinstance(value.get('message'),dict):
+            value=message_detail(value['message'])
+        elif kind=='conversation_exchange' and index is not None:
+            value=message_detail(value['messages'][index])
+        dialog=DetailDialog(kind,value,images,self,image_index=0 if image_index is None else image_index);dialog.exec_()
 
     def detail_finished(self):
         self.detail_reader=None
@@ -379,10 +458,16 @@ def main():
     parser.add_argument('--runtime-socket',default='')
     parser.add_argument('--catalog',default='')
     parser.add_argument('--duration',type=int,default=1200)
+    parser.add_argument('--session',default='',help='只读打开已有 session.sqlite')
     args=parser.parse_args()
     if not 1<=args.duration<=86400:parser.error('duration 必须在 1 至 86400 秒之间')
+    if args.session and not Path(args.session).is_file():parser.error('session 文件不存在')
     app=QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
-    window=ManualWindow(args.runtime_socket,args.catalog,args.duration);window.show()
+    window=ManualWindow(args.runtime_socket,args.catalog,args.duration)
+    if args.session:
+        window.set_reader(args.session)
+        window.notice.setText('只读历史会话；图片是当时发送的观察，不代表当前实时画面。')
+    window.show()
     return app.exec_()
 
 

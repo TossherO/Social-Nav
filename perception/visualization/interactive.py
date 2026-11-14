@@ -1,7 +1,7 @@
 """Terrain projection for frozen previews; planning outputs remain unchanged."""
 import numpy as np
 
-from .surface import DisplaySurface,annotation_height,line_segments,sample_ground,sample_poses
+from .surface import DisplaySurface,annotation_height,line_segments,sample_ground,sample_poses,complete_display_heights
 
 
 def goal_geometry(request,grid):
@@ -36,10 +36,17 @@ def preview_geometry(preview,grid,asset,settings):
         frame=result.get('frame_id',grid.metadata['frame_id'])
         points=sample_poses(poses,grid.metadata['resolution'])
         z,_=heights(points[:,:2],frame,lift)
+        approximate=np.zeros(len(z),bool)
+        if name=='reference':
+            fallback=(annotation_height(asset.snapshot,points[0,:2],0.)+settings['path_z_m']
+                      if len(points) and asset is not None and frame==asset.manifest['frame_id']
+                      else float(np.asarray(grid.metadata['world_from_lidar'])[2,3])+settings['path_z_m'])
+            z,approximate=complete_display_heights(z,fallback)
         xyz=np.c_[points[:,:2],z];valid=np.isfinite(z)
         end=int(np.flatnonzero(~valid)[0]) if (~valid).any() else len(z)
         curves[name]=dict(frame_id=frame,stamp_s=stamp,segments=line_segments(xyz).tolist(),
-            prefix=np.c_[xyz[:end],points[:end,2]].tolist(),height_count=int(valid.sum()),point_count=len(z))
+            prefix=np.c_[xyz[:end],points[:end,2]].tolist(),height_count=int(valid.sum()),point_count=len(z),
+            approximate_count=int(approximate.sum()))
 
     frame=reference.get('frame_id',grid.metadata['frame_id'])
     start=reference.get('start')
