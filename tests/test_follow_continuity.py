@@ -47,7 +47,7 @@ class FollowContinuityTests(unittest.TestCase):
         self.assertEqual(result['request']['completion_policy'],'continuous')
         self.assertLessEqual(result['request']['valid_until_s'],15.5)
         ticket=policy.observe(current,pid_to_track={0:['tracker_session',7,'a']})
-        with self.assertRaisesRegex(ValueError,'separate_visual_revalidation'):
+        with self.assertRaisesRegex(ValueError,'structured_t2'):
             policy.respond(ticket,dict(id=0,state='visible'),scene=current,now=15.)
         later=scene(15.1,5.4);self.history.add(later);updated=policy.update(later,now=15.1,history=self.history)
         self.assertEqual(updated['operation'],'plan')
@@ -77,6 +77,20 @@ class FollowContinuityTests(unittest.TestCase):
         self.history.add(late)
         self.assertEqual(policy.update(late,now=10.9,history=self.history)['operation'],'stop')
         self.assertEqual(policy.update(scene(11.),now=11.,history=self.history)['operation'],'stop')
+
+    def test_follow_and_people_prediction_share_support_age_limit(self):
+        from navigation.planning.people import PeopleModel
+        initial=scene(10.);self.history.add(initial)
+        policy=TaskPolicy('f','follow',self.config,self.geometry)
+        policy.start_continuous_follow(reference(initial),initial,self.history,now=10.)
+        for i in range(1,12):
+            now=round(10.+i*.1,1)
+            current=scene(now,support=10.,state='predicted');self.history.add(current)
+            self.assertIn(policy.target,PeopleModel(current,self.config['people']).ids)
+            self.assertEqual(policy.update(current,now=now,history=self.history)['operation'],'plan')
+        expired=scene(11.3,support=10.,state='predicted');self.history.add(expired)
+        self.assertNotIn(('tracker_session',7,'a'),PeopleModel(expired,self.config['people']).ids)
+        self.assertEqual(policy.update(expired,now=11.3,history=self.history)['operation'],'stop')
 
     def test_gap_identity_reuse_and_missing_source_refuse_start(self):
         initial=scene(10.);ref=reference(initial);self.history.add(initial)

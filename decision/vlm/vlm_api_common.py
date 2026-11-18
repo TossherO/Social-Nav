@@ -94,7 +94,7 @@ def read_stream(response, started, timing, *, text_chunks=None):
             "reasoning_content_present": reasoning}
 
 
-def request_dspark(body, *, client_factory=None):
+def request_dspark(body, *, client_factory=None, timeout_s=90):
     """One configured DSPARK request; retain partial output and never retry."""
     import httpx
     from .project_config import load_config
@@ -110,7 +110,7 @@ def request_dspark(body, *, client_factory=None):
     chunks, timing = [], {}
     factory = client_factory or httpx.Client
     try:
-        with factory(timeout=90, trust_env=False, follow_redirects=False,
+        with factory(timeout=timeout_s, trust_env=False, follow_redirects=False,
                      limits=httpx.Limits(max_connections=1)) as client:
             server = check_server(client, config, info=True)
             if server['status'] != 'ready' or server.get('server_args', {}).get('speculative_algorithm') != 'DSPARK':
@@ -121,8 +121,9 @@ def request_dspark(body, *, client_factory=None):
                 if response.status_code != 200:
                     raise ValueError('non_success_http_response')
                 reply = read_stream(response, began, timing, text_chunks=chunks)
-            result.update(raw_content=reply['raw_content'], timing=timing, usage=reply['usage'])
-            if (reply['server_model'] != model or reply['finish_reason'] != 'stop' or
+            result.update(raw_content=reply['raw_content'], timing=timing, usage=reply['usage'],
+                          finish_reason=reply['finish_reason'],server_model=reply['server_model'])
+            if (reply['server_model'] != model or reply['finish_reason']!='stop' or
                     reply['reasoning_content_present'] or reply['usage'].get('reasoning_tokens', 0)):
                 raise ValueError('invalid_completion_metadata')
             result['status'] = 'complete'

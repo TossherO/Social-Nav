@@ -16,8 +16,9 @@ class ProjectLayoutTests(unittest.TestCase):
 
     def test_current_tasks_have_prompts_and_frozen_two_second_policy(self):
         config=load_config()
-        self.assertEqual(set(config['tasks']),{'groups','appearance','follow','seating'})
-        for task in config['tasks'].values():self.assertTrue((ROOT/task['prompt']).is_file())
+        self.assertEqual(set(config['tasks']),{'groups','follow','seating'})
+        for task in config['tasks'].values():
+            if 'prompt' in task:self.assertTrue((ROOT/task['prompt']).is_file())
         self.assertTrue(config['model']['frozen']);self.assertFalse(config['model']['finetuning'])
         self.assertEqual((config['inference']['period_s'],config['inference']['rate_hz']),(2,.5))
 

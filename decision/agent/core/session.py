@@ -27,9 +27,6 @@ class AgentSession:
         self.follow_tracking_reference = None
         self.follow_loss = None
         self.follow_search = None
-        self.follow_recovery_inputs = set()
-        from .async_model import AsyncModel
-        self.follow_recovery_worker=AsyncModel()
         self.spatial_view = None
         self.reference_map = None
         self.reference_catalog = catalog
@@ -291,10 +288,8 @@ class AgentSession:
         self.task_goals.complete(goal_id, proof, checks, semantic)
         self.monitor = TaskMonitor(self.catalog)
         if goal['requirement'].get('stage_type') == 'follow':
-            self.follow_recovery_worker.invalidate()
             self.follow_reference = self.follow_tracking_reference = self.follow_recovery_reference = None
             self.follow_loss = self.follow_search = None
-            self.follow_recovery_inputs.clear()
         self.observation = self.spatial_view = None
         self.requested_bounds = None
         self.requested_static_crop = False
@@ -515,92 +510,24 @@ class AgentSession:
         self.observation = observation
         return dict(status='available', observation=observation.prompt())
 
-    def select_follow_target(self, goal_id, observation_id, candidate_binding, target_description, match, candidate_id):
-        from decision.vlm.follow_target import reference, verify_candidates
-        goal = self.task_goals.current(goal_id)['requirement']
-        if goal.get('stage_type') != 'follow':
-            return dict(status='refused', reason='current_stage_is_not_follow')
-        if self.skill.record['handle'] is not None and self.skill.record['status'] != 'held':
-            return dict(status='refused', reason='cancel_and_confirm_navigation_first')
-        context, observation = self._applying_context, self.observation
-        if (observation is None or context is None or
-                not (self.valid_context(context) or self.valid_expired_context(context)) or
-                observation_id != observation.record['observation_id'] or
-                context.get('observation_binding') != observation.record['input_fingerprint']):
-            return dict(status='refused', reason='selection_requires_current_consumed_observation')
-        value = observation.record.get('follow_candidates')
-        if value is None:
-            return dict(status='unavailable', reason=observation.record.get('follow_candidates_error', 'no_follow_candidates'))
-        verify_candidates(value, observation)
-        if value['binding'] != candidate_binding:
-            return dict(status='refused', reason='candidate_binding_changed')
-        if (match == 'unique') != (candidate_id >= 0):
-            raise ValueError('Unique selection needs one candidate; other states use -1')
-        if match != 'unique':
-            return dict(status=match, execution_completed=False, executable=False)
-        if self.store.read_follow_reference(self.state['task_id'],self.state['revision'],goal_id) is not None:
-            return dict(status='refused', reason='follow_reference_already_fixed')
-        record,image,crop = reference(observation,candidate_id,target_description,task_id=self.state['task_id'],
-                                      revision=self.state['revision'],goal_id=goal_id)
-        self.store.follow_reference(record,image,crop)
-        self.follow_reference = record
-        age = self.navigation.snapshot()['stamp_s']-record['stamp_s']
-        status = 'selected_historical' if age > 3 else 'selected' if record['track'] is not None else 'visual_only'
-        return dict(status=status, reference=copy.deepcopy(record), source_age_s=age,
-                    current_track_valid=False, execution_completed=False, executable=False)
-
-    def start_follow(self, goal_id):
+    def start_local_task(self, goal_id, task_type, target_description):
         current=self.task_goals.current(goal_id)
-        if current['requirement'].get('stage_type')!='follow':
-            return dict(status='refused',reason='current_stage_is_not_follow')
-        if self.follow_loss is not None and self.follow_recovery_reference is None:
-            return dict(status='refused',reason='follow_reidentification_required')
-        reference=self.follow_recovery_reference or self.follow_reference
-        if (reference is None or reference.get('task_id')!=self.state['task_id'] or
-                reference.get('task_revision')!=self.state['revision'] or reference.get('goal_id')!=goal_id):
-            return dict(status='refused',reason='select_follow_target_first')
-        if reference.get('track') is None:return dict(status='refused',reason='follow_reference_has_no_3d_track')
-        result=self.skill.start_follow(goal_id,reference,self.state['revision'],current['requirement'])
+        if current['requirement'].get('stage_type')!=task_type:
+            return dict(status='refused',reason='local_task_type_does_not_match_stage')
+        if task_type=='seating':
+            return dict(status='unavailable',reason='stage_skill_not_available',stage_type=task_type)
+        if not isinstance(target_description,str) or not target_description.strip():
+            return dict(status='refused',reason='follow_target_description_required')
+        intent=dict(target_description=target_description.strip())
+        result=self.skill.start_follow(goal_id,intent,self.state['revision'],current['requirement'])
         if result['status'] in ('accepted','uncertain'):
-            self.follow_tracking_reference=copy.deepcopy(reference)
             self.follow_loss=self.follow_search=None
-            current['selected']=dict(handle=copy.deepcopy(result['handle']),follow_reference_id=reference['reference_id'],
+            current['selected']=dict(handle=copy.deepcopy(result['handle']),follow_reference_id=None,
                                      pose=None,orientation_source=None,view_id=None)
-            self.observation=self.spatial_view=None
-            self._clear_candidates()
+            self.observation=self.spatial_view=None;self._clear_candidates()
             if self.monitor.settings is None:
-                self.monitor.configure(goal_id,'核对跟随目标身份及用户要求的结束条件',interval_s=15.)
+                self.monitor.configure(goal_id,'根据任务要求检查跟随是否完成及特殊情况',interval_s=15.)
         return result
-
-    def review_follow_target(self, goal_id, observation_id, state, candidate_id):
-        from decision.vlm.follow_target import verify_candidates
-        current=self.task_goals.current(goal_id);navigation=self.navigation.snapshot()
-        context=self._applying_context or {};observation=self.observation
-        if (current['requirement'].get('stage_type')!='follow' or self.skill.record['goal_id']!=goal_id or
-                self.skill.record['handle'] is None or (navigation.get('follow_status') or {}).get('status')!='running'):
-            return dict(status='refused',reason='follow_not_running')
-        if (observation is None or observation_id!=observation.record['observation_id'] or
-                context.get('observation_id')!=observation_id or
-                not (self.valid_context(context) or self.valid_expired_context(context))):
-            return dict(status='refused',reason='follow_review_requires_consumed_rgb')
-        if (state=='visible')!=(candidate_id>=0):raise ValueError('Visible review requires one candidate')
-        if state in ('uncertain','lost'):
-            return self.skill.lose_follow('follow_visual_'+state)
-        follow=navigation['follow_status'];target=follow.get('target_identity')
-        if not isinstance(target,list):return dict(status='refused',reason='follow_identity_unavailable')
-        if state=='visible':
-            candidates=observation.record.get('follow_candidates')
-            if candidates is None:
-                return self.skill.lose_follow('follow_candidates_unavailable')
-            verify_candidates(candidates,observation)
-            chosen=next((v for v in candidates['candidates'] if v['id']==candidate_id),None)
-            track=None if chosen is None else chosen.get('track')
-            if (not isinstance(track,dict) or track.get('identity')!=target or
-                    track.get('lifecycle_generation')!=(self.follow_tracking_reference or self.follow_reference or {}).get('track',{}).get('lifecycle_generation')):
-                return self.skill.lose_follow('follow_candidate_not_current_target_track')
-        result=self.navigation.review_follow(self.skill.record['handle'],dict(state=state,identity=target,
-            scene_binding=observation.record['scene_binding'],rgb_stamp_s=observation.record['rgb']['stamp_s']))
-        return dict(result,observation_id=observation_id,source_stamp_s=observation.record['rgb']['stamp_s'])
 
     def _remember_follow_loss(self, goal_id):
         navigation=self.navigation.snapshot();follow=navigation.get('follow_status') or {}
@@ -614,7 +541,6 @@ class AgentSession:
                           observed_stamp_s=navigation['stamp_s'],context=spatial_context(navigation),follow=copy.deepcopy(follow))
                 loss['binding']=fingerprint(loss);self.follow_loss=loss;self.follow_search=None
                 self.follow_recovery_reference=None
-                self.follow_recovery_inputs.clear()
                 self.store.event('follow_loss',loss)
         if self.follow_loss is None or self.follow_loss['goal_id']!=goal_id:
             return None
@@ -623,172 +549,18 @@ class AgentSession:
             raise ValueError('Follow loss context changed')
         return self.follow_loss
 
-    def _follow_recovery_stopped(self, navigation, loss):
-        if self.navigation.scope=='live':
-            return (navigation.get('stop_observation') is True and loss['follow'].get('recovery_available') is True and
-                    navigation.get('chassis_state')=='armed' and navigation.get('chassis_status_fresh') is True)
-        return self.navigation.scope=='shadow' and navigation.get('proposal_cancelled') is True
-
-    def request_follow_recovery(self, goal_id, reference_id):
-        from decision.vlm.follow_target import verify_candidates
-        _,_,loss=self._search_context(goal_id)
-        if self.follow_recovery_worker.busy:return dict(status='refused',reason='follow_recovery_already_pending')
-        if self.follow_reference is None or reference_id!=self.follow_reference['reference_id']:
-            return dict(status='refused',reason='follow_reference_mismatch')
-        observed=self.observe_scene()
-        if observed['status']!='available':return observed
-        observation=self.observation;value=observation.record.get('follow_candidates')
-        if value is None:return dict(status='unavailable',reason='follow_candidates_unavailable')
-        verify_candidates(value,observation)
-        if not value['candidates']:return dict(status='unavailable',reason='no_current_candidates')
-        input_key=fingerprint(dict(loss=loss['binding'],reference_id=reference_id,
-                                   observation_binding=observation.record['input_fingerprint']))
-        if input_key in self.follow_recovery_inputs:
-            return dict(status='refused',reason='follow_recovery_input_already_attempted')
-        saved=self.store.read_follow_reference(self.state['task_id'],self.state['revision'],goal_id)
-        if saved is None or saved[0]!=self.follow_reference:raise ValueError('Follow reference changed')
-        original,crop=copy.deepcopy(saved[0]),bytes(saved[2]);observation=copy.deepcopy(observation)
-        context=self.context()
-        def infer():
-            from decision.vlm.recovery import run
-            return run(original,crop,observation)
-        self.follow_recovery_worker.submit('follow_recovery',context,infer)
-        self.follow_recovery_inputs.add(input_key)
-        self.state['status']='waiting_follow_recovery'
-        return dict(status='pending',reference_id=reference_id,observation_id=value['observation_id'],
-                    source_stamp_s=value['rgb_stamp_s'],backend='remote_sglang_dspark',execution_completed=False)
-
-    def _accept_follow_recovery(self, goal_id, reference_id, observation_id, candidate_binding, match, candidate_id, evidence):
-        from decision.vlm.follow_target import reference,verify_candidates
-        current=self.task_goals.current(goal_id);navigation=self.navigation.snapshot()
-        original=self.follow_reference;loss=self._remember_follow_loss(goal_id)
-        if (current['requirement'].get('stage_type')!='follow' or original is None or
-                reference_id!=original['reference_id'] or self.skill.record['goal_id']!=goal_id or
-                self.skill.record['status'] not in ('failed','held') or
-                self.skill.record['handle'] is not None and self.skill.record['status']!='held' or loss is None):
-            return dict(status='refused',reason='follow_loss_not_ready_for_recovery')
-        follow=loss['follow']
-        if not self._follow_recovery_stopped(navigation,loss) or navigation.get('input_stale') or navigation.get('localization_status','valid')!='valid':
-            return dict(status='refused',reason='follow_stop_not_confirmed')
-        context=self._applying_context or {};observation=self.observation
-        if (observation is None or observation_id!=observation.record['observation_id'] or
-                context.get('observation_id')!=observation_id or
-                not (self.valid_context(context) or self.valid_expired_context(context))):
-            return dict(status='refused',reason='recovery_requires_consumed_rgb')
-        candidates=observation.record.get('follow_candidates')
-        if candidates is None:return dict(status='unavailable',reason='follow_candidates_unavailable')
-        verify_candidates(candidates,observation)
-        if candidates['binding']!=candidate_binding:raise ValueError('Recovery candidate binding changed')
-        if (match=='unique')!=(candidate_id>=0):raise ValueError('Unique recovery needs one candidate')
-        if not evidence.strip():raise ValueError('Recovery requires comparison evidence')
-        if match!='unique':
-            self.store.event('follow_recovery_unresolved',dict(goal_id=goal_id,reference_id=reference_id,
-                observation_id=observation_id,match=match,evidence=evidence))
-            return dict(status=match,execution_completed=False,executable=False)
-        record,image,crop=reference(observation,candidate_id,original['description'],task_id=self.state['task_id'],
-                                    revision=self.state['revision'],goal_id=goal_id)
-        last=copy.deepcopy(follow.get('last_evidence'))
-        if last is not None and last.get('binding')!=fingerprint({k:v for k,v in last.items() if k!='binding'}):
-            raise ValueError('Last follow evidence changed')
-        previous=(self.follow_tracking_reference or original).get('track')
-        record.update(original_reference_id=reference_id,previous_identity=None if previous is None else previous['identity'],
-            last_evidence=last,loss_reason=follow.get('reason'),loss_handle=copy.deepcopy(follow.get('handle')),
-            recovery_evidence=evidence.strip())
-        record['reference_id']=fingerprint({k:v for k,v in record.items() if k!='reference_id'})
-        self.store.follow_recovery(record,image,crop)
-        if record['track'] is None:
-            return dict(status='visual_only',reference_id=record['reference_id'],execution_completed=False,executable=False)
-        self.follow_recovery_reference=record
-        return dict(status='selected',reference=copy.deepcopy(record),current_track_valid=False,
-                    execution_completed=False,executable=False)
-
-    def _search_context(self, goal_id):
-        current=self.task_goals.current(goal_id);navigation=self.navigation.snapshot()
-        loss=self._remember_follow_loss(goal_id)
-        if (current['requirement'].get('stage_type')!='follow' or loss is None or
-                self.skill.record['goal_id']!=goal_id or self.skill.record['status'] not in ('failed','held') or
-                not self._follow_recovery_stopped(navigation,loss) or navigation.get('input_stale') or
-                navigation.get('localization_status','valid')!='valid'):
-            raise ValueError('follow_search_requires_confirmed_stop')
-        return current,navigation,loss
-
-    def prepare_follow_search(self, goal_id):
-        from navigation.search import candidates
-        from navigation.planning.inputs import load_config
-        _,navigation,loss=self._search_context(goal_id)
-        inputs=self.navigation.spatial_inputs();now=navigation['stamp_s']
-        if inputs['global_grid'].metadata['frame_id']!=self.catalog.value['frame_id']:
-            raise ValueError('search_map_frame_mismatch')
-        search=self.follow_search
-        if search is None:
-            pose=inputs.get('pose')
-            if pose is None:raise ValueError('search_current_pose_or_observation_unavailable')
-            search=dict(loss_binding=loss['binding'],start_stamp_s=now,anchor=list(pose[:2]),
-                        attempts=0,candidate_binding=None,candidate_set=None)
-        if search['loss_binding']!=loss['binding'] or not 0<=now-search['start_stamp_s']<=45. or search['attempts']>=3:
-            return dict(status='exhausted',reason='follow_search_budget_exhausted',execution_completed=False)
-        options=candidates(inputs,loss['follow'].get('last_evidence'),now=now,clock_domain=navigation['clock_domain'],
-            local_identity=spatial_context(navigation)['local_identity'],anchor=search['anchor'],margin=load_config()['safety_margin_m'])
-        value=dict(task_id=self.state['task_id'],task_revision=self.state['revision'],goal_id=goal_id,
-            loss_binding=loss['binding'],clock_domain=navigation['clock_domain'],source_stamp_s=inputs['stamp_s'],
-            source_binding=spatial_source_binding(inputs),anchor=copy.deepcopy(search['anchor']),candidates=options)
-        value['binding']=fingerprint(value);search['candidate_set']=value;search['candidate_binding']=value['binding']
-        self.follow_search=search
-        return dict(status='available',candidate_set=copy.deepcopy(value),remaining_attempts=3-search['attempts'],
-                    execution_completed=False,executable=False)
-
-    def execute_follow_search(self, goal_id, candidate_binding, candidate_id):
-        from navigation.search import check_pose
-        from navigation.planning.inputs import load_config
-        current,navigation,loss=self._search_context(goal_id)
-        search=self.follow_search;context=self._applying_context or {};now=navigation['stamp_s']
-        if (search is None or search.get('candidate_binding')!=candidate_binding or
-                context.get('follow_search_binding')!=candidate_binding or
-                not (self.valid_context(context) or self.valid_expired_context(context))):
-            return dict(status='refused',reason='follow_search_candidate_expired_or_changed')
-        value=search.get('candidate_set') or {}
-        if (value.get('binding')!=fingerprint({k:v for k,v in value.items() if k!='binding'}) or
-                value.get('loss_binding')!=loss['binding'] or value.get('clock_domain')!=navigation['clock_domain'] or
-                not 0<=now-value.get('source_stamp_s',float('inf'))<=30.):
-            return dict(status='refused',reason='follow_search_candidate_expired_or_changed')
-        if not 0<=now-search['start_stamp_s']<=45. or search['attempts']>=3:
-            return dict(status='exhausted',reason='follow_search_budget_exhausted')
-        candidate=next((v for v in value['candidates'] if v['id']==candidate_id),None)
-        if candidate is None:raise ValueError('Unknown follow search candidate')
-        if candidate['kind']=='wait':
-            search['attempts']+=1;search['candidate_set']=search['candidate_binding']=None
-            result=self.wait_for_event('observation')
-            return dict(result,candidate_id=candidate_id,execution_completed=False)
-        inputs=self.navigation.spatial_inputs()
-        if inputs['global_grid'].metadata['frame_id']!=self.catalog.value['frame_id']:
-            raise ValueError('search_map_frame_mismatch')
-        checked=check_pose(inputs,candidate['pose'],now=now,clock_domain=navigation['clock_domain'],
-                           anchor=search['anchor'],margin=load_config()['safety_margin_m'])
-        if not checked['valid']:
-            return dict(status='refused',reason='follow_search_current_sweep_not_free',check=checked)
-        map_id=self.catalog.value.get('map_snapshot_id')
-        if not isinstance(map_id,str) or not map_id:raise ValueError('follow_search_map_identity_missing')
-        destination=dict(goal_id=goal_id,place_id='follow_search',frame_id=self.catalog.value['frame_id'],
-            pose=copy.deepcopy(candidate['pose']),view_id=candidate_binding,
-            task_goal_binding=fingerprint(dict(loss=loss['binding'],candidate_binding=candidate_binding,candidate_id=candidate_id)),
-            requirement=copy.deepcopy(current['requirement']),valid_until_s=search['start_stamp_s']+45.,
-            search_bounds=dict(anchor_xy_m=copy.deepcopy(search['anchor']),radius_m=1.5,
-                               map_snapshot_id=map_id,loss_binding=loss['binding']))
-        result=self.skill.start(destination,self.state['revision'])
-        if result['status'] in ('accepted','uncertain'):
-            search['attempts']+=1;search['candidate_set']=search['candidate_binding']=None
-            self.monitor=TaskMonitor(self.catalog)
-            self.observation=self.spatial_view=None;self._clear_candidates()
-        return dict(result,candidate_id=candidate_id,revalidation=checked)
-
-    def finish_follow(self, goal_id, observation_id, evidence):
+    def finish_local_task(self, goal_id, observation_id=None, evidence=None):
         current=self.task_goals.current(goal_id)
-        if current['requirement'].get('stage_type')!='follow' or self.skill.record['goal_id']!=goal_id:
-            return dict(status='refused',reason='current_stage_is_not_active_follow')
+        stage_type=current['requirement'].get('stage_type')
+        if stage_type=='seating':
+            return dict(status='unavailable',reason='stage_skill_not_available',stage_type=stage_type)
+        if stage_type!='follow' or self.skill.record['goal_id']!=goal_id:
+            return dict(status='refused',reason='current_stage_is_not_active_local_task')
         context=self._applying_context or {};observation=self.observation
         if (observation is None or observation_id!=observation.record['observation_id'] or
                 context.get('observation_id')!=observation_id or
-                not self._current_rgb_context(context,observation,self.navigation.snapshot()) or not evidence.strip()):
+                not self._current_rgb_context(context,observation,self.navigation.snapshot()) or
+                not isinstance(evidence,str) or not evidence.strip()):
             return dict(status='refused',reason='current_rgb_and_stage_evidence_required')
         semantic=dict(observation_id=observation_id,source_stamp_s=observation.record['rgb']['stamp_s'],
             observation_binding=observation.record['input_fingerprint'],evidence=evidence.strip(),
@@ -1304,7 +1076,6 @@ class AgentSession:
                     completed_goals=[g['requirement']['goal_id'] for g in self.task_goals.goals])
 
     def stop(self, target, reason):
-        self.follow_recovery_worker.invalidate()
         self.state.update(stop_target=target, reason=reason)
         if self.skill.record.get('pending_completion') is not None:
             self.skill.record['pending_completion'] = None
@@ -1404,7 +1175,6 @@ class AgentSession:
             self.follow_tracking_reference = None
             self.follow_loss = None
             self.follow_search = None
-            self.follow_recovery_inputs.clear()
             self.spatial_view = None
             self.requested_bounds = None
             self.requested_static_crop = False
@@ -1414,49 +1184,6 @@ class AgentSession:
             self.conversation = Conversation(s['instruction'],self.catalog.prompt(),self.store.event)
             s['assistant_text'] = None
             self._history('user', dict(event='replacement', instruction=s['instruction']))
-
-    def _poll_follow_recovery(self):
-        import json
-        import jsonschema
-        from decision.vlm.follow import appearance_schema,validate_decision
-        result=self.follow_recovery_worker.poll()
-        if result is None:return
-        value=result.get('value') if result.get('ok') else dict(status='unavailable',reason=result.get('error_type'))
-        if not isinstance(value,dict):value=dict(status='unavailable',reason='invalid_recovery_result')
-        self.store.event('follow_recovery_raw',dict(context=result['context'],result=value,stale=result['stale']))
-        if self.state['status']!='waiting_follow_recovery' or result['stale']:
-            return
-        self.state['status']='ready';context=result['context']
-        output=dict(status='unavailable',reason=value.get('reason','recovery_result_invalid'))
-        try:
-            if not (self.valid_context(context) or self.valid_expired_context(context)):
-                output=dict(status='refused',reason='follow_recovery_result_expired_or_superseded')
-            elif value.get('status')=='complete':
-                observation=self.observation;reference=self.follow_reference
-                if (observation is None or reference is None or value.get('reference_id')!=reference['reference_id'] or
-                        value.get('observation_id')!=observation.record['observation_id'] or
-                        value.get('candidate_binding')!=(observation.record.get('follow_candidates') or {}).get('binding') or
-                        value.get('backend')!='remote_sglang_dspark' or
-                        value.get('scene_binding')!=observation.record['scene_binding'] or
-                        value.get('clock_domain')!=observation.record['clock_domain'] or
-                        value.get('source_stamp_s')!=observation.record['stamp_s'] or
-                        value.get('rgb_stamp_s')!=observation.record['rgb']['stamp_s']):
-                    raise ValueError('Recovery response source mismatch')
-                raw=json.loads(value['raw_content'])
-                ids=[v['id'] for v in observation.record['follow_candidates']['candidates']]
-                validate_decision(raw,appearance_schema(ids))
-                if raw!=value.get('response'):raise ValueError('Recovery response changed')
-                self._applying_context=context
-                try:
-                    output=self._accept_follow_recovery(reference['goal_id'],reference['reference_id'],
-                        value['observation_id'],value['candidate_binding'],raw['match'],raw['id'],
-                        '局部T2模型比较固定参考与该帧候选；原始响应已记录。')
-                finally:self._applying_context=None
-        except (ValueError,KeyError,TypeError,jsonschema.ValidationError) as error:
-            output=dict(status='unavailable',reason=str(error)[:240])
-        self._history('follow_recovery',output)
-        self.conversation.notice('follow_recovery_result',result=output)
-        self._save('follow_recovery_result',output)
 
     def tick(self):
         s = self.state
@@ -1498,7 +1225,6 @@ class AgentSession:
             self._history('navigation', self.skill.snapshot())
             self.conversation.notice('navigation_event',navigation=self.navigation_summary())
             self._save('navigation_event')
-        self._poll_follow_recovery()
         monitor_feedback = self.navigation.snapshot()
         if (spatial_context(monitor_feedback) != self.skill.context or
                 monitor_feedback.get('source') != self.skill.initial.get('source')):
@@ -1521,7 +1247,7 @@ class AgentSession:
                   'origin_pose','origin_frame_id','map_binding','localization_status','input_stale','stopped','execution_feedback',
                   'route_index','route_count','planning_status','planning_reason','follow_status')
         return dict({key:copy.deepcopy(record[key]) for key in
-                    ('status','goal_id','handle','selected_pose','reason','context_lost','connected')},
+                    ('status','stage_type','goal_id','handle','selected_pose','reason','context_lost','connected')},
                     feedback={key:copy.deepcopy(feedback[key]) for key in fields if key in feedback},
                     last_completion=copy.deepcopy(record['completed'][-1:]))
 

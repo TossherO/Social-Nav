@@ -8,7 +8,7 @@ from decision.agent import ROOT
 from decision.agent.core.session import AgentSession
 from decision.agent.core.store import Store
 from decision.agent.tools.places import Catalog
-from tests.test_agent import ScriptedFeedback, navigate, point_goal
+from tests.test_agent import ScriptedFeedback, navigate, point_goal, reply
 from tests.test_follow_recovery import candidate_observation
 
 
@@ -42,9 +42,9 @@ class CompositionTests(unittest.TestCase):
         def hold(handle):
             self.nav.state.update(status='stopped', stopped=True, arrival_observation=False, stop_observation=True)
         self.nav.hold = hold
-        def start_follow(reference, handle):
+        def start_follow(intent, handle):
             self.nav.state.update(status='running', handle=copy.deepcopy(handle), stopped=False, stop_observation=False,
-                follow_status=dict(status='running', handle=copy.deepcopy(handle), target_identity=reference['track']['identity']))
+                follow_status=dict(status='running', handle=copy.deepcopy(handle), target_identity=['tracker_session',7,'a']))
             return dict(accepted=True, handle=copy.deepcopy(handle))
         def finish_follow(handle):
             self.nav.state.update(status='stopping', follow_status=dict(status='stopped', handle=copy.deepcopy(handle)))
@@ -53,7 +53,6 @@ class CompositionTests(unittest.TestCase):
         self.session = AgentSession('先导航，再跟随两人，最后导航', Catalog(catalog), self.nav, self.store)
 
     def tearDown(self):
-        self.session.follow_recovery_worker.close()
         self.store.close()
         self.temp.cleanup()
 
@@ -71,55 +70,54 @@ class CompositionTests(unittest.TestCase):
         self.assertEqual(self.session.skill.record['status'], 'held')
         return self.session.call('check_goal', goal_id=goal_id)
 
-    def follow(self, goal_id, track_id):
-        obs = self.observation(track_id)
-        chosen = self.session.call('select_follow_target', _context=self.session.context(), goal_id=goal_id,
-            observation_id=obs.record['observation_id'], candidate_binding=obs.record['follow_candidates']['binding'],
-            target_description='当前跟随目标', match='unique', candidate_id=0)
-        self.assertEqual(chosen['status'], 'selected')
-        self.assertEqual(chosen['reference']['track']['identity'][-1], track_id)
-        self.assertEqual(self.session.call('start_follow', goal_id=goal_id)['status'], 'accepted')
-        self.session.tick()
-        obs = self.observation(track_id)
-        self.assertEqual(self.session.call('finish_follow', _context=self.session.context(), goal_id=goal_id,
-            observation_id=obs.record['observation_id'], evidence='目标已到达约定地点')['status'], 'stopping')
-        self.nav.state.update(status='stopped', stopped=True, stop_observation=True)
-        self.session.tick()
-        self.nav.tick()
-        obs = self.observation(track_id)
-        self.nav.state['pose'] = copy.deepcopy(obs.record['base_pose'])
-        result = self.session.call('check_goal', _context=self.session.context(), goal_id=goal_id,
-            observation_id=obs.record['observation_id'], semantic_result='satisfied', evidence='停稳后位置符合要求')
-        self.assertEqual(result['status'], 'completed')
-        return chosen['reference']
-
-    def test_navigation_follow_follow_navigation_preserves_separate_evidence(self):
-        goals = [point_goal('elevator'), follow_goal('person_a'), follow_goal('person_b'), point_goal('lobby_entrance')]
-        self.session.call('record_task', goals=goals)
-        self.assertEqual(self.session.call('start_follow', goal_id='person_a')['status'], 'unavailable')
-        before = self.session.context()
+    def test_follow_stage_submits_description_but_not_completion(self):
+        self.session.call('record_task', goals=[point_goal('elevator'), follow_goal('person')])
         self.assertEqual(self.finish_navigation('elevator')['status'], 'completed')
-        self.assertNotEqual(before['current_stage'], self.session.context()['current_stage'])
-        self.assertFalse(self.session.valid_context(before))
-        a = self.follow('person_a', 'a')
-        self.assertIsNone(self.session.follow_reference)
-        self.assertIsNone(self.session.follow_recovery_reference)
-        b = self.follow('person_b', 'b')
-        self.assertNotEqual(a['reference_id'], b['reference_id'])
-        for goal_id, ref in [('person_a', a), ('person_b', b)]:
-            self.assertEqual(self.store.read_follow_reference(self.session.state['task_id'], 1, goal_id)[0], ref)
-        self.assertEqual(self.finish_navigation('lobby_entrance')['status'], 'completed')
-        self.assertEqual(self.session.call('finish_task', status='succeeded', evidence='四个阶段已核对')['status'], 'succeeded')
+        result=self.session.call('start_local_task',goal_id='person',task_type='follow',target_description='红衣人物')
+        self.assertEqual(result['status'],'accepted')
+        self.assertEqual(self.session.skill.record['handle'],result['handle'])
+        self.assertEqual(self.session.call('get_navigation_state')['stage_type'],'follow')
+        self.assertFalse(self.session.task_goals.finished())
+
+    def test_local_task_reuses_cancellation_and_waits_for_stop(self):
+        self.session.call('record_task',goals=[follow_goal('person')])
+        result=self.session.call('start_local_task',goal_id='person',task_type='follow',target_description='红衣人物')
+        self.assertEqual(result['status'],'accepted')
+        cancelled=self.session.call('cancel_navigation')
+        self.assertEqual(cancelled['status'],'stopping')
+        self.assertEqual(self.nav.state['status'],'stopping')
+        self.assertFalse(self.session.task_goals.finished())
+        self.assertIsNotNone(self.session.skill.record['handle'])
+
+    def test_agent_loop_waits_after_local_task_is_accepted(self):
+        from decision.agent.core.loop import AgentLoop
+        self.session.call('record_task',goals=[follow_goal('person')])
+        actor=AgentLoop(self.session,lambda *_:reply('start_local_task',goal_id='person',
+                                                     task_type='follow',target_description='红衣人物'))
+        try:
+            actor.tick()
+            actor.model.thread.join(2)
+            actor.tick()
+            self.assertEqual(self.session.state['status'],'waiting_navigation')
+            self.assertIsNotNone(self.session.skill.record['handle'])
+            self.assertFalse(self.session.task_goals.finished())
+        finally:actor.close()
 
     def test_future_skill_cannot_complete_or_be_relabelled_navigation(self):
         goal = dict(goal_id='seat', kind='skill', stage_type='seating', target_id='', description='桌边停靠')
         self.session.call('record_task', goals=[goal, point_goal('elevator')])
+        self.assertEqual(self.session.call('start_local_task',goal_id='seat',task_type='seating',
+            target_description='桌边')['reason'],'stage_skill_not_available')
+        self.assertEqual(self.session.call('start_local_task',goal_id='seat',task_type='follow',
+            target_description='人物')['reason'],'local_task_type_does_not_match_stage')
+        self.assertEqual(self.session.call('finish_local_task',goal_id='seat',observation_id='obs',
+            evidence='桌边')['reason'],'stage_skill_not_available')
+        self.assertIsNone(self.session.skill.record['handle'])
         self.assertEqual(self.session.call('check_goal', goal_id='seat')['reason'], 'stage_skill_not_available')
         self.assertEqual(self.session.call('finish_task', status='succeeded', evidence='尚未完成')['status'], 'refused')
         other = AgentSession('invalid', self.session.reference_catalog, self.nav, self.store)
         result = other.call('record_task', goals=[dict(point_goal('elevator'), stage_type='follow')])
         self.assertEqual(result['status'], 'unavailable')
-        other.follow_recovery_worker.close()
 
     def test_clarification_after_stop_and_not_while_moving(self):
         self.session.call('record_task', goals=[point_goal('elevator'), follow_goal('person')])
@@ -202,24 +200,30 @@ class CompositionTests(unittest.TestCase):
             observation_id=fresh.record['observation_id'], semantic_result='satisfied', evidence='新图中门打开')['status'],
             'completed')
 
+
+
     def test_follow_finish_and_completion_need_fresh_visual_evidence(self):
         self.session.call('record_task', goals=[follow_goal('person')])
         obs = self.observation('a')
-        chosen = self.session.call('select_follow_target', _context=self.session.context(), goal_id='person',
-            observation_id=obs.record['observation_id'], candidate_binding=obs.record['follow_candidates']['binding'],
-            target_description='目标', match='unique', candidate_id=0)
-        self.assertEqual(chosen['status'], 'selected')
-        self.assertEqual(self.session.call('start_follow', goal_id='person')['status'], 'accepted')
+        from decision.vlm.follow_target import reference
+        ref,_,_=reference(obs,0,'目标',task_id=self.session.state['task_id'],revision=1,goal_id='person')
+        self.session.follow_reference=ref
+        requirement=self.session.task_goals.current('person')['requirement']
+        started=self.session.skill.start_follow('person',ref,1,requirement)
+        self.assertEqual(started['status'],'accepted')
+        self.session.task_goals.current('person')['selected']=dict(handle=copy.deepcopy(started['handle']),
+            follow_reference_id=ref['reference_id'],pose=None,orientation_source=None,view_id=None)
         self.session.tick()
         obs = self.observation('a')
+        self.assertEqual(self.session.call('finish_local_task',_context=self.session.context(),goal_id='person')['status'],'refused')
         context = self.session.context()
         self.nav.t += 4
         self.nav.state['stamp_s'] = 10 + self.nav.t
         self.assertTrue(self.session.valid_expired_context(context))
-        self.assertEqual(self.session.call('finish_follow', _context=context, goal_id='person',
+        self.assertEqual(self.session.call('finish_local_task', _context=context, goal_id='person',
             observation_id=obs.record['observation_id'], evidence='目标已到达')['status'], 'refused')
         fresh = self.observation('a')
-        self.assertEqual(self.session.call('finish_follow', _context=self.session.context(), goal_id='person',
+        self.assertEqual(self.session.call('finish_local_task', _context=self.session.context(), goal_id='person',
             observation_id=fresh.record['observation_id'], evidence='目标已到达')['status'], 'stopping')
         self.nav.state.update(status='stopped', stopped=True, stop_observation=True)
         self.session.tick()
@@ -265,7 +269,6 @@ class CompositionTests(unittest.TestCase):
             self.assertEqual(self.session.state['status'],'succeeded')
             self.assertTrue(self.session.task_goals.finished())
         finally:actor.close()
-
 
 if __name__ == '__main__':
     unittest.main()

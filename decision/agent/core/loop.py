@@ -188,8 +188,7 @@ class AgentLoop:
                         output = self.session.call(value['tool'], _context=result['context'], **value['arguments'])
                     elif expired and value['tool'] not in ('record_task', 'lookup_places', 'query_map', 'get_navigation_state',
                                                            'ask_user', 'cancel_navigation', 'wait_for_event', 'finish_task',
-                                                           'select_follow_target','start_follow','review_follow_target','request_follow_recovery',
-                                                           'prepare_follow_search','execute_follow_search','finish_follow','check_goal'):
+                                                           'start_local_task','finish_local_task','check_goal'):
                         output = dict(status='refused', reason='model_input_expired_request_fresh_observation',
                                       execution_completed=False)
                         self.session.store.event('expired_tool_refused', dict(call=value, context=result['context']))
@@ -207,18 +206,14 @@ class AgentLoop:
                     if self.repeated_route_refusal(value,output):
                         self.session.stop('needs_clarification','repeated_route_refusal')
                         return s
-                    if ((value['tool'] in ('navigate', 'navigate_route','start_follow','execute_follow_search') and output.get('status')=='accepted' or
-                         value['tool'] in ('finish_follow','review_follow_target') and output.get('status')=='stopping') and
+                    if ((value['tool'] in ('navigate', 'navigate_route','start_local_task') and output.get('status')=='accepted' or
+                         value['tool']=='finish_local_task' and output.get('status')=='stopping') and
                             self.session.skill.record['handle'] is not None):
                         # Do not ask the model to restate that it is waiting:
                         # a text-only reply has ambiguous intent and otherwise
                         # triggers clarification and cancels the active goal.
                         self.session.wait_for_event('navigation')
                         self.session._save('await_navigation_after_acceptance')
-                    elif (value['tool']=='review_follow_target' and output.get('status')=='submitted' and
-                          value['arguments']['state']=='occluded'):
-                        self.session.wait_for_event('observation')
-                        self.session._save('await_observation_after_occlusion')
                 except (ValueError, KeyError, TypeError, jsonschema.ValidationError) as error:
                     self.session.stop('needs_clarification', 'model_protocol_rejected')
                     self.session._save('model_protocol_rejected', dict(error_type=type(error).__name__))
@@ -244,6 +239,5 @@ class AgentLoop:
 
     def close(self):
         value = self.model.close()
-        self.session.follow_recovery_worker.close()
         self.session.store.event('model_worker_closed', value)
         return value

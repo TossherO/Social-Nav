@@ -35,14 +35,10 @@
       "prompt": "decision/vlm/configs/prompts/wheelchair_t1_groups.txt",
       "response": "activity_groups"
     },
-    "appearance": {
-      "prompt": "decision/vlm/configs/prompts/wheelchair_t2_appearance.txt",
-      "response": "id_match"
-    },
     "follow": {
-      "prompt": "decision/vlm/configs/prompts/wheelchair_t2_follow.txt",
-      "response": "id_state",
-      "visual_memory_s": 4.5
+      "response": "single_token_choice",
+      "decision_deadline_s": 4.0,
+      "visual_memory_s": 6.0
     },
     "seating": {
       "prompt": "decision/vlm/configs/prompts/wheelchair_t3_seating.txt",

@@ -92,7 +92,7 @@ class RuntimeClient:
         self.path = Path(path)
 
     def exchange(self, kind, value):
-        if kind not in ('agent_state', 'goal', 'cancel','follow_start','follow_finish','follow_cancel','follow_visual','follow_lost'):
+        if kind not in ('agent_state', 'goal', 'cancel','follow_start','follow_finish','follow_cancel','follow_lost'):
             raise ValueError('Agent runtime client cannot issue override or safety-management commands')
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(.5)
@@ -101,7 +101,7 @@ class RuntimeClient:
             connection = Connection(sock)
             wire_kind = {'goal':'agent_shadow_goal','cancel':'agent_shadow_cancel',
                 'follow_start':'agent_shadow_follow_start','follow_finish':'agent_shadow_follow_finish',
-                'follow_cancel':'agent_shadow_follow_cancel','follow_visual':'agent_shadow_follow_visual',
+                'follow_cancel':'agent_shadow_follow_cancel',
                 'follow_lost':'agent_shadow_follow_lost'}.get(kind,kind)
             connection.send(dict(kind=wire_kind, value=value))
             result = connection.recv()
@@ -130,7 +130,7 @@ class RuntimeClient:
 class LiveRuntimeClient(RuntimeClient):
     """Explicit live intent channel; it cannot arm or manage safety."""
     def exchange(self, kind, value):
-        if kind not in ('agent_state', 'goal', 'cancel', 'hold','follow_start','follow_finish','follow_cancel','follow_visual','follow_lost'):
+        if kind not in ('agent_state', 'goal', 'cancel', 'hold','follow_start','follow_finish','follow_cancel','follow_lost'):
             raise ValueError('Live Agent cannot arm or manage safety')
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(.5)
@@ -140,7 +140,7 @@ class LiveRuntimeClient(RuntimeClient):
             wire_kind = {'agent_state':'agent_live_state', 'goal':'agent_live_goal', 'cancel':'agent_live_cancel',
                          'hold':'agent_live_hold','follow_start':'agent_live_follow_start',
                          'follow_finish':'agent_live_follow_finish','follow_cancel':'agent_live_follow_cancel',
-                         'follow_visual':'agent_live_follow_visual','follow_lost':'agent_live_follow_lost'}[kind]
+                         'follow_lost':'agent_live_follow_lost'}[kind]
             connection.send(dict(kind=wire_kind, value=value))
             result = connection.recv()
         finally:

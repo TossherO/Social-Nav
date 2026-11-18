@@ -15,7 +15,7 @@ from perception.detection_tracking.inference.rgb_recording import recorded_input
 from navigation.planning.people import stable_identity
 
 
-def frame(entry, arrays):
+def frame(entry, arrays, *, include_predicted=False):
     row=entry['people'];rgb=arrays.get('rgb');association=entry.get('association')
     image_input=recorded_input(row,association) if association else None
     if rgb is None or image_input is None or image_input['raw_rgb_sha256']!=hashlib.sha256(rgb.tobytes()).hexdigest():
@@ -27,7 +27,7 @@ def frame(entry, arrays):
     for p in people_in_lidar(row):
         record=association['result']['tracks'].get(p['key'])
         if record is None:raise ValueError('Association omits a source identity')
-        people.append(dict(p,eligible=model_eligible(p),
+        people.append(dict(p,eligible=model_eligible(p,include_predicted=include_predicted),
             rgb_box=record.get('rgb_box') if record['status']=='matched' else None))
     result=dict(id=entry['id'],source_id=row['sequence_id'],stamp_ns=ns,people=people,
         image_size=[rgb.shape[1],rgb.shape[0]],has_rgb=True,clock_domain=row['clock_domain'],
@@ -37,12 +37,13 @@ def frame(entry, arrays):
     return result
 
 
-def render_window(entries, history, read_arrays, *, extent, view_binding, image_preparation=None):
+def render_window(entries, history, read_arrays, *, extent, view_binding, image_preparation=None,
+                  include_predicted=False):
     """Render a leased window in memory; returned PNG bytes own their storage."""
     rows=[];assets={}
     for entry in entries:
         arrays=read_arrays(entry['buffer'])
-        rows.append(frame(entry,arrays));assets[entry['id']]=arrays
+        rows.append(frame(entry,arrays,include_predicted=include_predicted));assets[entry['id']]=arrays
     window=build_window(rows,rows[-1],digest([r['source_binding'] for r in rows]),extent=extent)
     if not window['ready'] or any(i is None for i in window['frames']):raise ValueError('Incomplete runtime decision window')
     trajectories=build_trajectories(history,window['frames'],window['mapping'])
@@ -54,7 +55,8 @@ def render_window(entries, history, read_arrays, *, extent, view_binding, image_
     for index,ident in enumerate(window['frames']):
         arrays=assets[ident];rgb=io.BytesIO();Image.fromarray(arrays['rgb']).save(rgb,format='PNG')
         image=render_observation(by_id[ident],rgb.getvalue(),window['mapping'],window['fields']['dt'][index],extent,
-            trajectories[ident],bev_background=pointcloud_background(arrays['raw'],extent))
+            trajectories[ident],bev_background=pointcloud_background(arrays['raw'],extent),
+            distinguish_predictions=include_predicted)
         name=f'frame_{index}.png';encoded=io.BytesIO();image.save(encoded,format='PNG')
         payload=encoded.getvalue();payloads.append(payload)
         images.append(dict(path=name,sha256=hashlib.sha256(payload).hexdigest()))
@@ -69,6 +71,7 @@ def render_window(entries, history, read_arrays, *, extent, view_binding, image_
             **(dict(association_record=copy.deepcopy(e['association'])) if image_preparation is not None else {})) for e in entries],
         images=images,trajectories=trajectories,renderer=renderer_identity(),display_view=view_binding,
         scope='causal_runtime_input_no_human_labels_no_vlm_request')
+    if include_predicted:record['predicted_tracks_included']=True
     if image_preparation is not None:record['image_preparation']=image_preparation
     record['input_fingerprint']=digest(record)
     return record,tuple(payloads)

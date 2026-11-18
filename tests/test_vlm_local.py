@@ -21,10 +21,10 @@ class LocalInferenceTests(unittest.TestCase):
         self.out=self.root/'result'
 
     def args(self,*extra):
-        return local.arguments(['--request',str(self.request),'--task','appearance','--out',str(self.out),
+        return local.arguments(['--request',str(self.request),'--task','groups','--out',str(self.out),
             '--model-path',str(self.model),'--config',str(self.root/'private.json'),*extra])
 
-    def engine(self,raw='{"id":0,"match":"unique"}',complete=True):
+    def engine(self,raw='{"walking":[[0,1]]}',complete=True):
         return Mock(metadata={'synthetic':True},generate=Mock(return_value=dict(raw_content=raw,
                     finish_reason='stop',grammar_terminated=complete)))
 
@@ -39,13 +39,13 @@ class LocalInferenceTests(unittest.TestCase):
         self.assertEqual(local.run(self.args('--fallback-reason','remote_gpu_busy'),factory),0)
         self.assertEqual(engine.generate.call_args.args[0],self.body)
         result=json.loads((self.out/'response.json').read_text())
-        self.assertEqual(result['raw_content'],'{"id":0,"match":"unique"}')
+        self.assertEqual(result['raw_content'],'{"walking":[[0,1]]}')
         self.assertNotIn('request_sha256',result) # No HTTP request was sent.
         translated=local.local_messages(self.body)
         self.assertEqual(translated[1]['content'][1]['image'],self.body['messages'][1]['content'][1]['image_url']['url'])
 
     def test_invalid_identity_or_incomplete_grammar_is_saved_without_retry(self):
-        for raw,complete in [('{"id":9,"match":"unique"}',True),('{"id":0,"match":"unique"}',False)]:
+        for raw,complete in [('{"walking":[[0,9]]}',True),('{"walking":[[0,1]]}',False)]:
             with self.subTest(raw=raw,complete=complete):
                 engine=self.engine(raw,complete);args=self.args('--fallback-reason','remote_unavailable')
                 args.out=self.root/('bad_'+str(complete))

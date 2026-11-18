@@ -42,7 +42,7 @@ def parser():
     p.add_argument('--trace-timing',action='store_true',help='Bounded scalar timing events, flushed at shutdown; no map/image recording or scheduling change')
     p.add_argument('--record-decision-inputs',action='store_true',help='Optional VLM worker: prepare YOLO associations and freeze causal three-frame task windows; no VLM request')
     p.add_argument('--agent-observations',action='store_true',help='Bounded optional Agent RGB/scene outlet; no YOLO, API or chassis output')
-    p.add_argument('--agent-follow-candidates',action='store_true',help='Prepare optional YOLO person candidates for Agent target selection')
+    p.add_argument('--agent-follow-candidates',action='store_true',help='Enable optional continuous T2 follow input and candidate preparation')
     p.add_argument('--agent-execution',action='store_true',help='Allow owned Agent goal intents through the existing safety path; requires manual arming')
     p.add_argument('--no-image',action='store_true',help='Compatibility flag: the core never loads YOLO; disallows optional VLM image preparation')
     p.add_argument('--runtime-config',default=str(ROOT/'configs/runtime.yaml'))
@@ -234,11 +234,21 @@ def main():
                           follow_enabled=args.agent_follow_candidates)
     commands.agent_state.configure_vehicle(geometry,motion)
     agent_observer=None
+    follow_decision=None
     if args.agent_observations:
         from decision.agent.adapters.runtime import ObservationWorker
         commands.agent_state.enable_goal_observations()
         agent_observer=ObservationWorker(commands.agent_state.publish_observation,metrics=metrics,geometry=geometry,
-                                         follow_candidates=args.agent_follow_candidates)
+                                         follow_candidates=False)
+    if args.agent_follow_candidates:
+        from .follow_decision import FollowDecisionWorker
+        from navigation.search import follow_candidates
+        def search_factory(source,context):
+            value=context or {}
+            return follow_candidates(source,asset,geometry,value.get('last'),anchor=value.get('anchor'),
+                                     margin=planning['safety_margin_m'])
+        follow_decision=FollowDecisionWorker(search_factory,metrics=metrics,image_policy=det_cfg['image_association'],
+                                             camera_calibration=args.camera_calibration)
     schedule=[] if args.commands is None else json.loads(Path(args.commands).read_text())
     if not isinstance(schedule,list) or any(set(v)!={'offset_s','kind','value'} or not np.isfinite(v['offset_s']) or v['offset_s']<0 for v in schedule):
         raise ValueError('Command schedule requires finite offset_s, kind and value')
@@ -292,7 +302,7 @@ def main():
                 if time.monotonic()>deadline:raise RuntimeError('CPU worker startup exceeded its budget')
                 time.sleep(.01)
             safety_telemetry=SafetyTelemetry(safety,record)
-            control_loop=ControlLoop(reference,controller,batch,safety,main_pose,commands,settings,env_config['scene'],metrics,record,asset=asset,initial_goal=initial_goal,clock_domain=clock_domain,display=display,route_replay=route_replay,planning_recorder=planning_recorder,session=interactive)
+            control_loop=ControlLoop(reference,controller,batch,safety,main_pose,commands,settings,env_config['scene'],metrics,record,asset=asset,initial_goal=initial_goal,clock_domain=clock_domain,display=display,route_replay=route_replay,planning_recorder=planning_recorder,session=interactive,follow_decision=follow_decision)
             # Archives retain every selected scan and its matching optional
             # inputs. Normal navigation bounds map work independently of the
             # detector; the native tree has exactly one owning worker.
@@ -412,6 +422,11 @@ def main():
                             next_export=stamp+1/settings['scene_export_hz']
                     if agent_observer is not None and scene is not None and abs(scene.record['as_of']-stamp)<1e-6:
                         agent_observer.submit(scene,arrays.get('rgb'),packet['rgb_stamp'],packet['rgb_frame'],packet['camera_info'],packet['rgb_stamp_ns'])
+                    if follow_decision is not None:
+                        current_scene=scene if scene is not None and abs(scene.record['as_of']-stamp)<1e-6 else None
+                        follow_decision.submit(people,arrays,scene=current_scene,context=control_loop.follow_context(),
+                            image_metadata=dict(rgb_stamp_ns=packet['rgb_stamp_ns'],rgb_frame=packet['rgb_frame'],
+                                                camera_info=packet['camera_info']))
                     if decision_recorder is not None:
                         current_scene=scene if scene is not None and abs(scene.record['as_of']-stamp)<1e-6 else None
                         decision_recorder.submit(people,arrays,scene=current_scene,
@@ -449,6 +464,7 @@ def main():
         cleanup_errors=[];export_report=display_report=decision_report=planning_report=association_report=agent_report=None
         for name,close in [('scan_inbox',None if scan_inbox is None else scan_inbox.close),('map_worker',None if map_worker is None else map_worker.close),('commands',commands.close),('control',None if control_loop is None else control_loop.close),
                            ('agent_observations',None if agent_observer is None else agent_observer.close),
+                           ('follow_decision',None if follow_decision is None else follow_decision.close),
                            ('safety_telemetry',None if safety_telemetry is None else safety_telemetry.close),('safety',safety.close),('reference',reference.close),('environment',environment.close),('wire',wire.close),('pose_channel',main_pose.close),
                            ('reader',None if reader is None else reader.close),('journal',None if journal is None else journal.close),
                            ('exporter',None if exporter is None else exporter.close),

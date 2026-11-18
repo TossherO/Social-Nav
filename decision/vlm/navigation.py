@@ -15,6 +15,8 @@ class DecisionRequest:
         if not math.isfinite(self.deadline) or self.deadline<=0:raise ValueError('Positive response deadline required')
 
     def begin(self,scene,*,window=None,candidates=None,now):
+        if self.policy.kind=='follow':
+            raise ValueError('Follow uses the structured T2 interface')
         if self.policy.cancelled:raise ValueError('Task is cancelled')
         if self.pending is not None:raise ValueError('A request is already in flight; do not queue old frames')
         scene.verify();r=scene.record
@@ -31,9 +33,6 @@ class DecisionRequest:
         if self.policy.kind=='social':
             from .vlm_api_common import groups_schema
             schema=groups_schema(sorted(mapping))
-        elif self.policy.kind=='follow':
-            from .follow import follow_schema
-            schema=follow_schema(sorted(mapping),ticket['history'])
         else:
             from .seating.inference import selection_schema
             schema=selection_schema(candidates)

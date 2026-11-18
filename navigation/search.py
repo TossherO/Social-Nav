@@ -75,19 +75,54 @@ def candidates(inputs, last, *, now, clock_domain, local_identity, anchor, margi
         if abs(math.atan2(math.sin(heading-pose[2]),math.cos(heading-pose[2])))<.1:continue
         if any(abs(math.atan2(math.sin(heading-p[2]),math.cos(heading-p[2])))<.1 for p in proposed):continue
         proposed.append([float(pose[0]),float(pose[1]),heading])
+    destination=None
     if point is not None:
-        delta=point-pose[:2];distance=float(np.linalg.norm(delta));step=min(.8,max(0.,distance-1.5))
+        delta=point-pose[:2];distance=float(np.linalg.norm(delta));step=min(.8,distance)
+        direction=np.asarray(last.get('velocity_xy_mps'),dtype=float)
+        if direction.shape==(2,) and np.isfinite(direction).all() and np.linalg.norm(direction)>=.15:
+            mapped_direction=transform[:2,:2]@direction
+            yaw=math.atan2(mapped_direction[1],mapped_direction[0])
+        else:
+            yaw=math.atan2(delta[1],delta[0]) if distance>.05 else float(pose[2])
+        destination=[float(point[0]),float(point[1]),yaw]
         if step>=.2:
             end=pose[:2]+delta/distance*step
-            proposed.append([float(end[0]),float(end[1]),math.atan2(delta[1],delta[0])])
+            proposed.append([float(end[0]),float(end[1]),yaw if distance<=.8 else math.atan2(delta[1],delta[0])])
     results=[dict(id=0,kind='wait',pose=None)]
     for candidate in proposed:
         try:check=check_pose(inputs,candidate,now=now,clock_domain=clock_domain,anchor=anchor,margin=margin)
         except ValueError:continue
         if check['valid']:
-            results.append(dict(id=len(results),kind='rotate' if np.linalg.norm(np.asarray(candidate[:2])-pose[:2])<1e-8 else 'approach',
-                                pose=candidate,check=check))
+            kind='rotate' if np.linalg.norm(np.asarray(candidate[:2])-pose[:2])<1e-8 else 'approach'
+            item=dict(id=len(results),kind=kind,pose=candidate,check=check)
+            if kind=='approach' and destination is not None:item['last_observed_pose']=destination
+            results.append(item)
     return results
+
+
+def follow_candidates(scene, asset, geometry, last=None, *, anchor=None, margin=.05):
+    """Build the T2 search choices from this scene; unavailable maps permit waiting only."""
+    from perception.environment.context import fingerprint
+    from navigation.planning.inputs import association_status, load_config
+    scene.verify();record=scene.record;stamp=record['as_of']
+    identity=[record[k] for k in ('session_id','generation','frame_id')]
+    results=[dict(id=0,kind='wait',pose=None)]
+    if asset is not None and not association_status(scene,asset,load_config()):
+        matrix=np.asarray(record['localization'].get('world_from_lidar'),dtype=float)
+        transform=np.asarray(record['prior'].get('map_from_local'),dtype=float)
+        if matrix.shape==(4,4) and transform.shape==(4,4) and np.isfinite(matrix).all() and np.isfinite(transform).all():
+            local_pose=geometry.pose(matrix);map_pose=geometry.pose(transform@matrix)
+            inputs=dict(stamp_s=stamp,clock_domain=record['clock_domain'],scene=scene,geometry=geometry,
+                        global_grid=asset.snapshot,local_pose=local_pose,pose=map_pose)
+            try:
+                results=candidates(inputs,last,now=stamp,clock_domain=record['clock_domain'],
+                    local_identity=identity,anchor=map_pose[:2] if anchor is None else anchor,margin=margin)
+            except (ValueError,KeyError,TypeError):
+                pass
+    value=dict(clock_domain=record['clock_domain'],source_stamp_s=stamp,scene_binding=record['input_fingerprint'],
+               candidates=results)
+    value['binding']=fingerprint(value)
+    return value
 
 
 def bounds_status(request, scene, asset, planning, poses, *, margin,geometry):

@@ -274,12 +274,12 @@ class RuntimeShadowNavigation:
             self.cancel_requested = False
             raise ValueError('Runtime cancellation was not accepted')
 
-    def start_follow(self, reference, handle):
+    def start_follow(self, intent, handle):
         from ..tools.navigation import IntentRejected
         previous=(self.handle,self.request,self.cancel_requested,getattr(self,'follow_active',False))
         self.handle,self.request,self.cancel_requested,self.follow_active=copy.deepcopy(handle),None,False,True
         try:
-            ack=self.client.exchange('follow_start',dict(handle=handle,reference=reference))
+            ack=self.client.exchange('follow_start',dict(handle=handle,intent=intent))
             if ack.get('accepted') is not True:raise IntentRejected(ack.get('error','follow_start_rejected'))
         except IntentRejected:
             self.handle,self.request,self.cancel_requested,self.follow_active=previous
@@ -291,12 +291,6 @@ class RuntimeShadowNavigation:
         self.cancel_requested=True
         ack=self.client.exchange('follow_finish',dict(call_id=handle['call_id']))
         if ack.get('accepted') is not True:raise ValueError('Follow finish was not accepted')
-
-    def review_follow(self, handle, value):
-        if self.handle!=handle or not self.follow_active:raise ValueError('Wrong follow call')
-        ack=self.client.exchange('follow_visual',dict(call_id=handle['call_id'],**value))
-        if ack.get('accepted') is not True:raise ValueError('Follow visual review was not accepted')
-        return dict(status='submitted',execution_completed=False)
 
     def lose_follow(self, handle, reason):
         if self.handle!=handle or not self.follow_active:raise ValueError('Wrong follow call')

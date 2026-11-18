@@ -259,15 +259,14 @@ class CommandInbox:
             if len(self.pending)>=64:raise RuntimeError('Command inbox is full')
             state=self.agent_state.snapshot();control=state.get('control') or {}
             if kind=='start':
-                if set(value)!={'handle','reference'}:raise ValueError('Invalid follow start')
-                handle,ref=value['handle'],value['reference']
-                if (not isinstance(handle,dict) or not isinstance(ref,dict) or
-                        ref.get('reference_id')!=fingerprint({k:v for k,v in ref.items() if k!='reference_id'}) or
+                if set(value)!={'handle','intent'}:raise ValueError('Invalid follow start')
+                handle,intent=value['handle'],value['intent']
+                if (not isinstance(handle,dict) or not isinstance(intent,dict) or
+                        set(intent)!={'target_description'} or not isinstance(intent['target_description'],str) or
+                        not 1<=len(intent['target_description'].strip())<=2048 or
                         any(not isinstance(handle.get(k),str) or not handle[k] or len(handle[k])>128 for k in ('task_id','goal_id','call_id')) or
-                        any(type(handle.get(k)) is not int or handle[k]<0 for k in ('plan_revision','goal_revision')) or
-                        handle['task_id']!=ref.get('task_id') or handle['goal_id']!=ref.get('goal_id') or
-                        handle['plan_revision']!=ref.get('task_revision') or not isinstance(ref.get('track'),dict)):
-                    raise ValueError('follow_handle_reference_mismatch')
+                        any(type(handle.get(k)) is not int or handle[k]<0 for k in ('plan_revision','goal_revision'))):
+                    raise ValueError('follow_handle_or_intent_invalid')
                 chassis={} if not live else self.session.status().get('chassis') or {}
                 if live and (chassis.get('state')!='armed' or not chassis.get('status_fresh')):
                     raise ValueError('manual_arming_required')
@@ -301,16 +300,6 @@ class CommandInbox:
                 target=self._follow_stop_locked(owner,hold=hold)
                 self.pending.append(('follow_stop',dict(call_id=value['call_id'],target=target,
                     reason=value['reason'] if kind=='lost' else kind,lost=kind=='lost',retained=hold)))
-            elif kind=='visual':
-                if (set(value)!={'call_id','state','scene_binding','rgb_stamp_s','identity'} or
-                        value.get('state') not in ('visible','occluded') or
-                        not isinstance(value.get('scene_binding'),str) or not isinstance(value.get('identity'),list) or
-                        type(value.get('rgb_stamp_s')) not in (int,float) or not math.isfinite(value['rgb_stamp_s'])):
-                    raise ValueError('Invalid follow visual review')
-                owner=self.agent_owner
-                if owner is None or owner.get('kind')!='follow' or owner.get('held') or owner['request_id']!=value.get('call_id'):
-                    raise ValueError('agent_goal_ownership_lost')
-                self.pending.append(('follow_visual',copy.deepcopy(value)))
             else:raise ValueError('Unknown follow intent')
             self.route_preempted=True
         return dict(accepted=True,scope='follow_intent',executable=False,execution_feedback=False)
@@ -337,6 +326,33 @@ class CommandInbox:
                         chassis.get('arm_revision')!=owner['arm_revision']):return False
             self.safety.command('goal',request);owner['internal_revision']=request['goal_revision']
             return True
+
+    def follow_owner_valid(self, handle):
+        """Check ownership even when a follow task is waiting without a goal."""
+        with self.lock:
+            owner=self.agent_owner
+            if (owner is None or owner.get('kind')!='follow' or owner.get('held') or
+                    owner['request_id']!=handle.get('call_id') or
+                    time.monotonic()-owner['heartbeat_mono']>3.):
+                return False
+            if owner['live']:
+                chassis=self.session.status().get('chassis') or {}
+                return (chassis.get('state')=='armed' and chassis.get('status_fresh') and
+                        chassis.get('arm_revision')==owner['arm_revision'])
+            return True
+
+    def pause_follow(self, handle):
+        """Stop this owner's current goal while keeping the task and arm state."""
+        with self.lock:
+            owner=self.agent_owner
+            if (owner is None or owner.get('kind')!='follow' or owner.get('held') or
+                    owner['request_id']!=handle.get('call_id') or
+                    time.monotonic()-owner['heartbeat_mono']>3.):
+                raise ValueError('follow_owner_or_heartbeat_lost')
+            target=dict(task_id=owner['internal_task_id'],goal_revision=owner['internal_revision'])
+            if owner['internal_revision']>0:
+                self.safety.command('goal_hold' if owner['live'] else 'cancel',target)
+            return target
 
     def follow_failed(self, handle, *, recoverable=False):
         with self.lock:
@@ -421,8 +437,8 @@ class CommandInbox:
                     state.update(scope='live_observation',chassis=self.session.status().get('chassis'),agent_owner=owner)
                     connection.send(state);continue
                 if request['kind'] in ('agent_live_follow_start','agent_live_follow_finish','agent_live_follow_cancel',
-                                       'agent_live_follow_visual','agent_live_follow_lost','agent_shadow_follow_start','agent_shadow_follow_finish',
-                                       'agent_shadow_follow_cancel','agent_shadow_follow_visual','agent_shadow_follow_lost'):
+                                       'agent_live_follow_lost','agent_shadow_follow_start','agent_shadow_follow_finish',
+                                       'agent_shadow_follow_cancel','agent_shadow_follow_lost'):
                     parts=request['kind'].split('_')
                     connection.send(self.agent_follow(parts[-1],request['value'],live=parts[1]=='live'));continue
                 if request['kind'] in ('agent_live_goal','agent_live_cancel','agent_live_hold'):

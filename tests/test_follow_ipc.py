@@ -40,14 +40,14 @@ class FollowIpcTests(unittest.TestCase):
                 initial=scene(10.);ref=reference(initial);ref.update(task_revision=1,goal_id='g')
                 ref['reference_id']=fingerprint({k:v for k,v in ref.items() if k!='reference_id'})
                 with self.assertRaisesRegex(ValueError,'previous_agent_goal_not_completed'):
-                    client.exchange('follow_start',dict(handle=handle,reference=ref))
+                    client.exchange('follow_start',dict(handle=handle,intent=dict(target_description='red jacket')))
                 packet.update(request=None)
                 localization=dict(health=0,session_id='s',generation=0,frame_id='odom')
                 idle=dict(status='valid',source='causal_algorithm_poses_not_chassis_feedback',
                           local_identity=['s',0,'odom'],stamp_s=10.,velocity=[0.,0.])
                 inbox.agent_state.publish_control(packet,localization,map_binding=dict(valid=True),
                     cancelled_request=dict(task_id='f',goal_revision=1),idle_feedback=idle)
-                self.assertTrue(client.exchange('follow_start',dict(handle=handle,reference=ref))['accepted'])
+                self.assertTrue(client.exchange('follow_start',dict(handle=handle,intent=dict(target_description='red jacket')))['accepted'])
                 self.assertTrue(client.exchange('follow_finish',dict(call_id='follow'))['accepted'])
                 next_goal=dict(goal,request_id='nav2',goal_revision=3)
                 with self.assertRaisesRegex(ValueError,'previous_agent_goal_not_completed'):
@@ -72,7 +72,7 @@ class FollowIpcTests(unittest.TestCase):
                 handle=dict(task_id='f',goal_id='g',plan_revision=1,goal_revision=1,call_id='call')
                 initial=scene(10.);ref=reference(initial);ref.update(task_revision=1,goal_id='g')
                 ref['reference_id']=fingerprint({k:v for k,v in ref.items() if k!='reference_id'})
-                self.assertTrue(client.exchange('follow_start',dict(handle=handle,reference=ref))['accepted'])
+                self.assertTrue(client.exchange('follow_start',dict(handle=handle,intent=dict(target_description='red jacket')))['accepted'])
                 inbox.drain()
                 self.assertTrue(client.exchange('follow_lost',dict(call_id='call',reason='follow_visual_lost'))['accepted'])
                 self.assertEqual(events[-1][0],'goal_hold')
@@ -96,7 +96,7 @@ class FollowIpcTests(unittest.TestCase):
                 handle=dict(task_id='f',goal_id='g',plan_revision=1,goal_revision=1,call_id='call')
                 initial=scene(10.);ref=reference(initial);ref.update(task_revision=1,goal_id='g')
                 ref['reference_id']=fingerprint({k:v for k,v in ref.items() if k!='reference_id'})
-                self.assertTrue(client.exchange('follow_start',dict(handle=handle,reference=ref))['accepted'])
+                self.assertTrue(client.exchange('follow_start',dict(handle=handle,intent=dict(target_description='red jacket')))['accepted'])
                 inbox.agent_owner['heartbeat_mono']=time.monotonic()-4.
                 client.snapshot()
                 self.assertGreater(time.monotonic()-inbox.agent_owner['heartbeat_mono'],3.)
@@ -105,20 +105,13 @@ class FollowIpcTests(unittest.TestCase):
                 client.snapshot(follow_call_id='call')
                 self.assertLess(time.monotonic()-inbox.agent_owner['heartbeat_mono'],1.)
                 kind,value=inbox.drain()[0];self.assertEqual(kind,'follow_start')
-                geometry=VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],np.eye(4),source='synthetic')
-                control=object.__new__(ControlLoop)
-                control.lock=threading.Lock();control.follow=FollowRunner(load_config(),geometry)
-                control.follow_pending=value;control.follow_visual_pending=[];control.follow_visual_review=None
-                control.scene=initial;control.follow.observe(initial);control.request=None;control.cancelled_request=None
-                control.commands=inbox;control.record=lambda *_:None
-                control.reference=SimpleNamespace(invalidate=lambda *_:None,cancel=lambda *_:None)
-                control.controller=SimpleNamespace(controller=SimpleNamespace(clear=lambda:None))
-                control._update_follow(10.)
-                self.assertEqual(client.snapshot()['follow']['status'],'running')
+                request=dict(task_id='follow:call',request_id='call',goal_revision=1,frame_id='odom',mode='local',
+                    target_reference='base_link',goal=[2.5,2.],valid_until_s=10.5)
+                self.assertTrue(inbox.follow_goal(handle,request))
                 self.assertEqual(events[-1][0],'goal')
                 self.assertTrue(client.exchange('follow_finish',dict(call_id='call'))['accepted'])
                 self.assertEqual(events[-1][0],'goal_hold')
-                self.assertFalse(inbox.follow_goal(handle,dict(control.request,goal_revision=2)))
+                self.assertFalse(inbox.follow_goal(handle,dict(request,goal_revision=2)))
                 self.assertEqual(inbox.drain()[0][0],'follow_stop')
             finally:inbox.close()
 

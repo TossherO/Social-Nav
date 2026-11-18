@@ -164,8 +164,7 @@ def payload_fields(body,task):
         raise ValueError('Expected three real images in their original order')
     fields=json.loads(content[-1]['text'])
     expected={'v','dt','ts','e','o','d'}
-    if task!='groups':expected.add('target_description')
-    if task=='follow':expected.add('last_target')
+    if task!='groups':raise ValueError('Local fallback currently supports groups only')
     if set(fields)!=expected:
         raise ValueError('Task fields mismatch; labels and answers must stay separate')
     common.groups_schema(fields['v'])
@@ -175,20 +174,14 @@ def payload_fields(body,task):
 
 def validate_result(raw,body,task,fields):
     schema=body['response_format']['json_schema']['schema']
-    if task=='groups':
-        common.validate_groups(raw,fields['v'],schema)
-    else:
-        from .follow import validate_decision,follow_schema,appearance_schema
-        expected=follow_schema(fields['v'],fields['last_target']) if task=='follow' else appearance_schema(fields['v'])
-        if expected!=schema:
-            raise ValueError('The dynamic task Schema does not match its input context')
-        validate_decision(raw,schema)
+    if task!='groups':raise ValueError('Local fallback currently supports groups only')
+    common.validate_groups(raw,fields['v'],schema)
 
 
 def arguments(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--request',type=Path,required=True,help='Frozen body produced by vlm_api_common.make_body')
-    parser.add_argument('--task',choices=['groups','appearance','follow'],required=True)
+    parser.add_argument('--task',choices=['groups'],required=True)
     parser.add_argument('--config',type=Path,default=ROOT/'configs/vlm_local.local.json')
     parser.add_argument('--model-path',type=Path)
     parser.add_argument('--gpus')

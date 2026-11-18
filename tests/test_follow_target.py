@@ -45,167 +45,20 @@ class FollowTargetTests(unittest.TestCase):
         self.store.close()
         self.temp.cleanup()
 
-    def select(self, match, candidate_id):
-        return self.session.call('select_follow_target',_context=self.session.context(),goal_id='follow',
-            observation_id=self.obs.record['observation_id'],candidate_binding=self.value['binding'],
-            target_description='穿红衣的人',match=match,candidate_id=candidate_id)
-
-    def test_match_binds_original_image_box_and_track_without_motion(self):
-        result = self.select('unique',0)
-        self.assertEqual(result['status'],'selected')
-        self.assertFalse(result['executable'])
-        self.assertEqual(result['reference']['track']['identity'],['tracker_session',7,'a'])
-        saved,image,crop=self.store.read_follow_reference(self.session.state['task_id'],1,'follow')
+    def test_reference_binds_image_box_and_track_without_motion(self):
+        record,image,crop=reference(self.obs,0,'穿红衣的人',task_id='task',revision=1,goal_id='follow')
+        self.assertEqual(record['track']['identity'],['tracker_session',7,'a'])
         self.assertEqual(image,self.obs.image)
-        self.assertEqual(hashlib.sha256(crop).hexdigest(),saved['crop_sha256'])
-        self.assertEqual(self.select('unique',1)['reason'],'follow_reference_already_fixed')
-        self.assertEqual(self.session.task_goals.goals[0]['status'],'pending')
-        self.assertIsNone(self.session.skill.record['handle'])
+        self.assertEqual(hashlib.sha256(crop).hexdigest(),record['crop_sha256'])
         self.assertNotEqual(annotated(self.obs),self.obs.image)
-
-    def test_ambiguous_then_visual_only_remains_nonexecutable(self):
-        self.assertEqual(self.select('ambiguous',-1)['status'],'ambiguous')
-        self.assertIsNone(self.store.read_follow_reference(self.session.state['task_id'],1,'follow'))
-        result=self.select('unique',1)
-        self.assertEqual(result['status'],'visual_only')
-        self.assertIsNone(result['reference']['track'])
-        self.assertFalse(result['executable'])
-
-    def test_observation_and_candidate_changes_cannot_be_substituted(self):
         modified=copy.deepcopy(self.value)
         modified['candidates'][0]['box'][0]+=1
         with self.assertRaises(ValueError):verify_candidates(modified,self.obs)
-        context=self.session.context()
-        self.nav.state['stamp_s']=41.
-        result=self.session.call('select_follow_target',_context=context,goal_id='follow',
-            observation_id=self.obs.record['observation_id'],candidate_binding=self.value['binding'],
-            target_description='穿红衣的人',match='unique',candidate_id=0)
-        self.assertEqual(result['reason'],'selection_requires_current_consumed_observation')
 
-    def test_delayed_result_keeps_only_historical_reference(self):
-        context=self.session.context()
-        self.nav.state['stamp_s']=14.
-        result=self.session.call('select_follow_target',_context=context,goal_id='follow',
-            observation_id=self.obs.record['observation_id'],candidate_binding=self.value['binding'],
-            target_description='穿红衣的人',match='unique',candidate_id=0)
-        self.assertEqual(result['status'],'selected_historical')
-        self.assertEqual(result['source_age_s'],4.)
-        self.assertFalse(result['current_track_valid'])
-        self.assertFalse(result['executable'])
-
-    def test_follow_stage_requires_running_then_finish_and_observed_stop(self):
-        self.nav.scope='live'
-        self.nav.state.update(scope='live',chassis_state='armed',chassis_status_fresh=True,
-                              localization_status='valid',input_stale=False,stop_observation=False)
-        self.nav.check_route=lambda _:dict(proposal_allowed=True,status='available')
-        def start(ref,handle):
-            self.nav.state.update(status='running',handle=copy.deepcopy(handle),stopped=False,
-                                  follow_status=dict(status='running',handle=copy.deepcopy(handle),
-                                                     target_identity=ref['track']['identity']))
-            return dict(accepted=True,handle=copy.deepcopy(handle),execution_feedback=False)
-        def finish(handle):
-            self.nav.state.update(status='stopping',follow_status=dict(status='stopped',handle=copy.deepcopy(handle)))
-        self.nav.start_follow=start;self.nav.finish_follow=finish
-        self.assertEqual(self.select('unique',0)['status'],'selected')
-        result=self.session.call('start_follow',goal_id='follow')
-        self.assertEqual(result['status'],'accepted')
-        self.session.tick()
-        self.assertTrue(self.session.skill.record['follow_ready'])
-        self.assertEqual(self.session.call('check_goal',goal_id='follow')['status'],'unproven')
-        self.assertEqual(self.session.call('observe_scene')['status'],'available')
-        reviews=[]
-        self.nav.review_follow=lambda handle,value:(reviews.append((handle,value)) or dict(status='submitted'))
-        reviewed=self.session.call('review_follow_target',_context=self.session.context(),goal_id='follow',
-            observation_id=self.obs.record['observation_id'],state='visible',candidate_id=0)
-        self.assertEqual(reviewed['status'],'submitted')
-        self.assertEqual(reviews[-1][1]['identity'],['tracker_session',7,'a'])
-        from decision.agent.core.model import Model
-        client=object.__new__(Model)
-        client.request=lambda system,messages,**kwargs:messages
-        payload=self.session.prompt()
-        messages=client.decide(payload,observation=self.session.observation)
-        self.assertTrue(any('历史目标参考裁剪' in part.get('text','') for part in messages[-1]['content']))
-        finish_result=self.session.call('finish_follow',_context=self.session.context(),goal_id='follow',
-            observation_id=self.obs.record['observation_id'],evidence='已在电梯入口旁')
-        self.assertEqual(finish_result['status'],'stopping')
-        self.assertEqual(self.session.call('check_goal',goal_id='follow')['status'],'unproven')
-        self.nav.state.update(status='stopped',stopped=True,stop_observation=True)
-        self.session.tick()
-        self.assertEqual(self.session.skill.record['status'],'held')
-        self.assertEqual(self.session.call('check_goal',goal_id='follow')['status'],'needs_semantic_evidence')
-        _,arrays,_,after=observation(10.4)
-        self.nav.state['stamp_s']=10.4
-        self.nav.observe=lambda:Observation.from_scene(after,rgb=dict(pixels=arrays['rgb'],stamp_s=10.38,frame_id='camera'))
-        self.assertEqual(self.session.call('observe_scene')['status'],'available')
-        self.nav.state['pose']=copy.deepcopy(self.session.observation.record['base_pose'])
-        result=self.session.call('check_goal',_context=self.session.context(),goal_id='follow',
-            observation_id=self.session.observation.record['observation_id'],semantic_result='satisfied',evidence='停在电梯入口旁')
-        self.assertEqual(result['status'],'completed')
-
-    def test_visual_review_stops_when_selected_candidate_has_no_matching_3d_track(self):
-        self.select('unique',0)
-        handle=dict(task_id=self.session.state['task_id'],goal_id='follow',goal_revision=1,call_id='call')
-        self.session.skill.record.update(stage_type='follow',goal_id='follow',handle=handle,status='running')
-        self.nav.state.update(handle=copy.deepcopy(handle),status='running',
-            follow_status=dict(status='running',target_identity=['tracker_session',7,'a'],handle=copy.deepcopy(handle)))
-        result=self.session.call('review_follow_target',_context=self.session.context(),goal_id='follow',
-            observation_id=self.obs.record['observation_id'],state='visible',candidate_id=1)
-        self.assertEqual(result['status'],'stopping')
-        self.assertEqual(self.session.skill.record['reason'],'follow_candidate_not_current_target_track')
-        self.assertEqual(self.nav.state['status'],'stopping')
-        self.assertEqual(self.session.skill.record['completed'],[])
-
-    def test_delayed_agent_start_uses_runtime_revalidation_not_old_image_as_current(self):
-        from decision.agent.core.loop import AgentLoop
-        from decision.agent.tools.framework import Reply
-        import threading
-        self.select('unique',0)
-        self.nav.check_route=lambda _:dict(proposal_allowed=True,status='available')
-        calls=[]
-        def start(ref,handle):
-            calls.append((copy.deepcopy(ref),copy.deepcopy(handle)))
-            self.nav.state.update(handle=copy.deepcopy(handle),status='running',
-                                  follow_status=dict(status='starting',handle=copy.deepcopy(handle)))
-            return dict(accepted=True,handle=copy.deepcopy(handle),execution_feedback=False)
-        self.nav.start_follow=start
-        gate=threading.Event()
-        def work(*_):
-            gate.wait(2)
-            return Reply.fixture(dict(tool='start_follow',arguments=dict(goal_id='follow')))
-        actor=AgentLoop(self.session,work)
-        try:
-            actor.tick();self.nav.t=4.;gate.set();actor.model.thread.join(1);actor.tick()
-            self.assertEqual(len(calls),1)
-            self.assertEqual(calls[0][0]['stamp_s'],10.)
-            self.assertEqual(self.session.state['status'],'waiting_navigation')
-        finally:
-            gate.set()
-            if actor.model.thread is not None:actor.model.thread.join(1)
-            actor.close()
-
-    def test_delayed_agent_reply_can_save_historical_reference_without_motion(self):
-        from decision.agent.core.loop import AgentLoop
-        from decision.agent.tools.framework import Reply
-        import threading
-        gate=threading.Event()
-        def work(*_):
-            gate.wait(1)
-            return Reply.fixture(dict(tool='select_follow_target',arguments=dict(goal_id='follow',
-                observation_id=self.obs.record['observation_id'],candidate_binding=self.value['binding'],
-                target_description='穿红衣的人',match='unique',candidate_id=0)))
-        actor=AgentLoop(self.session,work)
-        try:
-            actor.tick()
-            self.nav.t=4.
-            gate.set()
-            actor.model.thread.join(1)
-            actor.tick()
-            self.assertEqual(self.session.state['history'][-1]['value']['result']['status'],'selected_historical')
-            self.assertIsNone(self.session.skill.record['handle'])
-        finally:
-            gate.set()
-            if actor.model.thread is not None:actor.model.thread.join(1)
-            actor.close()
+    def test_old_agent_selection_is_unavailable(self):
+        self.assertNotIn('select_follow_target',self.session.registry)
+        self.assertIsNone(self.session.skill.record['handle'])
+        self.assertIsNone(self.store.read_follow_reference(self.session.state['task_id'],1,'follow'))
 
     def test_invalid_association_and_future_image_are_rejected(self):
         wrong=copy.deepcopy(self.association)

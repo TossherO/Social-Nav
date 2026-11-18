@@ -58,13 +58,16 @@ class FollowTrackHistory:
         if end is None or end<start:raise ValueError('follow_reference_history_unavailable')
         rows=rows[start:end+1];r=scene.record
         rgb=reference.get('rgb_stamp_s')
-        if (type(rgb) not in (int,float) or not np.isfinite(rgb) or not 0<=rows[0]['stamp_s']-rgb<=.15 or
-                rows[0]['people_fingerprint']!=track.get('people_fingerprint') or
-                rows[0]['people_stamp_s']!=track.get('people_stamp_s') or
-                reference.get('local_identity')!=identity(scene) or reference.get('clock_domain')!=r['clock_domain'] or
-                not rows or rows[-1]['scene_binding']!=r['input_fingerprint'] or
-                not 0<=now-r['as_of']<=self.config['max_geometry_age_s']):
-            raise ValueError('follow_reference_context_or_scene_invalid')
+        if type(rgb) not in (int,float) or not np.isfinite(rgb) or not 0<=rows[0]['stamp_s']-rgb<=.15:
+            raise ValueError('follow_reference_rgb_time_invalid')
+        if (rows[0]['people_fingerprint']!=track.get('people_fingerprint') or
+                rows[0]['people_stamp_s']!=track.get('people_stamp_s')):
+            raise ValueError('follow_reference_people_source_mismatch')
+        if (reference.get('local_identity')!=identity(scene) or reference.get('clock_domain')!=r['clock_domain'] or
+                rows[-1]['scene_binding']!=r['input_fingerprint']):
+            raise ValueError('follow_reference_scene_context_changed')
+        if not 0<=now-r['as_of']<=self.config['max_geometry_age_s']:
+            raise ValueError('follow_reference_current_scene_stale')
         source=rows[0]['tracks'].get(key)
         if (source is None or source[1]!='observed' or source[2]!=track.get('support_stamp_s')):
             raise ValueError('follow_reference_support_mismatch')
@@ -144,11 +147,6 @@ class TaskPolicy:
         ticket=dict(task_id=self.task_id,kind=self.kind,sequence=self.sequence,scene_binding=r['input_fingerprint'],
             observation_id=r['observation_id'],stamp_s=r['as_of'],clock_domain=r['clock_domain'],local_identity=identity(scene),
             people_source=model.source,pid_to_track={str(k):list(v) for k,v in mapping.items()},candidates=copy.deepcopy(candidates))
-        if self.kind=='follow':
-            pid=next((k for k,v in mapping.items() if tuple(v)==self.target),None)
-            ticket['history']=dict(confirmed_before=self.last_visual is not None,current_pid=pid,
-                hold_allowed=bool(pid is not None and self.last_visual is not None and
-                                  0<=r['as_of']-self.last_visual<=self.hold_s))
         ticket['binding']=fingerprint(ticket);self.latest=copy.deepcopy(ticket)
         return ticket
 
@@ -169,8 +167,8 @@ class TaskPolicy:
         return dict(operation='stop',reason=reason,task_id=self.task_id,task_completed=False,executable=False)
 
     def respond(self,ticket,response,*,scene,now):
-        if self.kind=='follow' and self.tracked_generation is not None:
-            raise ValueError('continuous_follow_requires_separate_visual_revalidation')
+        if self.kind=='follow':
+            raise ValueError('follow_uses_structured_t2_interface')
         self._bound(ticket,scene,now);mapping=ticket['pid_to_track'];pids=[int(k) for k in mapping]
         # A malformed response is retained by the caller; it is not repaired or
         # silently resubmitted. A ticket permits one response attempt.
@@ -183,20 +181,6 @@ class TaskPolicy:
                 local_identity=ticket['local_identity'],groups=groups)
             value['binding']=fingerprint(value);self.groups=value;self.raw=copy.deepcopy(response)
             return dict(operation='social_context',social=value,raw_response=self.raw,task_completed=False,executable=False)
-        if self.kind=='follow':
-            from decision.vlm.follow import follow_schema,validate_decision
-            # Validate against the history actually sent, then apply current
-            # geometry/track/age gates below. Receipt never refreshes source time.
-            validate_decision(response,follow_schema(pids,ticket['history']));self.raw=copy.deepcopy(response)
-            if response['state'] in ('uncertain','lost','not_found'):
-                self.target=None;return self._stop('follow_'+response['state'])
-            selected=tuple(mapping[str(response['id'])])
-            if response['state']=='visible':
-                self.target=selected;self.last_visual=ticket['stamp_s'];self.last_update=None
-            elif selected!=self.target:raise ValueError('Occluded response cannot change target')
-            self.response_stamp=ticket['stamp_s']
-            self.response_binding=ticket['binding']
-            return self.update(scene,now=now)
         from decision.vlm.seating.inference import validate_selection,binding
         candidates=ticket['candidates']
         if candidates is None:raise ValueError('Missing seating candidate set')
@@ -237,14 +221,12 @@ class TaskPolicy:
             return dict(operation='social_context',social=self.groups if status['status']=='valid' else None,status=status,executable=False)
         if self.kind!='follow':raise ValueError('Only follow and social have per-observation policy updates')
         if self.target is None:return self._stop('follow_target_unavailable')
-        if self.tracked_generation is None and (self.response_stamp is None or not 0<=now-self.response_stamp<=self.hold_s):
-            return self._stop('follow_decision_expired')
+        if self.tracked_generation is None:return self._stop('follow_track_not_initialized')
         model=PeopleModel(scene,self.config['people'])
         if self.target not in model.ids:
             self.target=None
             return self._stop('follow_track_lost')
         track=model.tracks[model.ids.index(self.target)]
-        if self.tracked_generation is None and now-self.last_visual>self.hold_s:return self._stop('follow_visual_confirmation_expired')
         if not 0<=now-scene.record['as_of']<=self.config['max_geometry_age_s']:
             if self.tracked_generation is not None:self.target=None
             return self._stop('follow_scene_future_or_stale')
@@ -283,8 +265,7 @@ class TaskPolicy:
         direction=np.asarray(direction)/max(np.linalg.norm(direction),1e-9)
         goal=position-self.distance*direction
         request=self._goal(goal,scene,source=self.response_binding,stop=True);self.request=request
-        request['valid_until_s']=(min(stamp+self.config['max_geometry_age_s'],
-            track['last_observed']+self.config['people']['max_track_age_s']) if self.tracked_generation is not None else
-            min(self.response_stamp+self.hold_s,self.last_visual+self.hold_s))
+        request['valid_until_s']=min(stamp+self.config['max_geometry_age_s'],
+            track['last_observed']+self.config['people']['max_track_age_s'])
         return dict(operation='plan',request=copy.deepcopy(request),target_identity=list(self.target),
             raw_response=self.raw,task_completed=False,executable=False)

@@ -273,25 +273,6 @@ class PolicyTests(unittest.TestCase):
         self.config=load_config();self.geometry=VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],np.eye(4),source='synthetic')
         self.scene=tracked_scene([track(4,2,(.5,0,0))]);self.key=['tracker_session',7,'a']
 
-    def test_late_response_and_pid_reuse_cannot_replace_current_goal(self):
-        policy=TaskPolicy('follow','follow',self.config,self.geometry)
-        old=policy.observe(self.scene,pid_to_track={0:self.key});new=policy.observe(self.scene,pid_to_track={1:self.key})
-        with self.assertRaises(ValueError):policy.respond(old,dict(id=0,state='visible'),scene=self.scene,now=10.)
-        result=policy.respond(new,dict(id=1,state='visible'),scene=self.scene,now=10.)
-        self.assertEqual(result['target_identity'],self.key);self.assertEqual(result['request']['goal'],[2.5,2.])
-        lost=tracked_scene([track(id='reused')],stamp=10.1)
-        self.assertEqual(policy.update(lost,now=10.1)['operation'],'stop')
-        self.assertEqual(policy.update(tracked_scene([track()],generation=1),now=10.)['reason'],'task_localization_changed')
-
-    def test_occlusion_does_not_refresh_visual_confirmation_or_report_success(self):
-        p=TaskPolicy('follow','follow',self.config,self.geometry,occlusion_hold_s=1.)
-        t=p.observe(self.scene,pid_to_track={0:self.key});p.respond(t,dict(id=0,state='visible'),scene=self.scene,now=10.)
-        later=tracked_scene([track(4,2,(.5,0,0),stamp=10.5)],stamp=10.5)
-        t=p.observe(later,pid_to_track={3:self.key});r=p.respond(t,dict(id=3,state='occluded'),scene=later,now=10.5)
-        self.assertEqual(r['operation'],'plan');self.assertEqual(p.last_visual,10.)
-        self.assertEqual(p.update(later,now=11.1)['reason'],'follow_visual_confirmation_expired')
-        self.assertFalse(r['task_completed']);self.assertEqual(p.cancel()['operation'],'stop')
-
     def test_social_groups_expire_and_keep_tracker_generation(self):
         scene=tracked_scene([track(id='a'),track(id='b')]);p=TaskPolicy('social','social',self.config,self.geometry)
         t=p.observe(scene,pid_to_track={0:self.key,1:['tracker_session',7,'b']})
@@ -339,17 +320,20 @@ class PolicyTests(unittest.TestCase):
         from navigation.planning.reference import planning_config
         from navigation.planning.continuity import reference_envelope
         from navigation.control.runtime import DwaNavigationControl
+        from navigation.tasks import FollowTrackHistory
+        from tests.test_follow_continuity import reference
         p=TaskPolicy('follow','follow',self.config,self.geometry)
-        ticket=p.observe(self.scene,pid_to_track={0:self.key})
-        req=p.respond(ticket,dict(id=0,state='visible'),scene=self.scene,now=10.)['request']
+        scene=tracked_scene([dict(track(4,2,(.5,0,0)),state='observed',lifecycle_generation=7)])
+        history=FollowTrackHistory(self.config);history.add(scene)
+        req=p.start_continuous_follow(reference(scene,task_id='follow'),scene,history,now=10.)['request']
         config=planning_config(self.config)
         planner=Planner(config,self.geometry,require_actual_start=True)
-        reference=planner.query(req,scene=self.scene,now=10.,clock_domain='synthetic')
+        reference=planner.query(req,scene=scene,now=10.,clock_domain='synthetic')
         self.assertEqual(reference['status'],'path_found',reference.get('reason'))
-        result=reference_envelope(reference,req,self.scene,None)
+        result=reference_envelope(reference,req,scene,None)
         control=DwaNavigationControl(config,load_motion_config(),self.geometry,simulation=True)
         f=dict(status='valid',source='synthetic',stamp_s=10.,clock_domain='synthetic',local_identity=['test',0,'odom'],pose=[2,2,0],velocity=[0,0])
-        outcome=control.step(req,self.scene,f,now=10.,clock_domain='synthetic',dt=.1,result=result)
+        outcome=control.step(req,scene,f,now=10.,clock_domain='synthetic',dt=.1,result=result)
         self.assertEqual(outcome['command']['state'],'allowed');self.assertGreater(outcome['command']['velocity'][0],0.)
         self.assertFalse(outcome['goal']['task_completed'])
 

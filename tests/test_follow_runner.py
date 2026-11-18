@@ -48,7 +48,7 @@ class FollowRunnerTests(unittest.TestCase):
         first=scene(10.1);self.runner.observe(first)
         self.runner.visual(review(first,'occluded'),first,now=10.1)
         self.runner.update(first,now=10.1)
-        for i in range(2,47):
+        for i in range(2,62):
             current=scene(10.+i*.1);self.runner.observe(current)
             if i==20:self.runner.visual(review(current,'occluded'),current,now=12.)
             result=self.runner.update(current,now=10.+i*.1)
@@ -73,6 +73,52 @@ class FollowRunnerTests(unittest.TestCase):
         value.update(identity=['tracker_session',7,'a'],rgb_stamp_s=10.01)
         with self.assertRaisesRegex(ValueError,'source_unavailable'):
             self.runner.visual(value,self.initial,now=10.)
+
+    def test_retarget_rejects_stale_or_changed_source_without_mutating_target(self):
+        self.runner.start(self.handle,self.ref,self.initial,now=10.)
+        current=scene(10.1);self.runner.observe(current)
+        ref=reference(current);ref.update(task_revision=1,goal_id='g')
+        ref['reference_id']=fingerprint({k:v for k,v in ref.items() if k!='reference_id'})
+        altered=dict(ref,stamp_s=10.2)
+        with self.assertRaisesRegex(ValueError,'reference_invalid'):
+            self.runner.retarget(altered,current,now=10.1)
+        self.assertEqual(self.runner.policy.target,('tracker_session',7,'a'))
+        with self.assertRaisesRegex(ValueError,'expired'):
+            self.runner.retarget(ref,current,now=12.2)
+        self.runner.retarget(ref,current,now=10.1)
+        self.assertEqual(self.runner.policy.last_visual,10.08)
+        self.assertEqual(self.runner.update(current,now=10.1)['operation'],'plan')
+
+    def test_delayed_occlusion_does_not_override_newer_observed_track(self):
+        self.runner.start(self.handle,self.ref,self.initial,now=10.)
+        covered=scene(10.1,state='predicted',support=10.);self.runner.observe(covered)
+        returned=scene(10.2);self.runner.observe(returned)
+        result=self.runner.visual(dict(state='occluded',identity=['tracker_session',7,'a'],
+            scene_binding=covered.record['input_fingerprint'],rgb_stamp_s=10.08),returned,now=10.2)
+        self.assertEqual(result,'superseded')
+        self.assertIsNone(self.runner.occluded_since)
+        self.assertEqual(self.runner.policy.last_visual,9.98)
+        self.assertEqual(self.runner.update(returned,now=10.2)['operation'],'plan')
+
+    def test_retarget_switches_to_distinct_continuous_track(self):
+        from tests.test_navigation_prediction import track, tracked_scene
+        self.runner.start(self.handle,self.ref,self.initial,now=10.)
+        def two(stamp):
+            values=[]
+            for name,x in [('a',4.),('b',3.)]:
+                value=track(x,2.,stamp=stamp,id=name)
+                value.update(state='observed',lifecycle_generation=7)
+                values.append(value)
+            return tracked_scene(values,stamp=stamp)
+        source=two(10.1);self.runner.observe(source)
+        record=source.record['people']['data']
+        ref=reference(source);ref['track']['identity']=[record['session_id'],record['generation'],'b']
+        ref.update(task_revision=1,goal_id='g')
+        ref['reference_id']=fingerprint({k:v for k,v in ref.items() if k!='reference_id'})
+        current=two(10.2);self.runner.observe(current)
+        self.runner.retarget(ref,current,now=10.2)
+        self.assertEqual(self.runner.update(current,now=10.2)['target_identity'],
+                         ['tracker_session',7,'b'])
 
     def test_moving_person_drives_planner_control_and_synthetic_plant(self):
         from navigation.control.runtime import DwaNavigationControl
@@ -128,7 +174,7 @@ class FollowOwnershipTests(unittest.TestCase):
                       target_reference='base_link',goal=[2.5,2.],valid_until_s=10.5)
 
     def start(self):
-        return self.inbox.agent_follow('start',dict(handle=self.handle,reference=self.ref),live=True)
+        return self.inbox.agent_follow('start',dict(handle=self.handle,intent=dict(target_description='red jacket')),live=True)
 
     def test_follow_finish_blocks_later_goal_renewal_and_preserves_owner(self):
         self.assertTrue(self.start()['accepted'])
@@ -179,39 +225,14 @@ class FollowOwnershipTests(unittest.TestCase):
         self.inbox.follow_failed(self.handle)
         self.assertEqual(self.events[-1][0],'cancel')
 
-    def test_start_requires_arm_and_matching_reference(self):
+    def test_start_requires_arm_and_valid_description(self):
         self.chassis['state']='disarmed'
         with self.assertRaisesRegex(ValueError,'manual_arming_required'):self.start()
         self.chassis['state']='armed'
-        with self.assertRaisesRegex(ValueError,'mismatch'):
-            self.inbox.agent_follow('start',dict(handle=dict(self.handle,goal_id='other'),reference=self.ref),live=True)
+        with self.assertRaisesRegex(ValueError,'intent_invalid'):
+            self.inbox.agent_follow('start',dict(handle=self.handle,intent=dict(target_description='')),live=True)
         self.assertEqual(self.events,[])
 
-    def test_control_thread_renews_owned_target_then_stops_on_lost_track(self):
-        from runtime.control import ControlLoop
-        from runtime.follow import FollowRunner
-        self.start()
-        geometry=VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],np.eye(4),source='synthetic')
-        control=object.__new__(ControlLoop)
-        control.lock=threading.Lock();control.follow=FollowRunner(load_config(),geometry)
-        control.follow_pending=dict(handle=self.handle,reference=self.ref)
-        control.follow_visual_pending=[];control.follow_visual_review=None;control.record=lambda *_:None
-        control.scene=scene(10.);control.follow.observe(control.scene)
-        control.request=None;control.cancelled_request=None;control.commands=self.inbox
-        messages=[]
-        self.inbox.agent_state.publish_follow=lambda value:messages.append(value)
-        control.reference=SimpleNamespace(invalidate=lambda *_:None,cancel=lambda *_:None)
-        control.controller=SimpleNamespace(controller=SimpleNamespace(clear=lambda:None))
-        control._update_follow(10.)
-        self.assertEqual(messages[-1]['status'],'running')
-        self.assertEqual(self.events[-1][0],'goal')
-        control.scene=scene(10.1,present=False);control.follow.observe(control.scene)
-        control._update_follow(10.1)
-        self.assertEqual(messages[-1]['status'],'failed')
-        self.assertEqual(self.events[-1][0],'goal_hold')
-        self.assertTrue(messages[-1]['recovery_available'])
-        self.assertEqual(messages[-1]['last_evidence']['identity'],['tracker_session',7,'a'])
-        self.assertIsNone(control.request)
 
 
 if __name__=='__main__':unittest.main()

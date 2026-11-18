@@ -12,7 +12,6 @@ import httpx
 
 from decision.agent.core.store import Budget
 from decision.vlm import hosted_evaluation as hosted
-from decision.vlm.follow import FollowHistory
 from decision.vlm.vlm_api_common import groups_schema, save_json
 
 
@@ -37,22 +36,15 @@ class HostedTests(unittest.TestCase):
         batch=dict(name='test',task='groups',max_tokens=256,prompt=dict(text='frozen prompt',sha256=hashlib.sha256(b'frozen prompt').hexdigest()),cases=[case])
         return batch,case
 
-    def test_original_images_and_causal_history_are_used(self):
+    def test_original_images_are_used(self):
         batch,case=self.fixture();item,body,_=hosted.prepare_case(batch,case)
         self.assertFalse(body['enable_thinking']);self.assertNotIn('chat_template_kwargs',body)
         self.assertEqual(body['response_format']['json_schema']['schema'],item['response_schema'])
         images=[p for p in body['messages'][1]['content'] if p['type']=='image_url']
         for part,spec in zip(images,case['images']):
             self.assertEqual(base64.b64decode(part['image_url']['url'].split(',')[1]),Path(spec['path']).read_bytes())
-        batch['task']='follow';history=FollowHistory(2.5)
-        _,body,context=hosted.prepare_case(batch,case,history)
-        self.assertFalse(context['confirmed_before'])
-        history.accept(dict(id=1,state='visible'),item,item['window'])
-        _,body,context=hosted.prepare_case(batch,case,history)
-        self.assertTrue(context['confirmed_before']);self.assertEqual(context['current_pid'],1)
-        self.assertEqual(json.loads(body['messages'][1]['content'][-1]['text'])['last_target'],context)
         Path(case['images'][0]['path']).write_bytes(b'changed')
-        with self.assertRaisesRegex(ValueError,'Frozen source changed'):hosted.prepare_case(batch,case,history)
+        with self.assertRaisesRegex(ValueError,'Frozen source changed'):hosted.prepare_case(batch,case)
 
     def test_response_is_preserved_even_when_semantically_invalid(self):
         batch,case=self.fixture();item,body,_=hosted.prepare_case(batch,case)
@@ -82,15 +74,15 @@ class HostedTests(unittest.TestCase):
         self.assertGreater(self.budget.summary()['accounted_rmb'],.1)
 
     def test_portable_schema_keeps_strict_local_validation(self):
-        batch,case=self.fixture();batch.update(task='follow',schema_mode='portable')
-        item,body,_=hosted.prepare_case(batch,case,FollowHistory(2.5))
-        self.assertNotIn('oneOf',body['response_format']['json_schema']['schema'])
-        # Each field is individually allowed, but the pair is forbidden.
-        with self.assertRaises(Exception):hosted.validate_response('follow',dict(id=1,state='not_found'),item,body)
-        hosted.validate_response('follow',dict(id=-1,state='not_found'),item,body)
-        batch['task']='groups';item,body,_=hosted.prepare_case(batch,case)
+        batch,case=self.fixture();batch.update(schema_mode='portable')
+        item,body,_=hosted.prepare_case(batch,case)
         self.assertNotIn('uniqueItems',json.dumps(body['response_format']))
         with self.assertRaises(Exception):hosted.validate_response('groups',dict(walking=[[0,0]]),item,body)
+
+    def test_old_follow_comparison_is_unavailable(self):
+        batch,case=self.fixture();batch['task']='follow'
+        with self.assertRaisesRegex(ValueError,'T2 uses its own interface'):
+            hosted.prepare_case(batch,case)
 
 
 if __name__=='__main__':unittest.main()

@@ -2,7 +2,6 @@
 import unittest
 from jsonschema import Draft202012Validator,ValidationError
 from decision.vlm.vlm_api_common import groups_schema,validate_groups
-from decision.vlm.follow import appearance_schema,follow_schema,validate_decision
 
 
 class PromptSchemaTests(unittest.TestCase):
@@ -18,11 +17,5 @@ class PromptSchemaTests(unittest.TestCase):
         for pids in [[],[0]]:
             validate_groups({},pids)
             with self.assertRaises(ValidationError):validate_groups({'walking':[[0,1]]},pids)
-
-    def test_appearance_and_history_states_cannot_be_interchanged(self):
-        with self.assertRaises(ValidationError):validate_decision({'id':0,'state':'visible'},appearance_schema([0]))
-        schema=follow_schema([0],dict(confirmed_before=False,hold_allowed=False))
-        with self.assertRaises(ValidationError):validate_decision({'id':0,'state':'occluded'},schema)
-
 
 if __name__=='__main__':unittest.main()

@@ -103,8 +103,8 @@ def run_case(kind,planning,motion,geometry,*,max_s=75.,progress=False,global_per
     planner=Planner(planning,geometry,require_actual_start=True)
     policy=None
     if kind=='follow':
-        from navigation.tasks import TaskPolicy
-        policy=TaskPolicy(kind,'follow',planning,geometry)
+        from runtime.follow import FollowRunner
+        policy=FollowRunner(planning,geometry)
     control=DwaNavigationControl(planning,motion,geometry,simulation=True)
     tracker,safety=control.controller,control.safety
     goal_settings=tracker.goal_settings
@@ -130,15 +130,27 @@ def run_case(kind,planning,motion,geometry,*,max_s=75.,progress=False,global_per
         emergency=kind=='faults' and 14<=t<18
         policy_active=True;policy_began=time.perf_counter()
         if policy is not None:
-            # Explicit synthetic semantic responses test navigation policy, not
-            # VLM recognition. No future actor positions enter the policy.
-            if index%5==0:
-                ticket=policy.observe(scene,pid_to_track={0:['synthetic_tracker',0,'follow_person']})
-                state_name=('visible' if not 6<=t<10 else
-                    'occluded' if policy.last_visual is not None and now-policy.last_visual<=policy.hold_s else 'lost')
-                response=dict(id=-1 if state_name=='lost' else 0,state=state_name)
-                packet=policy.respond(ticket,response,scene=scene,now=now)
-            else:packet=policy.update(scene,now=now)
+            policy.observe(scene)
+            packet=dict(operation='stop')
+            if policy.policy is None and t>=.2 and not follow_held:
+                r=scene.record;people=r['people']['data'];track=people['tracks'][0]
+                ref=dict(task_id=kind,task_revision=1,goal_id='synthetic',
+                    scene_binding=r['input_fingerprint'],stamp_s=r['as_of'],rgb_stamp_s=now-.02,
+                    clock_domain=r['clock_domain'],local_identity=[r[k] for k in ('session_id','generation','frame_id')],
+                    track=dict(identity=[people['session_id'],people['generation'],track['track_id']],
+                        lifecycle_generation=track['lifecycle_generation'],people_fingerprint=people['input_fingerprint'],
+                        people_stamp_s=people['stamp_s'],support_stamp_s=track['last_observed_stamp_s']))
+                ref['reference_id']=fingerprint(ref)
+                handle=dict(task_id=kind,plan_revision=1,goal_id='synthetic',call_id=kind)
+                packet=policy.start(handle,ref,scene,now=now)
+            elif policy.policy is not None:
+                if index%5==0 and t<6:
+                    policy.visual(dict(state='visible',identity=list(policy.policy.target),
+                        scene_binding=scene.record['input_fingerprint'],rgb_stamp_s=now-.02),scene,now=now)
+                if index%5==0 and t==6:
+                    policy.visual(dict(state='occluded',identity=list(policy.policy.target),
+                        scene_binding=scene.record['input_fingerprint'],rgb_stamp_s=now-.02),scene,now=now)
+                packet=policy.update(scene,now=now)
             policy_active=packet['operation']=='plan'
             if policy_active:
                 from navigation.planning.continuity import goal_binding

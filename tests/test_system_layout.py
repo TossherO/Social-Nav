@@ -30,6 +30,7 @@ class SystemLayoutTests(unittest.TestCase):
         self.assertNotIn('perception.detection_tracking', report['pending_components'])
         self.assertIn('perception.mapping_localization', {c['component'] for c in report['components']})
         self.assertNotIn('perception.mapping_localization', report['pending_components'])
+        self.assertIn('decision.vlm', report['pending_components'])
         self.assertIn('decision.agent', report['pending_components'])
         self.assertIn('navigation.safety', report['pending_components'])
 

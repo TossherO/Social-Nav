@@ -71,10 +71,11 @@ def renderer_identity():
                 font_sha256=hashlib.sha256(Path(path).read_bytes()).hexdigest() if path and Path(path).is_file() else 'pillow-default')
 
 
-def model_eligible(person):
+def model_eligible(person, *, include_predicted=False):
     """A current confirmed 3D track is valid independently of RGB coverage."""
     if person.get('kind') == 'track' and 'confirmed' in person and 'observed' in person:
-        return bool(person.get('box') is not None and person['confirmed'] and person['observed'])
+        return bool(person.get('box') is not None and person['confirmed'] and
+                    (person['observed'] or include_predicted))
     # Old inputs without lifecycle evidence retain their recorded eligibility.
     return bool(person.get('eligible'))
 
@@ -290,7 +291,8 @@ def draw_rgb_people(canvas, frame, mapping):
         draw.text((rect[0]+6-b[0],rect[1]+5-b[1]),f'P{pid}',fill='white',font=face)
 
 
-def render_observation(frame, rgb, mapping, elapsed, extent, trajectory=None, *, bev_background=None):
+def render_observation(frame, rgb, mapping, elapsed, extent, trajectory=None, *, bev_background=None,
+                       distinguish_predictions=False):
     """Neutral model image. Human group/target colors never enter this function."""
     checked_extent(extent)
     canvas = Image.new('RGB', MODEL_SIZE, BACKGROUND)
@@ -332,7 +334,16 @@ def render_observation(frame, rgb, mapping, elapsed, extent, trajectory=None, *,
     if available:
         for segment in trajectory['ego']:trail(segment,BEV_EGO_HISTORY)
         for segments in trajectory['people'].values():
-            for points in continuous_history(segments):trail(points,BEV_HISTORY)
+            if distinguish_predictions:
+                for segment in segments:
+                    if segment['observed']:
+                        trail(segment['points'],BEV_HISTORY)
+                    else:
+                        # Preserve gaps and the original observed/predicted labels.
+                        for i in range(0,len(segment['points'])-1,2):
+                            trail(segment['points'][i:i+2],'#a487bc')
+            else:
+                for points in continuous_history(segments):trail(points,BEV_HISTORY)
     ex, ey = bev(0, 0)
     ahead=bev(1,0)
     draw.line([(ex,ey),ahead],fill='#293d52',width=3)
@@ -358,9 +369,13 @@ def render_observation(frame, rgb, mapping, elapsed, extent, trajectory=None, *,
     for pid,(left,top,right,bottom) in placements:
         x,y=anchors[pid]
         draw.line([(x,y),(max(left,min(x,right)),max(top,min(y,bottom)))],fill='#9daab6',width=1)
+    predicted={mapping[p['key']] for p in frame['people'] if p['key'] in mapping and not p.get('observed',True)}
     for pid,x,y in markers:
-        draw.ellipse((x-PERSON_RADIUS,y-PERSON_RADIUS,x+PERSON_RADIUS,y+PERSON_RADIUS),
-                     fill='#293d52' if pid==-1 else BEV_CURRENT)
+        rect=(x-PERSON_RADIUS,y-PERSON_RADIUS,x+PERSON_RADIUS,y+PERSON_RADIUS)
+        if distinguish_predictions and pid in predicted:
+            draw.ellipse(rect,fill='white',outline='#87599c',width=3)
+        else:
+            draw.ellipse(rect,fill='#293d52' if pid==-1 else BEV_CURRENT)
     # All labels go on top of all trajectories, leaders and current points.
     for pid,rect in placements:
         draw.rounded_rectangle(rect,radius=4,fill='white',outline='#b7c4d1',width=1)

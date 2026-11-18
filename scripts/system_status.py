@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "configs/system.json"
-STATUSES = {"source_available", "offline_ready", "planning_only_ready", "simulation_prototype",
+STATUSES = {"source_available", "offline_ready", "partial_online", "planning_only_ready", "simulation_prototype",
             "simulation_and_causal_shadow_ready", "planned", "not_implemented"}
 
 
@@ -28,7 +28,7 @@ def inspect_layout(root=ROOT):
             components.append({"component": key, "path": entry["path"], "status": entry["status"], "directory_present": present})
             if not present:
                 absent.append(key)
-            if entry["status"] in {"planned", "not_implemented", "simulation_prototype", "simulation_and_causal_shadow_ready"}:
+            if entry["status"] in {"planned", "not_implemented", "partial_online", "simulation_prototype", "simulation_and_causal_shadow_ready"}:
                 pending.append(key)
     contracts = (root / config["interfaces"]["path"]).resolve()
     if not contracts.is_relative_to(root) or not contracts.is_file():
@@ -38,7 +38,7 @@ def inspect_layout(root=ROOT):
             "components": components, "pending_components": pending,
             "missing_layout_paths": absent, "interfaces_status": config["interfaces"]["status"],
             "processes_started": 0, "network_requests": 0,
-            "notice": "Directories and draft contracts are not implementations. No integrated robot runtime exists."}
+            "notice": "Directory and interface status do not establish complete online or hardware validation."}
 
 
 def main(argv=None):

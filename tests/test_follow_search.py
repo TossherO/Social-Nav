@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 
 from navigation.planning.footprint import VehicleGeometry
-from navigation.search import candidates,check_pose,bounds_status
+from navigation.search import candidates,check_pose,bounds_status,follow_candidates
 from perception.environment.context import fingerprint
 from tests.navigation_fixtures import asset,bundle
 
@@ -41,6 +41,15 @@ class FollowSearchGeometryTests(unittest.TestCase):
         self.assertNotIn('approach',[x['kind'] for x in result])
         with self.assertRaisesRegex(ValueError,'budget'):
             check_pose(self.inputs,[4.,2.,0.],now=10.,clock_domain='synthetic',anchor=[2.,2.])
+
+    def test_t2_always_gets_wait_and_map_bound_choices_when_available(self):
+        unknown=follow_candidates(self.inputs['scene'],None,self.geometry,self.last)
+        self.assertEqual(unknown['candidates'],[dict(id=0,kind='wait',pose=None)])
+        scene=self.inputs['scene'];static=asset()
+        result=follow_candidates(scene,static,self.geometry,self.last)
+        self.assertEqual(result['scene_binding'],scene.record['input_fingerprint'])
+        self.assertEqual(result['candidates'][0]['kind'],'wait')
+        self.assertEqual(result['binding'],fingerprint({k:v for k,v in result.items() if k!='binding'}))
 
     def test_independent_search_radius_checks_current_mapped_motion(self):
         from navigation.planning.inputs import load_config

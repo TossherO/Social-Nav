@@ -27,6 +27,7 @@ class NavigationSkill:
         self.last_stamp = None
         self.blocked_since = None
         self.blocked_notified = False
+        self.follow_phase = None
 
     def _emit(self, event):
         self.emit(event, copy.deepcopy(self.record))
@@ -96,7 +97,7 @@ class NavigationSkill:
         self._emit('navigation_ack')
         return dict(status='accepted', handle=handle, scope=self.navigation.scope, execution_completed=False, route=route)
 
-    def start_follow(self, goal_id, reference, revision, requirement):
+    def start_follow(self, goal_id, intent, revision, requirement):
         r=self.record;state=self.navigation.snapshot()
         if self.navigation.scope=='manual' or not callable(getattr(self.navigation,'start_follow',None)):
             return dict(status='refused',reason='follow_not_supported_by_adapter')
@@ -117,9 +118,9 @@ class NavigationSkill:
         r.update(status='submitting',handle=handle,place_id=None,goal_id=goal_id,selected_pose=None,reason=None,
                  stage_type='follow',follow_ready=False,search_deadline_s=None)
         r['attempts'].append(dict(goal_id=goal_id,place_id=None,revision=revision,status='active',call_id=handle['call_id']))
-        self.last_stamp=None;self._emit('follow_intent')
+        self.last_stamp=None;self.follow_phase=None;self._emit('follow_intent')
         try:
-            ack=self.navigation.start_follow(reference,handle)
+            ack=self.navigation.start_follow(intent,handle)
             if ack.get('accepted') is not True or ack.get('handle')!=handle:raise ValueError('Follow ACK identity invalid')
         except IntentRejected as error:
             r.update(previous);self._mark_attempt(handle,'refused');self._emit('follow_refused')
@@ -227,6 +228,12 @@ class NavigationSkill:
                 r['status'] not in ('stopping','holding','held')):
             self.cancel(reason='follow_search_timeout')
             return False
+        if r['stage_type']=='follow' and follow.get('handle')==handle:
+            previous,self.follow_phase=self.follow_phase,follow.get('status')
+            if r['follow_ready'] and self.follow_phase=='searching' and previous!='searching':
+                self._emit('follow_searching');return True
+            if r['follow_ready'] and self.follow_phase=='running' and previous=='searching':
+                self._emit('follow_reacquired');return True
         if (r['stage_type']=='follow' and not r['follow_ready'] and follow.get('status')=='running' and
                 feedback.get('status') in ('running','proposed')):
             r['follow_ready']=True;self._emit('follow_started');return True

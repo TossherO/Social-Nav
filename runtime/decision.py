@@ -21,6 +21,11 @@ class DecisionBuffer:
     def _clear(self):
         while self.frames:self.pool.release(self.frames.popleft()['buffer'],'history')
 
+    def reset(self):
+        """Discard indexed history while existing consumer leases remain valid."""
+        with self.lock:
+            self._clear();self.scope=None
+
     def push(self,people,arrays,association,*,scene=None,image_metadata=None):
         with self.lock:
             scope=local_scope(people);stamp=people['stamp_s']

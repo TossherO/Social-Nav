@@ -91,11 +91,8 @@ class DecisionRuntimeTests(unittest.TestCase):
                 self.assertEqual(result['pid_to_track'],{'0':['tracker_session',7,'a']})
                 self.assertEqual(len(result['images']),3)
                 policy=TaskPolicy('follow','follow',self.planning,self.geometry);gate=DecisionRequest(policy)
-                request=gate.begin(scene,window=result,now=11.1)
-                with self.assertRaises(ValueError):gate.begin(scene,window=result,now=11.1)
-                accepted=gate.accept(request,'{"id":0,"state":"visible"}',scene=scene,now=11.1)
-                self.assertEqual(accepted['operation'],'plan');self.assertFalse(accepted['executable'])
-                with self.assertRaises(ValueError):gate.accept(request,'{"id":0,"state":"visible"}',scene=scene,now=11.1)
+            with self.assertRaisesRegex(ValueError,'structured T2'):
+                    gate.begin(scene,window=result,now=11.1)
         finally:buffer.close()
 
     def test_missing_history_and_future_rgb_are_not_substituted(self):
@@ -130,22 +127,6 @@ class DecisionRuntimeTests(unittest.TestCase):
             self.assertFalse(buffer.push(row,arrays,rgb))
             self.assertIsNone(buffer.acquire())
         finally:buffer.close()
-
-    def test_follow_retains_identity_across_two_second_cycle_but_revokes_gaps(self):
-        row,_,_,scene=observation(10);policy=TaskPolicy('follow','follow',self.planning,self.geometry)
-        ticket=policy.observe(scene,pid_to_track={0:['tracker_session',7,'a']})
-        policy.respond(ticket,dict(id=0,state='visible'),scene=scene,now=10.)
-        for i in range(1,24):
-            _,_,_,later=observation(10+i/10)
-            if i==20:policy.observe(later,pid_to_track={0:['tracker_session',7,'a']})
-            result=policy.update(later,now=10+i/10)
-            self.assertEqual(result['operation'],'plan')
-            self.assertEqual(result['request']['decision_source'],ticket['binding'])
-        self.assertEqual(policy.last_visual,10.)
-        _,_,_,later=observation(13.)
-        self.assertEqual(policy.update(later,now=13.)['reason'],'follow_continuity_lost')
-        _,_,_,later=observation(13.1)
-        self.assertEqual(policy.update(later,now=13.1)['operation'],'stop')
 
     def test_response_deadline_and_cancellation_remain_strict(self):
         _,_,_,scene=observation(10);policy=TaskPolicy('seat','seating',self.planning,self.geometry);gate=DecisionRequest(policy)

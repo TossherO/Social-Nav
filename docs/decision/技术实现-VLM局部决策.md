@@ -12,7 +12,7 @@
 
 切换后端必须记录原因。不能因为某次响应错误就静默换模型或重放请求。代码检查和输入准备不依赖模型服务；当前本地入口也不支持 T3。
 
-Agent 在跟随目标丢失后调用局部 T2 找回时，使用 `project.json` 中的服务地址和模型名，并检查服务是否启用 DSPARK。该路径当前没有本地后端切换；服务不可用或响应无效时报告失败，保留原始响应，不自动重试。首次选人与跟随中的视觉复核仍使用外层 Agent 的托管 VLM。
+持续 T2 使用 `project.json` 中的服务地址和模型名，并检查服务是否启用 DSPARK；不自动切换后端或重试。运行时需显式启用跟随支路，服务与实机闭环仍需验证。
 
 ## 远程服务启停与访问（默认）
 
@@ -61,9 +61,9 @@ T3 调用方提供当前场景、同源候选集，以及必要时独立传递�
 
 ## 托管API对照（显式选用）
 
-[hosted_evaluation.py](../../decision/vlm/hosted_evaluation.py)可按固定计划，通过Agent已有的托管API测试T1、T2和T3。它复用Agent的私有HTTPS配置、模型和共享费用账本，独立于Agent工具循环；不会改变局部VLM默认后端，也不作为失败后的自动备用。当前开发对照结果由[本机记录](../../ENVIRONMENT.local.md)定位。
+[hosted_evaluation.py](../../decision/vlm/hosted_evaluation.py)可按固定计划，通过 Agent 已有的托管 API 测试 T1 和 T3。它复用 Agent 的私有 HTTPS 配置、模型和共享费用账本，不改变局部 VLM 默认后端，也不作为失败后的自动备用。新 T2 协议尚未接入此入口。
 
-计划指定各任务的冻结输入、原始三图、Prompt及摘要，参考答案另存。T2按本次有效回答推进历史。与Agent单张缩略图输入不同，该入口保留三张原图，方便与既有任务结果对照；需要确认所用服务允许接收这些项目数据。
+计划指定各任务的冻结输入、原始三图、Prompt及摘要，参考答案另存。该入口保留三张原图；需要确认所用服务允许接收这些项目数据。
 
 ```bash
 # 只检查计划，不读取API凭证或联网
@@ -73,7 +73,7 @@ python -B -m decision.vlm.hosted_evaluation --plan /path/to/plan.json \
   --output /path/to/new_comparison --run
 ```
 
-当前托管API拒绝数组的`uniqueItems`。计划可显式设置`schema_mode: portable`：T1在传输Schema移除该关键字，T2／T3使用平面枚举对象；本地仍按完整原Schema检查去重、PID、状态组合及候选成员。没有实测原`oneOf`的服务端支持情况，不能宣称此模式与DSPARK具有相同的服务端约束。请求失败或响应非法即停止，保留原文，不修复或自动重试。
+当前托管 API 拒绝数组的 `uniqueItems`。计划可显式设置 `schema_mode: portable`：T1 在传输 Schema 移除该关键字，T3 使用平面枚举对象；本地仍按完整原 Schema 检查去重和候选成员。请求失败或响应非法即停止，保留原文，不修复或自动重试。
 
 时延分别记录首输出文本和完整返回，包含每次新建连接及上传，图像准备另计。与旧DSPARK记录比较时，还须说明模型、缓存、预热和测试日期不同，不能把差值单独归因于网络。
 
@@ -81,22 +81,22 @@ python -B -m decision.vlm.hosted_evaluation --plan /path/to/plan.json \
 
 [local_inference.py](../../decision/vlm/local_inference.py)使用原有 Transformers、Accelerate 和 XGrammar 引擎。模型从 FP8 显式反量化为 BF16，并按层分配到多张 GPU；不会自动下载权重或把模型卸载到 CPU。
 
-这个入口读取一份由 `make_body`生成的冻结请求 JSON，支持 `groups`、`appearance`和 `follow`。它保持原图像字节、顺序、Prompt、Schema 和输出预算，但不保证与远程逐字一致。
+这个入口读取一份由 `make_body` 生成的冻结请求 JSON，目前仅支持 `groups`。新 T2 协议尚未接入本地备用推理。
 
 新机器按实际 Torch 和 CUDA 准备[本地依赖](../../decision/vlm/requirements-local.txt)及可选[融合内核](../../decision/vlm/requirements-local-kernels.txt)，普通包优先中国镜像。已有环境直接复用，路径和 GPU 选择见本机记录：
 
 ```bash
 cp -n decision/vlm/configs/vlm_local.example.json configs/vlm_local.local.json
 python -B -m decision.vlm.local_inference \
-  --request /path/to/input/request.json --task follow --dry-run
+  --request /path/to/input/request.json --task groups --dry-run
 python -B -m decision.vlm.local_inference \
-  --request /path/to/input/request.json --task follow \
+  --request /path/to/input/request.json --task groups \
   --fallback-reason remote_unavailable --out /path/to/new_local_result
 ```
 
 实际运行须填写 `--fallback-reason`，允许 `remote_unavailable`或 `remote_gpu_busy`。模型与 GPU 可在私有配置中填写，也可用 `--model-path`和 `--gpus`覆盖。输出位置必须在输入目录和模型目录之外。
 
-`--dry-run`不读私有配置，不加载 GPU，不联网，也不写结果。正式运行只生成一次，原样保存 `response.json`和切换原因。需要历史时，调用者依据此前接受的结果构造，不能读取参考答案。
+`--dry-run`不读私有配置，不加载 GPU，不联网，也不写结果。正式运行只生成一次，原样保存 `response.json`和切换原因。
 
 请求适配通过不等于实际 GPU 推理已验收，具体范围以本机记录为准。当前不能用该入口运行 T3。
 
@@ -157,65 +157,15 @@ T1 使用[默认英文 Prompt](../../decision/vlm/configs/prompts/wheelchair_t1_
 
 标注器的富信息导出仍包含 `g/u`、未知、角色和覆盖信息，不能直接当作紧凑响应的答案。当前关系识别的离线开发已收尾，独立金标准、在线响应处理和导航消费仍需分别验收。最终本机结果由环境记录定位。
 
-## T2外观匹配与因果身份回放
+## T2持续跟随决策
 
-[follow.py](../../decision/vlm/follow.py)提供独立离线诊断，复用标注器的三帧 RGB、扫描 BEV 和 HTTP 工具，不调用 T1，也不控制底盘。
+[follow_online.py](../../decision/vlm/follow_online.py)提供持续跟随的请求接口。输入是按源时间排序的三帧 RGB／BEV、目标描述、可选固定人物参考和当前观察候选。预测轨迹与真实观察使用不同样式。模型返回两个字段：选中人物时如 `{"target":"P0","observation":null}`；没有人物时如 `{"target":null,"observation":"A"}`，其中 A 是本轮观察点 ID。`target` 和 `observation` 在当前模型分词器中各为单 token，整条 JSON 并非单 token。程序严格检查两项互斥及本轮映射，并校验图像和场景来源，再构造供跟踪层核验的目标参考。
 
-Agent 的首次选人另用单帧 YOLO 候选和固定参考，由[follow_target.py](../../decision/vlm/follow_target.py)保存原图、目标框、裁剪图和来源。它与本节三帧离线诊断是不同入口，不自动启动跟随；实时准备条件见[运行手册](../系统运行手册.md#可选图像与决策输入)。
+启用 `--agent-follow-candidates` 后，运行时在跟随任务中持续采集因果三帧并在后台准备请求，同一时刻最多一个请求在途。Agent 提供目标描述，首个被接纳的人物图像裁剪作为后续固定视觉参考；运行时按本次映射与连续三维轨迹应用结果，可纠正目标或进入搜索。请求周期为 2 秒，结果须在源观察后 4 秒内应用；连续跟踪的视觉确认最多保留 6 秒，遮挡后重新观察到同一连续轨迹时可以继续运动并尽快重新判断，但不会刷新原视觉时间。
 
-`prepare`只读标注工程中的固定事实，另存明确标记的开发输入及参考，不修改标签状态、人物关联或审核时使用的输入。描述参考必须来自同一采集，且不晚于当前观察。人工身份、合理候选及参考答案不会进入模型请求。
+搜索始终提供等待选项；地图关联与车体扫掠有效时，还提供原地转向及向最后观察位置短距离靠近的可行候选。每步最多 0.8 米，运动限制在丢失起点 1.5 米范围内，执行前按当前地图重新检查；缺少有效地图时只能等待，因此尚不能保证抵达较远的最后位置。安全监督仍独立生效。
 
-### 外观匹配
-
-先准备少量窗口，再手动启动远程 DSPARK 服务并建立连接：
-
-```bash
-# 先冻结少量外观匹配窗口；新目录不覆盖既有结果
-python -B -m decision.vlm.follow prepare \
-  --project /path/to/decision_annotation_project \
-  --out /path/to/new_t2_appearance --limit 20
-
-# 手动启动已有远程DSPARK服务并建立所需连接后执行
-python -B -m decision.vlm.follow run \
-  --out /path/to/new_t2_appearance \
-  --base-url http://127.0.0.1:30000/v1
-```
-
-外观匹配输出 `id/match`。`match`可以是 `unique`、`ambiguous`、`none`或 `insufficient`，只有 `unique`携带当前有效 PID，其余 `id`均为 `-1`。Prompt 由[外观配置](../../decision/vlm/configs/prompts/wheelchair_t2_appearance.txt)维护。
-
-这个接口只判断当前外观匹配，不输出完整跟随状态。目标没有 PID，也不能自动解释为目标已经离开。
-
-### 按历史顺序回放
-
-需要检验历史时，在同一目标任务中按时间选取已有观察点：
-
-```bash
-python -B -m decision.vlm.follow prepare \
-  --project /path/to/decision_annotation_project \
-  --out /path/to/new_t2_replay \
-  --target TARGET_TASK_ID --period-s 2 --limit 8
-python -B -m decision.vlm.follow run \
-  --out /path/to/new_t2_replay \
-  --base-url http://127.0.0.1:30000/v1
-```
-
-`TARGET_TASK_ID`是标注工程的目标任务 ID，不是模型 PID。`--period-s`规定已有观察点的最小采样间隔；指定时刻没有标注时，实际间隔可能更长，不补造连续观测。
-
-回放使用[跟随 Prompt](../../decision/vlm/configs/prompts/wheelchair_t2_follow.txt)，返回 `id/state`。`state`包括 `visible`、`occluded`、`uncertain`、`lost`和 `not_found`。历史只由本次运行的正式响应推进，预热不会推进历史；非法响应会终止该序列，不借用真值继续。
-
-程序根据带有生命周期信息的轨迹身份，把上一次接受的目标映射到当前 PID，不能直接复制旧编号。Prompt 只允许用最后一张图 IMAGE_2 左侧 RGB 确认当前视觉状态。标签框、有效三维 PID 和历史外观，都不能单独证明当前可见。
-
-短时保持身份需要有效位姿、连续轨迹、允许的年龄，以及尚未撤销的状态。`occluded`不会刷新最后视觉确认时刻。目前只支持原目标仍在当前有效三维候选中的保持，纯预测轨迹候选尚未接入。
-
-新输入与导航 `TaskPolicy`默认从 `tasks.follow.visual_memory_s`读取保持时间，并与 HTTP 响应期限分别检查。这个开发值考虑了一次推理周期、响应期限和少量调度余量，避免正常调用间隔内过早丢掉已确认身份；它不放宽场景、轨迹或控制反馈的新鲜度要求。旧冻结实验继续使用自身 settings，不重算历史成绩。
-
-### 结果保存与验证范围
-
-每次运行包含一次明确记录的预热和一遍正式请求，不自动续跑或重试。需要比较另一份 Prompt 时，可使用 `--prompt /path/to/prompt.txt --result-name NAME`，在新子目录保存独立历史和原始响应；也可用 `--result-out /path/to/new_result`指定独立结果目录，复用只读输入而不复制图像。两个结果位置选项互斥，都禁止覆盖已有结果。
-
-原生标注草稿提供固定身份、可见性和覆盖事实，不等于描述唯一性或完整五状态金标准。评测须分别报告身份命中、当前可见状态和端到端覆盖。RGB 关联框如果覆盖了前景路人，即使轨迹身份正确，也不能算当前视觉确认。
-
-独立新场景、完整状态覆盖、真实重捕获、T1 与 T2 联合请求、在线时效处理和导航执行仍需验证。保持年龄等诊断设置不是实机安全参数；本机结果由环境记录定位。
+目前已通过合成控制联动和模拟模型回复的短 bag 影子回放。托管 API 使用 JSON Schema 约束测试了两组真实人物输入和一组移除可选人物的模拟输入，三次回复均符合两字段协议。实际 DSPARK 的正则约束、现场识别、遮挡找回和运动效果仍待验证；少量格式测试不能代表这些能力。
 
 ## T3目标选择与就座
 

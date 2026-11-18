@@ -1,7 +1,6 @@
 """Explicit hosted-API comparison of frozen local tasks; no default backend change.
 
-Plans reference existing images and task inputs by SHA256. Follow histories are
-advanced only by this run's accepted responses. No retries or response repair.
+Plans reference existing images and task inputs by SHA256. No retries or response repair.
 """
 import argparse
 import copy
@@ -16,7 +15,6 @@ import httpx
 
 from . import vlm_api_common as common
 from .annotation.rules import digest
-from .follow import FollowHistory, follow_schema, validate_decision
 from .project_config import ROOT
 from .seating.inference import validate_selection
 from decision.agent.core.model import Model
@@ -32,7 +30,7 @@ def checked_asset(spec):
 
 
 def validation_schema(task,item,fields):
-    return follow_schema(fields['v'],fields['last_target']) if task=='follow' else item['response_schema']
+    return item['response_schema']
 
 
 def transport_schema(task,schema,mode):
@@ -66,10 +64,8 @@ def prepare_case(batch,case,history=None):
     if hashlib.sha256(prompt['text'].encode()).hexdigest()!=prompt['sha256']:
         raise ValueError('Prompt changed')
     fields=copy.deepcopy(item['fields']);context=None;schema=item['response_schema']
-    if batch['task']=='follow':
-        if history is None:raise ValueError('Follow requires its own causal history')
-        context=history.context(item,item['window'])
-        fields['last_target']=context;schema=follow_schema(fields['v'],context)
+    if batch['task'] not in ('groups','seating'):
+        raise ValueError('Hosted comparison supports groups and seating; T2 uses its own interface')
     schema=transport_schema(batch['task'],schema,batch.get('schema_mode','original'))
     model=dict(user_prompt=json.dumps(fields,ensure_ascii=False,separators=(',',':')),response_schema=schema)
     body=common.make_body(prompt['text'],dict(paths=paths,model=model),max_tokens=batch['max_tokens'],model=Model.model)
@@ -81,7 +77,6 @@ def prepare_case(batch,case,history=None):
 def validate_response(task,value,item,body):
     fields=json.loads(body['messages'][1]['content'][-1]['text'])
     if task=='groups':common.validate_groups(value,item['fields']['v'],item['response_schema'])
-    elif task=='follow':validate_decision(value,validation_schema(task,item,fields))
     elif task=='seating':validate_selection(value,item['candidate_set'])
     else:raise ValueError('Unsupported task')
 
@@ -145,8 +140,8 @@ class HostedClient:
 def inspect_plan(plan):
     ids=set();count=0
     for batch in plan['batches']:
-        if batch['task'] not in ('groups','follow','seating'):raise ValueError('Unknown task')
-        history=FollowHistory(batch['hold_age_s']) if batch['task']=='follow' else None
+        if batch['task'] not in ('groups','seating'):raise ValueError('Unknown task')
+        history=None
         for case in batch['cases']:
             key=(batch['name'],case['id'])
             if key in ids:raise ValueError('Duplicate planned observation')
@@ -168,7 +163,7 @@ def run(plan_path,output,private_config):
     try:
         client=HostedClient(private_config,budget)
         for batch in plan['batches']:
-            history=FollowHistory(batch['hold_age_s']) if batch['task']=='follow' else None
+            history=None
             for case in batch['cases']:
                 began=time.perf_counter();item,body,context=prepare_case(batch,case,history)
                 row=dict(batch=batch['name'],task=batch['task'],case_id=case['id'],input=case['input'],images=case['images'],
@@ -187,7 +182,6 @@ def run(plan_path,output,private_config):
                 print(json.dumps(dict(batch=batch['name'],case=case['id'],valid=row['valid'],response=row.get('response'),
                     timing=row.get('timing'),error=row.get('error_type')),ensure_ascii=False),flush=True)
                 if not row['valid']:raise RuntimeError('Stopped on rejected response; no automatic retry')
-                if history is not None:history.accept(value,item,item['window'])
         complete=True
     except Exception as error:
         failure=type(error).__name__
