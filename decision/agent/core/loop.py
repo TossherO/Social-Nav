@@ -16,6 +16,7 @@ class AgentLoop:
         self.requests, self.max_requests = 0, max_requests
         self.exit_reason = None
         self.route_refusal = None
+        self.navigation_refusal = None
 
     @property
     def state(self):
@@ -25,6 +26,7 @@ class AgentLoop:
         self.session.event(name, text)
         self.model.invalidate()
         self.route_refusal = None
+        self.navigation_refusal = None
 
     def repeated_route_refusal(self, value, output):
         if value['tool']!='navigate_route':
@@ -37,16 +39,29 @@ class AgentLoop:
             return False
         args={k:copy.deepcopy(v) for k,v in value['arguments'].items() if k!='view_id'}
         reason=output.get('reason')
-        # A changed terminal heading cannot fix the region geometry of a circuit.
-        if reason in ('circuit_waypoint_inside_region','circuit_requires_three_distinct_waypoints',
-                      'proposed_route_does_not_make_requested_circuit','proposed_route_excessive_reverse_winding'):
-            args.pop('final_yaw',None)
         key=fingerprint(dict(revision=self.session.state['revision'],arguments=args,reason=reason))
         previous=self.route_refusal
         count=previous[1]+1 if previous is not None and previous[0]==key else 1
         self.route_refusal=(key,count)
         if count<3:return False
         self.session.store.event('route_repeated_refusal',dict(goal_id=args.get('goal_id'),reason=reason,count=count,
+            action='await_user_before_retry',automatically_retried=False))
+        return True
+
+    def repeated_navigation_refusal(self, value, output):
+        """Stop repeating the same rejected target; a new view ID is not a new target."""
+        if (value['tool']!='navigate' or self.session.skill.record['handle'] is not None or
+                output.get('status') not in ('refused','unavailable')):
+            self.navigation_refusal=None
+            return False
+        args={k:copy.deepcopy(v) for k,v in value['arguments'].items() if k!='view_id'}
+        reason=output.get('reason')
+        key=fingerprint(dict(revision=self.session.state['revision'],arguments=args,reason=reason))
+        previous=self.navigation_refusal
+        count=previous[1]+1 if previous is not None and previous[0]==key else 1
+        self.navigation_refusal=(key,count)
+        if count<3:return False
+        self.session.store.event('navigation_repeated_refusal',dict(goal_id=args.get('goal_id'),reason=reason,count=count,
             action='await_user_before_retry',automatically_retried=False))
         return True
 
@@ -130,9 +145,8 @@ class AgentLoop:
         result = self.model.poll()
         if result is not None:
             valid = not result['stale'] and self.session.valid_context(result['context'])
-            expired = not valid and not result['stale'] and self.session.valid_expired_context(result['context'])
-            if not valid and not expired:
-                self.session.store.event('model_result_discarded', dict(context=result['context'], reason='cancelled_expired_or_superseded'))
+            if not valid:
+                self.session.store.event('model_result_discarded', dict(context=result['context'], reason='cancelled_or_superseded'))
                 if s['status'] == 'ready' and self.session.observation is not None:
                     self.session.observation = None
                     current = self.session.context()
@@ -166,33 +180,20 @@ class AgentLoop:
                             unregistered_task=unregistered,automatically_retried=False))
                         return s
                     value = reply.action
-                    # Delayed model decisions may still register the user's task
-                    # or query static state. Image-based judgments and motion
-                    # proposals must consume fresh evidence; expose the refusal
-                    # to the model instead of silently resending the request.
-                    if expired and value['tool'] == 'navigate':
-                        output = self.session.revalidate_delayed_navigation(value, result['context'])
+                    # Every proposed target is checked with current geometry,
+                    # independently of how long the model took to respond.
+                    if value['tool'] == 'navigate':
+                        output = self.session.revalidate_navigation(value, result['context'])
                         if output.get('status') == 'refused' and not output.get('revalidation'):
                             self.session._history('tool', dict(call=value, result=output))
-                    elif expired and value['tool'] == 'check_candidate':
-                        output = self.session.revalidate_delayed_candidate(value, result['context'])
+                    elif value['tool'] == 'check_candidate':
+                        output = self.session.revalidate_candidate(value, result['context'])
                         if output.get('status') == 'refused' and not output.get('revalidation'):
                             self.session._history('tool', dict(call=value, result=output))
-                    elif expired and value['tool'] == 'navigate_route':
-                        output = self.session.revalidate_delayed_route(value, result['context'])
+                    elif value['tool'] == 'navigate_route':
+                        output = self.session.revalidate_route(value, result['context'])
                         if output.get('status') == 'refused' and not output.get('revalidation'):
                             self.session._history('tool', dict(call=value, result=output))
-                    elif (expired and value['tool'] == 'check_goal' and not any(
-                            value['arguments'].get(key) for key in ('observation_id','semantic_result','evidence',
-                                'facing_result','facing_evidence','preference_result','preference_evidence'))):
-                        output = self.session.call(value['tool'], _context=result['context'], **value['arguments'])
-                    elif expired and value['tool'] not in ('record_task', 'lookup_places', 'query_map', 'get_navigation_state',
-                                                           'ask_user', 'cancel_navigation', 'wait_for_event', 'finish_task',
-                                                           'start_local_task','finish_local_task','check_goal'):
-                        output = dict(status='refused', reason='model_input_expired_request_fresh_observation',
-                                      execution_completed=False)
-                        self.session.store.event('expired_tool_refused', dict(call=value, context=result['context']))
-                        self.session._history('tool', dict(call=value, result=output))
                     else:
                         output = self.session.call(value['tool'], _context=result['context'], **value['arguments'])
                     keyframe = output.get('keyframe') if value['tool'] in ('save_keyframe','read_keyframe') and output.get('status') in ('saved','available') else None
@@ -202,9 +203,17 @@ class AgentLoop:
                             result_status=output.get('status')), result['context'],
                             place_id=value['arguments'].get('place_id') or self.session.skill.record['place_id'] or '',
                             clock_domain=result['context']['clock_domain'], map_binding=result['context']['map_binding'])
-                    self.session._save('model_action_applied', dict(call=value, result=output, context=result['context']))
+                    source_stamp=result['context'].get('source_stamp_s')
+                    current_stamp=self.session.navigation.snapshot().get('stamp_s')
+                    age=(current_stamp-source_stamp if type(current_stamp) in (int,float) and
+                         type(source_stamp) in (int,float) and 0<=current_stamp-source_stamp else None)
+                    self.session._save('model_action_applied', dict(call=value,result=output,context=result['context'],
+                                                                  source_age_s=age))
                     if self.repeated_route_refusal(value,output):
                         self.session.stop('needs_clarification','repeated_route_refusal')
+                        return s
+                    if self.repeated_navigation_refusal(value,output):
+                        self.session.stop('needs_clarification','repeated_navigation_refusal')
                         return s
                     if ((value['tool'] in ('navigate', 'navigate_route','start_local_task') and output.get('status')=='accepted' or
                          value['tool']=='finish_local_task' and output.get('status')=='stopping') and
@@ -218,6 +227,11 @@ class AgentLoop:
                     self.session.stop('needs_clarification', 'model_protocol_rejected')
                     self.session._save('model_protocol_rejected', dict(error_type=type(error).__name__))
         if self.model.busy or s['status'] != 'ready' or self.session.skill.record['context_lost'] or not self.session.skill.record['connected']:
+            return s
+        stage=next((g for g in self.session.task_goals.goals if g['status']!='completed'),None)
+        if (self.session.navigation.scope=='manual' and len(self.session.task_goals.floor_catalogs)>1 and
+                stage is not None and stage['requirement'].get('stage_type')=='elevator'):
+            # The manual workflow starts its independent camera monitor in on_tick.
             return s
         if self.requests >= self.max_requests:
             self.session.stop('needs_clarification', 'model_request_limit')

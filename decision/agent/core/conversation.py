@@ -4,7 +4,7 @@ from .store import encode
 
 
 class Conversation:
-    def __init__(self, instruction, catalog, emit, *, max_exchanges=12, history_bytes=12000):
+    def __init__(self, instruction, catalog, emit, *, max_exchanges=32, history_bytes=48000):
         self.introduction = [dict(role='user', content=instruction), dict(role='user', content=encode(
             dict(source='initial_map_catalog', catalog=catalog)))]
         self.exchanges = []

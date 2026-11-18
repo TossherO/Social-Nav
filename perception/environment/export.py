@@ -16,11 +16,13 @@ from .storage import asset_reference, content_hash, export_map_server_grid
 
 
 def export_environment(run_directory, output, *, config=None, bag=None, export_pgm=False, people=None, filter_mode=None,
-                       bounds=None, progress=None):
+                       bounds=None, progress=None, ground_method='tracked_scans'):
     run_directory, output = Path(run_directory), Path(output)
     if output.exists():
         raise FileExistsError('Select a new environment output directory')
     config = config or load_config()
+    if ground_method not in ('map_endpoints','tracked_scans'):
+        raise ValueError('Unknown static ground method')
     # Full-map historical evidence and static review use the CPU implementation.
     config = dict(config, compute=dict(config.get('compute',{}), backend='cpu'))
     run = json.loads((run_directory/'run.json').read_text())
@@ -74,12 +76,19 @@ def export_environment(run_directory, output, *, config=None, bag=None, export_p
     source.update(map=asset_reference(map_path), map_fingerprint=map_digest)
     scans = run_directory/'environment/scans.sqlite'
     expected_scans = run.get('environment_scans_fingerprint')
+    if ground_method=='tracked_scans' and expected_scans is None:
+        raise ValueError('Tracked scan ground requires a bound sealed scan journal')
     if expected_scans is not None:
         from .scans import sealed_scan_summary
         sealed_scan_summary(scans)
         digest = file_fingerprint(scans)
         if digest != expected_scans:
             raise ValueError('Deskewed scan journal no longer matches this mapping run')
+        if ground_method=='tracked_scans':
+            from .offline_ground import scan_ground,reproject_endpoints
+            snapshot=scan_ground(snapshot,scans,timeline,config,digest,progress=progress)
+            snapshot=reproject_endpoints(snapshot,points,config)
+            source['ground_method']='tracked_scans'
         from .fusion import fuse_scans_tiled
         snapshot = fuse_scans_tiled(snapshot, scans, timeline, config, digest, people=observations,
                               filter_mode=filter_mode, candidate_points=points, progress=progress)

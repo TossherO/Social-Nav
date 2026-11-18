@@ -69,7 +69,7 @@ class BuildMapTests(unittest.TestCase):
         self.drop_last = False
 
     def args(self, *extra):
-        return build_map.parser().parse_args(['--bag', str(self.bag), '--out', str(self.out), *extra])
+        return build_map.parser().parse_args(['--bag', str(self.bag), '--out', str(self.out), '--pipeline', 'raw', *extra])
 
     def make_session(self, *args, **kwargs):
         self.session = FakeSession(*args, **kwargs)
@@ -109,6 +109,25 @@ class BuildMapTests(unittest.TestCase):
         self.assertEqual(timeline.bound_keyframes, 1)
         self.assertIsNotNone(timeline.at(10.1, exact_ns=10100000000))
         self.assertEqual(self.bag.read_bytes(), self.original)
+
+    def test_loop_trace_and_explicit_library_are_recorded_for_the_run(self):
+        library=self.root/'diagnostic.so';library.write_bytes(b'synthetic library')
+        summary=self.run_fake('--trace-roll','--roll-library',str(library))
+        self.assertTrue(summary['success'])
+        run=json.loads((self.out/'run.json').read_text())
+        self.assertTrue(self.session.config['roll']['traceLoopClosure'])
+        self.assertEqual(run['roll_library']['path'],str(library))
+        self.assertEqual(run['roll_library']['fingerprint']['size'],library.stat().st_size)
+
+    def test_robust_loop_is_explicit_and_cannot_conflict_with_disabled_loops(self):
+        self.run_fake('--robust-loop', '--loop-min-gap', '8', '--loop-adaptive-noise')
+        self.assertTrue(self.session.config['roll']['robustLoopClosure'])
+        self.assertEqual(self.session.config['roll']['robustLoopMinGap'], 8.)
+        self.assertTrue(self.session.config['roll']['robustLoopAdaptiveNoise'])
+        self.out=self.root/'second'
+        with self.assertRaisesRegex(ValueError,'loop closure is off'):
+            self.run_fake('--robust-loop','--loop-closure','off')
+        self.assertFalse(self.out.exists())
 
     def test_backend_window_waits_instead_of_dropping_scans(self):
         sizes = iter([4, 4, 0])
@@ -199,7 +218,9 @@ class BuildMapTests(unittest.TestCase):
         self.assertNotIn('save', self.session.calls)
 
     def test_bad_paths_and_intervals_are_rejected_before_output_creation(self):
-        for arguments in (('--start', '-1'), ('--duration', 'nan'), ('--backend-timeout', '0')):
+        for arguments in (('--start', '-1'), ('--duration', 'nan'), ('--backend-timeout', '0'),
+                          ('--loop-min-gap', '-1'), ('--loop-min-gap', 'nan'),
+                          ('--loop-min-gap', '8'), ('--loop-adaptive-noise',)):
             with self.subTest(arguments=arguments), self.assertRaises(ValueError):
                 build_map.validate(self.args(*arguments))
         self.out.mkdir()

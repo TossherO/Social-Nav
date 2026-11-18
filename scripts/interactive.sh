@@ -19,6 +19,7 @@ SOCIAL_NAV_AGENT_OBSERVATIONS=0
 SOCIAL_NAV_AGENT_FOLLOW_CANDIDATES=0
 SOCIAL_NAV_AGENT_EXECUTION=0
 SOCIAL_NAV_TRACE_TIMING=0
+SOCIAL_NAV_AGENT_FLOOR=''
 SOCIAL_NAV_INITIAL_Z=''
 SOCIAL_NAV_INITIAL_Z_SET=0
 SOCIAL_NAV_MODE_ARG=''
@@ -28,6 +29,9 @@ while [[ $# -gt 0 ]]; do
     --agent-follow-candidates) SOCIAL_NAV_AGENT_FOLLOW_CANDIDATES=1 ;;
     --agent-execution) SOCIAL_NAV_AGENT_EXECUTION=1 ;;
     --trace-timing) SOCIAL_NAV_TRACE_TIMING=1 ;;
+    --floor)
+      if [[ $# -lt 2 || -n "$SOCIAL_NAV_AGENT_FLOOR" || ( "$2" != floor1 && "$2" != floor2 ) ]]; then echo '--floor 仅接受 floor1 或 floor2，且只能指定一次。' >&2; exit 2; fi
+      SOCIAL_NAV_AGENT_FLOOR="$2"; shift ;;
     --initial-z)
       if [[ $# -lt 2 || "$SOCIAL_NAV_INITIAL_Z_SET" == 1 || -z "$2" ]]; then echo '--initial-z 需要一个高度值且只能指定一次。' >&2; exit 2; fi
       SOCIAL_NAV_INITIAL_Z="$2"; SOCIAL_NAV_INITIAL_Z_SET=1; shift ;;
@@ -45,7 +49,7 @@ case "$SOCIAL_NAV_LAUNCH_KIND" in
     SOCIAL_NAV_LAUNCH_MODE="${SOCIAL_NAV_MODE_ARG:---start}"
     case "$SOCIAL_NAV_LAUNCH_MODE" in
       --help)
-        printf '%s\n' '用法：bash scripts/interactive.sh observe [--dry-run] [--agent-observations] [--agent-follow-candidates] [--initial-z 米]' \
+        printf '%s\n' '用法：bash scripts/interactive.sh observe [--dry-run] [--agent-observations] [--floor floor1|floor2] [--agent-follow-candidates] [--initial-z 米]' \
           '先运行传感器入口。本入口打开 RViz 进行在线观察与规划，不连接底盘。'
         exit 0;;
       --start|--dry-run) ;;
@@ -54,10 +58,14 @@ case "$SOCIAL_NAV_LAUNCH_KIND" in
     SOCIAL_NAV_LAUNCH_CONFIG=navigation/commissioning/interactive_observation.yaml
     if [[ "$SOCIAL_NAV_AGENT_OBSERVATIONS" == 1 ]]; then
       SOCIAL_NAV_LAUNCH_CONFIG=navigation/commissioning/interactive_agent.yaml
+      if [[ "$SOCIAL_NAV_AGENT_FLOOR" == floor1 ]]; then SOCIAL_NAV_LAUNCH_CONFIG=navigation/commissioning/interactive_agent_floor1.yaml; fi
+    elif [[ -n "$SOCIAL_NAV_AGENT_FLOOR" ]]; then
+      echo '--floor 需要 --agent-observations。' >&2; exit 2
     fi
     SOCIAL_NAV_LAUNCH_OUTPUT=live_observation
     ;;
   execute)
+    if [[ -n "$SOCIAL_NAV_AGENT_FLOOR" ]]; then echo '--floor 仅用于人工驾驶观察入口。' >&2; exit 2; fi
     SOCIAL_NAV_LAUNCH_MODE="${SOCIAL_NAV_MODE_ARG:---dry-run}"
     case "$SOCIAL_NAV_LAUNCH_MODE" in
       --help)
@@ -72,11 +80,11 @@ case "$SOCIAL_NAV_LAUNCH_KIND" in
     SOCIAL_NAV_LAUNCH_OUTPUT=live_execution
     ;;
   preflight)
-    if [[ "$SOCIAL_NAV_MODE_ARG" == --help && "$SOCIAL_NAV_INITIAL_Z_SET" == 0 && "$SOCIAL_NAV_AGENT_OBSERVATIONS" == 0 && "$SOCIAL_NAV_AGENT_FOLLOW_CANDIDATES" == 0 && "$SOCIAL_NAV_AGENT_EXECUTION" == 0 && "$SOCIAL_NAV_TRACE_TIMING" == 0 ]]; then
+    if [[ "$SOCIAL_NAV_MODE_ARG" == --help && -z "$SOCIAL_NAV_AGENT_FLOOR" && "$SOCIAL_NAV_INITIAL_Z_SET" == 0 && "$SOCIAL_NAV_AGENT_OBSERVATIONS" == 0 && "$SOCIAL_NAV_AGENT_FOLLOW_CANDIDATES" == 0 && "$SOCIAL_NAV_AGENT_EXECUTION" == 0 && "$SOCIAL_NAV_TRACE_TIMING" == 0 ]]; then
       printf '%s\n' '用法：bash scripts/interactive.sh preflight' '只读检查地图、ROS、RViz、原生库与 GPU，不连接底盘。'
       exit 0
     fi
-    if [[ -n "$SOCIAL_NAV_MODE_ARG" || "$SOCIAL_NAV_INITIAL_Z_SET" == 1 || "$SOCIAL_NAV_AGENT_OBSERVATIONS" == 1 || "$SOCIAL_NAV_AGENT_FOLLOW_CANDIDATES" == 1 || "$SOCIAL_NAV_AGENT_EXECUTION" == 1 || "$SOCIAL_NAV_TRACE_TIMING" == 1 ]]; then echo '此检查入口不接受其他参数。' >&2; exit 2; fi
+    if [[ -n "$SOCIAL_NAV_MODE_ARG" || -n "$SOCIAL_NAV_AGENT_FLOOR" || "$SOCIAL_NAV_INITIAL_Z_SET" == 1 || "$SOCIAL_NAV_AGENT_OBSERVATIONS" == 1 || "$SOCIAL_NAV_AGENT_FOLLOW_CANDIDATES" == 1 || "$SOCIAL_NAV_AGENT_EXECUTION" == 1 || "$SOCIAL_NAV_TRACE_TIMING" == 1 ]]; then echo '此检查入口不接受其他参数。' >&2; exit 2; fi
     SOCIAL_NAV_LAUNCH_MODE=--check
     ;;
   *) echo '请通过观察、执行或部署检查入口启动。' >&2; exit 2;;

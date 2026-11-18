@@ -94,7 +94,7 @@ class AgentMonitorTests(unittest.TestCase):
         self.assertEqual(self.session.call('record_task', goals=[goal, point_goal('elevator')])['status'], 'recorded')
         result = self.session.call('navigate', goal_id='follow', pose=[5., 4., 0.],
                                    view_id='unused', orientation_source='autonomous')
-        self.assertEqual(result['reason'], 'stage_skill_not_available')
+        self.assertEqual(result['reason'], 'current_stage_does_not_support_navigation')
         self.assertIsNone(self.session.skill.record['handle'])
         self.assertEqual(self.session.task_goals.goals[0]['status'], 'pending')
         self.assertEqual(len(self.session.task_goals.goals), 2)
@@ -168,6 +168,90 @@ class AgentMonitorTests(unittest.TestCase):
         value['handle'] = {'call_id':'c'}
         monitor.update(nav, value)
         self.assertEqual(monitor.take()['reasons'][0]['kind'], 'region_entered')
+
+    def test_agent_review_is_required_and_cannot_override_execution_evidence(self):
+        self.session.call('record_task',goals=[point_goal('elevator')])
+        navigate(self.session,'elevator')
+        self.nav.arrive();self.session.tick()
+        context=self.session.context()
+        self.assertEqual(self.session.call('check_goal',_context=context,goal_id='elevator')['status'],
+                         'needs_task_review')
+        context=self.session.context()
+        result=self.session.call('check_goal',_context=context,goal_id='elevator',
+                                 review_result='unknown',review_evidence='当前依据不足')
+        self.assertEqual(result['status'],'unknown')
+        self.assertEqual(self.session.task_goals.goals[0]['status'],'pending')
+        context=self.session.context()
+        result=self.session.call('check_goal',_context=context,goal_id='elevator',
+                                 review_result='satisfied',review_evidence='定位与目标一致且已停稳')
+        self.assertEqual(result['status'],'completed')
+        review=self.session.task_goals.goals[0]['completion']['semantic']['agent_task_review']
+        self.assertEqual(review['result'],'satisfied')
+        self.assertEqual(review['evidence'],'定位与目标一致且已停稳')
+
+    def test_satisfied_model_review_cannot_create_arrival(self):
+        self.session.call('record_task',goals=[point_goal('elevator')])
+        navigate(self.session,'elevator')
+        result=self.session.call('check_goal',_context=self.session.context(),goal_id='elevator',
+            review_result='satisfied',review_evidence='认为已经到达')
+        self.assertEqual(result['status'],'unproven')
+        self.assertEqual(self.session.task_goals.goals[0]['status'],'pending')
+
+    def test_model_loop_applies_review_after_navigation_completion(self):
+        self.session.call('record_task',goals=[point_goal('elevator')])
+        navigate(self.session,'elevator');self.nav.arrive();self.session.tick()
+        actor=AgentLoop(self.session,lambda *_:reply('check_goal',goal_id='elevator',
+            review_result='satisfied',review_evidence='当前位置与任务目标一致，且已停稳'))
+        try:
+            actor.tick()
+            self.assertIsNotNone(actor.model.thread)
+            actor.model.thread.join(3.)
+            actor.tick()
+            self.assertEqual(self.session.task_goals.goals[0]['status'],'completed')
+            self.assertEqual(self.session.task_goals.goals[0]['completion']['semantic']
+                             ['agent_task_review']['result'],'satisfied')
+        finally:actor.close()
+
+    def test_stopped_trigger_restarts_after_missing_measurements(self):
+        monitor=TaskMonitor(self.catalog);monitor.configure('g','停稳复核',stopped_s=1.)
+        nav=dict(handle={'call_id':'c'},status='running',goal_id='g',context_lost=False,connected=True)
+        def update(stamp):
+            monitor.update(nav,dict(stamp_s=stamp,origin_stamp_s=stamp,origin_frame_id='sim_odom',
+                origin_pose=[0.,0.,0.],localization_status='valid',handle={'call_id':'c'},stopped=True))
+        update(0.);update(1.1)
+        self.assertIsNone(monitor.take())
+        for stamp in (1.35,1.6,1.85,2.1):update(stamp)
+        self.assertEqual(monitor.take()['reasons'][0]['kind'],'stopped_duration')
+
+    def test_combined_motion_stop_and_timeout_triggers_use_new_pose_times(self):
+        monitor=TaskMonitor(self.catalog)
+        monitor.configure('g','复核',distance_m=.5,rotation_rad=.5,stopped_s=1.,timeout_s=3.)
+        nav=dict(handle={'call_id':'c'},status='running',goal_id='g',context_lost=False,connected=True)
+        def update(stamp,pose,stopped=False):
+            monitor.update(nav,dict(stamp_s=stamp,origin_stamp_s=stamp,origin_frame_id='sim_odom',
+                origin_pose=pose,localization_status='valid',handle={'call_id':'c'},stopped=stopped))
+        update(0.,[0.,0.,0.]);update(1.,[.6,0.,.6],True)
+        self.assertEqual({x['kind'] for x in monitor.take()['reasons']},{'distance_progress','rotation_progress'})
+        for stamp in (1.25,1.5,1.75,2.):update(stamp,[.6,0.,.6],True)
+        self.assertEqual(monitor.take()['reasons'][0]['kind'],'stopped_duration')
+        update(3.,[.6,0.,.6],True)
+        self.assertEqual(monitor.take()['reasons'][0]['kind'],'monitor_timeout')
+        update(4.,[.6,0.,.6],True)
+        self.assertIsNone(monitor.take())
+
+    def test_observation_stage_monitor_wait_and_operator_review(self):
+        goal=dict(goal_id='inspect',kind='skill',target_id='',stage_type='observation',description='查看现场')
+        self.session.call('record_task',goals=[goal])
+        self.assertEqual(self.session.call('set_navigation_monitor',goal_id='inspect',focus='查看现场',
+                                           interval_s=5)['status'],'configured')
+        self.assertEqual(self.session.call('wait_for_event',event='monitor')['status'],'waiting')
+        self.session.tick();self.nav.t=5.1;self.session.tick()
+        self.assertEqual(self.session.state['status'],'ready')
+        self.assertEqual(self.session.monitor.snapshot()['last_trigger']['reasons'][0]['kind'],'semantic_review_due')
+        self.session.call('wait_for_event',event='monitor')
+        self.session.event('review')
+        self.assertEqual(self.session.state['status'],'ready')
+        self.assertEqual(self.session.monitor.snapshot()['last_trigger']['reasons'][0]['kind'],'operator_review_requested')
 
 
 if __name__ == '__main__':

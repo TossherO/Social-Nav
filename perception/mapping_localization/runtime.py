@@ -24,7 +24,7 @@ def quaternion(rotation):
 
 
 class LocalizationSession:
-    def __init__(self,config_path,*,mode='odometry',coverage=None,allow_local_only=False,metrics=None,association_ready=None,latest_matching=False):
+    def __init__(self,config_path,*,mode='odometry',coverage=None,allow_local_only=False,metrics=None,association_ready=None,latest_matching=False,roll_library=None):
         if mode not in ('mapping','localization','odometry'):raise ValueError('Unsupported native localization mode')
         self.mode=mode;self.latest_matching=bool(latest_matching and mode=='localization');self.session=uuid.uuid4().hex;self.config=yaml.safe_load(Path(config_path).read_text());self.metrics=metrics
         self.map_id='';self.asset_fingerprint=''
@@ -42,7 +42,8 @@ class LocalizationSession:
                 raise ValueError('Coverage changed after localization configuration was prepared')
             coverage=frozen
         self.frontend=NativeFrontend(config_path);self.matcher=None
-        if mode!='odometry':self.matcher=NativeRoll(config_path)
+        if mode!='odometry':
+            self.matcher=NativeRoll(config_path) if roll_library is None else NativeRoll(config_path,library=roll_library)
         from perception.environment.layers import load_config as environment_config
         association_config=environment_config()
         self.context=LocalizationContext('fast_lio' if mode=='odometry' else 'roll_fast_lio',

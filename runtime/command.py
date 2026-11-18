@@ -35,7 +35,7 @@ class AgentState:
                 motion={k:copy.deepcopy(motion.get(k)) for k in keys})
 
     def publish_control(self, packet, localization=None, *, map_binding=None, cancelled_request=None, idle_feedback=None,
-                        manual_preview=None):
+                        manual_preview=None, agent_mapped_pose=None):
         value = dict(request=copy.deepcopy(packet.get('request')), stamp_s=packet['stamp_s'], clock_domain=packet['clock_domain'],
             scene_binding=packet.get('scene_binding'), feedback=copy.deepcopy(packet.get('feedback') or {}),
             reason=packet.get('reason'), reference_accepted=packet.get('result_accepted', False),
@@ -45,6 +45,7 @@ class AgentState:
         value['cancelled_request'] = copy.deepcopy(cancelled_request)
         value['idle_feedback'] = copy.deepcopy(idle_feedback)
         value['manual_preview'] = copy.deepcopy(manual_preview)
+        value['agent_mapped_pose'] = copy.deepcopy(agent_mapped_pose)
         proposal=packet.get('proposal') or {}
         value['planning_status']=proposal.get('status')
         value['planning_reason']=proposal.get('reason')

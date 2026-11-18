@@ -91,8 +91,8 @@ class AgentContextTests(unittest.TestCase):
         old=self.session.spatial_view.record['view_id']
         call=dict(tool='navigate',arguments=dict(goal_id='target',pose=[5.,4.,0.],view_id=old,orientation_source='autonomous'))
         self.fixture.nav.state['stamp_s']=14.
-        self.assertTrue(self.session.valid_expired_context(context))
-        result=self.session.revalidate_delayed_navigation(call,context)
+        self.assertTrue(self.session.valid_context(context))
+        result=self.session.revalidate_navigation(call,context)
         self.assertEqual(result['status'],'accepted')
         self.assertEqual(call['arguments']['view_id'],old)
         self.assertEqual(result['revalidation']['model_view_id'],old)
@@ -105,10 +105,140 @@ class AgentContextTests(unittest.TestCase):
         self.session.prompt();context=self.session.context()
         old=self.session.spatial_view.record['view_id']
         self.fixture.nav.state.update(stamp_s=14.,pose=[5.,4.,0.])
-        result=self.session.revalidate_delayed_navigation(dict(tool='navigate',arguments=dict(
+        result=self.session.revalidate_navigation(dict(tool='navigate',arguments=dict(
             goal_id='target',pose=[5.,4.,0.],view_id=old,orientation_source='autonomous')),context)
         self.assertEqual(result['reason'],'robot_pose_changed_since_model_input')
         self.assertEqual(self.session.skill.record['attempts'],[])
+
+    def test_delayed_reference_with_visual_preference_rechecks_without_claiming_visibility(self):
+        goal=dict(goal_id='near',kind='reference',target_id='front_window',description='到窗户旁，尽量看见窗户',
+                  visual_preferences=['尽量看见窗户'])
+        self.assertEqual(self.session.call('record_task',goals=[goal])['status'],'recorded')
+        self.session.prompt();context=self.session.context();old=self.session.spatial_view.record['view_id']
+        call=dict(tool='navigate',arguments=dict(goal_id='near',pose=[5.,4.,0.],view_id=old,orientation_source='autonomous'))
+        self.fixture.nav.state['stamp_s']=17.
+        result=self.session.revalidate_navigation(call,context)
+        self.assertEqual(result['status'],'accepted',result)
+        self.assertTrue(result['revalidation']['visual_preference_not_verified'])
+        self.assertEqual(result['revalidation']['model_source_stamp_s'],10.)
+        self.assertEqual(result['revalidation']['checked_source_stamp_s'],17.)
+        self.assertFalse(result['execution_completed'])
+        self.assertEqual(self.session.call('check_goal',goal_id='near')['status'],'unproven')
+        self.fixture.nav.t=7.
+        self.fixture.nav.arrive();self.session.tick()
+        self.session.observation=self.fixture.nav.observe()
+        args=dict(goal_id='near',observation_id=self.session.observation.record['observation_id'],
+                  preference_result='satisfied',preference_evidence='fixture visual judgment',
+                  review_result='satisfied',review_evidence='fixture task review')
+        result=self.session.call('check_goal',_context=self.session.context(),**args)
+        self.assertEqual(result['status'],'needs_preference_evidence')
+        self.session.tick();self.session.observation=self.fixture.nav.observe()
+        args['observation_id']=self.session.observation.record['observation_id']
+        result=self.session.call('check_goal',_context=self.session.context(),**args)
+        self.assertEqual(result['status'],'completed')
+
+    def test_model_response_after_long_wait_rechecks_current_target_and_preserves_times(self):
+        from decision.agent.core.loop import AgentLoop
+        self.session.call('record_task',goals=[dict(goal_id='near',kind='reference',target_id='front_window',
+            description='到窗户附近',visual_preferences=['尽量看见窗户'])])
+        self.fixture.nav.tick=lambda:self.fixture.nav.snapshot()
+        def work(_payload,_observation,view):
+            self.fixture.nav.state['stamp_s']+=90.
+            return reply('navigate',goal_id='near',pose=[5.,4.,0.],view_id=view.record['view_id'],
+                         orientation_source='autonomous')
+        actor=AgentLoop(self.session,work)
+        try:
+            actor.tick();actor.model.thread.join(2.);actor.tick()
+            self.assertEqual(self.session.state['status'],'waiting_navigation')
+            event=json.loads(self.fixture.store.db.execute("SELECT value FROM events WHERE kind='model_action_applied' ORDER BY seq DESC LIMIT 1").fetchone()[0])
+            result=event['result']
+            self.assertEqual(result['status'],'accepted')
+            self.assertEqual(result['revalidation']['model_source_stamp_s'],10.)
+            self.assertEqual(result['revalidation']['checked_source_stamp_s'],100.)
+            self.assertEqual(event['source_age_s'],90.)
+        finally:actor.close()
+
+    def test_long_model_response_can_use_post_arrival_rgb_without_refreshing_its_time(self):
+        from decision.agent.core.loop import AgentLoop
+        self.session.call('record_task',goals=[dict(goal_id='near',kind='reference',target_id='front_window',
+            description='到窗户附近',visual_preferences=['尽量看到窗户'])])
+        self.session.prompt();view=self.session.spatial_view.record['view_id']
+        self.assertEqual(self.session.call('navigate',goal_id='near',pose=[5.,4.,0.],view_id=view,
+            orientation_source='autonomous')['status'],'accepted')
+        self.fixture.nav.arrive();self.session.tick()
+        self.fixture.nav.state['stamp_s']+=.2
+        self.fixture.nav.tick=lambda:self.fixture.nav.snapshot()
+        def work(_payload,observation,_view):
+            self.fixture.nav.state['stamp_s']+=90.
+            return reply('check_goal',goal_id='near',observation_id=observation.record['observation_id'],
+                preference_result='satisfied',preference_evidence='可见窗户',
+                review_result='satisfied',review_evidence='已到达并观察')
+        actor=AgentLoop(self.session,work)
+        try:
+            actor.tick();actor.model.thread.join(2.);actor.tick()
+            self.assertEqual(self.session.task_goals.goals[0]['status'],'completed')
+            visual=self.session.task_goals.goals[0]['completion']['semantic']['visual_preferences']
+            self.assertGreater(visual['observation_age_s'],90.)
+            self.assertFalse(visual['current_scene_verified'])
+        finally:actor.close()
+
+    def test_delayed_visual_target_rechecks_current_occupancy(self):
+        from perception.environment.layers import GridSnapshot
+        geometry=VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],np.eye(4),source={'status':'test'})
+        self.fixture.nav.geometry=geometry
+        self.fixture.nav.spatial_inputs=lambda:dict(global_grid=self.fixture.grid,scene=None,
+            pose=self.fixture.nav.state['pose'],stamp_s=self.fixture.nav.state['stamp_s'],
+            clock_domain=self.fixture.nav.clock_domain,geometry=geometry)
+        self.session.call('record_task',goals=[dict(goal_id='near',kind='reference',target_id='front_window',
+            description='到窗户附近',visual_preferences=['尽量看见窗户'])])
+        self.session.prompt();context=self.session.context();old=self.session.spatial_view.record['view_id']
+        call=dict(tool='navigate',arguments=dict(goal_id='near',pose=[5.,4.,0.],view_id=old,orientation_source='autonomous'))
+        occupied=np.zeros((100,140),np.int8);occupied[40,50]=100
+        self.fixture.grid=GridSnapshot(dict(self.fixture.grid.metadata,snapshot_id='new-occupied'),dict(occupancy=occupied))
+        self.fixture.nav.state['stamp_s']=16.
+        result=self.session.revalidate_navigation(call,context)
+        self.assertEqual(result['reason'],'candidate_footprint_occupied',result)
+        self.assertIsNone(self.session.skill.record['handle'])
+
+    def test_delayed_visual_target_rejects_changed_map_identity(self):
+        self.session.call('record_task',goals=[dict(goal_id='near',kind='reference',target_id='front_window',
+            description='到窗户附近',visual_preferences=['尽量看见窗户'])])
+        self.session.prompt();context=self.session.context();old=self.session.spatial_view.record['view_id']
+        self.fixture.nav.state.update(stamp_s=16.,map_binding=dict(valid=True,map_id='different'))
+        result=self.session.revalidate_navigation(dict(tool='navigate',arguments=dict(goal_id='near',
+            pose=[5.,4.,0.],view_id=old,orientation_source='autonomous')),context)
+        self.assertEqual(result['status'],'refused')
+        self.assertIsNone(self.session.skill.record['handle'])
+
+    def test_observation_stage_refuses_navigation_with_specific_reason_even_if_delayed(self):
+        self.session.call('record_task',goals=[dict(goal_id='observe',kind='skill',stage_type='observation',
+            target_id='',description='停稳后观察')])
+        self.session.prompt();context=self.session.context();old=self.session.spatial_view.record['view_id']
+        call=dict(tool='navigate',arguments=dict(goal_id='observe',pose=[5.,4.,0.],view_id=old,orientation_source='autonomous'))
+        self.fixture.nav.state['stamp_s']=16.
+        result=self.session.revalidate_navigation(call,context)
+        self.assertEqual(result['reason'],'current_stage_does_not_support_navigation')
+        self.assertEqual(result['stage_type'],'observation')
+
+    def test_repeated_delayed_wrong_stage_navigation_waits_for_user(self):
+        from decision.agent.core.loop import AgentLoop
+        self.session.call('record_task',goals=[dict(goal_id='observe',kind='skill',stage_type='observation',
+            target_id='',description='停稳后观察')])
+        self.fixture.nav.tick=lambda:self.fixture.nav.snapshot()
+        def work(_payload,_observation,view):
+            self.fixture.nav.state['stamp_s']+=4.
+            return reply('navigate',goal_id='observe',pose=[5.,4.,0.],view_id=view.record['view_id'],
+                         orientation_source='autonomous')
+        actor=AgentLoop(self.session,work)
+        try:
+            for _ in range(5):
+                actor.tick()
+                if actor.model.thread is not None:actor.model.thread.join(2.)
+                if self.session.state['status']=='needs_clarification':break
+            self.assertEqual(actor.requests,3)
+            self.assertEqual(self.session.state['reason'],'repeated_navigation_refusal')
+            self.assertIsNone(self.session.skill.record['handle'])
+        finally:actor.close()
 
     def test_accepted_clarifications_survive_history_trimming_and_overflow_is_explicit(self):
         self.session.conversation.max_exchanges=1

@@ -27,6 +27,7 @@
 #include <pcl/common/transforms.h>
 
 #include <pcl/registration/icp.h>
+#include <pcl/registration/correspondence_rejection_trimmed.h>
 #include <pcl/registration/gicp.h>
 
 #include <pcl/io/pcd_io.h>

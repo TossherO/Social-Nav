@@ -16,6 +16,30 @@ def mapped_origin(catalog, record):
                 origin_frame_id=binding.get('map_frame') if matches else None, origin_stamp_s=record.get('stamp_s'))
 
 
+def apply_runtime_mapped_pose(state, control, catalog):
+    """Use the current causal map pose; never revive an older RGB pose on loss."""
+    if 'agent_mapped_pose' not in control:return state
+    mapped=control['agent_mapped_pose'] or {}
+    stamp=mapped.get('stamp_s')
+    binding=mapped.get('map_binding') or {}
+    map_id=catalog.value.get('localization_map_id')
+    asset=catalog.value.get('map_snapshot_id','')
+    bound_id=binding.get('map_id')
+    same_map=(bound_id==map_id if map_id else bool(bound_id and
+        (asset==bound_id or asset.startswith(bound_id+':scan_fusion:'))))
+    valid=(binding.get('valid') is True and binding==state.get('map_binding') and
+        same_map and binding.get('map_frame')==catalog.value.get('frame_id') and
+        mapped.get('local_identity')==[state.get(k) for k in ('session_id','generation','frame_id')] and
+        mapped.get('clock_domain')==state.get('clock_domain') and
+        type(stamp) in (int,float) and math.isfinite(stamp) and 0<=state['stamp_s']-stamp<=.5 and
+        isinstance(mapped.get('pose'),list) and len(mapped['pose'])==3 and
+        all(type(v) in (int,float) and math.isfinite(v) for v in mapped['pose']))
+    state['origin_pose']=copy.deepcopy(mapped['pose']) if valid else None
+    state['origin_stamp_s']=stamp if valid else None
+    state['origin_frame_id']=binding.get('map_frame') if valid else None
+    return state
+
+
 def load_catalog_map(catalog):
     from perception.environment.storage import StaticEnvironmentMap
     asset = StaticEnvironmentMap(ROOT/catalog.value['map_asset'])
@@ -328,7 +352,7 @@ class RuntimeLiveNavigation(RuntimeShadowNavigation):
             raise ValueError('Runtime hold was not accepted')
 
     def snapshot(self):
-        result = super().snapshot()
+        result = apply_runtime_mapped_pose(super().snapshot(),self.value['control'],self.catalog)
         control = self.value['control']
         follow=result.get('follow_status') or {}
         chassis = self.value.get('chassis') or {}

@@ -1,7 +1,19 @@
 """Display-only ROS marker bridge. This process never publishes a motion goal."""
 import json
+import math
 import sys
 import threading
+
+
+def heading_geometry(points, yaw):
+    """Return a raised endpoint and quaternion only for a known final heading."""
+    if not points or yaw is None or not math.isfinite(yaw):
+        return None
+    point=points[-1]
+    if len(point)!=3 or any(value is None or not math.isfinite(value) for value in point):
+        return None
+    return dict(position=[point[0],point[1],point[2]+.12],
+                quaternion=[0.,0.,math.sin(yaw/2.),math.cos(yaw/2.)])
 
 
 def main():
@@ -42,6 +54,15 @@ def main():
                 label.pose.position=Point(point[0],point[1],point[2]+.3);label.scale.z=.28
                 label.color.r=label.color.g=label.color.b=label.color.a=1.;label.text=str(i+1)
                 markers.append(label)
+            heading=heading_geometry(points,data.get('final_yaw'))
+            if heading is not None:
+                arrow=Marker();arrow.header.frame_id=frame;arrow.ns='manual_goal_heading';arrow.id=0
+                arrow.type=Marker.ARROW;arrow.action=Marker.ADD
+                arrow.pose.position=Point(*heading['position'])
+                arrow.pose.orientation.x,arrow.pose.orientation.y,arrow.pose.orientation.z,arrow.pose.orientation.w=heading['quaternion']
+                arrow.scale.x,arrow.scale.y,arrow.scale.z=1.0,.15,.2
+                arrow.color.r,arrow.color.g,arrow.color.b,arrow.color.a=1.,.25,.9,1.
+                markers.append(arrow)
             lines=Marker();lines.header.frame_id=frame;lines.ns='manual_route_line';lines.id=0
             lines.type=Marker.LINE_LIST;lines.action=Marker.ADD;lines.pose.orientation.w=1.
             lines.scale.x=.06;lines.color.r=.2;lines.color.g=.7;lines.color.b=1.;lines.color.a=1.

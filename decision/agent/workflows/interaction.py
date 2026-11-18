@@ -53,12 +53,18 @@ def dispatch_structured(command, actor, consumed):
     current=next((g for g in session.task_goals.goals if g['status']!='completed'),None)
     goal_id=None if current is None else current['requirement']['goal_id']
     handle=session.skill.record.get('handle') or {}
+    if value['name']=='arrived' and not handle and current is not None:
+        selected=(current.get('selected') or {}).get('handle')
+        completed=session.skill.record.get('completed') or []
+        if (selected is not None and getattr(session.navigation,'handle',None)==selected and completed and
+                completed[-1].get('handle')==selected and completed[-1].get('goal_id')==goal_id):
+            handle=selected
     if (session.navigation.scope!='manual' or value['task_id']!=state['task_id'] or
             type(value['revision']) is not int or value['revision']!=state['revision'] or
             value['goal_id']!=goal_id or value['call_id']!=handle.get('call_id')):
         return dict(event='operator_command',command_id=command_id,accepted=False,reason='task_or_goal_changed')
     name=value['name'];text=value['text']
-    if name not in ('continue','pause','resume','cancel','arrived','answer','replace'):
+    if name not in ('continue','pause','resume','cancel','arrived','review','answer','replace'):
         return dict(event='operator_command',command_id=command_id,accepted=False,reason='unknown_command')
     if name in ('answer','replace'):
         if not isinstance(text,str) or not text.strip() or len(text)>4096:
@@ -73,11 +79,11 @@ def dispatch_structured(command, actor, consumed):
 
 
 def dispatch(command, actor):
-    if command in ('continue', 'pause', 'resume', 'cancel', 'arrived'):
+    if command in ('continue', 'pause', 'resume', 'cancel', 'arrived', 'review'):
         actor.event(command)
         return
     for prefix, name in (('replace ', 'replace'), ('answer ', 'answer')):
         if command.startswith(prefix) and command[len(prefix):].strip():
             actor.event(name, command[len(prefix):].strip())
             return
-    raise ValueError('continue / pause / resume / cancel / arrived（手动模式） / answer 补充说明 / replace 新指令')
+    raise ValueError('continue / pause / resume / cancel / review / arrived（手动模式） / answer 补充说明 / replace 新指令')

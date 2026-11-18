@@ -184,6 +184,8 @@ def fuse_scans(candidate, path, timeline, config, fingerprint, *, people=None, f
                               grid_origin=reference_origin if grid_offset is not None else None, grid_offset=grid_offset)
     layers['last_observed'][~np.isfinite(layers['last_observed'])] = np.nan
     layers['endpoint_count'] = candidates['endpoint_count']
+    for key in ('ground_scan_unreliable','ground_scan_undersampled'):
+        if key in candidate.layers:layers[key] = candidate.layers[key].copy()
     from .changes import conditional_obstacles
     if not defer_derived:
         layers['conditional_obstacle'] = conditional_obstacles(layers, config)

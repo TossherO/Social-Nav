@@ -50,10 +50,18 @@ def distance_to_region(point, polygon):
 
 
 class TaskGoals:
-    def __init__(self, catalog):
+    def __init__(self, catalog, *, floor_catalogs=None):
         self.catalog = catalog
+        self.floor_catalogs = dict(floor_catalogs or {catalog.value.get('floor_id'):catalog})
+        if self.floor_catalogs.get(catalog.value.get('floor_id')) is not catalog:
+            raise ValueError('Current catalog must be registered under its floor identity')
+        if any(floor!=item.value.get('floor_id') for floor,item in self.floor_catalogs.items()):
+            raise ValueError('Floor catalog identity does not match its registration')
         self.goals = []
         self.settings = load_config()
+        # Task-level interpretation is shared across execution modes. The
+        # navigation controller keeps its own independent arrival tolerance.
+        self.settings['goal_position_tolerance_m'] = .20
 
     def record(self, goals):
         self.catalog.require_complete()
@@ -62,62 +70,79 @@ class TaskGoals:
         if not isinstance(goals, list) or not 1 <= len(goals) <= 16:
             raise ValueError('Use one to sixteen ordered requirements')
         ids = set()
+        active_floor=self.catalog.value.get('floor_id')
         for goal in goals:
             jsonschema.validate(goal, GOAL)
             if goal['goal_id'] in ids:
                 raise ValueError('Duplicate task goal identity')
             ids.add(goal['goal_id'])
+            if len(self.floor_catalogs)>1 and 'floor_id' not in goal:
+                raise ValueError('Cross-floor task stages require explicit floor identities')
+            floor=goal.get('floor_id',active_floor)
+            if floor!=active_floor or floor not in self.floor_catalogs:
+                raise ValueError('Task stage must follow the current floor and known transitions')
+            catalog=self.floor_catalogs[floor]
+            catalog.require_complete()
             target = goal['target_id']
             if goal['kind'] != 'skill' and goal.get('stage_type', 'navigation') != 'navigation':
                 raise ValueError('Non-navigation stage types require kind=skill')
             if goal['kind'] == 'skill':
-                if (target or goal.get('stage_type') not in ('follow', 'observation', 'seating') or
+                if (target or goal.get('stage_type') not in ('follow', 'observation', 'seating','elevator') or
                         any(key in goal for key in ('position', 'required_yaw', 'facing', 'position_rule',
-                                                    'max_distance_m', 'direction', 'checkpoints'))):
+                                                    'max_distance_m', 'checkpoints'))):
                     raise ValueError('A future skill stage requires its stage_type and an empty target, without navigation geometry')
+                if goal.get('stage_type')=='elevator':
+                    destination=goal.get('to_floor')
+                    if len(self.floor_catalogs)<2 or destination not in self.floor_catalogs or destination==floor:
+                        raise ValueError('Elevator transition requires a different registered destination floor')
+                    if goal.get('semantic_conditions') or goal.get('visual_preferences'):
+                        raise ValueError('Record additional visual requirements as a separate task stage')
+                    active_floor=destination
+                elif 'to_floor' in goal:
+                    raise ValueError('Only an elevator stage may name a destination floor')
             elif goal['kind'] == 'region':
-                if target not in self.catalog.regions or 'position' in goal:
+                if target not in catalog.regions or 'position' in goal:
                     raise ValueError('Region requirements use an annotated region, not a selected position')
-                if goal.get('position_rule') == 'region_centroid' and not inside(centroid(self.catalog.regions[target]['polygon']),self.catalog.regions[target]['polygon']):
+                if goal.get('position_rule') == 'region_centroid' and not inside(centroid(catalog.regions[target]['polygon']),catalog.regions[target]['polygon']):
                     raise ValueError('Region area centroid lies outside the region; clarify the intended center')
-            elif goal['kind'] == 'circuit':
-                if target not in self.catalog.regions or 'position' in goal:
-                    raise ValueError('Circuit requires a region')
+            elif goal['kind'] == 'route':
+                if 'position' in goal or target and target not in catalog.regions and target not in catalog.places:
+                    raise ValueError('Route reference must be a known annotation or empty')
             elif goal['kind'] == 'sequence':
                 if target or 'position' in goal or not goal.get('checkpoints'):
                     raise ValueError('Sequence uses ordered annotated checkpoints and an empty target')
                 for checkpoint in goal['checkpoints']:
-                    if checkpoint not in self.catalog.regions and (checkpoint not in self.catalog.places or
-                            self.catalog.places[checkpoint].get('pose') is None):
+                    if checkpoint not in catalog.regions and (checkpoint not in catalog.places or
+                            catalog.places[checkpoint].get('pose') is None):
                         raise ValueError('Sequence checkpoint is not bound in this map')
             elif goal['kind'] == 'reference':
                 if 'position' in goal:
                     raise ValueError('Reference requirements do not fix the selected position')
-                if target and target not in self.catalog.regions and (target not in self.catalog.places or
-                        self.catalog.places[target].get('pose') is None):
+                if target and target not in catalog.regions and (target not in catalog.places or
+                        catalog.places[target].get('pose') is None):
                     raise ValueError('Reference is not bound in this map')
                 if not goal.get('semantic_conditions') and not goal.get('visual_preferences') and 'max_distance_m' not in goal:
                     raise ValueError('Reference needs a geometric distance or an observable original task condition or visual preference')
                 if 'max_distance_m' in goal and not target:
                     raise ValueError('A geometric distance needs an annotated reference')
             elif target:
-                if target not in self.catalog.places or self.catalog.places[target].get('pose') is None:
+                if target not in catalog.places or catalog.places[target].get('pose') is None:
                     raise ValueError('Point is not bound in this map')
-                if 'position' in goal and not np.allclose(goal['position'], self.catalog.places[target]['pose'][:2], atol=1e-9):
+                if 'position' in goal and not np.allclose(goal['position'], catalog.places[target]['pose'][:2], atol=1e-9):
                     raise ValueError('Explicit position contradicts the named point')
             elif 'position' not in goal:
                 raise ValueError('An unnamed point requires a user-specified position')
             if goal.get('position_rule') and goal['kind'] != 'region':
                 raise ValueError('Position rule applies only to regions')
-            if goal.get('direction') and goal['kind'] != 'circuit':
-                raise ValueError('Direction applies only to circuits')
             if goal.get('checkpoints') and goal['kind'] != 'sequence':
                 raise ValueError('Checkpoints apply only to sequences')
             if 'max_distance_m' in goal and goal['kind'] != 'reference':
                 raise ValueError('Distance applies only to references')
-            if goal.get('facing') and goal['facing'] not in self.catalog.regions and (goal['facing'] not in self.catalog.places or
-                                       self.catalog.places[goal['facing']].get('pose') is None):
+            if goal.get('facing') and goal['facing'] not in catalog.regions and (goal['facing'] not in catalog.places or
+                                       catalog.places[goal['facing']].get('pose') is None):
                 raise ValueError('Facing condition needs a bound annotated point or region')
+            if goal['kind']!='skill' and 'to_floor' in goal:
+                raise ValueError('Only an elevator stage may name a destination floor')
             values = [*goal.get('position', []), *([goal['required_yaw']] if 'required_yaw' in goal else []),
                       *([goal['max_distance_m']] if 'max_distance_m' in goal else [])]
             if not all(math.isfinite(v) for v in values):
@@ -130,6 +155,9 @@ class TaskGoals:
         current = next((g for g in self.goals if g['status'] != 'completed'), None)
         if current is None or current['requirement']['goal_id'] != goal_id:
             raise ValueError('Only the next uncompleted task goal can be selected or checked')
+        floor=current['requirement'].get('floor_id')
+        if floor is not None and floor!=self.catalog.value.get('floor_id'):
+            raise ValueError('Current task stage belongs to another floor')
         return current
 
     def geometry(self, requirement, pose):
@@ -145,8 +173,8 @@ class TaskGoals:
             if requirement.get('position_rule') == 'region_centroid':
                 position_met = position_met and np.linalg.norm(np.asarray(pose[:2])-centroid(
                     self.catalog.regions[requirement['target_id']]['polygon'])) <= self.settings['goal_position_tolerance_m']
-        elif requirement['kind']=='circuit':
-            position_met = not inside(pose[:2],self.catalog.regions[requirement['target_id']]['polygon'])
+        elif requirement['kind']=='route':
+            position_met = True
         elif requirement['kind']=='sequence':
             position_met = self.checkpoint_met(requirement['checkpoints'][-1],pose[:2])
         else:

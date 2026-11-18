@@ -2,6 +2,7 @@
 import ctypes as C
 from pathlib import Path
 import numpy as np
+import yaml
 
 
 class Result(C.Structure):
@@ -105,7 +106,17 @@ class NativeRoll:
     def __init__(self,config,library=None):
         root=Path(__file__).resolve().parents[2]
         self.lib=C.CDLL(str(library or root/'outputs/runtime/build/localization/libsocial_nav_roll.so'))
-        lib=self.lib;lib.sn_roll_error.restype=C.c_char_p
+        lib=self.lib
+        roll_config=(yaml.safe_load(Path(config).read_text()) or {}).get('roll',{})
+        required=(1 if roll_config.get('traceLoopClosure',False) else 0)|(2 if roll_config.get('robustLoopClosure',False) else 0)
+        if roll_config.get('robustLoopMinGap',0) or roll_config.get('robustLoopAdaptiveNoise',False):required |= 4
+        if required:
+            if not hasattr(lib,'sn_roll_capabilities'):
+                raise RuntimeError('The ROLL library does not advertise the requested loop options; rebuild it or select an updated library')
+            lib.sn_roll_capabilities.restype=C.c_int
+            if lib.sn_roll_capabilities() & required != required:
+                raise RuntimeError('The ROLL library does not support all requested loop options')
+        lib.sn_roll_error.restype=C.c_char_p
         lib.sn_roll_create.argtypes=[C.c_char_p];lib.sn_roll_create.restype=C.c_void_p
         lib.sn_roll_destroy.argtypes=[C.c_void_p]
         lib.sn_roll_step.argtypes=[C.c_void_p,C.c_void_p,C.c_size_t,C.c_void_p,C.c_void_p,C.c_double,C.c_void_p]

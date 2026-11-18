@@ -4,8 +4,10 @@ import json
 import sqlite3
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from decision.agent.core.store import Store
 from decision.agent.ui_data import ContextTimeline,connect_readonly,display_value,event_detail,event_summary,message_detail,poll_session,request_context,select_detail
@@ -42,6 +44,17 @@ class ManualUiTests(unittest.TestCase):
         result=dispatch_structured(self.command(name='answer',text='第一行\n第二行'),self.actor,set())
         self.assertTrue(result['accepted']);self.assertEqual(self.calls,[('answer','第一行\n第二行')])
 
+    def test_completed_navigation_can_accept_identity_bound_arrival_reconfirmation(self):
+        selected=dict(call_id='old-call',task_id='task')
+        self.session.navigation.handle=selected
+        self.session.skill.record.update(handle=None,completed=[dict(goal_id='first',handle=selected)])
+        self.session.task_goals.goals[0]['selected']=dict(handle=selected)
+        value=self.command(call_id='old-call')
+        self.assertTrue(dispatch_structured(value,self.actor,set())['accepted'])
+        self.assertEqual(self.calls,[('arrived',None)])
+        self.session.navigation.handle=dict(call_id='different')
+        self.assertFalse(dispatch_structured(self.command(command_id='other',call_id='old-call'),self.actor,set())['accepted'])
+
     def test_readonly_history_omits_images_until_detail_and_redacts_secret(self):
         with tempfile.TemporaryDirectory() as root:
             path=Path(root)/'session.sqlite';store=Store(path)
@@ -73,7 +86,7 @@ class ManualUiTests(unittest.TestCase):
                 _,events=poll_session(db,0)
                 diagnostic=events[-1]
                 self.assertEqual(diagnostic['kind'],'manual_goal_evidence_unproven')
-                self.assertIn('mapped_pose_unavailable',event_summary(diagnostic))
+                self.assertIn('地图定位不可用',event_summary(diagnostic))
                 self.assertEqual(event_detail(db,diagnostic['seq'])[1]['goal_id'],'first')
             finally:db.close();store.close()
 
@@ -226,6 +239,69 @@ class ManualUiTests(unittest.TestCase):
         finally:
             window.close()
             app.processEvents()
+
+    def test_floor_preset_and_live_task_monitor(self):
+        import os
+        os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
+        from PyQt5 import QtCore,QtWidgets
+        from decision.agent.manual_ui import ManualWindow
+        app=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        window=ManualWindow(floor='floor2')
+        try:
+            self.assertTrue(window.catalog.text().endswith('floor2_catalog.json'))
+            self.assertIn('floor2_ground_refined',window.catalog.text())
+            if not Path(window.catalog.text()).is_file():
+                self.assertIn('尚无对应语义标注',window.notice.text())
+            window.socket.setText('/old/socket')
+            window.floor.setCurrentIndex(window.floor.findData('floor1'))
+            self.assertTrue(window.catalog.text().endswith('floor1_catalog.json'))
+            self.assertEqual(window.socket.text(),'')
+            window.status=dict(status='waiting_navigation',navigation_status='running',localization_status='valid',
+                input_stale=False,origin_pose=[0.,0.,0.],floor_id='floor1',goal_description='到停靠点',
+                goal_distance_m=.1,goal_tolerance_m=.2,arrival_dwell_s=.3,arrival_dwell_required_s=.5,
+                goal_yaw_error_rad=.1,goal_yaw_tolerance_rad=.2,stopped=True,monitor=dict(focus='关注入口'))
+            window.status_received=time.monotonic()
+            with patch.object(window.process,'state',return_value=QtCore.QProcess.Running):window.refresh_status()
+            value=window.task_monitor.toPlainText()
+            for expected in ('floor1','到停靠点','0.10 m','连续停稳','朝向偏差','关注入口'):
+                self.assertIn(expected,value)
+        finally:
+            window.close();app.processEvents()
+
+    def test_monitor_scroll_and_selection_survive_frequent_updates(self):
+        import os
+        os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
+        from PyQt5 import QtCore,QtGui,QtWidgets
+        from decision.agent.manual_ui import ManualWindow
+        app=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        window=ManualWindow();window.show();window.settings_toggle.setChecked(False)
+        try:
+            window.status=dict(status='waiting_navigation',navigation_status='running',localization_status='valid',
+                input_stale=False,origin_pose=[0.,0.,0.],floor_id='floor2',goal_id='goal',goal_description='前往目标',
+                goal_distance_m=.2,goal_tolerance_m=.2,stopped=True,
+                monitor=dict(focus='核对任务',last_review=dict(result='unknown',evidence='观察依据很长。'*250)))
+            window.status_received=time.monotonic()
+            with patch.object(window.process,'state',return_value=QtCore.QProcess.Running):
+                window.refresh_status();app.processEvents()
+                bar=window.task_monitor.verticalScrollBar()
+                self.assertGreater(bar.maximum(),10)
+                cursor=window.task_monitor.textCursor()
+                cursor.setPosition(5);cursor.setPosition(12,QtGui.QTextCursor.KeepAnchor)
+                window.task_monitor.setTextCursor(cursor)
+                bar.setValue(bar.maximum()//2)
+                previous=bar.value();height=window.task_monitor.height()
+                self.assertGreater(previous,0)
+                window.status['goal_distance_m']=.19
+                window.status['monitor']['last_review']['evidence']+='额外的观察结果。'
+                window.refresh_status();app.processEvents()
+                self.assertEqual(bar.value(),previous)
+                self.assertEqual((window.task_monitor.textCursor().anchor(),window.task_monitor.textCursor().position()),(5,12))
+                self.assertEqual(window.task_monitor.height(),height)
+                self.assertIn('0.19 m',window.task_monitor.toPlainText())
+            self.assertEqual(window.left_sections.count(),3)
+            self.assertGreater(window.task_monitor.maximumHeight(),window.task_monitor.minimumHeight())
+        finally:
+            window.close();app.processEvents()
 
     def test_registered_goal_requirements_and_agent_choice_are_visible(self):
         import os
@@ -382,7 +458,7 @@ class ManualUiTests(unittest.TestCase):
             self.assertEqual(window.context_tree.topLevelItemCount(),0)
             self.assertEqual(window.operation_events.topLevelItemCount(),1)
             item=window.operation_events.topLevelItem(0)
-            self.assertIn('mapped_pose_unavailable',item.text(2))
+            self.assertIn('地图定位不可用',item.text(2))
             self.assertEqual(item.data(0,QtCore.Qt.UserRole),42)
         finally:
             window.close();app.processEvents()

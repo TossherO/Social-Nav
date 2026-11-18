@@ -9,7 +9,11 @@ from difflib import SequenceMatcher
 
 
 KINDS=('conversation_exchange','conversation_trimmed','tool_intent','model_action_applied',
-       'api_request','api_response','api_failure','model_failed','model_protocol_rejected',
+       'api_request','api_response','api_failure','api_input_rejected','model_failed','model_protocol_rejected',
+       'navigation_repeated_refusal',
+       'manual_arrival_invalidated','manual_arrival_recovered',
+       'elevator_monitor_started','elevator_model_failed','elevator_model_discarded',
+       'floor_handoff_started','manual_floor_rebound','elevator_stage_completed',
        'model_result_discarded','manual_arrival_confirmation','manual_goal_evidence_wait_started',
        'manual_goal_evidence_wait_finished','manual_goal_evidence_refresh_failed','manual_goal_evidence_unproven','manual_route_progress',
        'manual_route_trace','manual_reference_status','manual_reference_region_conflict','operator_command','navigation_completed','navigation_ack','navigation_cancel_confirmed',
@@ -22,7 +26,7 @@ _LONG_HEX = re.compile(r'(?<![0-9a-fA-F])[0-9a-fA-F]{32,}(?![0-9a-fA-F])')
 def goal_requirements(goal,names):
     """Describe registered requirements separately from the Agent's choice."""
     req=goal.get('requirement') or {};kind=req.get('kind')
-    kinds={'point':'到指定点','region':'进入区域','reference':'靠近参考对象','circuit':'绕区域一圈',
+    kinds={'point':'到指定点','region':'进入区域','reference':'靠近参考对象','circuit':'绕区域一圈','route':'多点路线',
            'sequence':'依次经过多个地点','skill':'技能任务'}
     directions={'clockwise':'顺时针','counterclockwise':'逆时针'}
     target=req.get('target_id');target_name=names.get(target,target) if target else None
@@ -38,11 +42,13 @@ def goal_requirements(goal,names):
             lines.append('执行方案方向：'+directions.get(selected['direction'],selected['direction'])+'（'+origin+'）')
     fields={'position':'指定坐标','required_yaw':'要求朝向（弧度）','facing':'面向',
             'position_rule':'位置规则','max_distance_m':'距离上限（米）','checkpoints':'依次经过',
-            'semantic_conditions':'必须满足','visual_preferences':'视觉偏好','stage_type':'任务阶段'}
+            'semantic_conditions':'必须满足','visual_preferences':'视觉偏好','stage_type':'任务阶段',
+            'floor_id':'所在楼层','to_floor':'目标楼层'}
     for key,label in fields.items():
         value=req.get(key)
         if value in (None,'',[]):continue
         if key=='facing':value=names.get(value,value)
+        elif key=='stage_type' and value=='elevator':value='乘坐电梯'
         elif key=='checkpoints':value=[names.get(item,item) for item in value]
         elif key=='position_rule' and value=='region_centroid':value='区域正中'
         lines.append(label+'：'+('、'.join(map(str,value)) if isinstance(value,list) and key!='position' else str(value)))
@@ -301,6 +307,11 @@ def event_detail(db, seq):
 
 def event_summary(event):
     kind,value=event['kind'],event['value']
+    if kind=='task_monitor_event':
+        labels={'navigation_state_changed':'导航状态变化','operator_review_requested':'用户请求复核',
+                'semantic_review_due':'周期复核','region_entered':'进入区域','no_measured_progress':'暂无测量进展',
+                'distance_progress':'行驶距离','rotation_progress':'转角','stopped_duration':'持续停稳','monitor_timeout':'等待超时'}
+        return '复核触发：'+'、'.join(labels.get(r.get('kind'),str(r.get('kind','未知'))) for r in value.get('reasons',[]))
     if kind=='conversation_exchange':
         parts=[]
         for message in value.get('messages',[]):
@@ -313,9 +324,23 @@ def event_summary(event):
     if kind=='tool_intent':return '调用工具: '+str(value.get('tool',''))
     if kind=='api_request':return '模型请求 '+str(value.get('call_id',''))[:10]
     if kind=='api_response':return '模型返回: '+str(value.get('content') or value.get('finish_reason') or '')[:200]
+    if kind=='api_input_rejected':
+        return f"模型输入估算为 {value.get('estimated_input_tokens')}，超过本地限制 {value.get('limit')}；请求未发送。"
     if kind=='manual_route_progress':
         i=value.get('next_waypoint_index');n=value.get('waypoint_count')
         return f'路线进度：下一点 {i+1 if isinstance(i,int) else "?"}/{n}'
+    if kind=='manual_arrival_invalidated':
+        reasons={'movement_detected':'检测到运动','outside_position_tolerance':'离开目标位置容差',
+                 'outside_heading_tolerance':'朝向超出要求','localization_identity_changed':'定位身份变化',
+                 'map_association_changed':'地图关联变化','target_changed':'目标身份变化','clock_regressed':'反馈时间回退'}
+        return '到达证据失效：'+reasons.get(value.get('reason'),str(value.get('reason') or '未知原因'))
+    if kind=='manual_arrival_recovered':return '已重新记录定位和停稳到达证据。'
+    if kind=='elevator_monitor_started':return '开始周期观察乘梯过程。'
+    if kind=='elevator_model_failed':return '乘梯观察不可用：'+str(value.get('reason') or '未知原因')
+    if kind=='elevator_model_discarded':return '乘梯阶段已变化，未应用旧观察结果。'
+    if kind=='floor_handoff_started':return '已判断离开电梯，正在切换目标楼层地图。'
+    if kind=='manual_floor_rebound':return '目标楼层定位已关联，原任务正在恢复。'
+    if kind=='elevator_stage_completed':return '乘梯阶段已完成，继续后续子任务。'
     if kind=='manual_reference_region_conflict':return '参考路径穿过绕行区域；请手动停稳并等待新建议。'
     if kind=='manual_reference_status':
         status={'reference_ready':'已生成','waiting':'等待中','unavailable':'不可用'}.get(value.get('status'),value.get('status') or '未知')
@@ -324,10 +349,21 @@ def event_summary(event):
     if kind in ('manual_goal_evidence_wait_started','manual_goal_evidence_wait_finished','manual_goal_evidence_unproven'):
         prefix=('证据已就绪' if value.get('ready') else
                 '等待到达证据' if kind=='manual_goal_evidence_wait_started' else '到达证据不足')
-        return prefix+('：'+', '.join(value.get('issues',[])) if value.get('issues') else '')
+        labels={'manual_arrival_evidence_missing_or_mismatched':'当前到达证据缺失或不匹配',
+                'operator_confirmation_missing_or_mismatched':'到达证据缺失或不匹配',
+                'stopped_estimate_unavailable':'当前停稳估计不可用','mapped_pose_unavailable':'地图定位不可用'}
+        return prefix+('：'+', '.join(labels.get(issue,issue) for issue in value.get('issues',[])) if value.get('issues') else '')
     if kind=='manual_goal_evidence_refresh_failed':
         return '读取新反馈失败：'+str(value.get('error_type','未知错误'))
     if kind=='conversation_trimmed':return '模型上下文已裁剪；会话历史仍保留'
+    if kind=='navigation_repeated_refusal':
+        reason={'current_stage_does_not_support_navigation':'当前任务阶段不能导航',
+                'model_input_context_unavailable':'原始任务或观察身份不可用',
+                'model_input_expired_request_fresh_observation':'观察过期且无法重新核对',
+                'candidate_footprint_occupied':'目标位置与占据区域冲突',
+                'fresh_navigation_view_unavailable':'无法获取有效的新地图观察',
+                'robot_pose_changed_since_model_input':'轮椅位姿已明显变化'}.get(value.get('reason'),value.get('reason') or '未知原因')
+        return f"同一导航目标被拒绝 {value.get('count','?')} 次：{reason}；请调整任务或补充说明。"
     if kind=='route_repeated_refusal':
         reasons={'proposed_route_intersects_task_region':'路线穿过目标区域',
                  'circuit_waypoint_inside_region':'途经点位于绕行区域内',
@@ -336,6 +372,7 @@ def event_summary(event):
                  'waypoint_currently_occupied':'途经点被当前局部观测占据',
                  'waypoint_unknown':'途经点位置为未知',
                  'waypoint_outside_map':'途经点位于地图外',
+                 'route_waypoints_review_required':'自主途经点较多，需要精简或说明保留原因',
                  'circuit_route_must_return_to_its_start':'路线未回到起点附近',
                  'proposed_route_does_not_make_requested_circuit':'绕行方向或圈数不符',
                  'proposed_route_excessive_reverse_winding':'路线包含过多反向绕行',

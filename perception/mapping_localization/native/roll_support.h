@@ -9,6 +9,7 @@
 #include <pcl/common/transforms.h>
 #include <pcl/common/angles.h>
 #include <pcl/registration/icp.h>
+#include <pcl/registration/correspondence_rejection_trimmed.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/filters/voxel_grid.h>
 #include <vector>

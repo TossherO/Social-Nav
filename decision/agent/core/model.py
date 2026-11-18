@@ -17,18 +17,24 @@ from .media import image_part, png_part
 from .context import project_dialogue, view_context, visual_inputs
 from .model_projection import ModelProjection
 from perception.environment.context import fingerprint
-from ..tools.framework import Reply, native_tools
+from ..tools.framework import Reply, TOOL_SPECS, native_tools
 
 
 class ApiError(RuntimeError):
     pass
 
 
+class InputEstimateExceeded(ValueError):
+    def __init__(self, estimate):
+        self.estimate = estimate
+        super().__init__('Estimated request input exceeds local context limit')
+
+
 REGISTRATION_TOOLS=('record_task','lookup_places','query_map','observe_scene','wait_for_event','ask_user')
 
 
-def input_bound(messages, tools):
-    """Count text conservatively; never count Base64 as text tokens."""
+def input_estimate(messages, tools):
+    """Approximate tokens from observed usage; Base64 is not counted as text."""
     material = copy.deepcopy(messages)
     from PIL import Image
     images = visual_bound = 0
@@ -45,16 +51,17 @@ def input_bound(messages, tools):
                         picture.verify()
                     if max(width,height)>2048:
                         raise ValueError('Image exceeds the 2048 pixel development limit')
-                    # Reservation estimate, not a claim about server tokenization.
-                    visual_bound += 1024+2*math.ceil(width/14)*math.ceil(height/14)
+                    # Empirical estimate for the configured model and recorded
+                    # image sizes; the service remains the source of actual usage.
+                    visual_bound += math.ceil(width*height/1024)+32
                     part['image_url'] = dict(url='[current image]')
                     images += 1
     if images > 6:
         raise ValueError('At most a reference map, three current images and two historical RGBs are supported')
-    bound = len(encode(dict(messages=material,tools=tools)).encode())+4096+visual_bound
-    if bound > 131072:
-        raise ValueError('Request exceeds development input budget')
-    return bound
+    estimate = math.ceil(len(encode(dict(messages=material,tools=tools)).encode())/3.6)+visual_bound
+    if estimate > 131072:
+        raise InputEstimateExceeded(estimate)
+    return estimate
 
 
 def cache_messages(system, messages, mode):
@@ -143,7 +150,7 @@ class Model:
         self._url = url if url.endswith('/chat/completions') else url+'/chat/completions'
         self.budget, self.store, self.transport = budget, store, transport
 
-    def request(self, system, messages, *, observation_id=None, max_tokens=2048, tool_names=None, tool_choice='auto', projection=None):
+    def request(self, system, messages, *, observation_id=None, max_tokens=2048, tool_names=None, tool_choice='auto', projection=None, transient=False):
         if tool_choice not in ('auto','required'):
             raise ValueError('Unsupported tool choice')
         tools = native_tools(tool_names)
@@ -159,15 +166,24 @@ class Model:
         else:
             output_bound = self.output_limit or max_tokens
             body['max_tokens'] = output_bound
-        bound = input_bound(body['messages'],tools)
-        call_id = self.budget.reserve(bound,output_bound)
-        self.store.event('api_request',dict(call_id=call_id,purpose='native_tool_decision',model=self.model,
-            observation_id=observation_id,request=body,input_token_reservation=bound,cache_mode=self.cache_mode))
+        try:
+            bound = input_estimate(body['messages'],tools)
+        except InputEstimateExceeded as error:
+            self.store.event('api_input_rejected',dict(reason='estimated_context_limit',
+                estimated_input_tokens=error.estimate,limit=131072,request_sent=False))
+            raise
+        estimated_output=self.budget.estimate_output(self.model,self.thinking_mode,output_bound)
+        call_id = self.budget.reserve(bound,estimated_output)
+        request_event=dict(call_id=call_id,purpose='elevator_monitor' if transient else 'native_tool_decision',model=self.model,
+            observation_id=observation_id,input_token_reservation=bound,
+            input_estimate_method='empirical_utf8_and_image_area',estimated_output_tokens=estimated_output,cache_mode=self.cache_mode)
+        if not transient:request_event['request']=body
+        self.store.event('api_request',request_event)
         began = time.perf_counter()
         first = usage = returned_model = finish_reason = status = None
         chunks,text_parts,reason_parts,calls = [],[],[],{}
         try:
-            with httpx.Client(timeout=httpx.Timeout(90,connect=10),transport=self.transport,
+            with httpx.Client(timeout=httpx.Timeout(None,connect=10),transport=self.transport,
                               follow_redirects=False,trust_env=False) as client:
                 with client.stream('POST',self._url,headers={'Authorization':'Bearer '+self._key},json=body) as response:
                     status = response.status_code
@@ -175,7 +191,8 @@ class Model:
                         detail = response.read()[:16384].decode('utf-8',errors='replace')
                         for secret in (self._key,self._url,self._private['base_url']):
                             detail = detail.replace(secret,'[private]')
-                        self.store.event('api_http_error',dict(call_id=call_id,http_status=status,detail=detail))
+                        self.store.event('api_http_error',dict(call_id=call_id,http_status=status,
+                                                               detail='[transient request]' if transient else detail))
                         raise ApiError('API rejected native tool request; no retry performed')
                     for line in response.iter_lines():
                         if not line.startswith('data:'):
@@ -228,9 +245,13 @@ class Model:
                 returned_model=returned_model,wall_s=time.time(),first_token_s=first,
                 full_return_s=time.perf_counter()-began,usage=usage,finish_reason=finish_reason,
                 raw_chunks=chunks,content=message['content'],tool_calls=message.get('tool_calls',[]),
-                message=message,reasoning=''.join(reason_parts),cache=cache_usage(usage,self.cache_mode))
-            self.budget.finish(call_id,record)
-            self.store.event('api_response',record)
+                message=message,reasoning=''.join(reason_parts),thinking_mode=self.thinking_mode,
+                cache=cache_usage(usage,self.cache_mode))
+            saved=({k:record[k] for k in ('call_id','requested_model','returned_model','wall_s','first_token_s',
+                                           'full_return_s','usage','finish_reason','thinking_mode','cache')} if transient else record)
+            if transient:saved['purpose']='elevator_monitor'
+            self.budget.finish(call_id,saved)
+            self.store.event('api_response',saved)
             expected = 'tool_calls' if calls else 'stop'
             if returned_model!=self.model or finish_reason!=expected or self.thinking_mode=='off' and record['reasoning']:
                 raise ApiError('Unexpected model, finish reason or thinking output')
@@ -245,18 +266,28 @@ class Model:
             return reply
         except (httpx.HTTPError,ValueError,KeyError,TypeError,jsonschema.ValidationError,ApiError) as error:
             self.store.event('api_failure',dict(call_id=call_id,error_type=type(error).__name__,http_status=status,
-                full_return_s=time.perf_counter()-began,partial_chunks=chunks,automatically_retried=False))
+                full_return_s=time.perf_counter()-began,partial_chunks=[] if transient else chunks,automatically_retried=False))
             raise ApiError('Native tool request failed or response rejected; see session events, no retry performed') from None
 
     def decide(self, payload, *, observation=None, spatial_view=None):
         registration=payload.get('current_state',{}).get('requirements_registered') is False
         prompt='registration_prompt.txt' if registration else 'system_prompt.txt'
         system = (ROOT/'decision/agent/configs'/prompt).read_text().strip()
+        if payload.get('current_state',{}).get('cross_floor'):
+            single_floor=('当前会话只支持当前楼层的地图，不能识别乘梯后的楼层或切换定位地图。跨楼层任务不能按当前地图伪装为同层任务，也不能把抵达电梯口当作乘梯完成；应调用 ask_user 说明当前限制并询问如何分段。'
+                          if registration else
+                          '当前会话只连接一层的地图，不能自行乘电梯、识别楼层或切换定位地图。不同楼层即使坐标系同名，其坐标和标注也不能互换。遇到跨楼层任务时应明确说明这一限制并询问如何分段，不能把到达电梯口视为乘梯或到达其他楼层。')
+            system=system.replace(single_floor,'')
+            system+=('\n\n当前是人工驾驶跨楼层任务。cross_floor 提供各楼层独立标注；相同ID在不同楼层对应不同地图。'
+                     '按用户指令依次登记各阶段的 floor_id；乘梯阶段用 kind=skill、stage_type=elevator、空 target_id，'
+                     '填写当前 floor_id 与目标 to_floor。乘梯前需要先导航至当前楼层的电梯等候区，'
+                     '乘梯和手柄由操作者完成，无需用户预先指定电梯编号。程序在乘梯阶段周期观察并衔接目标楼层定位；'
+                     '出电梯不等于目的地到达，目标楼层关联后再执行后续阶段。不得混用楼层坐标。')
         if not registration and payload.get('current_state',{}).get('execution_mode',{}).get('mode') == 'operator_driven':
             system += ('\n\n当前是人工驾驶测试：navigate 只向操作者提供目标位姿，轮椅由操作者使用原车手柄驾驶。'
                        'navigate_route 可一次提交少量途经点，操作者连续经过，中间不要求停车或模型逐点决策。'
-                       'Agent 不控制底盘、不负责行驶路径；提交目标后等待人工确认及当前定位停稳反馈。'
-                       '绕行或顺序任务还须按实际定位轨迹检查；路线仅作参考，不证明通行安全。'
+                       'Agent 不控制底盘、不负责行驶路径；提交目标后等待当前定位和持续停稳估计，人工确认可作为备用。'
+                       '任务是否完成由你结合途经记录、实际轨迹和当前观察判断；路线仅作参考，不证明通行安全。'
                        '不能把目标接收或人工确认单独说成到达，也不能声称自动导航成功。')
         reference = payload.get('reference_map')
         messages = project_dialogue(payload['messages'],reference)
@@ -331,7 +362,7 @@ class Model:
         projection=ModelProjection()
         messages=projection.messages(messages,protected_indices=(1 if reference is not None else 0,))
         return self.request(system,messages,observation_id=None if observation is None else observation.record['observation_id'],
-                            tool_names=REGISTRATION_TOOLS if registration else None,
+                            tool_names=REGISTRATION_TOOLS if registration else tuple(name for name in TOOL_SPECS if name!='record_elevator_observation'),
                             tool_choice='required' if registration else 'auto',projection=projection)
 
 

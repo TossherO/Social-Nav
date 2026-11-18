@@ -56,7 +56,7 @@ def navigation_grid(raw,asset=None):
 
 
 def sample_ground(grid,xy,offset=0.):
-    """Sample supported cell heights only, in this grid's own coordinate frame."""
+    """Sample measured or explicitly fitted display heights in the grid frame."""
     xy=np.asarray(xy,float).reshape(-1,2);z=np.full(len(xy),np.nan);source=np.zeros(len(xy),np.uint8)
     meta,layers=grid.metadata,grid.layers
     if 'ground_z' not in layers or 'ground_support' not in layers:return z,source
@@ -66,6 +66,11 @@ def sample_ground(grid,xy,offset=0.):
     good=layers['ground_support'][y,x]&np.isfinite(layers['ground_z'][y,x])
     take=indices[good];z[take]=layers['ground_z'][y[good],x[good]]+offset
     source[take]=layers['display_ground_source'][y[good],x[good]] if 'display_ground_source' in layers else 1
+    fitted=layers.get('ground_estimated')
+    if fitted is not None:
+        estimate=(~good)&fitted[y,x]&np.isfinite(layers['ground_z'][y,x])
+        take=indices[estimate];z[take]=layers['ground_z'][y[estimate],x[estimate]]+offset
+        source[take]=5
     return z,source
 
 
@@ -132,18 +137,21 @@ def line_segments(points):
 
 
 def ground_cloud(grid,offset=.005):
-    """A sparse coloured occupancy surface, without filling unsupported cells."""
+    """A coloured surface with fitted heights distinguished from supported ground."""
     from .scans import pointcloud_message
     from sensor_msgs.msg import PointField
     layers,meta=grid.layers,grid.metadata
-    good=layers.get('ground_support',np.zeros_like(layers['occupancy'],bool))&np.isfinite(layers.get('ground_z',np.nan))
+    support=layers.get('ground_support',np.zeros_like(layers['occupancy'],bool))
+    fitted=layers.get('ground_estimated',np.zeros_like(layers['occupancy'],bool))
+    good=(support|fitted)&np.isfinite(layers.get('ground_z',np.nan))
     y,x=np.nonzero(good);r=meta['resolution'];origin=meta['origin_xy']
     xyz=np.c_[origin[0]+(x+.5)*r,origin[1]+(y+.5)*r,layers['ground_z'][y,x]+offset] if len(y) else np.empty((0,3))
     message=pointcloud_message(xyz,meta['frame_id'],meta['stamp_s'])
     data=np.empty(len(xyz),dtype=[('x','<f4'),('y','<f4'),('z','<f4'),('rgb','<u4')])
     for i,k in enumerate(('x','y','z')):data[k]=xyz[:,i]
     values=layers['occupancy'][y,x]
-    data['rgb']=np.where(values==0,0xD7DDE3,np.where(values==100,0xF05848,0xC89F50))
+    data['rgb']=np.where(fitted[y,x]&~support[y,x],0x90BCD5,
+                         np.where(values==0,0xD7DDE3,np.where(values==100,0xF05848,0xC89F50)))
     message.fields.append(PointField(name='rgb',offset=12,datatype=PointField.UINT32,count=1))
     message.point_step=16;message.row_step=len(xyz)*16;message.data=data.tobytes()
     return message

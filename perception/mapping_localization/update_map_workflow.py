@@ -77,7 +77,9 @@ def run(args):
             raise RuntimeError('未保存起点，已取消后续处理。')
         stage = '局部建图'
         print('\n[2/4] '+stage, flush=True)
-        subprocess.run(['bash', str(scripts/'build_map.sh'), '--bag', str(bag), '--out', str(local),
+        # Local updates are registered to an existing map; independently
+        # levelling the short local run would impose an unrelated floor frame.
+        subprocess.run(['bash', str(scripts/'build_map.sh'), '--pipeline', 'raw', '--bag', str(bag), '--out', str(local),
                         *gpu], check=True, cwd=ROOT)
         stage = '在旧图中定位'
         print('\n[3/4] '+stage, flush=True)

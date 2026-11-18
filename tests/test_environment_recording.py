@@ -141,7 +141,7 @@ class RecordingTests(unittest.TestCase):
                 environment_scans_fingerprint=file_fingerprint(journal),
                 playback=dict(bag_fingerprint=None,map_fingerprint=map_fingerprint(mapping)))
             (run/'run.json').write_text(json.dumps(record))
-            manifest=export_environment(run,root/'environment',export_pgm=True)
+            manifest=export_environment(run,root/'environment',export_pgm=True,ground_method='map_endpoints')
             self.assertEqual(manifest['source']['input_kind'],'live')
             self.assertIsNone(manifest['source']['bag_fingerprint'])
             self.assertNotIn('bag',manifest['source'])
@@ -152,18 +152,18 @@ class RecordingTests(unittest.TestCase):
             (run/'people.jsonl').write_text(json.dumps(dict(stamp_s=1.1,observation_id='live:1.1',
                 health='valid',frame_id='odom',clock_domain='ros_sim_time',tracks=[],
                 localization_binding=dict(session_id='live',generation=0,frame_id='odom')))+'\n')
-            export_environment(run,root/'with_people',people=run)
+            export_environment(run,root/'with_people',people=run,ground_method='map_endpoints')
             self.assertIsNotNone(GridSnapshot.load(root/'with_people/layers.npz').metadata['dynamic_filter']['people'])
             # Removed modes fail explicitly instead of changing the requested export.
             with self.assertRaisesRegex(ValueError,'Unknown static dynamic-filter mode'):
                 export_environment(run,root/'missing_people',filter_mode='people')
             config=load_config()
-            unfiltered=export_environment(run,root/'unfiltered',config=config,filter_mode='none')
+            unfiltered=export_environment(run,root/'unfiltered',config=config,filter_mode='none',ground_method='map_endpoints')
             self.assertEqual(unfiltered['configuration']['static']['dynamic_filter'],'none')
             self.assertEqual(config['static']['dynamic_filter'],'geometric')
             self.assertNotIn('dynamic_filter',GridSnapshot.load(root/'unfiltered/layers.npz').metadata)
             config['static']['dynamic_filter']='none'
-            export_environment(run,root/'configured_unfiltered',config=config)
+            export_environment(run,root/'configured_unfiltered',config=config,ground_method='map_endpoints')
             self.assertNotIn('dynamic_filter',GridSnapshot.load(root/'configured_unfiltered/layers.npz').metadata)
             with self.assertRaisesRegex(ValueError,'own bound sealed'):export_environment(run,root/'wrong',bag='other.bag')
             with journal.open('ab') as stream:stream.write(b'changed')

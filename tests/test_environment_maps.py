@@ -226,7 +226,9 @@ class StaticMapTests(unittest.TestCase):
             out=path/'export'
             with self.assertRaisesRegex(ValueError,'sealed scan journal'):
                 export_environment(run,out,export_pgm=True)
-            manifest=export_environment(run,out,export_pgm=True,filter_mode='none')
+            with self.assertRaisesRegex(ValueError,'Tracked scan ground requires'):
+                export_environment(run,out,export_pgm=True,filter_mode='none')
+            manifest=export_environment(run,out,export_pgm=True,filter_mode='none',ground_method='map_endpoints')
             self.assertEqual({p.name for p in out.iterdir()},{'manifest.yaml','layers.npz','map.pgm','map.yaml'})
             self.assertEqual(manifest['kind'],'static_environment')
             self.assertEqual(manifest['map_type'],'static_environment_map')

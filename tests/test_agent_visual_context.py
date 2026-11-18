@@ -10,12 +10,12 @@ import httpx
 import numpy as np
 from PIL import Image, ImageDraw
 from decision.agent import CONFIG_DIR
-from decision.agent.core.model import Model, cache_messages, input_bound
+from decision.agent.core.model import Model, cache_messages, input_estimate
 from decision.agent.core.session import AgentSession
 from decision.agent.core.store import Budget, Store
 from decision.agent.core.trajectory import Trajectory
 from decision.agent.tools.places import Catalog
-from decision.agent.tools.spatial import ReferenceMap, SpatialView, display_extent, map_font, wrap_map_text, reference_layout, render, semantic_label_layout
+from decision.agent.tools.spatial import ReferenceMap, SpatialView, compact_map_layout, display_extent, map_font, wrap_map_text, reference_layout, render, semantic_label_layout
 from perception.environment.layers import GridSnapshot
 from tests.test_agent import ScriptedFeedback, reply
 from tests.test_agent_conversation import wire
@@ -89,6 +89,27 @@ class VisualContextTests(unittest.TestCase):
         self.assertEqual(view['source_stamp_s'],10.)
         self.assertEqual(view['trajectory']['sample_count'],1)
         self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM events WHERE kind='reference_map_prepared'").fetchone()[0],1)
+        state=json.loads(body['messages'][-1]['content'][0]['text'])['state']
+        self.assertIn('occupancy',state['visual_inputs']['map_legend'])
+        self.assertIn('camera',state['visual_inputs']['map_legend'])
+        for data in self.session.spatial_view.images:
+            self.assertEqual(max(Image.open(io.BytesIO(data)).size),1024)
+
+    def test_compact_model_map_only_places_coordinate_ticks_outside_map(self):
+        from unittest.mock import patch
+        bounds=[0.,0.,14.,10.];layout=compact_map_layout(bounds,max_edge=1024)
+        self.assertGreater(layout['width']*layout['height']/(layout['size'][0]*layout['size'][1]),.88)
+        written=[];original=ImageDraw.ImageDraw.text
+        def capture(draw,xy,text,*args,**kwargs):
+            written.append((xy,text))
+            return original(draw,xy,text,*args,**kwargs)
+        with patch.object(ImageDraw.ImageDraw,'text',capture):
+            image=render(self.session.catalog,self.grid,bounds,[4.,4.,0.],compact=True,detailed=True)
+        self.assertEqual(Image.open(io.BytesIO(image)).size,layout['size'])
+        for (x,y),text in written:
+            if x<layout['left'] or y>=layout['top']+layout['height']:
+                float(text)  # Only numerical coordinate labels may lie outside the map.
+        self.assertNotIn('MAP XY metres | x right, y up | yaw CCW radians',[t for _,t in written])
 
     def test_static_crop_keeps_camera_view_and_local_grid_binding(self):
         from decision.agent.tools.sensors import sensor_context
@@ -287,10 +308,30 @@ class VisualContextTests(unittest.TestCase):
     def test_budget_accepts_six_real_images_and_rejects_extra_images(self):
         self.save();self.nav.state['stamp_s']=11.;self.save()
         body = self.request()
-        self.assertLess(input_bound(body['messages'],body['tools']),131072)
+        self.assertLess(input_estimate(body['messages'],body['tools']),131072)
         oversized = copy.deepcopy(body['messages'])
         oversized[-1]['content'].append(copy.deepcopy(body['messages'][1]['content'][1]))
-        with self.assertRaises(ValueError):input_bound(oversized,body['tools'])
+        with self.assertRaises(ValueError):input_estimate(oversized,body['tools'])
+
+    def test_estimate_uses_image_dimensions_instead_of_encoded_size(self):
+        def message(image):
+            blob=io.BytesIO();image.save(blob,format='PNG')
+            url='data:image/png;base64,'+base64.b64encode(blob.getvalue()).decode()
+            return [dict(role='user',content=[dict(type='image_url',image_url=dict(url=url))])]
+        solid=Image.new('RGB',(64,64),'white')
+        varied=Image.fromarray(np.random.default_rng(1).integers(0,256,(64,64,3),dtype=np.uint8))
+        self.assertEqual(input_estimate(message(solid),[]),input_estimate(message(varied),[]))
+        self.assertGreater(input_estimate(message(Image.new('RGB',(128,128))),[]),input_estimate(message(solid),[]))
+
+    def test_estimate_context_limit_reports_without_sending(self):
+        from decision.agent.core.model import InputEstimateExceeded
+        config=self.root/'private.json';config.write_text(json.dumps(dict(base_url='https://example.invalid/v1',api_key='test-secret')))
+        model=Model(config,self.budget,self.store,transport=httpx.MockTransport(lambda _:self.fail('unexpected request')))
+        with self.assertRaises(InputEstimateExceeded):
+            model.request('s',[dict(role='user',content='a'*600000)])
+        row=self.store.db.execute("select value from events where kind='api_input_rejected'").fetchone()
+        event=json.loads(row[0]);self.assertFalse(event['request_sent'])
+        self.assertGreater(event['estimated_input_tokens'],event['limit'])
 
 
 class TrajectoryTests(unittest.TestCase):

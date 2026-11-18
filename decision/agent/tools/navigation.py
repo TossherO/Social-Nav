@@ -300,12 +300,17 @@ class NavigationSkill:
                          pose=copy.deepcopy(feedback.get('origin_pose') if self.navigation.scope in ('live','manual') else feedback.get('pose')),
                          frame_id=feedback.get('origin_frame_id') if self.navigation.scope in ('live','manual') else feedback.get('frame_id'),
                          execution_feedback=self.navigation.scope == 'simulation', stopped=True,
-                         physical_acceptance=False, evidence_kind=('operator_confirmation_and_localization_estimate' if self.navigation.scope == 'manual'
+                         physical_acceptance=False, evidence_kind=(('automatic_localization_and_stop_estimate' if
+                             (feedback.get('manual_arrival_evidence') or {}).get('source')=='automatic_localization_and_stop_estimate'
+                             else 'operator_confirmation_and_localization_estimate') if self.navigation.scope == 'manual'
                              else 'localization_estimate' if self.navigation.scope == 'live' else 'simulation'))
             if self.navigation.scope == 'manual':
                 proof['operator_confirmation']=copy.deepcopy(feedback.get('manual_confirmation'))
+                proof['manual_arrival_evidence']=copy.deepcopy(feedback.get('manual_arrival_evidence'))
             if feedback.get('route_start_stamp_s') is not None:
                 proof['route_start_stamp_s']=feedback['route_start_stamp_s']
+            if feedback.get('route_count') is not None:
+                proof['route_visits']=copy.deepcopy(feedback.get('route_visits'))
             if self.navigation.scope == 'live':
                 r['pending_completion'] = proof
                 r.update(status='holding',reason='goal_arrival_hold')

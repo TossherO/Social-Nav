@@ -17,6 +17,8 @@ def parser():
     value = argparse.ArgumentParser(description=__doc__)
     value.add_argument('--bag', required=True, help='Read-only input ROS bag')
     value.add_argument('--out', required=True, help='New run directory beneath outputs/ or /tmp/')
+    value.add_argument('--pipeline', choices=('floor', 'raw'), default='floor',
+        help='Default: single-floor robust mapping and floor correction; raw preserves the original mapping workflow')
     value.add_argument('--gpu', help='CUDA_VISIBLE_DEVICES selection; otherwise preserve current visibility')
     value.add_argument('--start', type=float, default=0., help='Start offset in recorded seconds')
     value.add_argument('--duration', type=float, help='Optional recorded duration; default is the full remainder')
@@ -27,6 +29,11 @@ def parser():
     value.add_argument('--roll-backend', choices=('cpu', 'cuda'))
     value.add_argument('--deskew-backend', choices=('cpu', 'cuda'))
     value.add_argument('--loop-closure', choices=('on', 'off'), help='Optional override; default preserves module configuration')
+    value.add_argument('--trace-roll', action='store_true', help='Log ROLL loop-closure diagnostics to stderr')
+    value.add_argument('--robust-loop', action='store_true', help='Experimental trimmed loop ICP with overlap and correction gates')
+    value.add_argument('--loop-min-gap', type=float, default=0., help='Experimental minimum seconds between accepted robust loops')
+    value.add_argument('--loop-adaptive-noise', action='store_true', help='Experimental robust-loop quality weighting')
+    value.add_argument('--roll-library', help='Optional explicit ROLL native library for a separate offline candidate')
     value.add_argument('--no-record-scans', action='store_true', help='Omit ray evidence; subsequent free-space export is unavailable')
     value.add_argument('--backend-timeout', type=float, default=120., help='Maximum seconds waiting on a full backend window')
     return value
@@ -35,6 +42,14 @@ def parser():
 def validate(args):
     if not math.isfinite(args.start) or args.start < 0:
         raise ValueError('--start must be finite and nonnegative')
+    if not math.isfinite(args.loop_min_gap) or args.loop_min_gap < 0:
+        raise ValueError('--loop-min-gap must be finite and nonnegative')
+    if (args.loop_min_gap or args.loop_adaptive_noise) and args.pipeline == 'raw' and not args.robust_loop:
+        raise ValueError('Loop quality options require --robust-loop')
+    if args.pipeline == 'floor' and args.no_record_scans:
+        raise ValueError('The default floor pipeline requires recorded scans; use --pipeline raw to omit them')
+    if args.pipeline == 'floor' and args.loop_closure == 'off':
+        raise ValueError('The default floor pipeline requires loop closure; use --pipeline raw to disable it')
     for key in ('duration', 'backend_timeout'):
         value = getattr(args, key)
         if value is not None and (not math.isfinite(value) or value <= 0):
@@ -89,7 +104,7 @@ def write_json(path, value):
     path.write_text(json.dumps(value, allow_nan=False, ensure_ascii=False, indent=2)+'\n')
 
 
-def build(args, stop=None):
+def _build_raw(args, stop=None):
     import numpy as np
     import yaml
     from perception.mapping_localization.configuration import algorithm_config, DEFAULT_CALIBRATION
@@ -112,6 +127,16 @@ def build(args, stop=None):
                                 deskew_backend=args.deskew_backend)
     if args.loop_closure is not None:
         config['roll']['loopClosureEnableFlag'] = args.loop_closure == 'on'
+    if args.trace_roll:
+        config['roll']['traceLoopClosure'] = True
+    if args.robust_loop:
+        if args.loop_closure == 'off':raise ValueError('Robust loop cannot be enabled while loop closure is off')
+        config['roll']['robustLoopClosure'] = True
+        config['roll']['robustLoopMinGap'] = args.loop_min_gap
+        config['roll']['robustLoopAdaptiveNoise'] = args.loop_adaptive_noise
+    roll_library = Path(args.roll_library).expanduser().resolve() if args.roll_library else None
+    if roll_library is not None and not roll_library.is_file():
+        raise ValueError('Explicit ROLL library does not exist')
     calibration = Path(args.lidar_imu_calibration or DEFAULT_CALIBRATION).expanduser().resolve()
     timing = check_time_calibration(config, bag=bag, group=args.sensor_clock_group,
                                     session_file=args.sensor_session, source_file=calibration)
@@ -126,6 +151,7 @@ def build(args, stop=None):
                backend='native_roll_fast_lio', mode='mapping', bag=str(bag), map=str(output/'map'),
                start=args.start, duration=args.duration, algorithm_parameters=config,
                imu_time_calibration=timing, scheduling='offline_bounded_backpressure_all_selected_scans',
+               roll_library=None if roll_library is None else dict(path=str(roll_library),fingerprint=file_fingerprint(roll_library)),
                driver='perception.mapping_localization.build_map',
                playback=dict(records='localization.jsonl', bag_fingerprint=fingerprint, start_offset_s=args.start))
     write_json(output/'run.json', run)
@@ -148,7 +174,7 @@ def build(args, stop=None):
 
     print('开始纯建图：{}\n输出：{}'.format(bag, output), flush=True)
     try:
-        session = LocalizationSession(config_path, mode='mapping', allow_local_only=True, metrics=metrics)
+        session = LocalizationSession(config_path, mode='mapping', allow_local_only=True, metrics=metrics,roll_library=roll_library)
         if not args.no_record_scans:
             journal = ScanJournal(output/'environment/scans.sqlite', environment['scan_recording'],
                 dict(config=environment, sensor_frame='rslidar',
@@ -257,6 +283,88 @@ def build(args, stop=None):
     if failure is not None:
         raise failure
     return summary
+
+
+def finish_floor_pipeline(raw, output, raw_summary, stop=None):
+    """Derive a floor-corrected map; retain the raw run and all provenance."""
+    from .ground_refine import create as refine
+    from .level_map import create as level
+    from .results import file_fingerprint, map_fingerprint
+
+    raw, output = Path(raw).resolve(), Path(output).resolve()
+    stop = stop if stop is not None else threading.Event()
+    began = time.monotonic()
+    def check_stop():
+        if stop.is_set(): raise InterruptedError('Mapping cancelled during floor correction')
+    check_stop()
+    print('使用同源扫描估计地面并校正整体倾斜。', flush=True)
+    level_report = level(raw, None, output/'levelled')
+    check_stop()
+    print('根据扫描地面观测优化关键帧高度。', flush=True)
+    refine_report = refine(output/'levelled', output/'optimized')
+    check_stop()
+    final = output/'optimized'; result = json.loads((final/'run.json').read_text())
+    digest = map_fingerprint(final/'map')
+    if digest != result['playback']['map_fingerprint']:
+        raise ValueError('Final optimized map binding is invalid')
+    if result.get('source') == 'bag' and file_fingerprint(result['bag']) != result['playback']['bag_fingerprint']:
+        raise ValueError('Source bag changed during floor correction')
+    # The public mapping run keeps the normal locations, with relative links to
+    # immutable stage results; scans are sealed once in the raw subdirectory.
+    (output/'map').symlink_to('optimized/map', target_is_directory=True)
+    (output/'localization.jsonl').symlink_to('optimized/localization.jsonl')
+    (output/'frontend.jsonl').symlink_to('raw/frontend.jsonl')
+    (output/'algorithm.yaml').symlink_to('raw/algorithm.yaml')
+    (output/'environment').mkdir()
+    (output/'environment/scans.sqlite').symlink_to('../raw/environment/scans.sqlite')
+    result.update(map=str(output/'map'), driver='perception.mapping_localization.build_map',
+                  pipeline=dict(name='single_floor_robust_ground', raw_run=str(output/'raw'),
+                                levelled_run=str(output/'levelled'), optimized_run=str(final),
+                                assumption='single_approximately_horizontal_floor',
+                                verified_for_navigation=False))
+    write_json(output/'run.json', result)
+    summary = dict(raw_summary, pipeline='single_floor_robust_ground',
+                   raw_map=str(output/'raw/map'), levelled_map=str(output/'levelled/map'),
+                   map=str(output/'map'), level_angle_deg=level_report['rotation_angle_deg'],
+                   floor_correction_wall_s=time.monotonic()-began,
+                   ground_constraint=refine_report['solver'],
+                   verification='offline_mapping_not_independent_localization_or_navigation_acceptance')
+    write_json(output/'summary.json', summary)
+    return summary
+
+
+def build(args, stop=None):
+    if args.pipeline == 'raw':
+        return _build_raw(args, stop)
+    bag, output = validate(args)
+    stop = stop if stop is not None else threading.Event()
+    if stop.is_set(): raise InterruptedError('Mapping cancelled before starting')
+    raw_args = argparse.Namespace(**vars(args))
+    raw_args.out = str(output/'raw'); raw_args.pipeline = 'raw'; raw_args.robust_loop = True
+    if raw_args.roll_library is None:
+        raw_args.roll_library = str(ROOT/'outputs/runtime/build/localization/libsocial_nav_roll_mapping.so')
+    if not Path(raw_args.roll_library).is_file():
+        raise ValueError('Default robust ROLL mapping library is missing; rebuild native mapping libraries')
+    output.mkdir(parents=True, exist_ok=False)
+    try:
+        raw_summary = _build_raw(raw_args, stop)
+        return finish_floor_pipeline(output/'raw', output, raw_summary, stop)
+    except BaseException as error:
+        # Keep completed stages for diagnosis, but never mark the whole workflow
+        # successful when a correction or final publication fails.
+        for name in ('map', 'localization.jsonl', 'frontend.jsonl', 'algorithm.yaml'):
+            link = output/name
+            if link.is_symlink(): link.unlink()
+        scans_link = output/'environment/scans.sqlite'
+        if scans_link.is_symlink(): scans_link.unlink()
+        if (output/'environment').is_dir() and not any((output/'environment').iterdir()):
+            (output/'environment').rmdir()
+        record = dict(success=False, source='bag', mode='mapping', bag=str(bag),
+                      pipeline='single_floor_robust_ground', error=type(error).__name__+': '+str(error),
+                      verification='incomplete_workflow_not_navigation_acceptance')
+        write_json(output/'run.json', record)
+        write_json(output/'summary.json', record)
+        raise
 
 
 def main(argv=None):

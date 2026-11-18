@@ -126,7 +126,7 @@ class NavigationView:
             heading=np.vstack([pose[:2],pose[:2]+.8*np.array([np.cos(pose[2]),np.sin(pose[2])])])
             heights,_=surface.sample(heading);out['heading']=np.c_[heading,heights+.05]
         if out['goal'] is not None:out['goal_z']=float(surface.sample([out['goal'][:2]])[0][0])
-        status={0:'unknown (markers omitted)',1:'supported cells',2:'fitted near vehicle',3:'fixed XY diagnostic',4:'static supported cells'}[out['ground_source']]
+        status={0:'unknown (markers omitted)',1:'supported cells',2:'fitted near vehicle',3:'fixed XY diagnostic',4:'static supported cells',5:'estimated static ground'}[out['ground_source']]
         for key in ('reference','trajectory'):
             data=out[key]
             if data is not None:
@@ -135,13 +135,13 @@ class NavigationView:
                 if key=='reference':
                     if self.asset is not None and data.get('local_to_map') is not None:
                         mapped=transform_poses(data['display_poses'],data['local_to_map'])
-                        heights,_=sample_ground(self.asset.snapshot,mapped[:,:2],self.z)
+                        heights,sources=sample_ground(self.asset.snapshot,mapped[:,:2],self.z)
                         missing=~np.isfinite(data['heights']) & np.isfinite(heights)
                         if missing.any():
                             points=np.c_[mapped[missing,:2],heights[missing],np.ones(missing.sum())]
                             local=points@np.linalg.inv(np.asarray(data['map_from_local'],float)).T
                             data['heights'][missing]=local[:,2]
-                            data['height_sources'][missing]=4
+                            data['height_sources'][missing]=np.where(sources[missing]==5,5,4)
                     fallback=out['localization_row']['position'][2]+self.z
                     data['heights'],approx=complete_display_heights(data['heights'],fallback)
                     data['height_sources'][approx]=5

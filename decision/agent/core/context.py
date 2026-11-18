@@ -99,5 +99,11 @@ def visual_inputs(state, observation, spatial_view, reference, keyframes, status
     if spatial_view is not None:
         maps = current(spatial_view.record,'view_id',spatial_view.record['source_stamp_s'])
         maps['local_source'] = spatial_view.record['local_source']
-    return dict(rgb=rgb,maps=maps,reference_map_available=reference is not None,
+    legend=dict(coordinates='地图坐标单位为米；横轴向右为正，纵轴向上为正，车体 yaw 从 +x 逆时针为正。',
+        occupancy='浅色表示静态先验空闲，深色表示静态先验占据，灰色表示未知；不代表当前障碍已排除。',
+        annotations='红色 P 为标注点，绿色 R 及边界为标注区域；名称和正式身份在标注目录中。',
+        robot='橙色轮廓和箭头表示车体位置、形状和朝向；蓝色轨迹为实测定位轨迹。',
+        camera='局部图中的紫色标记和两条线表示相机位置及近似水平视野，不证明实际可见或没有遮挡。',
+        proposals='洋红色表示候选及与观察目标的连线，蓝色途经点连线只表示顺序，不是实际参考路径。')
+    return dict(rgb=rgb,maps=maps,map_legend=legend,reference_map_available=reference is not None,
                 historical_keyframe_ids=list(keyframes),historical_images_are_current=False)

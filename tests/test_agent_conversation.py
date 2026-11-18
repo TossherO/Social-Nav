@@ -44,6 +44,25 @@ class ConversationTests(unittest.TestCase):
     def client(self, handler):
         return Model(self.config,self.budget,self.store,transport=httpx.MockTransport(handler))
 
+    def test_default_history_retains_more_then_trims_old_complete_groups(self):
+        events=[]
+        conversation=Conversation('原任务',{},lambda kind,value:events.append((kind,value)))
+        for i in range(20):conversation.notice('test',index=i,text='x'*900)
+        self.assertEqual(len(conversation.exchanges),20)
+        self.assertFalse(any(kind=='conversation_trimmed' for kind,_ in events))
+        for i in range(20,33):conversation.notice('test',index=i,text='x'*900)
+        self.assertEqual(len(conversation.exchanges),32)
+        self.assertEqual(json.loads(conversation.exchanges[0][0]['content'])['index'],1)
+        self.assertEqual(conversation.messages()[0]['content'],'原任务')
+        self.assertTrue(any(kind=='conversation_trimmed' for kind,_ in events))
+
+    def test_history_size_limit_still_trims_old_groups(self):
+        conversation=Conversation('原任务',{},lambda *_:None)
+        conversation.notice('test',index=1,text='x'*25000)
+        conversation.notice('test',index=2,text='x'*25000)
+        self.assertEqual(len(conversation.exchanges),1)
+        self.assertEqual(json.loads(conversation.exchanges[0][0]['content'])['index'],2)
+
     def test_fragmented_native_arguments_and_separate_tools_preserve_original_reply(self):
         call = reply('lookup_places',name='电梯口').message['tool_calls'][0]
         raw = call['function']['arguments']
@@ -109,6 +128,14 @@ class ConversationTests(unittest.TestCase):
         stats=cache_usage(dict(prompt_tokens=100,prompt_tokens_details=dict(cached_tokens=60,cache_creation_input_tokens=20)),'explicit')
         self.assertEqual(stats['hit_fraction'],.6)
         self.assertEqual(stats['cache_creation_input_tokens'],20)
+
+    def test_model_response_has_no_read_deadline(self):
+        seen=[]
+        def handle(request):
+            seen.append(request.extensions.get('timeout'))
+            return httpx.Response(200,text=wire(reply('lookup_places',name='').message['tool_calls']))
+        self.client(handle).decide(self.session.prompt())
+        self.assertIsNone(seen[0]['read'])
 
     def test_metadata_is_referenced_only_while_full_tool_result_is_retained(self):
         view_id=query_map(self.session)
@@ -176,7 +203,7 @@ class ConversationTests(unittest.TestCase):
             if len(calls)==1:
                 return reply('navigate',goal_id='elevator',pose=[5,4,0],
                              view_id=view.record['view_id'],orientation_source='autonomous')
-            return reply('check_goal',goal_id='elevator')
+            return reply('check_goal',goal_id='elevator',review_result='satisfied',review_evidence='已到达目标并停稳')
         actor=AgentLoop(self.session,work)
         try:
             actor.tick();actor.model.thread.join(1);actor.tick()

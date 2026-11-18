@@ -11,6 +11,9 @@ cmake -S "$PROJECT/perception/mapping_localization/native" -B "$BUILD_ROOT/local
   -DSOCIAL_NAV_BUILD_LIO_CUDA="${SOCIAL_NAV_BUILD_LIO_CUDA:-ON}" -DSOCIAL_NAV_CUDA_ARCH="$SOCIAL_NAV_CUDA_ARCH" \
   -DCMAKE_CUDA_COMPILER="$CUDA_COMPILER" -DCMAKE_CUDA_HOST_COMPILER="${CUDAHOSTCXX:-$HOST_COMPILER}"
 cmake --build "$BUILD_ROOT/localization" --parallel "${BUILD_JOBS:-2}"
+# Keep the offline mapping library separately replaceable from live localization.
+install -m 755 "$BUILD_ROOT/localization/libsocial_nav_roll.so" "$BUILD_ROOT/localization/.libsocial_nav_roll_mapping.so.tmp"
+mv -f "$BUILD_ROOT/localization/.libsocial_nav_roll_mapping.so.tmp" "$BUILD_ROOT/localization/libsocial_nav_roll_mapping.so"
 cmake -S "$PROJECT/perception/environment/native" -B "$BUILD_ROOT/environment" \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER="$HOST_COMPILER" -DCMAKE_CUDA_COMPILER="$CUDA_COMPILER" \
   -DSOCIAL_NAV_CUDA_ARCH="$SOCIAL_NAV_CUDA_ARCH"

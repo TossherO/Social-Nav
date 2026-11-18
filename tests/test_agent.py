@@ -34,6 +34,8 @@ def query_map(session):
         session.navigation.spatial_inputs=lambda:dict(global_grid=GridSnapshot(
             dict(frame_id=session.catalog.value['frame_id'],shape=[100,140],resolution=.1,origin_xy=[0.,0.],snapshot_id='unit-static'),
             dict(occupancy=np.zeros((100,140),np.int8))),scene=None,
+            pose=(session.navigation.snapshot().get('origin_pose') if session.navigation.snapshot().get('origin_frame_id')==session.catalog.value['frame_id']
+                  else session.navigation.snapshot().get('pose') if session.navigation.snapshot().get('frame_id')==session.catalog.value['frame_id'] else None),
             stamp_s=session.navigation.snapshot()['stamp_s'],clock_domain=session.navigation.clock_domain)
     session.call('query_map')
     return session.spatial_view.record['view_id']
@@ -236,22 +238,34 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(budget.summary()['calls'], 1)
         budget.close()
 
-    def test_local_shared_budget_changes_limit_without_resetting_ledger(self):
+    def test_shared_usage_ledger_does_not_enforce_old_local_budget(self):
         import json
         config=self.root/'configs/agent_budget.local.json'
         config.parent.mkdir()
         first=shared_budget(self.root)
-        self.assertEqual(first.limit,.8)
+        self.assertIsNone(first.limit)
         first.reserve(1000,100)
         first.close()
         config.write_text(json.dumps({'limit_rmb':2.5}))
         second=shared_budget(self.root)
-        self.assertEqual(second.limit,2.5)
+        self.assertIsNone(second.limit)
         self.assertEqual(second.summary()['calls'],1)
+        second.reserve(5000000,100)
         second.close()
-        config.write_text(json.dumps({'limit_rmb':11}))
-        with self.assertRaises(ValueError):
-            shared_budget(self.root)
+
+    def test_output_estimate_uses_reported_matching_model_and_mode(self):
+        budget=Budget(self.root/'estimate.sqlite')
+        try:
+            self.assertEqual(budget.estimate_output('m','off',2048),512)
+            for tokens in (100,300):
+                call_id=budget.reserve(100,512)
+                budget.finish(call_id,dict(requested_model='m',thinking_mode='off',
+                    usage=dict(prompt_tokens=100,completion_tokens=tokens)))
+            self.assertEqual(budget.estimate_output('m','off',2048),200)
+            self.assertEqual(budget.estimate_output('other','off',2048),512)
+            self.assertEqual(budget.estimate_output('m','low',6144),1024)
+            self.assertEqual(budget.estimate_output('m','off',150),150)
+        finally:budget.close()
 
     def client(self, reply):
         config = self.root/'private.json'
@@ -312,7 +326,8 @@ class AgentTests(unittest.TestCase):
             self.assertNotIn('max_tokens',requests[0])
             reservation=budget.db.execute('SELECT reserved FROM calls').fetchone()[0]
             event=json.loads(self.store.db.execute("SELECT value FROM events WHERE kind='api_request' ORDER BY seq DESC LIMIT 1").fetchone()[0])
-            self.assertAlmostEqual(reservation,(event['input_token_reservation']*1.2+6144*4)/1e6)
+            self.assertEqual(event['estimated_output_tokens'],1024)
+            self.assertAlmostEqual(reservation,(event['input_token_reservation']*1.2+1024*4)/1e6)
         finally:
             budget.close()
 

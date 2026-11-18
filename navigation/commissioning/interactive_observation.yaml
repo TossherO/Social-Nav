@@ -1,7 +1,7 @@
 # 只供本车非执行观察入口使用；实机执行使用 interactive.yaml。
-map: outputs/perception/lab_floor2_20261107/mapping_compensated/map
-static_map: outputs/perception/lab_floor2_20261107/static_scans_10cm_manual_door
-coverage: navigation/commissioning/coverage_floor2_full.yaml
-initial_pose_hint: navigation/commissioning/height_hint.json
+map: outputs/perception/floor2_height_diagnostics_20261118/levelled_ground_refined/map
+static_map: outputs/perception/floor2_height_diagnostics_20261118/levelled_ground_refined_static_manual
+# 未指定 coverage 时，根据当前定位图自动生成全图关联范围。
+initial_pose_hint: outputs/perception/floor2_height_diagnostics_20261118/levelled_ground_refined_height_hint.json
 motion_config: navigation/planning/configs/motion.yaml
 motion_profile: trial

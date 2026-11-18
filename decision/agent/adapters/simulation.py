@@ -5,6 +5,7 @@ No ROS imports or robot output. All feedback explicitly belongs to simulation.
 import copy
 import numpy as np
 from .. import ROOT
+from ..core.route import record_route_visit
 
 
 class SimulationNavigation:
@@ -56,6 +57,7 @@ class SimulationNavigation:
         self.route = None
         self.route_index = None
         self.route_start_stamp_s = None
+        self.route_visits = []
 
     def snapshot(self):
         return dict(scope=self.scope, clock_domain=self.clock_domain, stamp_s=10+self.t,
@@ -70,6 +72,7 @@ class SimulationNavigation:
                     planning_search_budget_s=self.planning['pose_search']['max_search_s'],
                     route_index=self.route_index,route_count=None if self.route is None else len(self.route['waypoints']),
                     route_start_stamp_s=self.route_start_stamp_s,
+                    route_visits=copy.deepcopy(self.route_visits),
                     stopped=bool(np.max(np.abs(self.velocity)) < 1e-8 and all(np.max(abs(x)) < 1e-8 for x in self.queue)))
 
     def spatial_inputs(self):
@@ -100,6 +103,7 @@ class SimulationNavigation:
             raise RuntimeError('Only one active goal, and replacement requires a confirmed stop')
         self.handle = copy.deepcopy(handle)
         self.route = self.route_index = self.route_start_stamp_s = None
+        self.route_visits = []
         self.request = dict(request_id=handle['call_id'], task_id=handle['task_id'], goal_revision=handle['goal_revision'],
                             mode='local', frame_id='sim_odom', target_reference='base_link', goal=place['pose'], goal_behavior='stop')
         self.status, self.stopping = 'running', False
@@ -116,6 +120,7 @@ class SimulationNavigation:
         self.route=copy.deepcopy(place['route'])
         self.route_index=0
         self.route_start_stamp_s=None
+        self.route_visits=[]
         self.status,self.stopping='running',False
         self.best_distance,self.no_progress_s=None,0.
         self.progress_pose=self.pose.copy()
@@ -157,13 +162,6 @@ class SimulationNavigation:
         active = self.status == 'running' and not self.stopping
         if active and (self.reference is None or self.t-self.last_reference >= 3):
             result = self.planner.query(self.request, scene=scene, now=now, clock_domain='simulation')
-            if (self.route is not None and self.route_index>0 and self.route.get('region_polygon') is not None and
-                    result['status']=='path_found'):
-                from ..core.route import path_outside_region
-                if not path_outside_region(result['path'],self.route['region_polygon']):
-                    self.status,self.stopping='stopping',True
-                    self.stop_reason='planned_route_intersects_task_region'
-                    active=False
             self.reference = reference_envelope(result, self.request, scene, None)
             self.last_reference = self.t
         packet = self.control.step(self.request, scene, feedback, now=now, clock_domain='simulation', dt=self.dt,
@@ -180,23 +178,22 @@ class SimulationNavigation:
         dense, error = interpolate_se2(np.array([previous, self.pose]), self.world.resolution, 2000)
         self.collision |= swept_check(truth, self.geometry, dense, error, 2000, prefix=False)['status'] != 'free'
         self.t = round(self.t+self.dt, 8)
-        if active and self.route is not None and self.route_index>0 and self.route.get('region_polygon') is not None:
-            from ..core.route import path_outside_region
-            if not path_outside_region([previous.tolist(),self.pose.tolist()],self.route['region_polygon']):
-                self.status,self.stopping='stopping',True
-                self.stop_reason='measured_route_intersects_task_region'
-                active=False
         if self.collision:
             self.stopping, self.status = True, 'stopping'
         if (active and self.route is not None and self.route_index<len(self.route['waypoints'])-1 and
                 packet['goal'].get('reached_xy') is True):
-            if self.route_index==0:self.route_start_stamp_s=now
-            self.route_index+=1
-            self.best_distance,self.no_progress_s=None,0.
-            self.progress_pose=self.pose.copy()
-            self._route_request()
+            measured=dict(self.snapshot(),origin_pose=feedback['pose'],origin_stamp_s=now)
+            tolerance=.2 if self.route_index==0 else .5
+            if record_route_visit(self.route,self.route_visits,self.handle,measured,self.route_index,tolerance):
+                if self.route_index==0:self.route_start_stamp_s=now
+                self.route_index+=1
+                self.best_distance,self.no_progress_s=None,0.
+                self.progress_pose=self.pose.copy()
+                self._route_request()
         elif active and packet['goal'].get('task_completed') and self.snapshot()['stopped']:
-            self.status = 'arrived'
+            if self.route is None or record_route_visit(self.route,self.route_visits,self.handle,self.snapshot(),
+                                                        self.route_index,.2):
+                self.status = 'arrived'
         if self.stopping and self.snapshot()['stopped']:
             self.status = 'failed' if self.collision else 'stopped'
         if active:

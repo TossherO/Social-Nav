@@ -14,7 +14,7 @@
 #include <gtsam/nonlinear/Values.h>
 #include <gtsam/nonlinear/ISAM2.h>
 #include <atomic>
-#define ROS_INFO_STREAM(...) do{}while(0)
+#define ROS_INFO_STREAM(...) do{if(writeDetails || loopTrace) std::clog << __VA_ARGS__ << std::endl;}while(0)
 #define ROS_WARN_THROTTLE(...) do{}while(0)
 using namespace gtsam;
 struct PointXYZIRPYT
@@ -208,6 +208,10 @@ public:
     ofstream metricsFile;
     ofstream trajectoryFile;
     bool writeDetails = false;
+    bool loopTrace = false;
+    bool robustLoop = false;
+    double robustLoopMinGap = 0., lastAcceptedLoopTime = -INFINITY;
+    bool robustLoopAdaptiveNoise = false;
     std::ofstream registrationFile;
     std::mutex mtxInit;
     std::mutex mtxLoopInfo;
@@ -262,6 +266,13 @@ public:
     #include "MapMath.inc"
 
     explicit NativeRoll(const YAML::Node& c):ParamServer(c),features(c) {
+        nh.param("roll/traceLoopClosure",loopTrace,false);
+        nh.param("roll/robustLoopClosure",robustLoop,false);
+        nh.param("roll/robustLoopMinGap",robustLoopMinGap,0.);
+        nh.param("roll/robustLoopAdaptiveNoise",robustLoopAdaptiveNoise,false);
+        if (!std::isfinite(robustLoopMinGap) || robustLoopMinGap < 0. ||
+            (!robustLoop && (robustLoopMinGap > 0. || robustLoopAdaptiveNoise)))
+            throw std::invalid_argument("Loop quality options require robust loop and a nonnegative time gap");
         if(useGPS||gtAvailable||enableSecondaryFusion||temporaryMappingEnabled||mapUpdateEnabled)
             throw std::invalid_argument("Native ROLL supports the current immutable-map / LiDAR mapping configuration");
         string backend;nh.param("roll/matchingBackend",backend,"cpu");
@@ -401,6 +412,8 @@ public:
         roll_storage::save(directory,*cloudKeyPoses6D,cornerCloudKeyFrames,surfCloudKeyFrames,isIndoorKeyframe,globalMapVisualizationLeafSize,mapFrame);}
 };
 static thread_local string rollError;
+// Bits 0/1: tracing and robust closure; bit 2: loop quality options.
+extern "C" int sn_roll_capabilities(){return 7;}
 extern "C" const char* sn_roll_error(){return rollError.c_str();}
 extern "C" void* sn_roll_create(const char* path){try{return new NativeRoll(YAML::LoadFile(path));}catch(const exception& e){rollError=e.what();return nullptr;}}
 extern "C" void sn_roll_destroy(void* p){delete static_cast<NativeRoll*>(p);}

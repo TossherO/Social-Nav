@@ -264,11 +264,11 @@ class ObservationLoopTests(unittest.TestCase):
                 actor.model.thread.join(1)
             actor.close()
 
-    def test_expired_image_is_not_refreshed_by_query(self):
+    def test_delayed_image_keeps_original_source_time(self):
         self.tools.call('observe_scene')
         context = self.tools.context()
         self.nav.state['stamp_s'] = 14.
-        self.assertFalse(self.tools.valid_context(context))
+        self.assertTrue(self.tools.valid_context(context))
         self.assertEqual(context['source_stamp_s'], 10.)
 
     def test_delayed_static_lookup_is_kept_but_old_motion_intent_is_refused(self):
@@ -290,7 +290,7 @@ class ObservationLoopTests(unittest.TestCase):
             self.nav.t = 4.
             actor.tick()
             result = self.tools.state['history'][-1]['value']['result']
-            self.assertEqual(result['reason'], 'model_input_expired_request_fresh_observation')
+            self.assertEqual(result['reason'], 'model_input_context_unavailable')
             self.assertEqual(self.tools.skill.record['attempts'], [])
         finally:
             actor.close()

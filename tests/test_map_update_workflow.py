@@ -30,6 +30,7 @@ class MapUpdateWorkflowTests(unittest.TestCase):
             self.assertEqual(calls[2][calls[2].index('--coverage')+1], str(coverage))
             self.assertEqual(calls[2][calls[2].index('--pose-file')+1], str(out/'initial_pose.json'))
             self.assertEqual(calls[3][calls[3].index('--localization-run')+1], str(out/'local_reference'))
+            self.assertEqual(calls[1][calls[1].index('--pipeline')+1], 'raw')
             self.assertIn('--gpu', calls[1])
             self.assertIn('--gpu', calls[2])
 

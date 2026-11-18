@@ -1,4 +1,46 @@
 // Shared ROLL registration, submap and pose-graph implementation.
+    bool traceLoopClosure() const {
+#ifdef SOCIAL_NAV_NATIVE_ROLL
+        return loopTrace;
+#else
+        return writeDetails;
+#endif
+    }
+    bool robustLoopClosure() const {
+#ifdef SOCIAL_NAV_NATIVE_ROLL
+        return robustLoop;
+#else
+        return false;
+#endif
+    }
+    bool throttleLoop(double stamp) const {
+#ifdef SOCIAL_NAV_NATIVE_ROLL
+        return robustLoop && stamp-lastAcceptedLoopTime < robustLoopMinGap;
+#else
+        (void)stamp;return false;
+#endif
+    }
+    void recordAcceptedLoop(double stamp) {
+#ifdef SOCIAL_NAV_NATIVE_ROLL
+        lastAcceptedLoopTime=stamp;
+#else
+        (void)stamp;
+#endif
+    }
+    noiseModel::Diagonal::shared_ptr loopQualityNoise(double score, double overlap) const {
+#ifdef SOCIAL_NAV_NATIVE_ROLL
+        if (robustLoop && robustLoopAdaptiveNoise) {
+            // Experimental: only weaken the configured factor for low quality;
+            // ICP score and overlap are not independent covariance estimates.
+            const double scale=std::min(4.,std::max(1.,score/.01*.8/std::max(overlap,.01)));
+            return noiseModel::Diagonal::Variances((Vector(6)<<loop_variance[0]*scale,loop_variance[1]*scale,
+                loop_variance[2]*scale,loop_variance[3]*scale,loop_variance[4]*scale,loop_variance[5]*scale).finished());
+        }
+#else
+        (void)score;(void)overlap;
+#endif
+        return corrNoise;
+    }
     pcl::PointCloud<PointType>::Ptr transformPointCloud(pcl::PointCloud<PointType>::Ptr cloudIn, PointTypePose* transformIn)
     {
         pcl::PointCloud<PointType>::Ptr cloudOut(new pcl::PointCloud<PointType>());
@@ -71,15 +113,32 @@
         // find keys
         int loopKeyPre;
         if (detectLoopClosureDistance(loopKeyCur, &loopKeyPre) == false) {
-            if (writeDetails && lastLoopTraceKey != loopKeyCur)
+            if (traceLoopClosure() && lastLoopTraceKey != loopKeyCur)
                 ROS_INFO_STREAM("loop_check stage=no_candidate current=" << loopKeyCur
                     << " t=" << copy_cloudKeyPoses6D->points[loopKeyCur].time-rosTimeStart << " revision=" << revision);
             lastLoopTraceKey = loopKeyCur;
             return true;
         }
+        std::vector<int> candidates;
+        if (robustLoopClosure()) {
+            std::vector<int> indices;std::vector<float> distances;
+            kdtreeHistoryKeyPoses->radiusSearch(copy_cloudKeyPoses3D->points[loopKeyCur],historyKeyframeSearchRadius,indices,distances,0);
+            int oldest=-1;
+            for (int id:indices)
+                if (copy_cloudKeyPoses6D->points[loopKeyCur].time-copy_cloudKeyPoses6D->points[id].time>historyKeyframeSearchTimeDiff &&
+                    (oldest<0 || copy_cloudKeyPoses6D->points[id].time<copy_cloudKeyPoses6D->points[oldest].time)) oldest=id;
+            if (oldest>=0)candidates.push_back(oldest);
+        }
+        if (candidates.empty() || candidates.front()!=loopKeyPre)candidates.push_back(loopKeyPre);
         lastLoopTraceKey = loopKeyCur;
         const double checkTime = copy_cloudKeyPoses6D->points[loopKeyCur].time-rosTimeStart;
-        if (writeDetails)
+        if (throttleLoop(copy_cloudKeyPoses6D->points[loopKeyCur].time)) {
+            if (traceLoopClosure()) ROS_INFO_STREAM("loop_check stage=throttled current=" << loopKeyCur << " t=" << checkTime);
+            return true;
+        }
+        for (int candidate : candidates) {
+        loopKeyPre=candidate;
+        if (traceLoopClosure())
             ROS_INFO_STREAM("loop_check stage=candidate current=" << loopKeyCur << " previous=" << loopKeyPre
                 << " t=" << checkTime << " distance=" << pointDistance(copy_cloudKeyPoses3D->points[loopKeyCur],
                     copy_cloudKeyPoses3D->points[loopKeyPre]) << " dt="
@@ -92,11 +151,11 @@
         loopFindNearKeyframes(cureKeyframeCloud, loopKeyCur, 0, loopKeyCur);
         loopFindNearKeyframes(prevKeyframeCloud, loopKeyPre, historyKeyframeSearchNum, loopKeyCur);
         if (cureKeyframeCloud->size() < 300 || prevKeyframeCloud->size() < 1000) {
-            if (writeDetails)
+            if (traceLoopClosure())
                 ROS_INFO_STREAM("loop_check stage=insufficient_points current=" << loopKeyCur
                     << " previous=" << loopKeyPre << " source_points=" << cureKeyframeCloud->size()
                     << " target_points=" << prevKeyframeCloud->size());
-            return true;
+            continue;
         }
 #ifndef SOCIAL_NAV_NATIVE_ROLL
         if (pubHistoryKeyFrames.getNumSubscribers() != 0)
@@ -107,11 +166,17 @@
 
         // ICP Settings
         pcl::IterativeClosestPoint<PointType, PointType> registration;
-        registration.setMaxCorrespondenceDistance(historyKeyframeSearchRadius*2);
+        registration.setMaxCorrespondenceDistance(robustLoopClosure() ? 1.0 : historyKeyframeSearchRadius*2);
         registration.setMaximumIterations(100);
         registration.setTransformationEpsilon(1e-6);
         registration.setEuclideanFitnessEpsilon(1e-6);
         registration.setRANSACIterations(0);
+        if (robustLoopClosure()) {
+            pcl::registration::CorrespondenceRejectorTrimmed::Ptr trimmed(new pcl::registration::CorrespondenceRejectorTrimmed);
+            trimmed->setOverlapRatio(.75f);
+            trimmed->setMinCorrespondences(100);
+            registration.addCorrespondenceRejector(trimmed);
+        }
 
         // // gicp is way better than icp
         // static pcl::GeneralizedIterativeClosestPoint<PointType,PointType> registration;
@@ -123,23 +188,38 @@
         TicToc icpTimer;
         registration.align(*unused_result);
 
-        const double score = registration.getFitnessScore();
-        if (writeDetails) {
+        double overlap=0.;
+        if (robustLoopClosure()) {
+            pcl::KdTreeFLANN<PointType> target;
+            target.setInputCloud(prevKeyframeCloud);
+            std::vector<int> nearest(1);std::vector<float> distance(1);
+            size_t close=0;
+            for (const auto& point:unused_result->points)
+                if (target.nearestKSearch(point,1,nearest,distance)>0 && distance[0]<=.16f) ++close;
+            overlap=unused_result->empty()?0.:double(close)/unused_result->size();
+        }
+        const double score = robustLoopClosure() ? registration.getFitnessScore(.16) : registration.getFitnessScore();
+        if (traceLoopClosure()) {
             const Eigen::Matrix4f correction = registration.getFinalTransformation();
             ROS_INFO_STREAM("loop_check stage=icp current=" << loopKeyCur << " previous=" << loopKeyPre
                 << " t=" << checkTime << " source_points=" << cureKeyframeCloud->size()
                 << " target_points=" << prevKeyframeCloud->size() << " converged=" << registration.hasConverged()
-                << " score=" << score << " limit=" << historyKeyframeFitnessScore
+                << " score=" << score << " limit=" << (robustLoopClosure() ? .05 : historyKeyframeFitnessScore)
+                << " overlap=" << overlap << " robust=" << robustLoopClosure()
                 << " dx=" << correction(0,3) << " dy=" << correction(1,3) << " dz=" << correction(2,3)
                 << " angle_rad=" << Eigen::AngleAxisf(correction.block<3,3>(0,0)).angle()
                 << " elapsed_ms=" << icpTimer.toc());
         }
 
-        if (registration.hasConverged() == false || score > historyKeyframeFitnessScore)
-            return true;
+        if (registration.hasConverged() == false ||
+            (robustLoopClosure() ? (score>.05 || overlap<.55) : score>historyKeyframeFitnessScore)) {
+            mapLock.lock();
+            if (revision != mapRevision) return false;
+            continue;
+        }
         mapLock.lock();
         if (revision != mapRevision) {
-            if (writeDetails) ROS_INFO_STREAM("loop_check stage=stale_snapshot current=" << loopKeyCur);
+            if (traceLoopClosure()) ROS_INFO_STREAM("loop_check stage=stale_snapshot current=" << loopKeyCur);
             return false; // Retry this keyframe against the corrected map on the next wake.
         }
         fitnessScore = score;
@@ -163,6 +243,12 @@
         Eigen::Affine3f tWrong = pclPointToAffine3f(copy_cloudKeyPoses6D->points[loopKeyCur]);
         // transform from world origin to corrected pose
         Eigen::Affine3f tCorrect = correctionLidarFrame * tWrong;// pre-multiplying -> successive rotation about a fixed frame
+        if (robustLoopClosure() &&
+            ((tCorrect.translation()-tWrong.translation()).norm()>2.0f ||
+             Eigen::AngleAxisf(correctionLidarFrame.rotation()).angle()>.25f)) {
+            if (traceLoopClosure()) ROS_INFO_STREAM("loop_check stage=correction_rejected current=" << loopKeyCur << " previous=" << loopKeyPre);
+            continue;
+        }
         pcl::getTranslationAndEulerAngles (tCorrect, x, y, z, roll, pitch, yaw);
         gtsam::Pose3 poseFrom = Pose3(Rot3::RzRyRx(roll, pitch, yaw), Point3(x, y, z));
         gtsam::Pose3 poseTo = pclPointTogtsamPose3(copy_cloudKeyPoses6D->points[loopKeyPre]);
@@ -175,15 +261,18 @@
         mtx.lock();
         loopIndexQueue.push_back(make_pair(loopKeyCur, loopKeyPre));
         loopPoseQueue.push_back(poseFrom.between(poseTo));
-        loopNoiseQueue.push_back(corrNoise);
+        loopNoiseQueue.push_back(loopQualityNoise(score,overlap));
         noiseVec.push_back(fitnessScore);
         mtx.unlock();
 
         // add loop constriant
         // loopIndexContainer[loopKeyCur] = loopKeyPre;
         loopIndexContainer.insert(std::pair<int, int>(loopKeyCur, loopKeyPre)); // giseop for multimap
-        if (writeDetails)
+        recordAcceptedLoop(copy_cloudKeyPoses6D->points[loopKeyCur].time);
+        if (traceLoopClosure())
             ROS_INFO_STREAM("loop_check stage=queued current=" << loopKeyCur << " previous=" << loopKeyPre);
+        return true;
+        }
         return true;
     }
 
@@ -669,7 +758,7 @@
             // gtsam::noiseModel::Diagonal::shared_ptr noiseBetween = loopNoiseQueue[i];
             auto noiseBetween = loopNoiseQueue[i];
             gtSAMgraph.add(BetweenFactor<Pose3>(indexFrom, indexTo, poseBetween, noiseBetween));
-            if (writeDetails)
+            if (traceLoopClosure())
                 ROS_INFO_STREAM("loop_check stage=added_to_graph current=" << indexFrom << " previous=" << indexTo);
         }
 
@@ -704,7 +793,7 @@
         if (aLoopIsClosed == true)
         {
             ++mapRevision;
-            if (writeDetails)
+            if (traceLoopClosure())
                 ROS_INFO_STREAM("loop_check stage=optimized revision=" << mapRevision << " t=" << cloudInfoTime-rosTimeStart);
             isam->update();
             isam->update();

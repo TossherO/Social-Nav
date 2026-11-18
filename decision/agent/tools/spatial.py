@@ -151,6 +151,19 @@ def reference_layout(bounds, captions, *, max_edge=2048):
         width = fitted
 
 
+def compact_map_layout(bounds, *, max_edge):
+    """Preserve metric aspect ratio while reserving only coordinate tick margins."""
+    span_x,span_y = bounds[2]-bounds[0],bounds[3]-bounds[1]
+    if not all(math.isfinite(v) and v>0 for v in (span_x,span_y)) or max_edge < 128:
+        raise ValueError('Map requires finite nonempty bounds and a usable image size')
+    ratio=max_edge/1024
+    left,top,right,bottom=(round(v*ratio) for v in (50,5,5,27))
+    scale=min((max_edge-left-right)/span_x,(max_edge-top-bottom)/span_y)
+    w,h=max(1,round(span_x*scale)),max(1,round(span_y*scale))
+    return dict(size=(left+w+right,top+h+bottom),ratio=ratio,left=left,top=top,
+                width=w,height=h,scale=scale)
+
+
 def semantic_label_layout(entries, font, frame, ratio):
     """Place point and region labels around nearby anchors with short leaders."""
     if not entries:return []
@@ -234,7 +247,7 @@ def semantic_label_layout(entries, font, frame, ratio):
 
 def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_local=None, tracks=(), geometry=None,
            size=(896,768), detailed=False, trajectory=(), local_view=False, sensors=None, static_crop=False,
-           candidate_preview=None, route_preview=None):
+           candidate_preview=None, route_preview=None, compact=False, max_edge=1024):
     annotations = catalog.annotations()
     legend = []
     if detailed:
@@ -252,9 +265,13 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
     if local_view and route_preview is not None:
         captions.append('Blue: waypoint order only | red point: rejected waypoint')
         captions.append('Connecting lines are not planned paths or proof of clearance')
-    layout = reference_layout(bounds,[*captions,'    '.join(legend)]) if size is None else None
-    width,height = layout['size'] if layout else size
-    ratio = layout['ratio'] if layout else width/896
+    compact_layout=compact_map_layout(bounds,max_edge=max_edge) if compact else None
+    layout = reference_layout(bounds,[*captions,'    '.join(legend)]) if size is None and not compact else None
+    if compact_layout:
+        width,height=compact_layout['size']
+    else:
+        width,height = layout['size'] if layout else size
+    ratio = compact_layout['ratio'] if compact_layout else layout['ratio'] if layout else width/896
     canvas = Image.new('RGB', (width,height), '#f2f4f7')
     draw = ImageDraw.Draw(canvas)
     font = map_font(round((12 if detailed else 16)*ratio))
@@ -269,12 +286,12 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
             lines.append(item)
     legend_height = layout['legend_height'] if layout else (80+max(0,len(captions)-2)*24+len(lines)*24)*ratio
     x0,y0,x1,y1 = map(float,bounds)
-    top = layout['top'] if layout else round(58*ratio)
-    if local_view and sensors and (sensors.get('camera') or {}).get('view',{}).get('status') == 'approximate_pinhole':
+    top = compact_layout['top'] if compact_layout else layout['top'] if layout else round(58*ratio)
+    if not compact and local_view and sensors and (sensors.get('camera') or {}).get('view',{}).get('status') == 'approximate_pinhole':
         top = max(top,round(72*ratio))
-    scale = min((width-136*ratio)/(x1-x0), (height-top-30*ratio-legend_height)/(y1-y0))
+    scale = compact_layout['scale'] if compact_layout else min((width-136*ratio)/(x1-x0), (height-top-30*ratio-legend_height)/(y1-y0))
     w,h = max(1,round((x1-x0)*scale)),max(1,round((y1-y0)*scale))
-    left = (width-w)//2
+    left = compact_layout['left'] if compact_layout else (width-w)//2
     yy,xx = np.mgrid[:h,:w]
     xy = np.column_stack((x0+(xx.ravel()+.5)/scale, y1-(yy.ravel()+.5)/scale))
     values,_ = sample(global_grid,xy)
@@ -424,21 +441,26 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
     draw.rectangle((left,top,left+w,top+h),outline='#526274',width=1)
     for value in np.linspace(x0,x1,5):
         x,_ = pixel([value,y0])
-        draw.text((x-24*ratio,top+h+8*ratio),f'{value:.1f}',font=small,fill='#223548')
+        text=f'{value:.1f}'
+        tx=x-24*ratio
+        if compact:tx=min(max(1,x-draw.textlength(text,font=small)/2),width-draw.textlength(text,font=small)-1)
+        draw.text((tx,top+h+(3 if compact else 8)*ratio),text,font=small,fill='#223548')
     for value in np.linspace(y0,y1,5):
         _,y = pixel([x0,value])
-        draw.text((max(2,left-55*ratio),y-10*ratio),f'{value:.1f}',font=small,fill='#223548')
-    headers = layout['headers'] if layout else ['MAP XY metres | x right, y up | yaw CCW radians']
-    for i,line in enumerate(headers):
-        draw.text((18*ratio,(10+i*(20 if layout else 24))*ratio),line,font=font,fill='#162c43')
-    if local_view and local_grid is None:
-        caption = 'STATIC PRIOR ONLY | local occupancy not overlaid' if static_crop else 'STATIC PRIOR ONLY | no current local grid'
-        draw.text((18*ratio,34*ratio),caption,font=small,fill='#8b4c15')
-    if local_view and sensors and (sensors.get('camera') or {}).get('view',{}).get('status') == 'approximate_pinhole':
-        draw.text((18*ratio,48*ratio),'Purple: approximate camera FOV, not visibility',font=small,fill='#7848bf')
-    footer = height-legend_height+15*ratio
-    for i,line in enumerate(layout['lines'] if layout else [*captions,*lines]):
-        draw.text((18*ratio,footer+i*(20 if layout else 24)*ratio),line,font=small,fill='#263b51')
+        ty=min(max(0,y-8*ratio),height-16*ratio) if compact else y-10*ratio
+        draw.text((max(1,left-(47 if compact else 55)*ratio),ty),f'{value:.1f}',font=small,fill='#223548')
+    if not compact:
+        headers = layout['headers'] if layout else ['MAP XY metres | x right, y up | yaw CCW radians']
+        for i,line in enumerate(headers):
+            draw.text((18*ratio,(10+i*(20 if layout else 24))*ratio),line,font=font,fill='#162c43')
+        if local_view and local_grid is None:
+            caption = 'STATIC PRIOR ONLY | local occupancy not overlaid' if static_crop else 'STATIC PRIOR ONLY | no current local grid'
+            draw.text((18*ratio,34*ratio),caption,font=small,fill='#8b4c15')
+        if local_view and sensors and (sensors.get('camera') or {}).get('view',{}).get('status') == 'approximate_pinhole':
+            draw.text((18*ratio,48*ratio),'Purple: approximate camera FOV, not visibility',font=small,fill='#7848bf')
+        footer = height-legend_height+15*ratio
+        for i,line in enumerate(layout['lines'] if layout else [*captions,*lines]):
+            draw.text((18*ratio,footer+i*(20 if layout else 24)*ratio),line,font=small,fill='#263b51')
     buffer = io.BytesIO()
     canvas.save(buffer,format='PNG')
     return buffer.getvalue()
@@ -468,7 +490,7 @@ class ReferenceMap:
         if grid.metadata['frame_id'] != static.value['frame_id']:
             raise ValueError('Reference map and annotations use different frames')
         display=display_extent(grid,static.annotations());bounds=display['bounds']
-        image = render(static,grid,bounds,None,size=None,detailed=True)
+        image = render(static,grid,bounds,None,size=None,detailed=True,compact=True,max_edge=2048)
         with Image.open(io.BytesIO(image)) as picture:
             image_size = list(picture.size)
         record = dict(frame_id=static.value['frame_id'],units=dict(position='metres',angle='radians'),
@@ -476,7 +498,7 @@ class ReferenceMap:
                       display_crop=display,global_binding=layer_binding(grid),
                       annotations=static.annotations(),image_role='static_annotated_global_map',
                       image_sha256=hashlib.sha256(image).hexdigest(),image_size=image_size,
-                      image_layout='map_aspect_and_wrapped_legend',max_image_edge=2048,
+                      image_layout='metric_aspect_coordinate_ticks_only',max_image_edge=2048,
                       scope='static_prior_not_current_observation',task_start_in_current_context=True)
         record['reference_map_id'] = fingerprint(record)
         return cls(record,image).verify()
@@ -498,7 +520,7 @@ class SpatialView:
         return measured is None or 0 <= stamp-measured <= max_age
 
     @classmethod
-    def build(cls, catalog, inputs, bounds=None, *, trajectory=(), static_crop=False, candidate_preview=None,route_preview=None):
+    def build(cls, catalog, inputs, bounds=None, *, trajectory=(), static_crop=False, candidate_preview=None,route_preview=None,trajectory_truncated=False,trajectory_sample_interval_s=.1):
         catalog.require_complete()
         global_grid = inputs['global_grid']
         pose = inputs.get('pose')
@@ -550,10 +572,10 @@ class SpatialView:
                         max(bounds[2],float(high[0])),max(bounds[3],float(high[1]))]
         if global_grid.metadata['frame_id'] != catalog.value['frame_id']:
             raise ValueError('Map view and annotation coordinate frames differ')
-        images = (render(catalog,global_grid,full,pose,geometry=inputs.get('geometry'),size=(768,640),trajectory=trajectory),
+        images = (render(catalog,global_grid,full,pose,geometry=inputs.get('geometry'),size=None,trajectory=trajectory,compact=True),
                   render(catalog,global_grid,bounds,pose,
                          geometry=inputs.get('geometry'),local_view=True,sensors=inputs.get('sensors'),static_crop=True,
-                         candidate_preview=candidate_preview,route_preview=route_preview))
+                         candidate_preview=candidate_preview,route_preview=route_preview,compact=True))
         record = dict(catalog_fingerprint=catalog.fingerprint,map_condition=catalog.condition,
             frame_id=catalog.value['frame_id'],target_reference='base_link',units=dict(position='metres',angle='radians'),
             full_bounds=display['asset_bounds'],overview_bounds=full,display_crop=display,
@@ -574,7 +596,8 @@ class SpatialView:
             heading_reference='base_link_x',camera_extrinsics_status=(inputs.get('sensors') or {}).get('status','not_provided'),
             camera_view=copy.deepcopy(((inputs.get('sensors') or {}).get('camera') or {}).get('view',dict(status='unavailable'))),
             trajectory=dict(segment_count=len(trajectory),sample_count=sum(len(s['samples']) for s in trajectory),
-                            source_binding=fingerprint(trajectory),scope='measured_poses_only_not_planned_route'),
+                            source_binding=fingerprint(trajectory),scope='measured_poses_only_not_planned_route',
+                            older_samples_discarded=trajectory_truncated,sampling_interval_s=trajectory_sample_interval_s),
             image_roles=['trajectory_global_overview','target_or_robot_static_crop'],
             image_sha256=[hashlib.sha256(i).hexdigest() for i in images])
         record['view_id'] = fingerprint(record)

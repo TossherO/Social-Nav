@@ -87,6 +87,10 @@ def query_geometry(snapshot, points, *, frame):
             for name,key in [('ground_z','ground_z'),('clearance_m','clearance'),('unknown_distance_m','unknown_distance')]:
                 value = float(layers[key][y,x]) if key in layers else np.nan
                 row[name] = value if np.isfinite(value) else None
+            if 'ground_estimated' in layers:
+                row['ground_estimated']=bool(layers['ground_estimated'][y,x])
+                row['ground_height_source']=('estimated_manual_plane' if row['ground_estimated'] else
+                    'supported' if layers['ground_support'][y,x] and row['ground_z'] is not None else 'unavailable')
             row['coverage'] = float(layers['coverage'][y,x])
             seen = float(layers['last_observed'][y,x])
             row['last_observed_s'] = seen if np.isfinite(seen) else None

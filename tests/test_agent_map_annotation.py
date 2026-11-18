@@ -70,6 +70,31 @@ class MapAnnotationTests(unittest.TestCase):
         (self.map/'layers.npz').write_bytes(b'changed')
         with self.assertRaisesRegex(ValueError,'已改变'):self.editor.save(self.root/'catalog.json')
 
+    @unittest.skipUnless(Path('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc').is_file(),
+                         'Noto CJK 字体集合不可用')
+    def test_map_labels_use_simplified_chinese_face(self):
+        import os
+        os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
+        from PyQt5 import QtWidgets
+        from matplotlib import font_manager
+        from matplotlib.ft2font import FT2Font
+        from fontTools.ttLib import TTFont
+        from decision.agent.map_annotation import make_figure
+        import matplotlib.pyplot as plt
+        app=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.editor.update('点','door','门1',[],[0,0])
+        fig=make_figure(self.editor,self.root/'result.json')
+        try:
+            label=next(text for text in fig.axes[0].texts if text.get_text()=='门1')
+            actual=font_manager.findfont(label.get_fontproperties())
+            collection=TTFont('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',fontNumber=2)
+            try:expected=collection.getGlyphID(collection.getBestCmap()[ord('门')])
+            finally:collection.close()
+            self.assertEqual(FT2Font(actual).get_char_index(ord('门')),expected)
+            self.assertEqual(font_manager.FontProperties(fname=actual).get_name(),'Noto Sans CJK SC')
+        finally:
+            plt.close(fig);app.processEvents()
+
 
 class ShadowIsolationTests(unittest.TestCase):
     def test_live_session_refuses_agent_goal_and_cancel_before_forwarding(self):

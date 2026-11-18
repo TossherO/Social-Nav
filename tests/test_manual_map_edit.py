@@ -145,6 +145,63 @@ class ManualMapEditTests(unittest.TestCase):
         self.assertEqual(twice.snapshot.metadata['manual_free_cells_total'], 0)
         self.assertEqual(twice.manifest['limitations'].count('manual_free_not_sensor_observation'), 1)
 
+    def test_plane_fit_estimates_manual_free_without_claiming_observed_ground(self):
+        from perception.environment.layers import finish_evidence
+        from perception.visualization.surface import sample_ground
+        shape=(40,40);y,x=np.mgrid[:40,:40];ground=(1+.02*x*.1-.03*y*.1).astype(np.float32)
+        cells=np.zeros(shape,np.int8);cells[17:23,17:23]=100
+        support=np.ones(shape,bool);support[17:23,17:23]=False;ground[~support]=np.nan
+        nan=np.full(shape,np.nan);layers=finish_evidence(cells,np.ones(shape,bool),np.full(shape,9.),
+            np.ones(shape,np.float32),nan.copy(),nan.copy(),ground,support,.1)
+        metadata=dict(snapshot_id='plane-source',map_id='map-a',frame_id='map',stamp_s=10.,
+                      shape=list(shape),origin_xy=[0.,0.],resolution=.1,geometry_status='STATIC_SCAN_OBSERVED')
+        source=self.root/'plane_source'
+        _save_package(GridSnapshot(metadata,layers),source,{'map_fingerprint':{}},load_config(),'map',0,True,[])
+        edited=cells.copy();edited[17:23,17:23]=0
+        out=self.root/'plane_edited'
+        static_edit.save_manual_map(source,out,edited,expected_binding=static_edit.source_binding(source),fit_ground=True)
+        asset=StaticEnvironmentMap(out);actual=asset.snapshot.layers;mask=actual['ground_estimated']
+        self.assertEqual(int(mask.sum()),36)
+        self.assertFalse(actual['ground_support'][mask].any())
+        self.assertTrue(np.isnan(actual['last_observed'][mask]).all())
+        np.testing.assert_allclose(actual['ground_z'][mask],(1+.02*x*.1-.03*y*.1)[mask],atol=.01)
+        self.assertIn('estimated_ground_not_sensor_observation',asset.manifest['limitations'])
+        query=asset.query_geometry([[1.75,1.75]],frame='map')[0]
+        self.assertTrue(query['ground_estimated']);self.assertEqual(query['ground_height_source'],'estimated_manual_plane')
+        heights,kind=sample_ground(asset.snapshot,[[1.75,1.75]])
+        self.assertTrue(np.isfinite(heights[0]));self.assertEqual(kind[0],5)
+        from decision.agent.workflows.manual import display_points
+        points,approximate=display_points(asset.snapshot,[[1.75,1.75]])
+        self.assertEqual(approximate,[0]);self.assertTrue(np.isfinite(points[0][2]))
+        from perception.environment.navigation import static_support
+        local=GridSnapshot(dict(shape=list(shape),resolution=.1,origin_xy=[0.,0.],stamp_s=10.),{})
+        selected=np.zeros(shape,bool);selected[20,20]=True;selected[25,25]=True
+        supported,_=static_support(local,asset.snapshot,np.eye(4),np.array([0.,0.,1.]),
+                                   [.12,1.8],selected,.2)
+        np.testing.assert_array_equal(supported,[False,True])
+        existing=self.root/'already_edited';static_edit.save_manual_map(source,existing,edited,
+            expected_binding=static_edit.source_binding(source))
+        filled=self.root/'filled_existing'
+        static_edit.save_manual_map(existing,filled,edited,expected_binding=static_edit.source_binding(existing),fit_ground=True)
+        self.assertEqual(int(StaticEnvironmentMap(filled).snapshot.layers['ground_estimated'].sum()),36)
+
+    def test_plane_fit_requires_existing_supported_ground(self):
+        layers=dict(occupancy=np.zeros((3,3),np.int8),ground_z=np.full((3,3),np.nan,np.float32),
+                    ground_support=np.zeros((3,3),bool),manual_edit=np.ones((3,3),bool))
+        with self.assertRaisesRegex(ValueError,'参考点不足'):
+            static_edit.fit_manual_ground(layers,.1)
+        self.assertTrue(np.isnan(layers['ground_z']).all())
+
+    def test_plane_fit_clears_inconsistent_support_without_creating_evidence(self):
+        layers=dict(occupancy=np.zeros((5,5),np.int8),ground_z=np.zeros((5,5),np.float32),
+                    ground_support=np.ones((5,5),bool),manual_edit=np.zeros((5,5),bool))
+        layers['manual_edit'][2,2]=True;layers['ground_z'][2,2]=np.nan
+        report=static_edit.fit_manual_ground(layers,.1)
+        self.assertEqual(report['invalid_support_cleared'],1)
+        self.assertFalse(layers['ground_support'][2,2])
+        self.assertTrue(layers['ground_estimated'][2,2])
+        self.assertTrue(np.isfinite(layers['ground_z'][2,2]))
+
     def test_saved_manual_map_is_not_certified_as_observed_static_path(self):
         from perception.environment.layers import finish_evidence
         from navigation.planning.footprint import VehicleGeometry

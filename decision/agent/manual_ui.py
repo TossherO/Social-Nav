@@ -2,6 +2,7 @@
 import argparse
 from datetime import datetime
 import json
+import math
 from pathlib import Path
 import sqlite3
 import sys
@@ -9,10 +10,12 @@ import time
 import uuid
 
 from PyQt5 import QtCore, QtGui, QtWidgets
+import yaml
 from . import ROOT
 from .ui_data import ContextTimeline,connect_readonly,display_value,event_detail,event_summary,goal_requirements,poll_session,select_detail
 
-STATUS={'ready':'准备决策','waiting_navigation':'等待人工驾驶或到达确认','waiting_observation':'等待新观察',
+STATUS={'ready':'准备决策','waiting_navigation':'等待人工驾驶和自动到达检查','waiting_observation':'等待新观察',
+        'waiting_monitor':'等待任务监控触发',
         'waiting_user':'等待用户继续','needs_clarification':'等待用户答复','paused':'已暂停',
         'stopping':'正在结束任务','cancelled':'已取消','succeeded':'已完成','failed':'未完成',
         'idle':'空闲','running':'进行中',
@@ -21,11 +24,35 @@ OPERATION_EVENTS={'manual_goal_evidence_wait_started':'等待到达证据',
     'manual_goal_evidence_wait_finished':'到达证据等待结果',
     'manual_goal_evidence_refresh_failed':'到达证据读取失败',
     'manual_goal_evidence_unproven':'到达证据不足',
+    'manual_arrival_invalidated':'到达证据失效','manual_arrival_recovered':'到达证据恢复',
     'manual_reference_status':'参考路径预览','manual_reference_region_conflict':'绕行路径冲突','manual_route_progress':'路线进度',
-    'operator_command':'操作结果','navigation_context_lost':'定位或地图变化',
+    'api_input_rejected':'模型输入超过估算限制',
+    'operator_command':'操作结果','task_monitor_event':'任务复核触发','navigation_context_lost':'定位或地图变化',
     'task_connection_lost':'连接中断','model_failed':'模型错误',
     'model_protocol_rejected':'模型格式错误','conversation_trimmed':'上下文裁剪','route_repeated_refusal':'路线重复被拒绝',
+    'navigation_repeated_refusal':'导航目标重复被拒绝',
     'agent_run_finished':'会话结束'}
+MONITOR_TRIGGER_LABELS={'navigation_state_changed':'导航状态变化','operator_review_requested':'用户请求复核',
+    'semantic_review_due':'周期复核','region_entered':'进入区域','no_measured_progress':'暂无测量进展',
+    'distance_progress':'行驶距离','rotation_progress':'转角','stopped_duration':'持续停稳','monitor_timeout':'等待超时'}
+MONITOR_REVIEW_LABELS={'satisfied':'已满足','not_satisfied':'未满足','unknown':'证据不足'}
+
+
+def update_readonly_text(widget, text):
+    """Refresh changing status without moving a reader's viewport or selection."""
+    if widget.toPlainText()==text:return
+    vertical=widget.verticalScrollBar().value()
+    horizontal=widget.horizontalScrollBar().value()
+    cursor=widget.textCursor()
+    anchor,position=cursor.anchor(),cursor.position()
+    widget.setPlainText(text)
+    cursor=widget.textCursor()
+    last=max(0,widget.document().characterCount()-1)
+    cursor.setPosition(min(anchor,last))
+    cursor.setPosition(min(position,last),QtGui.QTextCursor.KeepAnchor)
+    widget.setTextCursor(cursor)
+    widget.verticalScrollBar().setValue(vertical)
+    widget.horizontalScrollBar().setValue(horizontal)
 
 
 def message_label(message):
@@ -168,7 +195,7 @@ class DetailDialog(QtWidgets.QDialog):
 
 
 class ManualWindow(QtWidgets.QMainWindow):
-    def __init__(self, socket='', catalog='', duration=1200):
+    def __init__(self, socket='', catalog='', duration=1200, floor=''):
         super().__init__();self.setWindowTitle('Social-Nav · Agent 人工调试');self.resize(1380,900)
         self.process=QtCore.QProcess(self);self.process.setWorkingDirectory(str(ROOT))
         self.process.readyReadStandardOutput.connect(self.read_stdout)
@@ -180,10 +207,10 @@ class ManualWindow(QtWidgets.QMainWindow):
         self.annotation_names={}
         self.timeline=ContextTimeline();self.timeline_items=[];self.active_tools=[];self.detail_selection=None
         self.latest_request_seq=None
-        self._build(socket,catalog,duration)
+        self._build(socket,catalog,duration,floor)
         self.timer=QtCore.QTimer(self);self.timer.timeout.connect(self.refresh_status);self.timer.start(500)
 
-    def _build(self,socket,catalog,duration):
+    def _build(self,socket,catalog,duration,floor):
         central=QtWidgets.QWidget();self.setCentralWidget(central);outer=QtWidgets.QVBoxLayout(central)
         self.setStyleSheet("""
             QMainWindow, QWidget { background: #f4f6fa; color: #243047; font-size: 13px; }
@@ -206,6 +233,11 @@ class ManualWindow(QtWidgets.QMainWindow):
         form.setContentsMargins(0,0,0,0);outer.addWidget(self.settings_panel)
         self.settings_toggle.toggled.connect(self.toggle_settings)
         self.socket=QtWidgets.QLineEdit(socket);self.catalog=QtWidgets.QLineEdit(catalog)
+        self.floor=QtWidgets.QComboBox()
+        self.floor.addItem('手动选择语义标注','')
+        self.floor.addItem('一楼新地图','floor1');self.floor.addItem('二楼新地图','floor2')
+        self.floor.currentIndexChanged.connect(self.select_floor)
+        self.cross_floor=QtWidgets.QCheckBox('跨楼层任务（人工驾驶与操作电梯）')
         self.instruction=QtWidgets.QLineEdit();self.instruction.setPlaceholderText('输入长程任务，例如：先到停靠点1，再绕圆形区域一圈')
         self.duration=QtWidgets.QSpinBox();self.duration.setRange(1,86400);self.duration.setValue(duration);self.duration.setSuffix(' 秒')
         self.start_button=QtWidgets.QPushButton('开始新任务');self.start_button.clicked.connect(self.start_task)
@@ -219,6 +251,8 @@ class ManualWindow(QtWidgets.QMainWindow):
             form.addWidget(browse,row,2);self.browse_buttons.append(browse)
         form.addWidget(QtWidgets.QLabel('任务'),2,0);form.addWidget(self.instruction,2,1)
         form.addWidget(self.duration,2,2);form.addWidget(self.start_button,0,3);form.addWidget(self.history_button,1,3)
+        form.addWidget(QtWidgets.QLabel('楼层预设'),3,0);form.addWidget(self.floor,3,1)
+        form.addWidget(self.cross_floor,3,2,1,2)
         outer.addWidget(QtWidgets.QLabel('任务、地图、实时状态和 RGB 可能发送至已配置的托管模型服务。'))
         self.status_label=QtWidgets.QPlainTextEdit('未连接');self.status_label.setReadOnly(True)
         self.status_label.setFixedHeight(self.status_label.fontMetrics().lineSpacing()*2+14)
@@ -227,20 +261,38 @@ class ManualWindow(QtWidgets.QMainWindow):
         left=QtWidgets.QWidget();left.setMinimumWidth(380);left_layout=QtWidgets.QVBoxLayout(left)
         left_layout.addWidget(QtWidgets.QLabel('任务与进度'))
         self.current_task=QtWidgets.QLabel('当前任务：无');self.current_task.setWordWrap(True);left_layout.addWidget(self.current_task)
+        self.left_sections=QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.left_sections.setChildrenCollapsible(False);self.left_sections.setHandleWidth(7)
+        left_layout.addWidget(self.left_sections,1)
+        goals_panel=QtWidgets.QWidget();goals_layout=QtWidgets.QVBoxLayout(goals_panel)
+        goals_layout.setContentsMargins(0,0,0,0)
         self.goals=QtWidgets.QTreeWidget();self.goals.setHeaderLabels(['子任务与要求','状态'])
         self.goals.header().setSectionResizeMode(0,QtWidgets.QHeaderView.Stretch)
         self.goals.header().setSectionResizeMode(1,QtWidgets.QHeaderView.ResizeToContents)
-        self.goals.setWordWrap(True);self.goals.setTextElideMode(QtCore.Qt.ElideNone);left_layout.addWidget(self.goals,2)
+        self.goals.setWordWrap(True);self.goals.setTextElideMode(QtCore.Qt.ElideNone);self.goals.setMinimumHeight(65)
+        goals_layout.addWidget(self.goals,1)
         self.goals.itemSelectionChanged.connect(self.show_goal_requirements)
         self.goal_details=QtWidgets.QPlainTextEdit('选择子任务查看完整要求');self.goal_details.setReadOnly(True)
-        self.goal_details.setFixedHeight(self.goal_details.fontMetrics().lineSpacing()*5+14)
-        left_layout.addWidget(self.goal_details)
-        self.target_text=QtWidgets.QLabel('尚无目标');self.target_text.setWordWrap(True);left_layout.addWidget(self.target_text)
+        self.goal_details.setFixedHeight(self.goal_details.fontMetrics().lineSpacing()*4+14)
+        goals_layout.addWidget(self.goal_details)
+        self.left_sections.addWidget(goals_panel)
+        monitor_panel=QtWidgets.QWidget();monitor_layout=QtWidgets.QVBoxLayout(monitor_panel)
+        monitor_layout.setContentsMargins(0,0,0,0)
+        monitor_layout.addWidget(QtWidgets.QLabel('任务监控'))
+        self.task_monitor=QtWidgets.QPlainTextEdit('等待任务状态');self.task_monitor.setReadOnly(True)
+        self.task_monitor.setMinimumHeight(self.task_monitor.fontMetrics().lineSpacing()*5+14)
+        monitor_layout.addWidget(self.task_monitor,1);self.left_sections.addWidget(monitor_panel)
+        target_panel=QtWidgets.QWidget();target_layout=QtWidgets.QVBoxLayout(target_panel)
+        target_layout.setContentsMargins(0,0,0,0)
+        self.target_text=QtWidgets.QLabel('尚无目标');self.target_text.setWordWrap(True);target_layout.addWidget(self.target_text)
         self.target_image=ClickableImage('目标示意图');self.target_image.setAlignment(QtCore.Qt.AlignCenter)
-        self.target_image.setMinimumSize(300,220);left_layout.addWidget(self.target_image,2)
+        self.target_image.setMinimumSize(300,100);target_layout.addWidget(self.target_image,1)
         self.target_pixmap=None;self.target_image.doubleClicked.connect(self.open_target_image)
         self.target_zoom=QtWidgets.QPushButton('放大查看目标示意图');self.target_zoom.setEnabled(False)
-        self.target_zoom.clicked.connect(self.open_target_image);left_layout.addWidget(self.target_zoom)
+        self.target_zoom.clicked.connect(self.open_target_image);target_layout.addWidget(self.target_zoom)
+        self.left_sections.addWidget(target_panel)
+        for index in range(3):self.left_sections.setStretchFactor(index,1)
+        self.left_sections.setSizes([220,180,250])
         split.addWidget(left)
         right=QtWidgets.QWidget();right_layout=QtWidgets.QVBoxLayout(right)
         header=QtWidgets.QHBoxLayout();right_layout.addLayout(header)
@@ -278,7 +330,7 @@ class ManualWindow(QtWidgets.QMainWindow):
         self.notice=QtWidgets.QLabel('历史会话只读；Agent 不会因打开记录而恢复。');self.notice.setWordWrap(True);outer.addWidget(self.notice)
         controls=QtWidgets.QHBoxLayout();outer.addLayout(controls)
         self.buttons={}
-        for name,label in [('arrived','确认到达'),('pause','暂停任务'),('resume','恢复'),('continue','继续'),('cancel','取消任务')]:
+        for name,label in [('review','立即复核'),('arrived','人工确认（备用）'),('pause','暂停任务'),('resume','恢复'),('continue','继续'),('cancel','取消任务')]:
             button=QtWidgets.QPushButton(label);button.clicked.connect(lambda _=False,n=name:self.send_command(n))
             controls.addWidget(button);self.buttons[name]=button
         self.message=QtWidgets.QLineEdit();self.message.setPlaceholderText('需要澄清时输入答复，或输入用于替换任务的新指令')
@@ -286,7 +338,29 @@ class ManualWindow(QtWidgets.QMainWindow):
         for name,label in [('answer','发送答复'),('replace','替换任务')]:
             button=QtWidgets.QPushButton(label);button.clicked.connect(lambda _=False,n=name:self.send_command(n))
             controls.addWidget(button);self.buttons[name]=button
+        if floor:
+            self.floor.setCurrentIndex(self.floor.findData(floor))
         self.refresh_status()
+
+    def select_floor(self):
+        floor=self.floor.currentData()
+        if not floor:return
+        config_name='interactive_agent_floor1.yaml' if floor=='floor1' else 'interactive_agent.yaml'
+        config_path=ROOT/'navigation/commissioning'/config_name
+        try:
+            config=yaml.safe_load(config_path.read_text()) or {}
+            if not isinstance(config,dict):raise ValueError('Invalid floor configuration')
+            configured=config.get('catalog')
+            catalog=(ROOT/configured if configured else ROOT/'outputs/decision/agent/lab_floors_20261114'/f'{floor}_catalog.json')
+        except (OSError,ValueError,yaml.YAMLError,TypeError):
+            self.catalog.clear();self.socket.clear()
+            self.notice.setText('楼层配置无法读取，请手动选择与当前地图匹配的语义标注。');return
+        self.catalog.setText(str(catalog))
+        self.socket.clear()
+        if catalog.is_file():
+            self.notice.setText('已选择楼层标注，请选择同一楼层的观察会话。')
+        else:
+            self.notice.setText('当前楼层地图尚无对应语义标注，请先在该地图上标注，再选择观察会话。')
 
     def toggle_settings(self,expanded):
         self.settings_panel.setVisible(expanded)
@@ -345,6 +419,7 @@ class ManualWindow(QtWidgets.QMainWindow):
         args=['-B','-m','decision.agent','manual','--runtime-socket',socket,'--catalog',catalog,
               '--instruction',instruction,'--interactive','--gui-commands','--duration',str(self.duration.value()),
               '--output',str(output)]
+        if self.cross_floor.isChecked():args.append('--cross-floor')
         self.process.start(sys.executable,args)
         self.settings_toggle.setChecked(False)
         self.notice.setText('正在启动人工 Agent；等待定位和会话初始化。')
@@ -367,6 +442,11 @@ class ManualWindow(QtWidgets.QMainWindow):
             elif event=='manual_target':self.show_target(value)
             elif event=='manual_reference_region_conflict':self.notice.setText(value.get('instruction','参考路径穿过绕行区域，请手动停稳。'))
             elif event=='manual_observation_stage':self.notice.setText(value.get('instruction','进入观察阶段'))
+            elif event=='elevator_stage_completed':
+                index=self.floor.findData(value.get('floor_id'))
+                if index>=0:self.floor.setCurrentIndex(index)
+                self.socket.setText(str(value.get('runtime_socket') or ''))
+                self.notice.setText('已切换到目标楼层观察会话，Agent 将继续原任务。')
             elif event=='manual_rviz_unavailable':self.notice.setText('RViz Agent 标记不可用：'+str(value.get('reason')))
             elif 'event_rejected' in value:self.notice.setText('操作未执行：'+str(value['event_rejected']))
         self.refresh_status()
@@ -588,9 +668,7 @@ class ManualWindow(QtWidgets.QMainWindow):
             ImageDialog(self.target_pixmap,'目标示意图',self).exec_()
 
     def set_status_text(self,text):
-        if self.status_label.toPlainText()!=text:
-            scroll=self.status_label.verticalScrollBar();position=scroll.value()
-            self.status_label.setPlainText(text);scroll.setValue(position)
+        update_readonly_text(self.status_label,text)
 
     def refresh_status(self):
         running=self.process.state()==QtCore.QProcess.Running
@@ -619,31 +697,67 @@ class ManualWindow(QtWidgets.QMainWindow):
             self.set_status_text(f"人工驾驶 ｜ 定位：{loc} ｜ 位姿：{pose} ｜ Agent：{task} ｜ "
                 f"静止估计：{stopped} ｜ 导航：{nav} ｜ 模型：{'请求中' if s.get('model_busy') else '空闲'}{route}"
                 f" ｜ 参考路径：{ref} ｜ 定位源时间：{s.get('source_stamp_s')}")
+            distance=s.get('goal_distance_m');dwell=s.get('arrival_dwell_s');monitor=s.get('monitor') or {}
+            detail=('目标距离 %.2f m（容差 %.2f m）'%(distance,s.get('goal_tolerance_m'))
+                    if isinstance(distance,(int,float)) and isinstance(s.get('goal_tolerance_m'),(int,float)) else '目标距离不可用')
+            if isinstance(dwell,(int,float)):
+                detail+=' ｜ 连续停稳 %.1f/%.1f s'%(dwell,s.get('arrival_dwell_required_s',0.))
+            yaw=s.get('goal_yaw_error_rad');yaw_limit=s.get('goal_yaw_tolerance_rad')
+            if isinstance(yaw,(int,float)) and isinstance(yaw_limit,(int,float)):
+                detail+=' ｜ 朝向偏差 %.0f°（容差 %.0f°）'%(math.degrees(yaw),math.degrees(yaw_limit))
+            trigger=(monitor.get('last_trigger') or {}).get('reasons') or []
+            review=monitor.get('last_review') or {}
+            summary=('子任务：'+str(s.get('goal_description') or '等待登记')+'（'+str(s.get('floor_id') or '楼层未知')+'）'+
+                '\n'+detail+' ｜ 停稳：'+stopped+
+                '\n参考路径：'+ref+(' ｜ '+route.strip(' ｜') if route else '')+
+                '\n监控重点：'+str(monitor.get('focus') or '等待子任务')+
+                '\n最近触发：'+('、'.join(MONITOR_TRIGGER_LABELS.get(x.get('kind'),str(x.get('kind','未知'))) for x in trigger) if trigger else '无')+
+                '\n模型判断：'+MONITOR_REVIEW_LABELS.get(review.get('result'),str(review.get('result') or '无'))+
+                ('\n判断依据：'+str(review['evidence']) if review.get('evidence') else ''))
+            if s.get('elevator_status'):
+                states={'awaiting_entry':'等待进入电梯','awaiting_exit':'等待离开电梯',
+                        'awaiting_destination_localization':'已判断离开电梯，正在切换并定位目标楼层',
+                        'completed':'目标楼层定位已建立'}
+                handoff=s.get('floor_handoff') or {}
+                decision=s.get('elevator_decision') or {}
+                summary=('乘梯任务：'+str(s.get('goal_description') or '')+
+                    '\n阶段：'+states.get(s['elevator_status'],str(s['elevator_status']))+
+                    '\n地图切换：'+str(handoff.get('status') or '尚未开始')+
+                    ('（'+str(handoff['wait_reason'])+'）' if handoff.get('wait_reason') else '')+
+                    ('\n需要处理：'+str(s['error']) if s.get('error') else '')+
+                    ('\n最近判断：'+str(decision.get('judgment'))+'；'+str(decision.get('evidence')) if decision else '')+
+                    '\n乘梯图像与逐次判断仅在监测期间保留。')
+            update_readonly_text(self.task_monitor,summary)
         else:
             self.set_status_text('人工驾驶 ｜ '+('等待新状态或连接已失效' if running else '未连接；历史记录为只读'))
+            update_readonly_text(self.task_monitor,'等待任务状态')
         busy=bool(self.pending);status=self.status.get('status') if fresh else None
         nav=self.status.get('navigation_status') if fresh else None
         for name,button in self.buttons.items():
             enabled=fresh and not busy
-            if name=='arrived':enabled=enabled and nav=='running' and self.status.get('call_id') is not None
+            if name=='arrived':enabled=enabled and (self.status.get('manual_confirmation_available') or
+                nav=='running' and self.status.get('call_id') is not None)
+            elif name=='review':enabled=enabled and self.status.get('goal_id') is not None and status in ('ready','waiting_navigation','waiting_observation','waiting_monitor')
             elif name=='resume':enabled=enabled and status=='paused'
             elif name=='continue':enabled=enabled and status=='waiting_user'
             elif name=='answer':enabled=enabled and status=='needs_clarification'
             elif name=='pause':enabled=enabled and status not in ('paused','stopping','succeeded','failed','cancelled')
             elif name in ('cancel','replace'):enabled=enabled and status not in ('stopping','succeeded','failed','cancelled')
+            if name=='replace' and (self.status or {}).get('elevator_status'):enabled=False
             button.setEnabled(bool(enabled))
         self.start_button.setEnabled(self.process.state()==QtCore.QProcess.NotRunning)
         self.history_button.setEnabled(self.process.state()==QtCore.QProcess.NotRunning)
         editable=self.process.state()==QtCore.QProcess.NotRunning
-        for field in (self.socket,self.catalog,self.instruction,self.duration,*self.browse_buttons):field.setEnabled(editable)
+        for field in (self.socket,self.catalog,self.instruction,self.duration,self.floor,self.cross_floor,*self.browse_buttons):field.setEnabled(editable)
 
     def send_command(self,name):
         if self.status is None or self.pending or time.monotonic()-self.status_received>=3.:return
         text=self.message.text().strip() if name in ('answer','replace') else None
         if name in ('answer','replace') and not text:self.notice.setText('请先输入答复或新任务。');return
         identity=uuid.uuid4().hex;s=self.status
+        call_id=s.get('confirmation_call_id') if name=='arrived' and s.get('confirmation_call_id') else s['call_id']
         value=dict(command_id=identity,name=name,task_id=s['task_id'],revision=s['revision'],
-                   goal_id=s['goal_id'],call_id=s['call_id'],text=text)
+                   goal_id=s['goal_id'],call_id=call_id,text=text)
         if self.process.write((json.dumps(value,ensure_ascii=False)+'\n').encode('utf-8'))<0:
             self.notice.setText('命令发送失败，未自动重试。');return
         self.pending[identity]=dict(name=name,sent=time.monotonic());self.notice.setText('等待 Agent 确认操作……');self.refresh_status()
@@ -668,12 +782,14 @@ def main():
     parser.add_argument('--runtime-socket',default='')
     parser.add_argument('--catalog',default='')
     parser.add_argument('--duration',type=int,default=1200)
+    parser.add_argument('--floor',choices=('floor1','floor2'),default='',help='选择本机一楼或二楼语义标注预设')
     parser.add_argument('--session',default='',help='只读打开已有 session.sqlite')
     args=parser.parse_args()
     if not 1<=args.duration<=86400:parser.error('duration 必须在 1 至 86400 秒之间')
     if args.session and not Path(args.session).is_file():parser.error('session 文件不存在')
     app=QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
-    window=ManualWindow(args.runtime_socket,args.catalog,args.duration)
+    if args.floor and (args.runtime_socket or args.catalog):parser.error('--floor 不能与 --runtime-socket 或 --catalog 同时使用')
+    window=ManualWindow(args.runtime_socket,args.catalog,args.duration,args.floor)
     if args.session:
         window.set_reader(args.session)
         window.settings_toggle.setChecked(False)

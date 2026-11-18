@@ -106,6 +106,27 @@ class LiveIntentTests(unittest.TestCase):
 
 
 class LiveCompletionTests(unittest.TestCase):
+    def test_live_adapter_uses_current_map_pose_without_stale_rgb(self):
+        from decision.agent import CONFIG_DIR
+        from decision.agent.tools.places import Catalog
+        from decision.agent.adapters.shadow import RuntimeLiveNavigation
+        value=copy.deepcopy(Catalog.load(CONFIG_DIR/'simulation.json').value)
+        value.update(scope='development_prior',map_snapshot_id='static',localization_map_id='map-id')
+        binding=dict(valid=True,map_id='map-id',map_frame='sim_odom')
+        mapped=dict(pose=[5.,4.,0.],stamp_s=10.,clock_domain='runtime_live',
+                    local_identity=['s',0,'odom'],map_binding=binding)
+        control=dict(clock_domain='runtime_live',stamp_s=10.,request=None,feedback={},idle_feedback={},
+            localization=dict(session_id='s',generation=0,frame_id='odom',health=0),map_binding=binding,
+            agent_mapped_pose=mapped)
+        obs=dict(local_identity=['s',0,'odom'],clock_domain='runtime_live',map_binding=binding,
+                 map_base_pose=[1.,2.,0.],stamp_s=8.)
+        state=dict(control=control,observation=obs,received_age_s=.01,
+                   chassis=dict(state='armed',status_fresh=True,arm_revision=3),agent_owner=None)
+        nav=RuntimeLiveNavigation(Catalog(value),SimpleNamespace(snapshot=lambda **_:state))
+        self.assertEqual(nav.snapshot()['origin_pose'],[5.,4.,0.])
+        control['agent_mapped_pose']=None
+        self.assertIsNone(nav.snapshot()['origin_pose'])
+
     def test_idle_stop_requires_unowned_fresh_localization_feedback(self):
         from decision.agent import CONFIG_DIR
         from decision.agent.tools.places import Catalog

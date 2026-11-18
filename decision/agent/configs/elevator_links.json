@@ -1,0 +1,9 @@
+{
+  "source": "2026-11-18 user confirmed floor1 and floor2 elevator numbering correspond",
+  "links": [
+    {"floor1": "p-01-1", "floor2": "p-01-1"},
+    {"floor1": "p-01-2", "floor2": "p-01-2"},
+    {"floor1": "p-01-3", "floor2": "p-01-3"},
+    {"floor1": "p-01-4", "floor2": "p-01-4"}
+  ]
+}

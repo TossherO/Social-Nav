@@ -35,13 +35,14 @@ def preview_geometry(preview,grid,asset,settings):
         ('trajectory',trajectory,[p[1:] for p in trajectory.get('points',[])],.02)):
         frame=result.get('frame_id',grid.metadata['frame_id'])
         points=sample_poses(poses,grid.metadata['resolution'])
-        z,_=heights(points[:,:2],frame,lift)
-        approximate=np.zeros(len(z),bool)
+        z,height_source=heights(points[:,:2],frame,lift)
+        approximate=height_source==5
         if name=='reference':
             fallback=(annotation_height(asset.snapshot,points[0,:2],0.)+settings['path_z_m']
                       if len(points) and asset is not None and frame==asset.manifest['frame_id']
                       else float(np.asarray(grid.metadata['world_from_lidar'])[2,3])+settings['path_z_m'])
-            z,approximate=complete_display_heights(z,fallback)
+            z,filled=complete_display_heights(z,fallback)
+            approximate|=filled
         xyz=np.c_[points[:,:2],z];valid=np.isfinite(z)
         end=int(np.flatnonzero(~valid)[0]) if (~valid).any() else len(z)
         curves[name]=dict(frame_id=frame,stamp_s=stamp,segments=line_segments(xyz).tolist(),

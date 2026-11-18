@@ -88,6 +88,7 @@ def make_figure(source, output, *, localization=False):
         mode.addItem('画笔', 'brush');mode.addItem('多边形', 'polygon')
     toolbar.addWidget(mode)
     value = None
+    fit_ground = None
     if not localization:
         value = QtWidgets.QComboBox();value.setObjectName('edit_state')
         for label, cell in (('空闲（人工假定）', 0), ('占据', 100), ('未知', -1)):
@@ -96,6 +97,10 @@ def make_figure(source, output, *, localization=False):
         toolbar.addWidget(QtWidgets.QLabel('半径（米）'))
         radius = QtWidgets.QDoubleSpinBox();radius.setRange(.05, 20.);radius.setDecimals(2);radius.setValue(.3)
         radius.setObjectName('brush_radius');toolbar.addWidget(radius)
+        fit_ground=QtWidgets.QCheckBox('拟合人工空闲缺失地面高度')
+        fit_ground.setObjectName('fit_manual_ground');fit_ground.setChecked(True)
+        fit_ground.setToolTip('用邻近已有地面拟合高度，仅供近似显示，不增加实测地面或自由证据。')
+        toolbar.addWidget(fit_ground)
     else:
         toolbar.addWidget(QtWidgets.QLabel('高度 Z 范围（米）'))
         zmin = QtWidgets.QDoubleSpinBox();zmax = QtWidgets.QDoubleSpinBox()
@@ -248,12 +253,16 @@ def make_figure(source, output, *, localization=False):
             redraw('请完成或取消当前多边形。');return
         try:
             result = (roll_editor.save_manual_map(source,output,selections,expected_binding=binding) if localization
-                      else static_editor.save_manual_map(source,output,data,expected_binding=binding))
+                      else static_editor.save_manual_map(source,output,data,expected_binding=binding,
+                                                       fit_ground=fit_ground.isChecked()))
             text = ('已保存新地图：'+str(output))
             if localization:
                 text += '\n已删除关键帧点：'+str(result['removed_points'])+'。原地图对应的静态地图和定位区域须重新生成或绑定。'
             else:
                 text += '\n人工空闲不构成传感器观测；请检查局部障碍及地图来源。'
+                estimation=(result['source'].get('manual_edit') or {}).get('ground_estimation')
+                if estimation:
+                    text += '\n拟合地面高度 '+str(estimation['estimated_cells'])+' 格；仅用于近似显示，不作为实测地面。'
             redraw(text);QtWidgets.QMessageBox.information(window,'保存成功',text)
         except (OSError, ValueError, KeyError) as error:
             redraw(str(error));QtWidgets.QMessageBox.warning(window,'保存失败',str(error))

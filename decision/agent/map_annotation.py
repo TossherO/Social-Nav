@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import warnings
 
 import numpy as np
 from perception.environment.storage import StaticEnvironmentMap, asset_reference, content_hash
@@ -125,14 +126,54 @@ class Annotation:
 KINDS_BY_GROUP = {group:field for group,field in KINDS.values()}
 
 
+_FONT_DIRECTORY = None
+_SIMPLIFIED_FONT = None
+
+
+def simplified_chinese_font():
+    """Select an actual Simplified Chinese face, not the TTC's default JP face."""
+    global _FONT_DIRECTORY, _SIMPLIFIED_FONT
+    if _SIMPLIFIED_FONT is not None:
+        return _SIMPLIFIED_FONT
+    from matplotlib import font_manager
+    collection=Path('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc')
+    if collection.is_file():
+        directory=None
+        try:
+            from fontTools.ttLib import TTFont
+            font=TTFont(str(collection),fontNumber=2)
+            try:
+                if font['name'].getDebugName(1)!='Noto Sans CJK SC':
+                    raise ValueError('Noto 字体集合中的简体中文子字体不匹配')
+                directory=tempfile.TemporaryDirectory(prefix='social_nav_sc_font_')
+                output=Path(directory.name)/'NotoSansCJKsc-Regular.otf'
+                font.save(str(output))
+            finally:
+                font.close()
+            font_manager.fontManager.addfont(str(output))
+            _FONT_DIRECTORY=directory
+            _SIMPLIFIED_FONT=font_manager.FontProperties(fname=str(output)).get_name()
+            return _SIMPLIFIED_FONT
+        except (ImportError,OSError,ValueError,KeyError) as error:
+            if directory is not None:directory.cleanup()
+            warnings.warn('无法加载 Noto 简体中文字体：'+str(error),RuntimeWarning)
+    fallback=Path('/usr/share/fonts/truetype/arphic/ukai.ttc')
+    if fallback.is_file():
+        font_manager.fontManager.addfont(str(fallback))
+        name=font_manager.FontProperties(fname=str(fallback)).get_name()
+        if name=='AR PL UKai CN':
+            _SIMPLIFIED_FONT=name
+            return name
+    warnings.warn('未找到简体中文字体，地图标注文字可能显示异常',RuntimeWarning)
+    return None
+
+
 def make_figure(annotation, output, geometry=None):
     import matplotlib
     matplotlib.use('Qt5Agg')
-    from matplotlib import font_manager
-    font=Path('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc')
-    if font.is_file():
-        font_manager.fontManager.addfont(str(font))
-        matplotlib.rcParams['font.sans-serif']=[font_manager.FontProperties(fname=str(font)).get_name(),'DejaVu Sans']
+    font=simplified_chinese_font()
+    if font:
+        matplotlib.rcParams['font.sans-serif']=[font,'DejaVu Sans']
     matplotlib.rcParams['axes.unicode_minus']=False
     import matplotlib.pyplot as plt
     from matplotlib.colors import ListedColormap

@@ -6,6 +6,37 @@ import threading
 import time
 
 
+def agent_mapped_pose(scene, row, geometry, now, max_association_age_s, clock_domain):
+    """Bind a fresh localization measurement to the current scene's map association."""
+    import math
+    import numpy as np
+    from perception.mapping_localization.context import pose_matrix
+
+    if scene is None or not isinstance(row, dict):
+        return None
+    record = scene.record
+    prior = record.get('prior') or {}
+    identity = [row.get(k) for k in ('session_id', 'generation', 'frame_id')]
+    stamp, measured = row.get('stamp_s'), prior.get('measurement_stamp_s')
+    if (row.get('health') != 0 or record.get('clock_domain') != clock_domain or
+            record.get('localization', {}).get('status') != 'valid' or not prior.get('valid') or
+            identity != [record.get(k) for k in ('session_id', 'generation', 'frame_id')] or
+            identity != [prior.get(k) for k in ('local_session_id', 'local_generation', 'local_frame')] or
+            any(type(v) not in (int, float) or not math.isfinite(v) for v in (stamp, measured, now)) or
+            not 0 <= now-stamp <= .5 or not 0 <= stamp-measured or
+            not 0 <= now-measured <= max_association_age_s):
+        return None
+    try:
+        local = pose_matrix(row['position'], row['quaternion_xyzw'])
+        pose = geometry.pose(np.asarray(prior['map_from_local']) @ local).tolist()
+    except (ValueError, TypeError, KeyError, IndexError):
+        return None
+    binding = {k: copy.deepcopy(prior.get(k)) for k in
+               ('valid', 'map_id', 'map_frame', 'map_revision', 'association_session', 'association_generation')}
+    return dict(pose=pose, stamp_s=stamp, clock_domain=clock_domain, local_identity=identity,
+                map_binding=binding, association_stamp_s=measured, source='current_localization_and_scene_association')
+
+
 def manual_preview_path(reference, request):
     """Expose a bounded, identity-matched reference for task-level checking."""
     if not isinstance(reference,dict) or not isinstance(request,dict):return None
@@ -265,8 +296,11 @@ class ControlLoop:
                         if self.request is None:
                             preview_status['reference_path']=manual_preview_path(self.reference.current,preview['request'])
                             preview_status['reference_frame']=preview['request']['frame_id']
+                    mapped_pose=agent_mapped_pose(self.scene,self.rows[-1],self.controller.geometry,now,
+                        self.scene_settings['max_association_age_s'],self.clock_domain) if self.commands.agent_state.goal_evidence is not None else None
                     self.commands.agent_state.publish_control(packet,self.rows[-1],map_binding=binding,
-                        cancelled_request=self.cancelled_request,idle_feedback=idle_feedback,manual_preview=preview_status)
+                        cancelled_request=self.cancelled_request,idle_feedback=idle_feedback,manual_preview=preview_status,
+                        agent_mapped_pose=mapped_pose)
                     if self.display is not None:
                         self.display.navigation(self.controller.controller.result,self.reference.current,planning_request,self.scene,
                             self.rows[-1],packet,self.reference.reason,now=now,clock_domain=self.clock_domain,

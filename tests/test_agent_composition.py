@@ -175,7 +175,7 @@ class CompositionTests(unittest.TestCase):
             observation_id=obs.record['observation_id'], semantic_result='satisfied', evidence='看到门')['status'],'completed')
         self.assertEqual(self.session.call('finish_task',status='succeeded',evidence='已完成观察')['status'],'succeeded')
 
-    def test_observation_stage_rejects_old_rgb_then_accepts_new_judgement(self):
+    def test_observation_stage_preserves_source_time_for_delayed_judgement(self):
         goal = dict(goal_id='inspect', kind='skill', stage_type='observation', target_id='', description='观察门')
         self.session.call('record_task', goals=[goal])
         self.nav.state['idle_stop_observation'] = True
@@ -183,26 +183,19 @@ class CompositionTests(unittest.TestCase):
         obs = self.observation('a')
         self.nav.state['pose'] = copy.deepcopy(obs.record['base_pose'])
         context = self.session.context()
-        # The scene is still younger than 3 seconds, but the RGB itself is not.
-        self.nav.state['stamp_s'] = obs.record['rgb']['stamp_s'] + 3.01
+        self.nav.state['stamp_s'] = obs.record['rgb']['stamp_s'] + 90.
         self.assertTrue(self.session.valid_context(context))
         result = self.session.call('check_goal', _context=context, goal_id='inspect',
             observation_id=obs.record['observation_id'], semantic_result='satisfied', evidence='门打开')
-        self.assertEqual(result['status'], 'needs_semantic_evidence')
-        self.assertFalse(self.session.task_goals.finished())
-        self.nav.state['stamp_s'] = obs.record['stamp_s'] + 4
-        self.assertTrue(self.session.valid_expired_context(context))
-        result = self.session.call('check_goal', _context=context, goal_id='inspect',
-            observation_id=obs.record['observation_id'], semantic_result='satisfied', evidence='门打开')
-        self.assertEqual(result['status'], 'needs_semantic_evidence')
-        fresh = self.observation('a')
-        self.assertEqual(self.session.call('check_goal', _context=self.session.context(), goal_id='inspect',
-            observation_id=fresh.record['observation_id'], semantic_result='satisfied', evidence='新图中门打开')['status'],
-            'completed')
+        self.assertEqual(result['status'], 'completed')
+        semantic=self.session.task_goals.goals[0]['completion']['semantic']
+        self.assertAlmostEqual(semantic['observation_age_s'],90.)
+        self.assertFalse(semantic['current_scene_verified'])
+        self.assertEqual(semantic['source_stamp_s'],obs.record['rgb']['stamp_s'])
 
 
 
-    def test_follow_finish_and_completion_need_fresh_visual_evidence(self):
+    def test_follow_finish_and_completion_keep_delayed_visual_source(self):
         self.session.call('record_task', goals=[follow_goal('person')])
         obs = self.observation('a')
         from decision.vlm.follow_target import reference
@@ -219,12 +212,9 @@ class CompositionTests(unittest.TestCase):
         context = self.session.context()
         self.nav.t += 4
         self.nav.state['stamp_s'] = 10 + self.nav.t
-        self.assertTrue(self.session.valid_expired_context(context))
+        self.assertTrue(self.session.valid_context(context))
         self.assertEqual(self.session.call('finish_local_task', _context=context, goal_id='person',
-            observation_id=obs.record['observation_id'], evidence='目标已到达')['status'], 'refused')
-        fresh = self.observation('a')
-        self.assertEqual(self.session.call('finish_local_task', _context=self.session.context(), goal_id='person',
-            observation_id=fresh.record['observation_id'], evidence='目标已到达')['status'], 'stopping')
+            observation_id=obs.record['observation_id'], evidence='目标已到达')['status'], 'stopping')
         self.nav.state.update(status='stopped', stopped=True, stop_observation=True)
         self.session.tick()
         self.nav.tick()
@@ -233,15 +223,13 @@ class CompositionTests(unittest.TestCase):
         context = self.session.context()
         self.nav.t += 4
         self.nav.state['stamp_s'] = 10 + self.nav.t
-        self.assertTrue(self.session.valid_expired_context(context))
-        self.assertEqual(self.session.call('check_goal', _context=context, goal_id='person',
-            observation_id=obs.record['observation_id'], semantic_result='satisfied', evidence='位置符合要求')['status'],
-            'needs_semantic_evidence')
-        self.assertFalse(self.session.task_goals.finished())
-        fresh = self.observation('a')
-        self.assertEqual(self.session.call('check_goal', _context=self.session.context(), goal_id='person',
-            observation_id=fresh.record['observation_id'], semantic_result='satisfied', evidence='新图确认位置')['status'],
-            'completed')
+        self.assertTrue(self.session.valid_context(context))
+        result=self.session.call('check_goal', _context=context, goal_id='person',
+            observation_id=obs.record['observation_id'], semantic_result='satisfied', evidence='位置符合要求')
+        self.assertEqual(result['status'],'completed')
+        semantic=self.session.task_goals.goals[0]['completion']['semantic']['after_stop']
+        self.assertGreater(semantic['observation_age_s'],3.)
+        self.assertFalse(semantic['current_scene_verified'])
 
     def test_agent_tool_loop_completes_idle_observation_from_new_image(self):
         from decision.agent.core.loop import AgentLoop

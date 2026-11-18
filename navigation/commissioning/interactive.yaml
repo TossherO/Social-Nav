@@ -1,11 +1,10 @@
 # 定位使用的地图路径。
-map: outputs/perception/lab_floor2_20261107/mapping_compensated/map
+map: outputs/perception/floor2_height_diagnostics_20261118/levelled_ground_refined/map
 # 环境和导航使用的静态地图包路径。
-static_map: outputs/perception/lab_floor2_20261107/static_scans_10cm_manual_door
-# 地图定位关联适用区域的文件路径。
-coverage: navigation/commissioning/coverage_floor2_full.yaml
+static_map: outputs/perception/floor2_height_diagnostics_20261118/levelled_ground_refined_static_manual
+# 未指定 coverage 时，根据当前定位图自动生成全图关联范围。
 # 初始化时参考的高度和姿态提示文件。
-initial_pose_hint: navigation/commissioning/height_hint.json
+initial_pose_hint: outputs/perception/floor2_height_diagnostics_20261118/levelled_ground_refined_height_hint.json
 # 运动配置文件路径。
 motion_config: navigation/planning/configs/motion.yaml
 # 交互会话选择的运动档位。

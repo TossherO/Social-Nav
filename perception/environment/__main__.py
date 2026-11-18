@@ -47,6 +47,8 @@ def bundle_main(argv):
     export.add_argument('--people', help='Source-bound environment_people package from this mapping run')
     export.add_argument('--dynamic-filter', choices=STATIC_FILTER_MODES,
                         help='Default: static.dynamic_filter (geometric); sealed scans required, people optional; none allows endpoint-only export')
+    export.add_argument('--ground-method',choices=['map_endpoints','tracked_scans'],
+                        help='Mapping --run defaults to tracked scans; map-only exports default to map endpoints')
     export.add_argument('--projection-strategy',choices=['observed_endpoints','ground_relative_assume_free','docker_assume_free'],
                         default='observed_endpoints',help='Endpoint projection; assumed-free strategies do not provide ray evidence')
     export.add_argument('--projection-z-min',type=float,help='Legacy absolute map Z minimum')
@@ -89,6 +91,8 @@ def bundle_main(argv):
         return
     if args.command == 'export':
         config = load_config(args.config)
+        if args.ground_method=='tracked_scans' and args.localization_map:
+            parser.error('Tracked scan ground currently requires a mapping --run, not --localization-map')
         def progress(message):
             print(message, file=sys.stderr, flush=True)
         if args.resolution is not None:
@@ -130,7 +134,7 @@ def bundle_main(argv):
             if args.evidence_run or args.reference_run:parser.error('Registered rays require --localization-map')
             data = export_environment(args.run,args.out,config=config,bag=args.bag,
                                       export_pgm=args.export_pgm,people=args.people,filter_mode=args.dynamic_filter,
-                                      bounds=args.bounds,progress=progress)
+                                      bounds=args.bounds,progress=progress,ground_method=args.ground_method or 'tracked_scans')
         result=dict(out=args.out,entity_type='map',map_type='static_environment_map',snapshot_id=data['snapshot_id'])
         if args.projection_strategy in ('docker_assume_free','ground_relative_assume_free'):
             result.update(projection_strategy=args.projection_strategy,free_assumption='no_filtered_endpoint_in_cell',

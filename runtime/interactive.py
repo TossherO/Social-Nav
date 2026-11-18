@@ -2,6 +2,7 @@
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -104,6 +105,21 @@ def bag_initial_pose(path, config, *, bag, start, live=False):
     if live or not bag:
         raise ValueError('--pose-file is only valid for the matching bag and start offset')
     return load_seed(resolve(path), config['map'], resolve(bag), start)
+
+
+def handoff_initial_pose(value, asset, hint):
+    """Build a provisional LiDAR seed from the previous floor's measured pose."""
+    from perception.mapping_localization.initial_pose import quaternion_rpy
+    transform=value.get('floor_transform') or {};pose=value.get('lidar_xy_yaw')
+    if (value.get('verified_localization') is not False or
+            transform.get('to_map_id')!=asset.snapshot.metadata.get('map_id') or
+            transform.get('to_floor')!=value.get('floor_id') or
+            not isinstance(pose,list) or len(pose)!=3 or
+            not all(type(v) in (int,float) and math.isfinite(v) for v in pose)):
+        raise ValueError('Floor handoff seed does not match the destination localization map')
+    height=selected_initial_height(asset.snapshot,hint,pose[:2])
+    roll,pitch,_=quaternion_rpy(hint['pose']['quaternion_xyzw'])
+    return [roll,pitch,pose[2],pose[0],pose[1],height['lidar_z_m']]
 
 
 def require_rviz_tools(python='/usr/bin/python3'):
@@ -211,6 +227,7 @@ def parser():
     p.add_argument('--pause-at', type=float)
     p.add_argument('--initial-z', type=float, help='LiDAR map Z initial guess, overriding the selected map hint')
     p.add_argument('--pose-file', help='Explicit saved LiDAR start, validated against this bag, map and --start; skips mouse initialization')
+    p.add_argument('--handoff-seed', help='Provisional cross-floor LiDAR seed for a nonexecuting live Agent observation')
     p.add_argument('--motion-config')
     p.add_argument('--motion-profile')
     p.add_argument('--runtime-config', help='Same machine scheduling override inspected by runtime.preflight')
@@ -240,6 +257,8 @@ def main(argv=None):
         p.error('--roll-gravity-deg requires live input and a finite value in (0,15] degrees')
     if args.live and (args.start != 0 or args.rate != 1 or args.pause_at is not None):
         p.error('Live input does not accept bag playback options')
+    if args.handoff_seed and (not args.live or not args.agent_observations or args.execute or args.pose_file or args.initial_z is not None):
+        p.error('--handoff-seed requires nonexecuting live Agent observations, without --pose-file or --initial-z')
     if args.pause_at is not None and (not math.isfinite(args.pause_at) or args.pause_at < 0):
         p.error('--pause-at must be finite and nonnegative')
     if args.execute and not (args.live and args.vehicle_profile and args.chassis_port):
@@ -258,6 +277,8 @@ def main(argv=None):
     if args.pose_file:
         if args.initial_z is not None:p.error('--initial-z cannot modify a saved --pose-file')
         seed = bag_initial_pose(args.pose_file,config,bag=args.bag,start=args.start,live=args.live)
+    if args.handoff_seed:
+        seed=handoff_initial_pose(json.loads(resolve(args.handoff_seed).read_text()),asset,hint)
     suggested = None
     if not args.live:
         try:suggested = bag_initial_pose(config['initial_pose_hint'],config,bag=args.bag,start=args.start)
@@ -271,8 +292,9 @@ def main(argv=None):
     output = resolve(args.output); output.mkdir(parents=True, exist_ok=False); args.output = str(output)
     (output/'session.json').write_text(json.dumps(dict(source='live' if args.live else 'bag', config=config,
         start=args.start, rate=args.rate, pause_at=args.pause_at, execute_requested=args.execute,
+        owner_pid=os.getpid(),agent_observations=args.agent_observations,
         initial_pose_reference='rslidar', map_frame=asset.manifest['frame_id'],
-        initial_guess_source=config['initial_pose_hint'],pose_file=args.pose_file), ensure_ascii=False, indent=2))
+        initial_guess_source=config['initial_pose_hint'],pose_file=args.pose_file,handoff_seed=args.handoff_seed), ensure_ascii=False, indent=2))
 
     import rospy
     from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, PointStamped, Point
@@ -358,8 +380,8 @@ def main(argv=None):
 
     if seed is not None:
         selection.append(seed)
-        (output/'initial_pose.json').write_text(json.dumps(dict(source='validated_bag_pose_file',
-            source_file=str(resolve(args.pose_file)),reference='rslidar',map=config['map'],pose_rpy_xyz=seed,
+        (output/'initial_pose.json').write_text(json.dumps(dict(source='cross_floor_provisional_seed' if args.handoff_seed else 'validated_bag_pose_file',
+            source_file=str(resolve(args.handoff_seed or args.pose_file)),reference='rslidar',map=config['map'],pose_rpy_xyz=seed,
             registration_verified=False),indent=2))
 
     def send(kind, value):
@@ -616,7 +638,8 @@ def main(argv=None):
         state_pub.publish(String(data=json.dumps(dict(state='initializing' if selection else 'waiting_for_initial_pose', reference='rslidar', executable=False))))
         show_notice()
         show_goal(None)
-        print(('Saved bag start loaded; wait for map localization. ' if seed is not None else
+        print(('Cross-floor provisional start loaded; wait for map localization. ' if args.handoff_seed else
+               'Saved bag start loaded; wait for map localization. ' if seed is not None else
                'RViz: Ground Pose Estimate selects LiDAR start. ')+
               'Ground Nav Goal selects pose; Publish Point selects XY.', flush=True)
         print('Terminal: c + Enter confirms live initial pose; p pauses; r resumes; s cancels/disarms; a arms; q exits.', flush=True)

@@ -1,4 +1,4 @@
-"""Agent-selected routes and circuit evidence, using synthetic feedback only."""
+"""Agent-selected routes and ordered evidence, using synthetic feedback only."""
 import copy
 import io
 import math
@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 from decision.agent import CONFIG_DIR,ROOT
-from decision.agent.core.route import circuit_evidence,circuit_plan_diagnostics,path_outside_region,static_route_line_diagnostics
+from decision.agent.core.route import record_route_visit,validate_route_progress
 from decision.agent.core.loop import AgentLoop
 from decision.agent.core.session import AgentSession
 from decision.agent.core.store import Store
@@ -21,7 +21,10 @@ from tests.test_agent import ScriptedFeedback,query_map,reply
 class RouteFeedback(ScriptedFeedback):
     def start_route(self,place,handle):
         self.handle=copy.deepcopy(handle)
-        self.points=iter(place['route']['waypoints'])
+        self.route=copy.deepcopy(place['route'])
+        self.visits=[]
+        self.points=iter(self.route['waypoints'])
+        self.state['route_count']=len(self.route['waypoints'])
         self.final_yaw=place['route']['final_yaw']
         self.start_stamp=None
         self.state.update(handle=copy.deepcopy(handle),status='running',stopped=False)
@@ -35,7 +38,10 @@ class RouteFeedback(ScriptedFeedback):
                 self.state.update(status='arrived',stopped=True,goal=dict(task_completed=True,
                     task_id=self.handle['task_id'],goal_revision=self.handle['goal_revision']))
             else:
-                self.state['pose']=[*point,self.final_yaw]
+                self.state['pose']=[*point,self.final_yaw or 0.]
+                measured=dict(self.state,origin_pose=self.state['pose'],origin_frame_id='sim_odom')
+                record_route_visit(self.route,self.visits,self.handle,measured,len(self.visits),.2)
+                self.state['route_visits']=copy.deepcopy(self.visits)
                 if self.start_stamp is None:self.start_stamp=self.state['stamp_s']
                 self.state['route_start_stamp_s']=self.start_stamp
         return self.snapshot()
@@ -64,29 +70,52 @@ class AgentRouteTests(unittest.TestCase):
         return [[float(center[0]+radius*math.cos(sign*2*math.pi*i/8)),
                  float(center[1]+radius*math.sin(sign*2*math.pi*i/8))] for i in range(9)]
 
-    def test_circuit_executes_one_plan_and_requires_measured_closed_trace(self):
-        self.assertEqual(self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',
-            target_id='lobby_area',direction='clockwise',description='绕一圈')])['status'],'recorded')
-        view=query_map(self.session)
-        ack=self.session.call('navigate_route',goal_id='loop',view_id=view,orientation_source='autonomous',
-                              waypoints=self.points(),final_yaw=0.)
-        self.assertEqual(ack['status'],'accepted')
-        self.assertFalse(ack['execution_completed'])
-        for _ in range(10):self.session.tick()
-        outcome=self.session.call('check_goal',goal_id='loop')
-        self.assertEqual(outcome['status'],'completed')
-        self.assertFalse(outcome['real_robot_success'])
-        self.assertTrue(outcome['checks']['circuit_met'])
+    def test_route_visits_require_order_freshness_and_matching_context(self):
+        route=dict(waypoints=[[4.,4.],[5.,4.],[4.,4.]])
+        handle=dict(call_id='test')
+        visits=[]
+        state=dict(origin_pose=[4.,4.,0.],origin_frame_id='sim_odom',stamp_s=10.,origin_stamp_s=10.,
+                   clock_domain='simulation',session_id='unit',generation=0,frame_id='sim_odom',
+                   source='synthetic_differential_drive_plant')
+        self.assertFalse(record_route_visit(route,visits,handle,state,1,.5))
+        self.assertTrue(record_route_visit(route,visits,handle,state,0,.2))
+        state.update(origin_pose=[5.,4.,0.],stamp_s=12.,origin_stamp_s=10.)
+        self.assertFalse(record_route_visit(route,visits,handle,state,1,.5))
+        state['origin_stamp_s']=12.
+        self.assertTrue(record_route_visit(route,visits,handle,state,1,.5))
+        state.update(origin_pose=[4.,4.,0.],stamp_s=13.,origin_stamp_s=13.)
+        self.assertTrue(record_route_visit(route,visits,handle,state,2,.2))
+        proof=dict(route_visits=visits,handle=handle,frame_id='sim_odom',stamp_s=13.,source=state['source'],
+                   context=dict(clock_domain='simulation',local_identity=['unit',0,'sim_odom'],map_binding=None))
+        self.assertEqual(validate_route_progress(route,proof)['status'],'met')
+        altered=copy.deepcopy(proof);altered['route_visits'][1]['local_identity'][1]=1
+        self.assertEqual(validate_route_progress(route,altered)['status'],'unproven')
+        altered=copy.deepcopy(proof);altered['route_visits'].pop(1)
+        self.assertEqual(validate_route_progress(route,altered)['status'],'unproven')
+
+    def test_long_trajectory_keeps_older_measured_samples(self):
+        from decision.agent.core.trajectory import Trajectory
+        trajectory=Trajectory(capacity=64)
+        for i in range(500):
+            state=dict(origin_pose=[i*.01,0.,0.],origin_frame_id='map',stamp_s=i*.11,
+                origin_stamp_s=i*.11,clock_domain='simulation',session_id='test',generation=0,frame_id='odom')
+            trajectory.update(state,'map')
+        segments=trajectory.snapshot(frame_id='map',clock_domain='simulation',now=100.)
+        samples=segments[0]['samples']
+        self.assertEqual(samples[0]['stamp_s'],0.)
+        self.assertGreater(samples[-1]['stamp_s'],50.)
+        self.assertLessEqual(len(samples),64)
+        self.assertFalse(trajectory.truncated)
 
     def test_delayed_route_rechecks_current_view_and_preserves_original_call(self):
-        self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
-                                                     direction='clockwise',description='绕一圈')])
+        self.session.call('record_task',goals=[dict(goal_id='loop',kind='route',target_id='lobby_area',
+                                                     description='绕一圈')])
         view=query_map(self.session);context=self.session.context()
         call=dict(tool='navigate_route',arguments=dict(goal_id='loop',view_id=view,orientation_source='autonomous',
-                  waypoints=self.points(),final_yaw=0.))
+                  waypoints=self.points(),final_yaw=0.,waypoint_reason='合成测试需要逐段验证'))
         original=copy.deepcopy(call);self.nav.state['stamp_s']=14.
-        self.assertFalse(self.session.valid_context(context));self.assertTrue(self.session.valid_expired_context(context))
-        result=self.session.revalidate_delayed_route(call,context)
+        self.assertTrue(self.session.valid_context(context))
+        result=self.session.revalidate_route(call,context)
         self.assertEqual(result['status'],'accepted');self.assertEqual(call,original)
         self.assertEqual(result['revalidation']['model_view_id'],view)
         self.assertEqual(result['revalidation']['model_source_stamp_s'],10.)
@@ -95,67 +124,53 @@ class AgentRouteTests(unittest.TestCase):
         self.assertEqual(self.session.skill.record['handle']['view_id'],result['revalidation']['checked_view_id'])
 
     def test_delayed_route_refuses_when_pose_changed(self):
-        self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
-                                                     direction='clockwise',description='绕一圈')])
+        self.session.call('record_task',goals=[dict(goal_id='loop',kind='route',target_id='lobby_area',
+                                                     description='绕一圈')])
         view=query_map(self.session);context=self.session.context()
         self.nav.state.update(stamp_s=14.,pose=[5.,4.,0.])
         call=dict(tool='navigate_route',arguments=dict(goal_id='loop',view_id=view,orientation_source='autonomous',
-                  waypoints=self.points(),final_yaw=0.))
-        self.assertEqual(self.session.revalidate_delayed_route(call,context)['reason'],'robot_pose_changed_since_model_input')
+                  waypoints=self.points(),final_yaw=0.,waypoint_reason='合成测试需要逐段验证'))
+        self.assertEqual(self.session.revalidate_route(call,context)['reason'],'robot_pose_changed_since_model_input')
         self.assertIsNone(self.session.skill.record['handle'])
 
     def test_delayed_route_refuses_heading_or_localization_identity_change(self):
-        self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
-                                                     direction='clockwise',description='绕一圈')])
+        self.session.call('record_task',goals=[dict(goal_id='loop',kind='route',target_id='lobby_area',
+                                                     description='绕一圈')])
         view=query_map(self.session);context=self.session.context()
         call=dict(tool='navigate_route',arguments=dict(goal_id='loop',view_id=view,orientation_source='autonomous',
-                  waypoints=self.points(),final_yaw=0.))
+                  waypoints=self.points(),final_yaw=0.,waypoint_reason='合成测试需要逐段验证'))
         self.nav.state.update(stamp_s=14.,pose=[4.,4.,.5])
-        self.assertEqual(self.session.revalidate_delayed_route(call,context)['reason'],'robot_pose_changed_since_model_input')
+        self.assertEqual(self.session.revalidate_route(call,context)['reason'],'robot_pose_changed_since_model_input')
         view=self.session.spatial_view.record['view_id'];context=self.session.context()
         call['arguments']['view_id']=view
         self.nav.state.update(stamp_s=18.,generation=1)
-        self.assertEqual(self.session.revalidate_delayed_route(call,context)['status'],'refused')
+        self.assertEqual(self.session.revalidate_route(call,context)['status'],'refused')
         self.assertIsNone(self.session.skill.record['handle'])
 
-    def test_delayed_route_rejects_old_evidence_and_other_execution_scopes(self):
-        self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
-                                                     direction='clockwise',description='绕一圈')])
+    def test_route_revalidates_after_long_model_response(self):
+        self.session.call('record_task',goals=[dict(goal_id='loop',kind='route',target_id='lobby_area',
+                                                     description='绕一圈')])
         view=query_map(self.session);context=self.session.context()
         call=dict(tool='navigate_route',arguments=dict(goal_id='loop',view_id=view,orientation_source='autonomous',
-                  waypoints=self.points(),final_yaw=0.))
-        self.nav.state['stamp_s']=41.
-        self.assertEqual(self.session.revalidate_delayed_route(call,context)['status'],'refused')
-        self.nav.state['stamp_s']=14.;self.nav.scope='live'
-        self.assertEqual(self.session.revalidate_delayed_route(call,context)['status'],'refused')
-        self.assertIsNone(self.session.skill.record['handle'])
+                  waypoints=self.points(),final_yaw=0.,waypoint_reason='合成测试需要逐段验证'))
+        self.nav.state['stamp_s']=100.
+        self.assertEqual(self.session.revalidate_route(call,context)['status'],'accepted')
+        self.assertIsNotNone(self.session.skill.record['handle'])
 
-    def test_delayed_invalid_route_returns_current_geometry_feedback(self):
-        self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
-                                                     direction='clockwise',description='绕一圈')])
-        view=query_map(self.session);context=self.session.context();points=self.points()
+    def test_route_remains_unsupported_in_live_scope(self):
+        self.session.call('record_task',goals=[dict(goal_id='loop',kind='route',target_id='lobby_area',description='绕一圈')])
+        view=query_map(self.session);context=self.session.context()
+        self.nav.scope='live'
         call=dict(tool='navigate_route',arguments=dict(goal_id='loop',view_id=view,orientation_source='autonomous',
-                  waypoints=[points[0],centroid(self.catalog.regions['lobby_area']['polygon']).tolist(),points[4]],final_yaw=0.))
-        self.nav.state['stamp_s']=14.;result=self.session.revalidate_delayed_route(call,context)
-        self.assertEqual(result['reason'],'circuit_waypoint_inside_region')
-        self.assertIn('waypoint_inside_region',result['diagnostics']['issues'])
-        self.assertEqual(self.session.route_preview['view_id'],result['revalidation']['checked_view_id'])
+                  waypoints=self.points(),final_yaw=0.,waypoint_reason='合成测试需要逐段验证'))
+        self.assertEqual(self.session.revalidate_route(call,context)['reason'],'route_execution_not_supported_by_adapter')
         self.assertIsNone(self.session.skill.record['handle'])
-
-    def test_route_feedback_reports_actual_direction_even_if_region_intersected(self):
-        polygon=self.catalog.regions['lobby_area']['polygon'];points=self.points('clockwise')
-        result=circuit_plan_diagnostics(points,polygon,'counterclockwise',.2)
-        self.assertEqual(result['actual_direction'],'clockwise')
-        self.assertIn('direction_opposite_to_requested',result['issues'])
-        points[2]=centroid(polygon).tolist()
-        result=circuit_plan_diagnostics(points,polygon,'counterclockwise',.2)
-        self.assertIn('waypoint_inside_region',result['issues'])
 
     def test_repeated_failed_route_waits_for_user_instead_of_calling_model_32_times(self):
-        self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
-                                                     direction='clockwise',description='绕一圈')])
+        self.session.call('record_task',goals=[dict(goal_id='loop',kind='route',target_id='lobby_area',
+                                                     description='绕一圈')])
         self.nav.tick=lambda:self.nav.snapshot()
-        points=self.points();bad=[points[0],centroid(self.catalog.regions['lobby_area']['polygon']).tolist(),points[4]]
+        points=self.points();bad=[points[0],[-1.,-1.],points[4]]
         def work(_payload,_observation,view):
             self.nav.state['stamp_s']+=4.
             return reply('navigate_route',goal_id='loop',view_id=view.record['view_id'],
@@ -184,50 +199,66 @@ class AgentRouteTests(unittest.TestCase):
             self.assertEqual(self.store.db.execute("select count(*) from events where kind='route_repeated_refusal'").fetchone()[0],0)
         finally:actor.close()
 
-    def test_circuit_adds_closure_and_rejects_waypoint_inside_region(self):
-        self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
-                                                     direction='clockwise',description='绕一圈')])
-        view=query_map(self.session);points=self.points()
-        bad=[points[0],centroid(self.catalog.regions['lobby_area']['polygon']).tolist(),points[4]]
-        result=self.session.call('navigate_route',goal_id='loop',view_id=view,orientation_source='autonomous',
-            waypoints=bad,final_yaw=0.)
-        self.assertEqual(result['reason'],'circuit_waypoint_inside_region')
-        self.assertEqual(result['diagnostics']['inside_waypoint_indices'],[1])
-        self.assertEqual(result['diagnostics']['scope'],'waypoint_order_only_not_planned_path_or_execution_check')
-        state=self.session.prompt()['current_state']
-        self.assertEqual(state['last_tool_feedback']['diagnostics']['inside_waypoint_indices'],[1])
-        self.assertEqual(self.session.spatial_view.record['route_preview']['waypoints'],bad)
-        pixels=np.asarray(Image.open(io.BytesIO(self.session.spatial_view.images[1])))
-        self.assertTrue(np.any(np.all(pixels==[207,48,48],axis=2)))
+    def test_repeated_navigation_refusal_ignores_view_id_and_waits_after_three(self):
+        actor=AgentLoop(self.session,lambda *_:None)
+        try:
+            value=dict(tool='navigate',arguments=dict(goal_id='goal',pose=[5.,4.,0.],view_id='v1',orientation_source='autonomous'))
+            refusal=dict(status='refused',reason='current_stage_does_not_support_navigation')
+            self.assertFalse(actor.repeated_navigation_refusal(value,refusal))
+            value['arguments']['view_id']='v2'
+            self.assertFalse(actor.repeated_navigation_refusal(value,refusal))
+            value['arguments']['view_id']='v3'
+            self.assertTrue(actor.repeated_navigation_refusal(value,refusal))
+            self.assertEqual(self.store.db.execute("select count(*) from events where kind='navigation_repeated_refusal'").fetchone()[0],1)
+            self.session.skill.record['handle']={'call_id':'active'}
+            self.assertFalse(actor.repeated_navigation_refusal(value,refusal))
+        finally:actor.close()
+
+    def test_many_waypoints_request_review_but_allow_an_explained_route(self):
+        self.session.call('record_task',goals=[dict(goal_id='route',kind='route',target_id='',description='经过多处')])
+        view=query_map(self.session)
+        points=[[4.,4.],[5.,4.],[6.,4.],[7.,4.],[8.,4.],[9.,4.]]
+        args=dict(goal_id='route',view_id=view,orientation_source='autonomous',waypoints=points)
+        result=self.session.call('navigate_route',**args)
+        self.assertEqual(result['reason'],'route_waypoints_review_required')
+        self.assertEqual(result['distinct_waypoints'],6)
         self.assertIsNone(self.session.skill.record['handle'])
-        view=self.session.spatial_view.record['view_id']
-        result=self.session.call('navigate_route',goal_id='loop',view_id=view,orientation_source='autonomous',
-            waypoints=[points[0],points[3],points[6]])
-        self.assertEqual(result['status'],'accepted')
-        route=self.session.task_goals.current('loop')['selected']['route']
-        self.assertEqual(route['waypoints'],[points[0],points[3],points[6],points[0]])
-        self.assertIsNone(route['final_yaw'])
+        result=self.session.call('navigate_route',**args,waypoint_reason='用户指定依次经过这些地点')
+        self.assertEqual(result['status'],'accepted',result)
+        route=self.session.task_goals.current('route')['selected']['route']
+        self.assertEqual(route['waypoints'],points)
+        self.assertEqual(route['waypoint_reason'],'用户指定依次经过这些地点')
 
-    def test_circuit_order_does_not_reject_imaginary_crossing_chords(self):
-        polygon=[[-1,-1],[1,-1],[1,1],[-1,1]]
-        points=[[2,0],[-1,-2],[-1,2]]
-        self.assertFalse(path_outside_region(points+[points[0]],polygon))
-        result=circuit_plan_diagnostics(points,polygon,'clockwise',.2)
-        self.assertIsNone(result['reason'])
-        self.assertTrue(result['closure_added'])
+    def test_three_waypoints_are_not_automatically_closed(self):
+        self.session.call('record_task',goals=[dict(goal_id='route',kind='route',target_id='',description='按顺序经过')])
+        view=query_map(self.session);points=[[4.,4.],[5.,4.],[6.,4.]]
+        result=self.session.call('navigate_route',goal_id='route',view_id=view,orientation_source='autonomous',waypoints=points)
+        self.assertEqual(result['status'],'accepted',result)
+        self.assertEqual(self.session.task_goals.current('route')['selected']['route']['waypoints'],points)
 
-    def test_manual_region_check_uses_matching_fresh_reference_only(self):
-        from decision.agent.workflows.manual_reference import region_check
-        handle={'call_id':'test'}
-        route={'region_polygon':[[-1,-1],[1,-1],[1,1],[-1,1]]}
-        preview=dict(owner='test',request_id='test:1',reference_frame='map',status='reference_ready',
-                     reference_stamp_s=10.,reference_path=[[-2,0],[2,0]])
-        self.assertEqual(region_check(preview,route,1,handle,'map',11.),'crosses')
-        self.assertEqual(region_check(preview,route,0,handle,'map',11.),'not_applicable')
-        self.assertEqual(region_check(preview,route,1,handle,'map',14.),'unavailable')
-        self.assertEqual(region_check(dict(preview,request_id='old'),route,1,handle,'map',11.),'unavailable')
-        self.assertEqual(region_check(dict(preview,reference_path=None),route,1,handle,'map',11.),'unavailable')
-        self.assertEqual(region_check(dict(preview,reference_path=[[-2,2],[2,2]]),route,1,handle,'map',11.),'clear')
+    def test_four_waypoints_request_review_before_route_is_accepted(self):
+        self.session.call('record_task',goals=[dict(goal_id='route',kind='route',target_id='',description='按顺序经过')])
+        view=query_map(self.session);points=[[4.,4.],[5.,4.],[6.,4.],[7.,4.]]
+        result=self.session.call('navigate_route',goal_id='route',view_id=view,orientation_source='autonomous',waypoints=points)
+        self.assertEqual(result['reason'],'route_waypoints_review_required')
+        self.assertEqual(result['distinct_waypoints'],4)
+        self.assertIsNone(self.session.skill.record['handle'])
+
+    def test_waypoint_reason_never_bypasses_occupied_check(self):
+        from perception.environment.layers import GridSnapshot
+        occupancy=np.zeros((100,140),np.int8);occupancy[40,90]=100
+        grid=GridSnapshot(dict(frame_id='sim_odom',shape=[100,140],resolution=.1,origin_xy=[0.,0.],snapshot_id='occupied'),
+                          dict(occupancy=occupancy))
+        self.nav.spatial_inputs=lambda:dict(global_grid=grid,scene=None,pose=self.nav.state['pose'],
+            stamp_s=self.nav.state['stamp_s'],clock_domain=self.nav.clock_domain)
+        self.session.call('record_task',goals=[dict(goal_id='route',kind='route',target_id='',description='经过多处')])
+        view=query_map(self.session);points=[[4.,4.],[5.,4.],[6.,4.],[7.,4.],[8.,4.],[9.05,4.05]]
+        result=self.session.call('navigate_route',goal_id='route',view_id=view,orientation_source='autonomous',
+                                 waypoints=points,waypoint_reason='需要这些位置')
+        self.assertEqual(result['reason'],'waypoint_statically_occupied')
+        self.assertEqual(result['distinct_waypoints'],6)
+        self.assertIn('三个',result['guidance'])
+        self.assertIsNone(self.session.skill.record['handle'])
 
     def test_manual_preview_exposes_only_matching_reference(self):
         from runtime.control import manual_preview_path
@@ -237,19 +268,6 @@ class AgentRouteTests(unittest.TestCase):
         self.assertIsNone(manual_preview_path(reference,dict(request,goal=[2.,2.])))
         self.assertIsNone(manual_preview_path(dict(result=dict(reference['result'],frame_id='odom')),request))
         self.assertIsNone(manual_preview_path(dict(result=dict(reference['result'],path=[[0,0]]*1025)),request))
-
-    def test_manual_region_conflict_withdraws_suggestion_and_reports(self):
-        from unittest.mock import Mock
-        from types import SimpleNamespace
-        from decision.agent.workflows.manual import cancel_region_conflict
-        session=SimpleNamespace(store=Mock(),conversation=Mock(),skill=Mock())
-        reference=Mock()
-        with patch('decision.agent.workflows.manual.emit') as emit:
-            cancel_region_conflict(session,reference,'goal',1)
-        session.skill.cancel.assert_called_once_with(reason='planned_route_intersects_task_region')
-        reference.set.assert_called_once_with(None,None)
-        self.assertIn('手柄停稳',emit.call_args.args[0]['instruction'])
-        session.conversation.notice.assert_called_once()
 
     def test_waypoint_checks_reject_occupied_and_unknown_without_current_evidence(self):
         from decision.agent.core.route import waypoint_occupancy_diagnostics
@@ -271,85 +289,34 @@ class AgentRouteTests(unittest.TestCase):
         self.assertEqual(result['goal'],[2,2])
         self.assertEqual(result['goal_behavior'],'stop')
 
-    def test_static_line_feedback_distinguishes_occupied_unknown_and_outside(self):
-        from perception.environment.layers import GridSnapshot
-        cells=np.zeros((10,10),np.int8);cells[0,4]=100;cells[0,7]=-1
-        grid=GridSnapshot(dict(frame_id='sim_odom',shape=[10,10],resolution=.1,
-                               origin_xy=[0.,0.],snapshot_id='unit-static'),dict(occupancy=cells))
-        result=static_route_line_diagnostics(grid,[[.05,.05],[.85,.05],[1.2,.05]])
-        self.assertGreater(result['segments'][0]['occupied_samples'],0)
-        self.assertGreater(result['segments'][0]['unknown_samples'],0)
-        self.assertGreater(result['segments'][1]['outside_samples'],0)
-        self.assertEqual(result['scope'],'static_centerline_only_not_vehicle_or_actual_planned_path')
-
     def test_route_rejects_changed_source_instead_of_using_old_view(self):
-        self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
-                                                     direction='clockwise',description='绕一圈')])
+        self.session.call('record_task',goals=[dict(goal_id='loop',kind='route',target_id='lobby_area',
+                                                     description='绕一圈')])
         inputs=self.nav.spatial_inputs();self.nav.spatial_inputs=lambda:inputs
         view=query_map(self.session);inputs['stamp_s']+=.1
         result=self.session.call('navigate_route',goal_id='loop',view_id=view,orientation_source='autonomous',
-                                 waypoints=self.points(),final_yaw=0.)
+                                 waypoints=self.points(),final_yaw=0.,waypoint_reason='合成测试需要逐段验证')
         self.assertEqual(result['reason'],'spatial_source_changed')
         self.assertIsNone(self.session.skill.record['handle'])
-
-    def test_unspecified_direction_is_agent_choice_not_user_requirement(self):
-        goal=dict(goal_id='loop',kind='circuit',target_id='lobby_area',description='绕一圈')
-        self.assertEqual(self.session.call('record_task',goals=[goal])['status'],'recorded')
-        view=query_map(self.session)
-        args=dict(goal_id='loop',view_id=view,orientation_source='autonomous',waypoints=self.points(),final_yaw=0.)
-        self.assertEqual(self.session.call('navigate_route',**args)['reason'],'choose_a_circuit_direction')
-        self.assertEqual(self.session.call('navigate_route',direction='clockwise',**args)['status'],'accepted')
-        selected=self.session.task_goals.current('loop')['selected']
-        self.assertNotIn('direction',selected['requirement'])
-        self.assertEqual(selected['route']['direction_source'],'autonomous')
-
-    def test_explicit_direction_cannot_be_changed_by_route(self):
-        goal=dict(goal_id='loop',kind='circuit',target_id='lobby_area',direction='clockwise',description='顺时针绕')
-        self.session.call('record_task',goals=[goal]);view=query_map(self.session)
-        result=self.session.call('navigate_route',goal_id='loop',view_id=view,orientation_source='autonomous',
-                                 waypoints=self.points(),final_yaw=0.,direction='counterclockwise')
-        self.assertEqual(result['reason'],'route_direction_conflicts_with_user_requirement')
-        result=self.session.call('navigate_route',goal_id='loop',view_id=view,orientation_source='autonomous',
-                                 waypoints=self.points('counterclockwise'),final_yaw=0.)
-        self.assertEqual(result['reason'],'proposed_route_does_not_make_requested_circuit')
-
-    def test_direction_and_gaps_use_actual_trace_not_proposal(self):
-        points=self.points();samples=[dict(stamp_s=i*.1,pose=[*p,0.]) for i,p in enumerate(points)]
-        polygon=self.catalog.regions['lobby_area']['polygon'];segments=[dict(samples=samples)]
-        self.assertEqual(circuit_evidence(segments,polygon,'clockwise',0.,.8,.12)['status'],'met')
-        self.assertEqual(circuit_evidence(segments,polygon,'counterclockwise',0.,.8,.12)['status'],'not_met')
-        self.assertEqual(circuit_evidence([dict(samples=samples[:3]),dict(samples=samples[3:])],polygon,
-                                         'clockwise',0.,.8,.12)['status'],'unproven')
-        self.assertFalse(path_outside_region([points[0],points[4]],polygon))
-
-    def test_circuit_plan_rejects_reverse_winding_hidden_by_net_one_circle(self):
-        from decision.agent.core.route import circuit_plan_diagnostics
-        polygon=[[-1,-1],[1,-1],[1,1],[-1,1]]
-        angles=np.r_[np.linspace(0,-4*math.pi,17),np.linspace(-4*math.pi,-2*math.pi,9)[1:]]
-        points=np.column_stack((3*np.cos(angles),3*np.sin(angles)))
-        result=circuit_plan_diagnostics(points,polygon,'clockwise',.12)
-        self.assertEqual(result['reason'],'proposed_route_excessive_reverse_winding')
-        self.assertAlmostEqual(result['signed_winding_rad'],2*math.pi)
-        self.assertAlmostEqual(result['reverse_winding_rad'],2*math.pi)
 
     def test_adapter_without_route_support_is_explicitly_refused(self):
         self.nav.start_route=None
         # A backend must expose a callable, not merely an attribute.
-        self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
-                                                     direction='clockwise',description='绕一圈')])
+        self.session.call('record_task',goals=[dict(goal_id='loop',kind='route',target_id='lobby_area',
+                                                     description='绕一圈')])
         view=query_map(self.session)
         result=self.session.call('navigate_route',goal_id='loop',view_id=view,orientation_source='autonomous',
-                                 waypoints=self.points(),final_yaw=0.)
+                                 waypoints=self.points(),final_yaw=0.,waypoint_reason='合成测试需要逐段验证')
         self.assertEqual(result['reason'],'route_execution_not_supported_by_adapter')
 
     def test_static_view_without_current_pose_cannot_submit_route(self):
-        self.session.call('record_task',goals=[dict(goal_id='loop',kind='circuit',target_id='lobby_area',
-                                                     direction='clockwise',description='绕一圈')])
+        self.session.call('record_task',goals=[dict(goal_id='loop',kind='route',target_id='lobby_area',
+                                                     description='绕一圈')])
         inputs=self.nav.spatial_inputs()
         self.nav.spatial_inputs=lambda:dict(inputs,pose=None,stamp_s=None)
         view=query_map(self.session)
         result=self.session.call('navigate_route',goal_id='loop',view_id=view,orientation_source='autonomous',
-                                 waypoints=self.points(),final_yaw=0.)
+                                 waypoints=self.points(),final_yaw=0.,waypoint_reason='合成测试需要逐段验证')
         self.assertEqual(result['reason'],'query_a_current_spatial_view_first')
         self.assertIsNone(self.session.skill.record['handle'])
 
@@ -368,16 +335,7 @@ class AgentRouteTests(unittest.TestCase):
         for _ in range(4):self.session.tick()
         outcome=self.session.call('check_goal',goal_id='visit')
         self.assertEqual(outcome['status'],'completed')
-        self.assertTrue(outcome['checks']['sequence_met'])
-
-    def test_sequence_uses_measured_order_and_does_not_accept_skipped_checkpoint(self):
-        from decision.agent.core.route import sequence_evidence
-        checkpoints=['elevator','lobby_entrance','corridor_wait']
-        samples=[dict(stamp_s=i*.2,pose=p) for i,p in enumerate([[5.,4.,0.],[8.,4.,0.],[6.,4.,0.],[8.,4.,0.]])]
-        result=sequence_evidence([dict(samples=samples)],checkpoints,self.session.task_goals.checkpoint_met,0.,.6)
-        self.assertEqual(result['status'],'met')
-        result=sequence_evidence([dict(samples=samples[:2])],checkpoints,self.session.task_goals.checkpoint_met,0.,.2)
-        self.assertEqual(result['status'],'not_met')
+        self.assertEqual(outcome['checks']['route_progress']['waypoint_count'],3)
 
     def test_route_cancel_never_completes_requirement(self):
         goal=dict(goal_id='visit',kind='sequence',target_id='',description='经过电梯口和大厅门口',
@@ -392,27 +350,12 @@ class AgentRouteTests(unittest.TestCase):
         self.assertFalse(self.session.task_goals.finished())
         self.assertEqual(self.session.call('check_goal',goal_id='visit')['status'],'unproven')
 
-    def test_simulation_stops_if_new_reference_cuts_through_region(self):
-        from decision.agent.adapters.simulation import SimulationNavigation
-        nav=SimulationNavigation()
-        nav.pose=np.array([4.,4.,0.])
-        nav.start_route(dict(route=dict(waypoints=[[4.,4.],[8.,4.]],final_yaw=0.,
-            region_polygon=[[5.,3.],[7.,3.],[7.,5.],[5.,5.]])),
-            dict(task_id='t',call_id='c',goal_revision=1))
-        nav.route_index=1;nav._route_request()
-        nav.planner.query=lambda *args,**kwargs:dict(status='path_found',path=[[4.,4.,0.],[8.,4.,0.]])
-        with patch('navigation.planning.continuity.reference_envelope',return_value=None):
-            state=nav.tick()
-        self.assertEqual(state['stop_reason'],'planned_route_intersects_task_region')
-        self.assertEqual(state['status'],'stopped')
-        np.testing.assert_allclose(state['pose'],[4.,4.,0.])
-
     @unittest.skipUnless((ROOT/'outputs/runtime/build/planning/libsocial_nav_pose_search.so').is_file(),
                          'runtime CPU planner is not available')
     def test_real_simulation_passes_intermediate_point_then_stops_at_final(self):
         from decision.agent.adapters.simulation import SimulationNavigation
         nav=SimulationNavigation()
-        place=dict(pose=[5.,4.,0.],route=dict(waypoints=[[4.5,4.],[5.,4.]],final_yaw=0.,region_polygon=None))
+        place=dict(pose=[5.,4.,0.],route=dict(waypoints=[[4.5,4.],[5.,4.]],final_yaw=0.))
         self.assertTrue(nav.check_route(place)['reference_found'])
         nav.start_route(place,dict(task_id='t',call_id='c',goal_revision=1))
         transition=None
