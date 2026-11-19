@@ -207,7 +207,7 @@ def run(args,planning,motion,geometry,settings):
             rospy.Subscriber(args.people_topic,String,people,queue_size=16),
             rospy.Subscriber('/navigation/planning/goal',String,lambda m:command('goal',m),queue_size=16),
             rospy.Subscriber('/navigation/planning/cancel',String,lambda m:command('cancel',m),queue_size=16)]
-        previous=None;last_publish=0.;last_shadow=-float('inf');last_observation=None;events=[];last_pose=None;blocked_since=None;direct_reason=None
+        previous=None;last_publish=0.;last_shadow=-float('inf');last_observation=None;events=[];last_pose=None;direct_reason=None
         try:
             while not rospy.is_shutdown():
                 began=time.perf_counter();now=rospy.Time.now().to_sec()
@@ -221,13 +221,7 @@ def run(args,planning,motion,geometry,settings):
                 if changed or pose_key!=last_pose or mono-last_shadow>=direct_control.settings['period_s']:
                     packet=direct_control.step(bridge.request,bridge.scene,rows,reference,now=now,clock_domain=clock,mono=mono)
                     last_shadow=mono;last_pose=pose_key
-                    p=packet.get('proposal') or {}
-                    stopping=(p.get('status')=='candidate' and p.get('velocity',[0])[0]<.03 and
-                        not (packet.get('recorded_goal_diagnostic') or {}).get('reached_xy',False))
-                    if p.get('reason')=='no_admissible_velocity' or stopping:
-                        if blocked_since is None:blocked_since=mono
-                        if mono-blocked_since>=1.:runtime.request_replan()
-                    else:blocked_since=None
+                    runtime.note_control(packet,monotonic_s=mono)
                 result=direct_control.controller.result
                 if bridge.request is None or bridge.scene is None or (result is not None and
                         not 0<=now-result['input_binding']['as_of']<=motion['state_max_age_s']):result=None
@@ -242,8 +236,7 @@ def run(args,planning,motion,geometry,settings):
                     if scene is not None and scene.record['input_fingerprint']!=last_observation:
                         observation_pub.publish(String(data=json.dumps(scene.record,ensure_ascii=False,allow_nan=False)))
                         last_observation=scene.record['input_fingerprint']
-                    with bridge.lock:rows=list(bridge.rows)
-                    proposal_pub.publish(String(data=json.dumps(packet,ensure_ascii=False,allow_nan=False)));last_shadow=mono
+                    proposal_pub.publish(String(data=json.dumps(packet,ensure_ascii=False,allow_nan=False)))
                 if key!=previous or mono-last_publish>=.2:
                     path_pub.publish(trajectory_path(result,rospy))
                     # The compact state includes full candidate timing and input binding,

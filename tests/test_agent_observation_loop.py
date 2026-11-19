@@ -284,13 +284,14 @@ class ObservationLoopTests(unittest.TestCase):
         # A separate late motion reply must never be silently rebound to a new view.
         self.nav.t = 0.
         self.nav.state['stamp_s'] = 10.
+        self.tools.call('record_task',goals=[dict(goal_id='elevator',kind='point',target_id='elevator',description='到电梯')])
         actor = AgentLoop(self.tools, lambda *_: reply('navigate', goal_id='elevator', pose=[5,4,0], view_id='old', orientation_source='autonomous'))
         try:
             actor.tick(); actor.model.thread.join(1)
             self.nav.t = 4.
             actor.tick()
             result = self.tools.state['history'][-1]['value']['result']
-            self.assertEqual(result['reason'], 'model_input_context_unavailable')
+            self.assertEqual(result['reason'], 'model_view_not_current')
             self.assertEqual(self.tools.skill.record['attempts'], [])
         finally:
             actor.close()

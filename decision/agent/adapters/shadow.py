@@ -401,7 +401,7 @@ class RuntimeLiveNavigation(RuntimeShadowNavigation):
                       handle=copy.deepcopy(self.handle) if match or cancelled or follow or status in ('preempted','interrupted') else None,
                       pose=copy.deepcopy(feedback.get('pose')),velocity=copy.deepcopy(feedback.get('velocity')),
                       stopped=bool(stopped),arrival_observation=bool(arrival),
-                      stop_observation=bool(cancelled and stopped),physical_acceptance=False,
+                      stop_observation=bool(cancelled and stopped),stop_measurement_stamp_s=feedback.get('stamp_s'),physical_acceptance=False,
                       idle_stop_observation=bool(idle and stopped and enabled and not result['input_stale']),
                       stop_reason=follow.get('reason') if failed_follow else None,
                       chassis_state=chassis.get('state'),chassis_status_fresh=chassis.get('status_fresh') is True,

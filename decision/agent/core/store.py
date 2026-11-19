@@ -1,4 +1,6 @@
 """Session persistence and shared API spending reservations."""
+import copy
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -11,6 +13,30 @@ def encode(value):
     return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
 
 
+def image_parts(request):
+    for message in request.get('messages',[]):
+        content=message.get('content')
+        if isinstance(content,list):
+            for part in content:
+                if isinstance(part,dict) and part.get('type')=='image_url':
+                    yield part['image_url']
+
+
+def restore_request_images(db, event):
+    """Read a complete archived request, including original data URLs, on demand."""
+    if event.get('image_storage')!='session_sha256':
+        return event
+    restored=copy.deepcopy(event)
+    for image in image_parts(restored['request']):
+        digest=image.pop('session_image_sha256',None)
+        if digest is None:continue
+        row=db.execute('SELECT url FROM request_images WHERE digest=?',(digest,)).fetchone()
+        if row is None or hashlib.sha256(row[0].encode()).hexdigest()!=digest:
+            raise ValueError('Archived request image missing or changed')
+        image['url']=row[0]
+    return restored
+
+
 class Store:
     def __init__(self, path):
         path = Path(path)
@@ -19,6 +45,7 @@ class Store:
         self.db.execute('CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, wall_s REAL, kind TEXT, value TEXT)')
         self.db.execute('CREATE TABLE IF NOT EXISTS map_images (view_id TEXT, role TEXT, sha256 TEXT, png BLOB, PRIMARY KEY(view_id,role))')
+        self.db.execute('CREATE TABLE IF NOT EXISTS request_images (digest TEXT PRIMARY KEY,url TEXT NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS keyframes (keyframe_id TEXT PRIMARY KEY, task_id TEXT, revision INTEGER, metadata TEXT, image BLOB)')
         self.db.execute('CREATE TABLE IF NOT EXISTS follow_references (task_id TEXT, revision INTEGER, goal_id TEXT, metadata TEXT, image BLOB, crop BLOB, PRIMARY KEY(task_id,revision,goal_id))')
         self.db.commit()
@@ -34,6 +61,16 @@ class Store:
 
     def event(self, kind, value):
         with self.db:
+            if kind=='api_request' and value.get('request'):
+                value=copy.deepcopy(value)
+                for image in image_parts(value['request']):
+                    url=image.get('url','')
+                    if not url.startswith('data:image/'):continue
+                    digest=hashlib.sha256(url.encode()).hexdigest()
+                    self.db.execute('INSERT OR IGNORE INTO request_images VALUES (?,?)',(digest,url))
+                    del image['url']
+                    image['session_image_sha256']=digest
+                    value['image_storage']='session_sha256'
             self.db.execute('INSERT INTO events(wall_s,kind,value) VALUES (?,?,?)', (time.time(), kind, encode(value)))
 
     def spatial_view(self, view):
@@ -116,6 +153,11 @@ class Budget:
         return min(maximum,max(1,estimated))
 
     def finish(self, call_id, record):
+        # Raw replies are retained by the owning session. Only accounting data
+        # belongs in the shared ledger used across sessions.
+        fields=('requested_model','returned_model','thinking_mode','usage','first_token_s',
+                'full_return_s','wall_s','cache','purpose','finish_reason')
+        record={k:record[k] for k in fields if k in record}
         usage = record.get('usage') or {}
         inp, out = usage.get('prompt_tokens'), usage.get('completion_tokens')
         known = all(type(v) is int and v >= 0 for v in (inp, out))

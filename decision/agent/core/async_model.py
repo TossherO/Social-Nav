@@ -2,6 +2,13 @@
 import copy
 import threading
 
+_worker=threading.local()
+
+
+def request_cancelled():
+    flag=getattr(_worker,'cancel',None)
+    return flag is not None and flag.is_set()
+
 
 class AsyncModel:
     def __init__(self):
@@ -9,6 +16,7 @@ class AsyncModel:
         self.epoch = 0
         self.thread = None
         self.result = None
+        self.cancel = None
 
     @property
     def busy(self):
@@ -21,8 +29,10 @@ class AsyncModel:
                 raise RuntimeError('One model request is already pending')
             epoch = self.epoch
             context = copy.deepcopy(context)
+            cancel=self.cancel=threading.Event()
 
             def execute():
+                _worker.cancel=cancel
                 try:
                     outcome = dict(ok=True, value=work())
                 except Exception as error:
@@ -37,6 +47,7 @@ class AsyncModel:
     def invalidate(self):
         with self.lock:
             self.epoch += 1
+            if self.cancel is not None:self.cancel.set()
 
     def poll(self):
         with self.lock:

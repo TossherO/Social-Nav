@@ -234,10 +234,40 @@ class DwaTests(unittest.TestCase):
         blocked=self.controller.command(self.req,bundle(cells),feedback,self.reference,now=10.,clock_domain='synthetic')
         self.assertEqual(blocked['status'],'unavailable');self.assertIsNone(self.controller.result)
 
+    def test_expired_goal_cannot_restore_a_pending_or_completed_reference(self):
+        for mode in ('expired_update','late_reply','delivered'):
+            with self.subTest(mode=mode), ReferenceRuntime(
+                    self.cfg,self.motion,self.geometry,worker_factory=FakeWorker) as runtime:
+                goal=dict(self.req,valid_until_s=10.05)
+                runtime.update(goal,self.scene,None,now=10.)
+                runtime.tick(now=10.,clock_domain='synthetic')
+                self.assertIsNotNone(runtime.worker.job)
+                runtime.worker.reply(self.reference)
+                if mode=='delivered':
+                    self.assertIsNotNone(runtime.tick(now=10.,clock_domain='synthetic')['result'])
+                elif mode=='expired_update':
+                    self.assertFalse(runtime.update(goal,self.scene,None,now=10.1))
+                status=runtime.tick(now=10.1,clock_domain='synthetic')
+                self.assertEqual(status['reason'],'request_expired')
+                self.assertIsNone(status['result'])
+                self.assertIsNone(runtime.reference)
+                self.assertIsNone(runtime.worker.job)
+                renewed=dict(goal,goal_revision=goal['goal_revision']+1,valid_until_s=11.)
+                self.assertTrue(runtime.update(renewed,self.scene,None,now=10.1))
+                runtime.tick(now=10.1,clock_domain='synthetic')
+                self.assertEqual(runtime.worker.job['request'],renewed)
+
+    def test_progress_monitor_distinguishes_reverse_and_rotation_from_stopping(self):
+        with ReferenceRuntime(self.cfg,self.motion,self.geometry,worker_factory=FakeWorker) as runtime:
+            for i,velocity in enumerate(([-.2,0.],[-.2,0.],[0.,.2],[0.,.2],[0.,0.],[0.,0.])):
+                runtime.note_control(dict(proposal=dict(status='candidate',velocity=velocity)),monotonic_s=i)
+                self.assertEqual(runtime.need_replan,i==5)
+
     def test_reference_recovers_after_short_outage_without_refreshing_source_time(self):
         with ReferenceRuntime(self.cfg,self.motion,self.geometry,worker_factory=FakeWorker) as runtime:
             runtime.update(self.req,self.scene,None,now=10.);runtime.tick(now=10.,clock_domain='synthetic')
             runtime.worker.reply(self.reference);runtime.tick(now=10.,clock_domain='synthetic')
+            self.assertFalse(runtime.update(self.req,self.scene,None,now=10.6))
             runtime.tick(now=10.6,clock_domain='synthetic');self.assertIsNone(runtime.current)
             newer=scene_at(10.7);runtime.update(self.req,newer,None,now=10.7)
             state=runtime.tick(now=10.7,clock_domain='synthetic')

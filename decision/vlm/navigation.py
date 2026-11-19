@@ -1,9 +1,9 @@
 """Single-flight acceptance of decision responses; no service or motion startup."""
 import copy
-import json
 import math
 
 from .annotation.rules import digest
+from .vlm_api_common import parse_response
 from .project_config import load_config
 
 
@@ -48,7 +48,7 @@ class DecisionRequest:
         self.pending=None
         if not envelope['ticket']['stamp_s']<=now<=envelope['deadline_s']:
             raise ValueError('Decision response deadline exceeded')
-        response=json.loads(raw_response) if isinstance(raw_response,str) else raw_response
+        response=parse_response(raw_response) if isinstance(raw_response,str) else raw_response
         result=self.policy.respond(envelope['ticket'],response,scene=scene,now=now)
         self.last_response.update(accepted=True,result=copy.deepcopy(result))
         return result

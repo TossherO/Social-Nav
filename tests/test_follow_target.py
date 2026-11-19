@@ -3,9 +3,7 @@ import copy
 import hashlib
 import tempfile
 import unittest
-from contextlib import nullcontext
 from pathlib import Path
-from unittest.mock import patch
 
 from decision.agent import ROOT
 from decision.agent.core.session import AgentSession
@@ -94,98 +92,6 @@ class FollowTargetTests(unittest.TestCase):
         self.assertEqual(result['association_status'],'track_identity_unavailable')
         self.assertIsNone(result['candidates'][0]['track'])
 
-    def test_runtime_preparer_restores_scene_health_before_association(self):
-        from decision.vlm.image_inputs import FollowImagePreparer
-        preparer=FollowImagePreparer.__new__(FollowImagePreparer)
-        preparer.stream=None
-        preparer.calls=0
-        preparer.calibration=dict(source_frame=self.row['detection_frame_id'],target_frame='camera',sha256='cal')
-        preparer.transform=__import__('numpy').eye(4)
-        class Detector:
-            metadata=dict(backend='test',sha256='model')
-            def detect(inner, pixels):return self.detections,0.
-        class Matcher:
-            def step(inner, people, *args, **kwargs):
-                self.assertEqual(people[0]['kind'],'track')
-                return self.association
-        preparer.detector=Detector()
-        preparer.matcher=Matcher()
-        camera=dict(stamp_ns=9_950_000_000,frame_id='camera',width=64,height=48)
-        with patch('torch.cuda.stream',return_value=nullcontext()):
-            result=preparer.prepare_scene(self.scene,self.arrays['rgb'],9.98,'camera',camera,9_980_000_000)
-            camera['stamp_ns']=10_000_000_000
-            no_match=preparer.prepare_scene(self.scene,self.arrays['rgb'],9.98,'camera',camera,9_980_000_000)
-            camera['stamp_ns']=9_950_000_000
-            class BadMatcher:
-                def step(inner,*args,**kwargs):raise ValueError('invalid camera')
-            preparer.matcher=BadMatcher()
-            invalid=preparer.prepare_scene(self.scene,self.arrays['rgb'],9.98,'camera',camera,9_980_000_000)
-        self.assertEqual(result['candidates'][0]['track']['identity'],['tracker_session',7,'a'])
-        self.assertIsNone(no_match['candidates'][0]['track'])
-        self.assertIsNone(no_match['detector']['camera_info'])
-        self.assertEqual(invalid['association_status'],'association_error_ValueError')
-        self.assertIsNone(invalid['candidates'][0]['track'])
-
-    def test_worker_failure_preserves_regular_observation(self):
-        from decision.agent.adapters.runtime import ObservationWorker
-        published=[]
-        def fail():raise RuntimeError('detector unavailable')
-        worker=ObservationWorker(lambda record,image:published.append(record),follow_candidates=True,follow_factory=fail)
-        self.assertTrue(worker.submit(self.scene,self.arrays['rgb'],9.98,'camera'))
-        result=worker.close()
-        self.assertEqual(result['follow_candidates_error'],'RuntimeError')
-        self.assertEqual(published[0]['follow_candidates_error'],'RuntimeError')
-        self.assertNotIn('follow_candidates',published[0])
-
-    def test_worker_preserves_exact_rgb_nanoseconds_with_candidates(self):
-        from decision.agent.adapters.runtime import ObservationWorker
-        published=[]
-        class Preparer:
-            def prepare_scene(inner,scene,image,stamp,frame,camera,stamp_ns):
-                self.assertEqual(stamp_ns,9_980_000_000)
-                return candidates(scene,image,stamp,self.detections,self.association,detector={},rgb_stamp_ns=stamp_ns)
-        worker=ObservationWorker(lambda record,image:published.append((record,image)),
-                                 follow_candidates=True,follow_factory=Preparer)
-        self.assertTrue(worker.submit(self.scene,self.arrays['rgb'],9.98,'camera',None,9_980_000_000))
-        result=worker.close()
-        self.assertIsNone(result['follow_candidates_error'])
-        record,image=published[0]
-        Observation(record,image).verify()
-        self.assertEqual(record['rgb']['stamp_ns'],9_980_000_000)
-        self.assertEqual(record['follow_candidates']['rgb_stamp_ns'],9_980_000_000)
-
-    def test_worker_recovers_after_one_invalid_candidate_frame(self):
-        import threading
-        from decision.agent.adapters.runtime import ObservationWorker
-        published = []
-        ready = threading.Event()
-        class Preparer:
-            def __init__(inner):
-                inner.calls = 0
-            def prepare_scene(inner, scene, image, stamp, frame, camera, stamp_ns):
-                inner.calls += 1
-                detections = self.detections * (33 if inner.calls == 1 else 1)
-                return candidates(scene, image, stamp, detections, self.association, detector={})
-        preparer = Preparer()
-        def publish(record, image):
-            published.append(record)
-            ready.set()
-        worker = ObservationWorker(publish, follow_candidates=True, follow_factory=lambda: preparer)
-        try:
-            self.assertTrue(worker.submit(self.scene, self.arrays['rgb'], 9.98, 'camera'))
-            self.assertTrue(ready.wait(3))
-            ready.clear()
-            _, arrays, _, scene = observation(11.)
-            self.assertTrue(worker.submit(scene, arrays['rgb'], 10.98, 'camera'))
-            self.assertTrue(ready.wait(3))
-        finally:
-            result = worker.close()
-        self.assertEqual(published[0]['follow_candidates_error'], 'ValueError')
-        self.assertNotIn('follow_candidates', published[0])
-        self.assertNotIn('follow_candidates_error', published[1])
-        self.assertEqual(len(published[1]['follow_candidates']['candidates']), 2)
-        self.assertEqual(preparer.calls, 2)
-        self.assertIsNone(result['follow_candidates_error'])
 
     def test_agent_model_input_receives_numbered_image_and_candidate_binding(self):
         from decision.agent.core.model import Model

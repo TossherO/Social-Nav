@@ -18,5 +18,6 @@ def make_loop(args, session, session_path):
         from ..core.model import api_work
         work = lambda payload, observation, spatial_view: api_work(
             args.api_config,session_path,payload,observation,spatial_view,cache_mode=args.cache_mode,
-            thinking_mode=args.thinking_mode)
+            thinking_mode=(('off' if payload['current_state']['requirements_registered'] else 'low')
+                           if args.thinking_mode=='planning' else args.thinking_mode))
     return AgentLoop(session, work, max_requests=args.max_requests)

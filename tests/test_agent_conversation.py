@@ -129,13 +129,13 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(stats['hit_fraction'],.6)
         self.assertEqual(stats['cache_creation_input_tokens'],20)
 
-    def test_model_response_has_no_read_deadline(self):
+    def test_model_stream_has_idle_read_timeout(self):
         seen=[]
         def handle(request):
             seen.append(request.extensions.get('timeout'))
             return httpx.Response(200,text=wire(reply('lookup_places',name='').message['tool_calls']))
         self.client(handle).decide(self.session.prompt())
-        self.assertIsNone(seen[0]['read'])
+        self.assertEqual(seen[0]['read'],120.)
 
     def test_metadata_is_referenced_only_while_full_tool_result_is_retained(self):
         view_id=query_map(self.session)
@@ -254,10 +254,12 @@ class ConversationTests(unittest.TestCase):
             self.session.conversation.commit(reply('get_navigation_state'),dict(status='idle'))
         prompt=self.session.prompt()
         self.assertEqual(prompt['messages'][0]['content'],'到电梯口')
-        pairs=prompt['messages'][2:]
+        self.assertEqual(json.loads(prompt['messages'][2]['content'])['source'],'registered_task_plan')
+        pairs=prompt['messages'][3:]
         self.assertEqual([m['role'] for m in pairs],['assistant','tool','assistant','tool'])
         for a,b in zip(pairs[::2],pairs[1::2]):self.assertEqual(a['tool_calls'][0]['id'],b['tool_call_id'])
-        self.assertEqual(prompt['current_state']['task_goals'][0]['requirement']['target_id'],'elevator')
+        self.assertEqual(prompt['current_state']['task_goals'][0],dict(goal_id='elevator',status='pending'))
+        self.assertEqual(json.loads(prompt['messages'][2]['content'])['requirements'][0]['target_id'],'elevator')
         self.assertNotIn('history',prompt)
         self.assertGreater(self.store.db.execute("SELECT COUNT(*) FROM events WHERE kind='conversation_exchange'").fetchone()[0],2)
 

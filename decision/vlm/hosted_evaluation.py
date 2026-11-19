@@ -123,11 +123,11 @@ class HostedClient:
                             if private:detail=detail.replace(private,'[private]')
                         row['http_error']=detail
                         raise ValueError('HTTP failure')
-                    row.update(common.read_stream(response,began,timing))
+                    row.update(common.recorded_stream(response, began, timing, row))
             if (row['server_model']!=Model.model or row['finish_reason']!='stop' or
                     row['reasoning_content_present'] or row['usage'].get('reasoning_tokens',0)):
                 raise ValueError('Unexpected completion metadata')
-            return json.loads(row['raw_content'])
+            return common.parse_response(row['raw_content'])
         except Exception as error:
             row['error_type']=type(error).__name__
             return None

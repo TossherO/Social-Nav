@@ -108,10 +108,13 @@ def bag_initial_pose(path, config, *, bag, start, live=False):
 
 
 def handoff_initial_pose(value, asset, hint):
-    """Build a provisional LiDAR seed from the previous floor's measured pose."""
+    """Apply map-specific height and attitude to a provisional LiDAR XY/yaw."""
     from perception.mapping_localization.initial_pose import quaternion_rpy
-    transform=value.get('floor_transform') or {};pose=value.get('lidar_xy_yaw')
+    transform=value.get('destination') or {};pose=value.get('lidar_xy_yaw')
     if (value.get('verified_localization') is not False or
+            value.get('source')!='agent_destination_scan_and_map' or not value.get('scan_frame') or
+            not all(type(value.get(k)) in (int,float) and math.isfinite(value[k]) for k in ('scan_stamp_s','exit_stamp_s')) or
+            value['scan_stamp_s']<=value['exit_stamp_s'] or
             transform.get('to_map_id')!=asset.snapshot.metadata.get('map_id') or
             transform.get('to_floor')!=value.get('floor_id') or
             not isinstance(pose,list) or len(pose)!=3 or
@@ -197,6 +200,8 @@ def runtime_command(args, config, pose):
         command += ['--agent-observations']
     if getattr(args,'agent_follow_candidates',False):
         command += ['--agent-follow-candidates']
+    if getattr(args,'agent_seating',False):
+        command += ['--agent-seating']
     if getattr(args,'agent_execution',False):
         command += ['--agent-execution']
     if getattr(args,'trace_timing',False):
@@ -233,6 +238,7 @@ def parser():
     p.add_argument('--runtime-config', help='Same machine scheduling override inspected by runtime.preflight')
     p.add_argument('--agent-observations', action='store_true', help='Publish bounded RGB observations for the nonexecuting Agent')
     p.add_argument('--agent-follow-candidates', action='store_true', help='Prepare optional YOLO person candidates for Agent follow selection')
+    p.add_argument('--agent-seating',action='store_true',help='Prepare RGB and lidar for current table-edge proposals')
     p.add_argument('--agent-execution', action='store_true', help='Allow Agent goal intents in this manually armed execution session')
     p.add_argument('--trace-timing', action='store_true', help='Record bounded scalar stage timings for diagnosis')
     p.add_argument('--roll-gravity-deg', type=float, help='Explicit live fixed-map gravity correction limit in degrees')
@@ -267,6 +273,8 @@ def main(argv=None):
         p.error('--agent-execution requires --execute and --agent-observations')
     if args.agent_follow_candidates and not args.agent_observations:
         p.error('--agent-follow-candidates requires --agent-observations')
+    if args.agent_seating and not (args.live and args.agent_observations):
+        p.error('--agent-seating requires --live and --agent-observations')
     if args.chassis_port and not args.execute:
         p.error('--chassis-port is only used with explicit --execute')
     if not args.no_rviz:

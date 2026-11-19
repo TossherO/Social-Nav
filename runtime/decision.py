@@ -10,6 +10,7 @@ import uuid
 
 from interfaces.shared import SharedArrayPool, BufferFull
 from decision.vlm.trajectory_inputs import local_scope, pose, HISTORY_S
+from .export import drain_worker
 
 
 class DecisionBuffer:
@@ -138,11 +139,7 @@ class DecisionRecorder:
             print('可选VLM输入准备已停止，感知导航继续：'+self.error,file=sys.stderr,flush=True)
 
     def close(self):
-        while self.worker.is_alive():
-            try:self.queue.put(None,timeout=.1);break
-            except queue.Full:continue
-        self.worker.join(timeout=20)
-        if self.worker.is_alive():raise RuntimeError('Decision recorder failed to drain')
+        drain_worker(self.worker, self.queue)
         self.buffer.close()
         return dict(written=self.written,unready_or_busy=self.skipped,buffer_dropped=self.buffer.dropped,
                     complete=self.error is None,error=self.error,model_requests=0,

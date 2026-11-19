@@ -263,12 +263,16 @@ class CandidateTests(unittest.TestCase):
                     return httpx.Response(200,json={'data':[{'id':'qwen3.8-27b-fp8'}]} if request.url.path.endswith('/models') else {'server_args':{'speculative_algorithm':'DSPARK'}})
                 posts.append(request)
                 raw=dict(model='qwen3.8-27b-fp8',choices=[dict(index=0,delta=dict(content='{invalid'),finish_reason='stop')])
-                return httpx.Response(200,text='data: '+json.dumps(raw)+'\n\ndata: [DONE]\n\n')
-            client=httpx.Client(transport=httpx.MockTransport(handler))
-            with patch('httpx.Client',return_value=client),self.assertRaises(RuntimeError):inference.run(root,'http://localhost/v1')
-            self.assertEqual(len(posts),1)
-            saved=json.loads((root/'remote/warmup.json').read_text())
-            self.assertEqual(saved['raw_content'],'{invalid');self.assertFalse(saved['valid'])
+                return httpx.Response(200,text='data: '+json.dumps(raw)+('\n\ndata: [DONE]\n\n' if complete else '\n\n'))
+            for suffix, complete in [('malformed', True), ('interrupted', False)]:
+                posts.clear()
+                client = httpx.Client(transport=httpx.MockTransport(handler))
+                with self.subTest(suffix=suffix), patch('httpx.Client', return_value=client), self.assertRaises(RuntimeError):
+                    inference.run(root, 'http://localhost/v1', result_name=suffix)
+                self.assertEqual(len(posts), 1)
+                saved = json.loads((root / suffix / 'warmup.json').read_text())
+                self.assertEqual(saved['raw_content'], '{invalid')
+                self.assertFalse(saved['valid'])
 
 
 class StageTests(unittest.TestCase):

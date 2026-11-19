@@ -13,7 +13,7 @@ from PIL import Image, ImageDraw
 from perception.environment.context import fingerprint
 from .annotation.rules import digest
 from .project_config import load_config
-from .vlm_api_common import request_dspark
+from .vlm_api_common import parse_response, request_dspark
 
 
 PROMPT = (
@@ -187,10 +187,7 @@ def _infer(prepared, *, client_factory=None):
 
 def parse_selection(raw, choices):
     """Require exactly one target or observation from the corresponding set."""
-    def unique_object(pairs):
-        if len({key for key,_ in pairs})!=len(pairs):raise ValueError('Duplicate field')
-        return dict(pairs)
-    try:value=json.loads(raw,object_pairs_hook=unique_object)
+    try:value=parse_response(raw)
     except (TypeError,ValueError):raise ValueError('Invalid T2 JSON') from None
     if not isinstance(value,dict) or set(value)!={'target','observation'}:
         raise ValueError('Invalid T2 fields')

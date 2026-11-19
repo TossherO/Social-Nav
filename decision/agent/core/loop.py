@@ -15,8 +15,7 @@ class AgentLoop:
         self.model = AsyncModel()
         self.requests, self.max_requests = 0, max_requests
         self.exit_reason = None
-        self.route_refusal = None
-        self.navigation_refusal = None
+        self.refusals = {}
 
     @property
     def state(self):
@@ -25,45 +24,27 @@ class AgentLoop:
     def event(self, name, text=None):
         self.session.event(name, text)
         self.model.invalidate()
-        self.route_refusal = None
-        self.navigation_refusal = None
+        self.refusals.clear()
 
-    def repeated_route_refusal(self, value, output):
-        if value['tool']!='navigate_route':
-            return False
-        if self.session.navigation.scope not in ('manual','simulation') or self.session.skill.record['handle'] is not None:
-            self.route_refusal=None
-            return False
-        if output.get('status') not in ('refused','unavailable'):
-            self.route_refusal=None
-            return False
-        args={k:copy.deepcopy(v) for k,v in value['arguments'].items() if k!='view_id'}
+    def repeated_refusal(self, value, output):
+        tool=value['tool']
+        if tool not in ('navigate','navigate_route'):
+            return None
+        name='route' if tool=='navigate_route' else 'navigation'
+        if (self.session.skill.record['handle'] is not None or output.get('status') not in ('refused','unavailable')
+                or tool=='navigate_route' and self.session.navigation.scope not in ('manual','simulation')):
+            self.refusals.pop(tool,None)
+            return None
+        args={k:v for k,v in value['arguments'].items() if k!='view_id'}
         reason=output.get('reason')
         key=fingerprint(dict(revision=self.session.state['revision'],arguments=args,reason=reason))
-        previous=self.route_refusal
-        count=previous[1]+1 if previous is not None and previous[0]==key else 1
-        self.route_refusal=(key,count)
-        if count<3:return False
-        self.session.store.event('route_repeated_refusal',dict(goal_id=args.get('goal_id'),reason=reason,count=count,
-            action='await_user_before_retry',automatically_retried=False))
-        return True
-
-    def repeated_navigation_refusal(self, value, output):
-        """Stop repeating the same rejected target; a new view ID is not a new target."""
-        if (value['tool']!='navigate' or self.session.skill.record['handle'] is not None or
-                output.get('status') not in ('refused','unavailable')):
-            self.navigation_refusal=None
-            return False
-        args={k:copy.deepcopy(v) for k,v in value['arguments'].items() if k!='view_id'}
-        reason=output.get('reason')
-        key=fingerprint(dict(revision=self.session.state['revision'],arguments=args,reason=reason))
-        previous=self.navigation_refusal
-        count=previous[1]+1 if previous is not None and previous[0]==key else 1
-        self.navigation_refusal=(key,count)
-        if count<3:return False
-        self.session.store.event('navigation_repeated_refusal',dict(goal_id=args.get('goal_id'),reason=reason,count=count,
-            action='await_user_before_retry',automatically_retried=False))
-        return True
+        previous,count=self.refusals.get(tool,(None,0))
+        count=count+1 if previous==key else 1
+        self.refusals[tool]=(key,count)
+        if count<3:return None
+        self.session.store.event(name+'_repeated_refusal',dict(goal_id=args.get('goal_id'),reason=reason,
+            count=count,action='await_user_before_retry',automatically_retried=False))
+        return 'repeated_'+name+'_refusal'
 
     def run(self, *, console=None, driver=None, emit=None, on_tick=None, timeout_s=None):
         """Run one task; optional drivers supply inputs and test-time pacing.
@@ -115,7 +96,12 @@ class AgentLoop:
             held_follow = (self.session.navigation.scope == 'live' and
                            self.session.skill.record['status'] == 'failed' and
                            getattr(self.session.navigation, 'handle', None) is not None)
-            if self.session.skill.record['handle'] is not None or self.state['status'] == 'ready' or held_follow:
+            # Live run cleanup releases the final confirmed hold and disarms once.
+            final_hold=(self.state['status']=='succeeded' and self.session.navigation.scope=='live' and
+                        self.session.skill.record['status']=='held')
+            if (self.session.skill.record['handle'] is not None and not final_hold or self.state['status'] == 'ready' or held_follow
+                    or self.session.seating_pending is not None or
+                    self.state.get('elevator_active') and self.state['status'] not in TERMINAL):
                 self.stop(reason=self.exit_reason)
             self.session._save('agent_run_finished', dict(reason=self.exit_reason))
         return self.state
@@ -170,8 +156,22 @@ class AgentLoop:
                     if not isinstance(reply,Reply):
                         raise ValueError('Model worker must return a checked native reply')
                     self.session.conversation.validate(reply)
-                    s['assistant_text'] = reply.message.get('content')
+                    transient = bool(s.get('elevator_active'))
+                    s['assistant_text'] = None if transient else reply.message.get('content')
+                    if reply.argument_error is not None:
+                        if transient:
+                            self.session.elevator.feedback=reply.argument_error
+                            self.session.conversation.consume_transient(reply)
+                            self.session.wait_for_event('monitor')
+                            return s
+                        self.session.conversation.commit(reply,reply.argument_error)
+                        self.session._save('tool_arguments_rejected',reply.argument_error)
+                        return s
                     if reply.action is None:
+                        if transient:
+                            self.session.elevator.feedback=dict(status='refused',reason='native_tool_required')
+                            self.session.wait_for_event('monitor')
+                            return s
                         self.session.conversation.commit(reply)
                         unregistered=not self.session.task_goals.goals
                         reason='model_text_without_task_registration' if unregistered else s['assistant_text']
@@ -182,23 +182,22 @@ class AgentLoop:
                     value = reply.action
                     # Every proposed target is checked with current geometry,
                     # independently of how long the model took to respond.
-                    if value['tool'] == 'navigate':
-                        output = self.session.revalidate_navigation(value, result['context'])
+                    if not transient and value['tool'] in ('navigate','navigate_route','check_candidate'):
+                        output = self.session.revalidate_spatial(value,result['context'])
                         if output.get('status') == 'refused' and not output.get('revalidation'):
-                            self.session._history('tool', dict(call=value, result=output))
-                    elif value['tool'] == 'check_candidate':
-                        output = self.session.revalidate_candidate(value, result['context'])
-                        if output.get('status') == 'refused' and not output.get('revalidation'):
-                            self.session._history('tool', dict(call=value, result=output))
-                    elif value['tool'] == 'navigate_route':
-                        output = self.session.revalidate_route(value, result['context'])
-                        if output.get('status') == 'refused' and not output.get('revalidation'):
-                            self.session._history('tool', dict(call=value, result=output))
+                            self.session._history('tool',dict(call=value,result=output))
                     else:
                         output = self.session.call(value['tool'], _context=result['context'], **value['arguments'])
+                    if transient:
+                        self.session.conversation.consume_transient(reply)
+                        self.session.elevator.feedback=output
+                        if s['status']=='ready':
+                            self.session.wait_for_event('monitor')
+                        return s
                     keyframe = output.get('keyframe') if value['tool'] in ('save_keyframe','read_keyframe') and output.get('status') in ('saved','available') else None
-                    self.session.conversation.commit(reply,output,keyframe=keyframe)
-                    if self.session.memory is not None and 'observation_id' in result['context']:
+                    handoff = value['tool'] == 'record_task' and output.get('status') == 'recorded'
+                    self.session.conversation.commit(reply,output,keyframe=keyframe,audit_only=handoff)
+                    if not handoff and self.session.memory is not None and 'observation_id' in result['context']:
                         self.session.memory.remember(dict(kind='historical_model_tool_choice', call=value,
                             result_status=output.get('status')), result['context'],
                             place_id=value['arguments'].get('place_id') or self.session.skill.record['place_id'] or '',
@@ -209,14 +208,12 @@ class AgentLoop:
                          type(source_stamp) in (int,float) and 0<=current_stamp-source_stamp else None)
                     self.session._save('model_action_applied', dict(call=value,result=output,context=result['context'],
                                                                   source_age_s=age))
-                    if self.repeated_route_refusal(value,output):
-                        self.session.stop('needs_clarification','repeated_route_refusal')
-                        return s
-                    if self.repeated_navigation_refusal(value,output):
-                        self.session.stop('needs_clarification','repeated_navigation_refusal')
+                    refusal=self.repeated_refusal(value,output)
+                    if refusal:
+                        self.session.stop('needs_clarification',refusal)
                         return s
                     if ((value['tool'] in ('navigate', 'navigate_route','start_local_task') and output.get('status')=='accepted' or
-                         value['tool']=='finish_local_task' and output.get('status')=='stopping') and
+                         value['tool'] in ('complete_subtask','finish_local_task') and output.get('status')=='stopping') and
                             self.session.skill.record['handle'] is not None):
                         # Do not ask the model to restate that it is waiting:
                         # a text-only reply has ambiguous intent and otherwise
@@ -227,11 +224,6 @@ class AgentLoop:
                     self.session.stop('needs_clarification', 'model_protocol_rejected')
                     self.session._save('model_protocol_rejected', dict(error_type=type(error).__name__))
         if self.model.busy or s['status'] != 'ready' or self.session.skill.record['context_lost'] or not self.session.skill.record['connected']:
-            return s
-        stage=next((g for g in self.session.task_goals.goals if g['status']!='completed'),None)
-        if (self.session.navigation.scope=='manual' and len(self.session.task_goals.floor_catalogs)>1 and
-                stage is not None and stage['requirement'].get('stage_type')=='elevator'):
-            # The manual workflow starts its independent camera monitor in on_tick.
             return s
         if self.requests >= self.max_requests:
             self.session.stop('needs_clarification', 'model_request_limit')

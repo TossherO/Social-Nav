@@ -25,6 +25,16 @@ def delayed_gate_run(*arguments):
 
 
 class SafetyIsolationTests(unittest.TestCase):
+    def test_pool_startup_failure_closes_the_acquired_chassis(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        with patch('navigation.control.chassis.ChassisProcess') as chassis, \
+                patch('runtime.safety.ScenePool', side_effect=OSError('synthetic pool failure')):
+            with self.assertRaisesRegex(OSError, 'synthetic pool failure'):
+                SafetyProcess(None, {}, {'parameters_assumed': False}, SimpleNamespace(assumed=False),
+                              clock_domain='runtime_live', chassis_port='synthetic', chassis_output='unused')
+            chassis.return_value.close.assert_called_once_with()
+
     def test_fresh_live_pose_promptly_rechecks_without_extending_its_lifetime(self):
         import copy
         import json

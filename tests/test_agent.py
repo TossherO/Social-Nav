@@ -104,6 +104,12 @@ class AgentTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_call_arguments_are_checked_without_repair(self):
+        for raw in ('{"name":"one","name":"two"}', '{"name":"point","unused":NaN}',
+                    '{"goal_id":"g","view_id":"v","orientation_source":"semantic","pose":[0,0,1e999]}'):
+            name = 'navigate' if 'pose' in raw else 'lookup_places'
+            call = dict(id='check',type='function',function=dict(name=name,arguments=raw))
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                Reply.parse(dict(role='assistant',content=None,tool_calls=[call]))
         for value in (action('navigate'), action('observe_scene', place_id='elevator'),
                       action('override'), [action('observe_scene')]):
             with self.assertRaises(jsonschema.ValidationError):

@@ -9,8 +9,7 @@ DATA_CONFIG:
     DATA_PATH: 'data/coda'
     # 原始数据路径。
     RAW_DATA_PATH: 'data/coda_raw'
-    # 总帧数：当前帧 + 最近 3 个历史帧（CODa OS1 为 10 Hz）
-    # 单样本最多使用的扫描帧数。
+    # 默认仅使用当前帧。
     MAX_SWEEPS: 1
     # 历史扫描允许的最大时间间隔，单位为秒。
     MAX_SWEEP_TIME_LAG: 0.75

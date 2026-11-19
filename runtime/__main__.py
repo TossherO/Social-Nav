@@ -1,6 +1,7 @@
 """Direct perception/navigation; shadow by default, explicitly armed live tests optional."""
 import argparse
 from collections import deque
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -13,7 +14,6 @@ import time
 import numpy as np
 import yaml
 
-from interfaces.shared import SharedArrayReader
 from .transport import Connection,frame_ref
 from .metrics import Metrics
 
@@ -43,6 +43,7 @@ def parser():
     p.add_argument('--record-decision-inputs',action='store_true',help='Optional VLM worker: prepare YOLO associations and freeze causal three-frame task windows; no VLM request')
     p.add_argument('--agent-observations',action='store_true',help='Bounded optional Agent RGB/scene outlet; no YOLO, API or chassis output')
     p.add_argument('--agent-follow-candidates',action='store_true',help='Enable optional continuous T2 follow input and candidate preparation')
+    p.add_argument('--agent-seating',action='store_true',help='Enable current RGB/lidar table-edge selection for T3')
     p.add_argument('--agent-execution',action='store_true',help='Allow owned Agent goal intents through the existing safety path; requires manual arming')
     p.add_argument('--no-image',action='store_true',help='Compatibility flag: the core never loads YOLO; disallows optional VLM image preparation')
     p.add_argument('--runtime-config',default=str(ROOT/'configs/runtime.yaml'))
@@ -64,25 +65,41 @@ def parser():
     return p
 
 
-def main():
-    args=parser().parse_args()
+def load_command_schedule(path):
+    if path is None:
+        return deque()
+    entries = json.loads(Path(path).read_text())
+    if not isinstance(entries, list):
+        raise ValueError('Command schedule must be a list')
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {'offset_s', 'kind', 'value'}:
+            raise ValueError('Command schedule requires offset_s, kind and value')
+        offset = entry['offset_s']
+        if type(offset) not in (int, float) or not np.isfinite(offset) or offset < 0:
+            raise ValueError('Scheduled offset_s must be finite and nonnegative')
+    return deque(sorted(entries, key=lambda entry: entry['offset_s']))
+
+
+def _runtime_inputs(args):
     if args.execute and (not args.live or not args.interactive_session or not args.vehicle_profile or not args.chassis_port):
         raise ValueError('--execute requires --live --interactive-session --vehicle-profile and --chassis-port')
     if args.agent_execution and not (args.execute and args.agent_observations):
         raise ValueError('--agent-execution requires --execute and --agent-observations')
     if args.agent_follow_candidates and (not args.agent_observations or args.no_image):
         raise ValueError('--agent-follow-candidates requires --agent-observations and RGB input')
+    if args.agent_seating and (not args.agent_observations or args.no_image or not args.live):
+        raise ValueError('--agent-seating requires live agent observations with RGB')
     if args.chassis_port and not args.execute:raise ValueError('--chassis-port requires --execute')
     if args.record_decision_inputs and args.no_image:
         raise ValueError('--record-decision-inputs explicitly enables VLM image preparation; remove --no-image')
     if args.gpu is not None:os.environ['CUDA_VISIBLE_DEVICES']=str(args.gpu)
     os.environ.setdefault('OMP_NUM_THREADS','2');os.environ.setdefault('OPENBLAS_NUM_THREADS','1')
     from .config import runtime_settings
-    from perception.mapping_localization.configuration import algorithm_config,DEFAULT_CALIBRATION
+    from perception.mapping_localization.configuration import algorithm_config,DEFAULT_CALIBRATION,replay_start
     from perception.sensors.clock_session import check_time_calibration
     source=Path(args.source_run).resolve() if args.source_run else None
     run={} if source is None else json.loads((source/'run.json').read_text())
-    args.start=(0. if args.live else float(run.get('start',0.) or 0.)) if args.start is None else args.start
+    args.start=(0. if args.live else replay_start(run)) if args.start is None else args.start
     if args.coverage is None and args.map_directory is None:
         args.coverage=run.get('association_coverage')
     if args.duration is None and source is not None and not args.live:args.duration=run.get('duration')
@@ -123,17 +140,58 @@ def main():
         if args.environment_window_m<minimum or args.environment_window_m/env_config['resolution']>600:
             raise ValueError('Environment window must cover configured ground fitting and navigation support radii')
         env_config['window_m']=args.environment_window_m
-    with_rgb=bool((args.display and settings['display']['rgb_hz']>0) or args.record_views or
-        args.record_decision_inputs or args.agent_observations)
     if (not np.isfinite([args.start,args.rate]).all() or args.start<0 or
             args.duration is not None and (not np.isfinite(args.duration) or args.duration<=0)):
         raise ValueError('Start/rate/duration must be finite with nonnegative start and positive rate/duration')
-    for key in ('control_period_s','scene_export_hz','sensor_input_timeout_s','startup_timeout_s','finalization_timeout_s'):
-        if not np.isfinite(settings[key]) or settings[key]<=0:raise ValueError('Positive finite runtime setting required: '+key)
-    if not .01<=settings['control_period_s']<=.2:raise ValueError('Control period must stay in [0.01,0.2] seconds')
     calibration_source=Path(args.lidar_imu_calibration) if args.lidar_imu_calibration else source/'run.json' if source else DEFAULT_CALIBRATION
     timing=check_time_calibration(config,bag=bag,group=args.sensor_clock_group,session_file=args.sensor_session,
         previous=run.get('imu_time_calibration'),source_file=calibration_source)
+    return source, mode, bag, config, settings, env_config, timing
+
+
+def _socket_pair(handles, *args):
+    first, second = socket.socketpair(*args)
+    return handles.enter_context(first), handles.enter_context(second)
+
+
+def _close_resources(resources):
+    # Stop producers before the consumers and storage they still use.
+    order = ('scan_inbox', 'map_worker', 'commands', 'control', 'agent_observations', 'seating', 'follow_decision',
+             'safety_telemetry', 'safety', 'reference', 'environment', 'reader', 'journal', 'exporter',
+             'planning_recorder', 'associations', 'decision_inputs', 'interactive_session', 'display')
+    reports, errors = {}, []
+    for name in order:
+        resource = resources.pop(name, None)
+        if resource is None:
+            continue
+        try:
+            reports[name] = resource.close()
+            if name == 'display' and not reports[name]['complete']:
+                errors.append('display: ' + str(reports[name]['error'] or 'worker failed to drain'))
+        except Exception as error:
+            errors.append(name + ': ' + str(error))
+    return reports, errors
+
+
+def main():
+    args = parser().parse_args()
+    resources = {}
+    with ExitStack() as handles:
+        try:
+            _run(args, resources, handles)
+        finally:
+            # Startup may fail before the reporting loop is ready.
+            if resources:
+                _, errors = _close_resources(resources)
+                for error in errors:
+                    print(error, file=sys.stderr)
+
+
+def _run(args, resources, handles):
+    source, mode, bag, config, settings, env_config, timing = _runtime_inputs(args)
+    schedule = load_command_schedule(args.commands)
+    with_rgb=bool((args.display and settings['display']['rgb_hz']>0) or args.record_views or
+        args.record_decision_inputs or args.agent_observations)
     import torch
     if not torch.cuda.is_available():raise RuntimeError('Selected CUDA device unavailable; check device access before changing dependencies')
     torch.cuda.set_device(0)
@@ -167,17 +225,17 @@ def main():
         camera_record=camera_calibration(args.camera_calibration)
     support_enabled=env_config.get('navigation_support',{}).get('enabled',False)
     factory=lambda resolution:OccupancyTree(resolution,library=ROOT/settings['environment_library'],backend='cuda',device=0)
-    environment=LocalEnvironmentMap(env_config,tree_factory=factory)
+    environment = resources['environment'] = LocalEnvironmentMap(env_config,tree_factory=factory)
     from perception.environment.scans import AsyncScanJournal
     record_scans=mode=='mapping' if args.record_scans is None else args.record_scans
-    journal=AsyncScanJournal(output/'environment/scans.sqlite',env_config['scan_recording'],dict(config=env_config,
+    journal = resources['journal'] = AsyncScanJournal(output/'environment/scans.sqlite',env_config['scan_recording'],dict(config=env_config,
         sensor_frame=det_cfg['ros']['localization_child_frame'],evidence='frontend_accepted_deskewed_points_not_feature_keyframes')) if record_scans else None
     display=None
-    exporter=SceneExporter(output/'scenes',env_config['scene'],metrics=metrics,prior_directory=args.static_map,clock_domain=clock_domain) if args.record_views else None
+    exporter = resources['exporter'] = SceneExporter(output/'scenes',env_config['scene'],metrics=metrics,prior_directory=args.static_map,clock_domain=clock_domain) if args.record_views else None
     decision_recorder=None
     if args.record_decision_inputs:
         from .decision import DecisionRecorder
-        decision_recorder=DecisionRecorder(output/'decision_inputs',metrics=metrics,
+        decision_recorder = resources['decision_inputs'] = DecisionRecorder(output/'decision_inputs',metrics=metrics,
             image_policy=det_cfg['image_association'],camera_calibration=args.camera_calibration)
     motion_path=Path(args.motion_config or ROOT/'navigation/planning/configs/motion.yaml').expanduser().resolve()
     motion_document=yaml.safe_load(motion_path.read_text())
@@ -201,14 +259,14 @@ def main():
     if args.route:
         from navigation.planning.route_replay import RouteReplay
         route_replay=RouteReplay(args.route,bag,args.route_floor,geometry,planning,settings['route_replay'],asset)
-    reference=ReferenceRuntime(planning,motion,geometry,worker_factory=lambda *parts:Worker(*parts,metrics=metrics))
+    reference = resources['reference'] = ReferenceRuntime(planning,motion,geometry,worker_factory=lambda *parts:Worker(*parts,metrics=metrics))
     batch=DeviceDwaBatch(device=device,library=ROOT/settings['dwa_library'],metrics=metrics)
     shadow=shadow_config();shadow['period_s']=settings['control_period_s']
     controller=DwaShadowController(planning,motion,geometry,asset=asset,device_batch=batch,settings=shadow,execution=args.execute)
     planning_recorder=None
     if args.record_planning:
         from .planning_record import PlanningRecorder
-        planning_recorder=PlanningRecorder(output/'planning',metrics=metrics)
+        planning_recorder = resources['planning_recorder'] = PlanningRecorder(output/'planning',metrics=metrics)
         reference.diagnostics=controller.controller.diagnostics=True
         (output/'planning/config.json').write_text(json.dumps(dict(planning=reference.planning,motion=motion,
             reference=reference.settings,dwa=controller.controller.settings,safety=controller.controller.safety_settings,
@@ -216,21 +274,22 @@ def main():
             static_map=args.static_map),allow_nan=False,indent=2)+'\n')
     if args.display:
         from perception.visualization.runtime import RuntimeDisplay
-        display=RuntimeDisplay(settings['display'],geometry,planning,asset=asset,
+        display = resources['display'] = RuntimeDisplay(settings['display'],geometry,planning,asset=asset,
             reference_max_age_s=reference.settings['max_age_s'],
             trajectory_max_age_s=controller.controller.safety_settings['max_input_age_s'],metrics=metrics)
-    state_parent,state_input=socket.socketpair();safety=SafetyProcess(state_parent,planning,motion,geometry,clock_domain=clock_domain,asset=asset,
+    state_parent, state_input = _socket_pair(handles)
+    safety = resources['safety'] = SafetyProcess(state_parent,planning,motion,geometry,clock_domain=clock_domain,asset=asset,
         slots=settings['shared_safety_slots'],slot_bytes=settings['shared_safety_slot_bytes'],settings=shadow,
         chassis_port=args.chassis_port,chassis_output=output/'chassis')
-    main_pose,pose_input=socket.socketpair(socket.AF_UNIX,socket.SOCK_DGRAM);main_pose.setblocking(False)
+    main_pose,pose_input=_socket_pair(handles, socket.AF_UNIX, socket.SOCK_DGRAM);main_pose.setblocking(False)
     from .association import AssociationInbox
-    association_socket,association_input=socket.socketpair(socket.AF_UNIX,socket.SOCK_DGRAM)
-    associations=AssociationInbox(association_socket,metrics)
+    association_socket,association_input=_socket_pair(handles, socket.AF_UNIX, socket.SOCK_DGRAM)
+    associations = resources['associations'] = AssociationInbox(association_socket,metrics)
     interactive=None
     if args.interactive_session:
         from .session import InteractiveSession
-        interactive=InteractiveSession(live=args.live,safety=safety,output=output,execute=args.execute)
-    commands=CommandInbox(output/'commands.sock',safety,session=interactive,agent_execution=args.agent_execution,
+        interactive = resources['interactive_session'] = InteractiveSession(live=args.live,safety=safety,output=output,execute=args.execute)
+    commands = resources['commands'] = CommandInbox(output/'commands.sock',safety,session=interactive,agent_execution=args.agent_execution,
                           follow_enabled=args.agent_follow_candidates)
     commands.agent_state.configure_vehicle(geometry,motion)
     agent_observer=None
@@ -238,24 +297,31 @@ def main():
     if args.agent_observations:
         from decision.agent.adapters.runtime import ObservationWorker
         commands.agent_state.enable_goal_observations()
-        agent_observer=ObservationWorker(commands.agent_state.publish_observation,metrics=metrics,geometry=geometry,
-                                         follow_candidates=False)
+        if args.agent_seating:
+            from .seating import SeatingWorker
+            commands.agent_state.seating=resources['seating']=SeatingWorker(geometry,planning,motion)
+        agent_observer = resources['agent_observations'] = ObservationWorker(commands.agent_state.publish_observation,
+            metrics=metrics,geometry=geometry,seating=commands.agent_state.seating)
     if args.agent_follow_candidates:
         from .follow_decision import FollowDecisionWorker
+        from decision.agent.adapters.runtime import follow_observation
         from navigation.search import follow_candidates
+        def publish_agent_frame(handle,scene,pixels,association,camera_info):
+            observation=follow_observation(scene,pixels,association,geometry,camera_info)
+            commands.agent_state.publish_observation(observation.record,observation.image,follow_handle=handle)
         def search_factory(source,context):
             value=context or {}
             return follow_candidates(source,asset,geometry,value.get('last'),anchor=value.get('anchor'),
                                      margin=planning['safety_margin_m'])
-        follow_decision=FollowDecisionWorker(search_factory,metrics=metrics,image_policy=det_cfg['image_association'],
-                                             camera_calibration=args.camera_calibration)
-    schedule=[] if args.commands is None else json.loads(Path(args.commands).read_text())
-    if not isinstance(schedule,list) or any(set(v)!={'offset_s','kind','value'} or not np.isfinite(v['offset_s']) or v['offset_s']<0 for v in schedule):
-        raise ValueError('Command schedule requires finite offset_s, kind and value')
-    schedule=deque(sorted(schedule,key=lambda v:v['offset_s']));first_observation=None
-    state_parent.close();parent,child=socket.socketpair();wire=Connection(parent);worker=None;reader=None
+        follow_decision = resources['follow_decision'] = FollowDecisionWorker(search_factory,metrics=metrics,image_policy=det_cfg['image_association'],
+                                             camera_calibration=args.camera_calibration,publish_agent_frame=publish_agent_frame)
+    first_observation = None
+    state_parent.close()
+    parent, child = _socket_pair(handles)
+    wire = Connection(parent)
+    worker = reader = None
     names=('localization','people','control','safety','reference')+(('route',) if route_replay is not None else ())
-    streams={name:(output/(name+'.jsonl')).open('x') for name in names}
+    streams = {name: handles.enter_context((output / (name + '.jsonl')).open('x')) for name in names}
     def record(name,value):streams[name].write(json.dumps(value,allow_nan=False,separators=(',',':'))+'\n')
     scene=None;next_env=-np.inf;next_export=-np.inf;control_loop=None;safety_telemetry=None;initial_goal=None;map_worker=None;map_stream=None;scan_inbox=None;input_epoch=None
     if args.goal is not None:
@@ -301,14 +367,14 @@ def main():
                 safety.poll();reference.worker.poll()
                 if time.monotonic()>deadline:raise RuntimeError('CPU worker startup exceeded its budget')
                 time.sleep(.01)
-            safety_telemetry=SafetyTelemetry(safety,record)
-            control_loop=ControlLoop(reference,controller,batch,safety,main_pose,commands,settings,env_config['scene'],metrics,record,asset=asset,initial_goal=initial_goal,clock_domain=clock_domain,display=display,route_replay=route_replay,planning_recorder=planning_recorder,session=interactive,follow_decision=follow_decision)
+            safety_telemetry = resources['safety_telemetry'] = SafetyTelemetry(safety,record)
+            control_loop = resources['control'] = ControlLoop(reference,controller,batch,safety,main_pose,commands,settings,env_config['scene'],metrics,record,asset=asset,initial_goal=initial_goal,clock_domain=clock_domain,display=display,route_replay=route_replay,planning_recorder=planning_recorder,session=interactive,follow_decision=follow_decision)
             # Archives retain every selected scan and its matching optional
             # inputs. Normal navigation bounds map work independently of the
             # detector; the native tree has exactly one owning worker.
             if not (journal or exporter or decision_recorder or agent_observer):
                 from .environment import LatestMapWorker
-                map_worker=LatestMapWorker(compute_map,publish_map,reset_map)
+                map_worker = resources['map_worker'] = LatestMapWorker(compute_map,publish_map,reset_map)
             cfg=Path(tmp)/'algorithm.yaml';cfg.write_text(yaml.safe_dump(config))
             command=[settings['input_python'],'-B','-m','runtime.input_worker','--socket-fd',str(child.fileno()),'--pose-fd',str(state_input.fileno()),
                 '--main-pose-fd',str(pose_input.fileno()),
@@ -329,7 +395,7 @@ def main():
                 if args.pause_at is not None:command+=['--pause-at',str(args.pause_at)]
             child_env=dict(os.environ,PYTHONNOUSERSITE='1',PYTHONPATH=str(ROOT)+':/opt/ros/noetic/lib/python3/dist-packages')
             child_env['LD_LIBRARY_PATH']='/opt/ros/noetic/lib:'+str(ROOT/'outputs/perception/dependencies/gtsam/lib')+':'+child_env.get('LD_LIBRARY_PATH','')
-            worker_log=(output/'input.log').open('x')
+            worker_log = handles.enter_context((output / 'input.log').open('x'))
             worker=subprocess.Popen(command,cwd=ROOT,env=child_env,pass_fds=pass_fds,stdout=worker_log,stderr=subprocess.STDOUT,start_new_session=True)
             if interactive is not None and interactive.child is not None:interactive.child.close()
             def request_stop(*_):
@@ -338,7 +404,7 @@ def main():
                 stop_requested=True;safety.command('override',dict(manual_override=False,emergency_stop=True));worker.send_signal(signal.SIGINT)
             previous_interrupt=signal.signal(signal.SIGINT,request_stop)
             child.close();state_input.close();pose_input.close();association_input.close();parent.settimeout(settings['startup_timeout_s'])
-            fd=wire.recv_fd();header=wire.recv();reader=SharedArrayReader(fd,header['owner'],header['slots'],header['slot_bytes'])
+            reader = resources['reader'] = wire.recv_array_reader()
             ready=wire.recv()
             if ready.get('kind')!='ready':raise RuntimeError('Input initialization failed: '+str(ready))
             metrics.add('startup',time.perf_counter()-startup)
@@ -351,7 +417,7 @@ def main():
                     metrics.trace('scan_received',measurement_stamp_s=packet['stamp_s'])
                     if first_observation is None:first_observation=packet['stamp_s']
                     record('localization',dict(packet['state'],clock_domain=clock_domain))
-                scan_inbox=LatestScanInbox(wire,observe_scan,map_worker.invalidate,settings['finalization_timeout_s'])
+                scan_inbox = resources['scan_inbox'] = LatestScanInbox(wire,observe_scan,map_worker.invalidate,settings['finalization_timeout_s'])
             while True:
                 with metrics.span('input_wait'):packet=wire.recv() if scan_inbox is None else scan_inbox.recv()
                 if packet['kind']=='end':source_metrics=packet['metrics'];break
@@ -421,7 +487,11 @@ def main():
                             exporter.submit(last_device,people,rgb=rgb,name=packet['observation_id'])
                             next_export=stamp+1/settings['scene_export_hz']
                     if agent_observer is not None and scene is not None and abs(scene.record['as_of']-stamp)<1e-6:
-                        agent_observer.submit(scene,arrays.get('rgb'),packet['rgb_stamp'],packet['rgb_frame'],packet['camera_info'],packet['rgb_stamp_ns'])
+                        agent_observer.submit(scene,arrays.get('rgb'),packet['rgb_stamp'],packet['rgb_frame'],packet['camera_info'],
+                                              packet['rgb_stamp_ns'],points=arrays.get('deskewed'),
+                                              measured_mono=packet['source_mono']+stamp-packet['source_clock_s'])
+                    if commands.agent_state.seating is not None and (scene is None or abs(scene.record['as_of']-stamp)<1e-6):
+                        commands.agent_state.seating.update_scene(scene,packet['source_mono']+stamp-packet['source_clock_s'])
                     if follow_decision is not None:
                         current_scene=scene if scene is not None and abs(scene.record['as_of']-stamp)<1e-6 else None
                         follow_decision.submit(people,arrays,scene=current_scene,context=control_loop.follow_context(),
@@ -461,30 +531,8 @@ def main():
             except subprocess.TimeoutExpired:worker.kill();worker.wait(timeout=2)
         process_cpu_s=None if cpu_start is None else time.process_time()-cpu_start
         run_wall_s=None if run_start is None else time.monotonic()-run_start
-        cleanup_errors=[];export_report=display_report=decision_report=planning_report=association_report=agent_report=None
-        for name,close in [('scan_inbox',None if scan_inbox is None else scan_inbox.close),('map_worker',None if map_worker is None else map_worker.close),('commands',commands.close),('control',None if control_loop is None else control_loop.close),
-                           ('agent_observations',None if agent_observer is None else agent_observer.close),
-                           ('follow_decision',None if follow_decision is None else follow_decision.close),
-                           ('safety_telemetry',None if safety_telemetry is None else safety_telemetry.close),('safety',safety.close),('reference',reference.close),('environment',environment.close),('wire',wire.close),('pose_channel',main_pose.close),
-                           ('reader',None if reader is None else reader.close),('journal',None if journal is None else journal.close),
-                           ('exporter',None if exporter is None else exporter.close),
-                           ('planning_recorder',None if planning_recorder is None else planning_recorder.close),
-                           ('associations',associations.close),
-                           ('decision_inputs',None if decision_recorder is None else decision_recorder.close),
-                           ('interactive_session',None if interactive is None else interactive.close),
-                           ('display',None if display is None else display.close)]:
-            if close is None:continue
-            try:
-                result=close()
-                if name=='exporter':export_report=result
-                if name=='planning_recorder':planning_report=result
-                if name=='associations':association_report=result
-                if name=='agent_observations':agent_report=result
-                if name=='decision_inputs':decision_report=result
-                if name=='display':
-                    display_report=result
-                    if not result['complete']:cleanup_errors.append('display: '+str(result['error'] or 'worker failed to drain'))
-            except Exception as error:cleanup_errors.append(name+': '+str(error))
+        reports, cleanup_errors = _close_resources(resources)
+        decision_report = reports.get('decision_inputs')
         try:metrics.write_trace()
         except Exception as error:cleanup_errors.append('timing_trace: '+str(error))
         if cleanup_errors:failure=failure or '; '.join(cleanup_errors)
@@ -497,13 +545,13 @@ def main():
             internal_ros_transport=False,native_localization=True,gpu_device=str(torch.cuda.get_device_name(0)),
             scope='supervised_live_navigation; inspect chassis events for transmitted targets; not physical acceptance' if args.execute else
                 'nonexecuting_shadow; bag motion is observed input, never navigation execution feedback',
-            detector=detector.metadata,environment_config=env_config,runtime_config=settings,scene_export=export_report,display=display_report,
-            decision_inputs=decision_report,planning_record=planning_report,association_delivery=association_report,
+            detector=detector.metadata,environment_config=env_config,runtime_config=settings,scene_export=reports.get('exporter'),display=reports.get('display'),
+            decision_inputs=decision_report,planning_record=reports.get('planning_recorder'),association_delivery=reports.get('associations'),
             map_scheduling=dict(policy='synchronous_archive') if map_worker is None else dict(map_worker.counts,policy='one_active_one_latest_pending'),
             scan_scheduling=dict(policy='synchronous_archive') if scan_inbox is None else dict(policy='one_active_one_latest_pending',received=scan_inbox.received,replaced=scan_inbox.replaced),
             main_process_cpu_s=process_cpu_s,run_wall_s=run_wall_s,cleanup_errors=cleanup_errors)
         report['route_replay']=None if route_replay is None else route_replay.summary()
-        report['agent_observations']=agent_report
+        report['agent_observations']=reports.get('agent_observations')
         report['termination']='user_stop' if stop_requested else 'source_end'
         (output/'summary.json').write_text(json.dumps(report,allow_nan=False,indent=2)+'\n')
         manifest=dict(success=failure is None,source='live' if args.live else 'bag',clock_domain=clock_domain,backend='native_roll_fast_lio',mode=mode,bag=None if bag is None else str(bag),imu_time_calibration=timing,

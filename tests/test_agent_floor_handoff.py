@@ -21,7 +21,9 @@ class FloorHandoffTests(unittest.TestCase):
         session.catalog=SimpleNamespace(value={'floor_id':'floor2'})
         session.task_goals.current.return_value=dict(requirement=dict(stage_type='elevator',floor_id='floor2',to_floor='floor1'))
         catalog=SimpleNamespace(value={'floor_id':'floor1','localization_map_id':'m'})
-        seed=dict(verified_localization=False,floor_id='floor1',floor_transform=dict(from_floor='floor2',to_floor='floor1',to_map_id='m'))
+        seed=dict(verified_localization=False,floor_id='floor1',task_id='t',goal_id='lift',
+                  source='agent_destination_scan_and_map',exit_stamp_s=11.,scan_stamp_s=11.5,
+                  destination=dict(from_floor='floor2',to_floor='floor1',to_map_id='m'))
         process=MagicMock();process.poll.return_value=None
         binding=dict(valid=True,map_id='m',map_frame='map',association_session='assoc',association_generation=0)
         state=dict(input_stale=False,origin_pose=[1.,2.,0.],localization_status='valid',map_binding=binding,
@@ -42,6 +44,9 @@ class FloorHandoffTests(unittest.TestCase):
             self.assertEqual(start.call_count,1)
             socket=Path(handoff.run_dir)/'run/commands.sock';socket.parent.mkdir(parents=True);socket.touch()
             self.assertEqual(handoff.tick()['status'],'complete')
-            session.rebind_manual_floor.assert_called_once_with(catalog,navigation,transition)
+            session.rebind_manual_floor.assert_called_once()
+            target,adapter,accepted=session.rebind_manual_floor.call_args.args
+            self.assertEqual((target,adapter),(catalog,navigation))
+            self.assertEqual(accepted.snapshot(),transition.snapshot())
             self.assertEqual(transition.status,'completed')
             handoff.close()

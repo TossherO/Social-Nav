@@ -28,7 +28,6 @@ def planning_config(planning,settings=None):
 
 
 class ReferenceRuntime:
-    retain_reference_on_observation=True
     def __init__(self,planning,motion,geometry,settings=None,*,worker_factory=Worker):
         self.motion=motion;self.geometry=geometry;self.settings=copy.deepcopy(settings) if settings is not None else load_config()
         self.planning=planning_config(planning,self.settings)
@@ -57,6 +56,7 @@ class ReferenceRuntime:
         self.retry_after_observation=None
         self.control_blocked_since=None
         if self.worker.job is not None:self.worker.restart()
+        self.start_evidence=None
         self._event('invalidated',reason=reason)
 
     def cancel(self,request=None):
@@ -70,7 +70,15 @@ class ReferenceRuntime:
             if not np.isfinite(clock_rate) or clock_rate<=0:raise ValueError('Invalid planning source clock rate')
             if request.get('algorithm','hybrid_astar')!='hybrid_astar':raise ValueError('direct_control_requires_curvature_reference')
             if request['goal_revision']<=self.cancelled.get(request['task_id'],-1):raise ValueError('cancelled_goal_revision')
-            reason=scene_status(scene,now,scene.record['clock_domain'],self.planning,check_navigation=False) or request_status(request,scene,now,scene.record['clock_domain'])
+            clock=scene.record['clock_domain']
+            reason=request_status(request,scene,now,clock) or scene_status(scene,now,clock,self.planning,check_navigation=False)
+            if (reason=='geometry_future_or_stale' and self.latest is not None and
+                    self.latest['scene'] is scene and self.latest['request']==request):
+                # The control loop can poll the same scan between sensor updates.
+                # tick checks its age; keep the goal identity and cached path for recovery.
+                self.current=None
+                self.reason=reason
+                return False
             if reason:raise ValueError(reason)
             scene.verify()
             context=context_binding(request,scene,asset)
@@ -79,19 +87,21 @@ class ReferenceRuntime:
             self.latest=dict(request=copy.deepcopy(request),scene=scene,asset=asset,context=context,received_mono=time.monotonic(),clock_rate=clock_rate)
             pose=self.geometry.pose(scene.record['localization']['world_from_lidar'])
             grid=navigation_geometry(scene,now=now,asset=asset,check_asset=True)
-            self.blocked=footprint_status(grid,self.geometry,pose,self.planning['safety_margin_m'])!='free'
+            start_status=footprint_status(grid,self.geometry,pose,self.planning['safety_margin_m'])
+            self.blocked=start_status!='free'
             if self.diagnostics:
                 from .footprint import footprint_details
                 self.start_evidence=footprint_details(grid,self.geometry,pose,self.planning['safety_margin_m'])
-                self.start_evidence.update(status=footprint_status(grid,self.geometry,pose,self.planning['safety_margin_m']),
-                    pose=pose.tolist(),scene_binding=scene.record['input_fingerprint'])
+                self.start_evidence.update(status=start_status,pose=pose.tolist(),scene_binding=scene.record['input_fingerprint'])
             self.reason='start_footprint_not_free' if self.blocked else None
             self._event('observation',as_of=scene.record['as_of'],scene=scene.record['input_fingerprint'])
             return True
         except (ValueError,KeyError,TypeError) as error:
-            self.current=None;self.reason=str(error);return False
-
-    def request_replan(self):self.need_replan=True
+            if self.context is not None:
+                self.invalidate(str(error))
+            else:
+                self.reason=str(error)
+            return False
 
     def note_control(self,packet,*,monotonic_s=None):
         """Request an early refresh after sustained lack of local progress.
@@ -108,10 +118,15 @@ class ReferenceRuntime:
             self.control_blocked_since=None;return
         now=time.monotonic() if monotonic_s is None else monotonic_s
         if self.control_blocked_since is None:self.control_blocked_since=now
-        elif now-self.control_blocked_since>=1.:self.request_replan()
+        elif now-self.control_blocked_since>=1.:self.need_replan=True
 
     def tick(self,*,now,clock_domain):
-        mono=time.monotonic();response=self.worker.poll()
+        mono=time.monotonic()
+        if self.latest is not None:
+            reason=request_status(self.latest['request'],self.latest['scene'],now,clock_domain)
+            if reason:
+                self.invalidate(reason)
+        response=self.worker.poll()
         if response is not None:
             job,reply=response
             transient_input=False

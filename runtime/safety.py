@@ -132,20 +132,33 @@ def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,mot
 
 class SafetyProcess:
     def __init__(self,pose_socket,planning,motion,geometry,*,clock_domain,asset=None,slots=16,slot_bytes=256*1024,settings=None,chassis_port=None,chassis_output=None):
-        self.chassis=None
-        if chassis_port is not None:
-            if clock_domain!='runtime_live' or geometry.assumed or motion.get('parameters_assumed',True):
-                raise ValueError('Chassis output requires confirmed live vehicle parameters')
-            from navigation.control.chassis import ChassisProcess
-            self.chassis=ChassisProcess(chassis_port,chassis_output,motion)
-        self.scenes=ScenePool(slots,slot_bytes);pool=self.scenes.pool
-        self.out,child_out=socket.socketpair(socket.AF_UNIX,socket.SOCK_DGRAM);self.out.setblocking(False)
-        context=mp.get_context('spawn');self.connection,child=context.Pipe()
-        self.process=context.Process(target=_run,args=(child,DupFd(pose_socket.fileno()),DupFd(child_out.fileno()),DupFd(pool.fd),
-            pool.owner,pool.slots,pool.slot_bytes,planning,motion,geometry,clock_domain,None if asset is None else str(asset.directory),settings,
-            None if self.chassis is None else DupFd(self.chassis.channel.fileno())),daemon=True)
-        self.process.start();child.close();child_out.close();self.ready=False;self.pending={}
-        self.send_lock=threading.Lock()
+        from contextlib import ExitStack
+        with ExitStack() as startup:
+            self.chassis=None
+            if chassis_port is not None:
+                if clock_domain!='runtime_live' or geometry.assumed or motion.get('parameters_assumed',True):
+                    raise ValueError('Chassis output requires confirmed live vehicle parameters')
+                from navigation.control.chassis import ChassisProcess
+                self.chassis=ChassisProcess(chassis_port,chassis_output,motion)
+                startup.callback(self.chassis.close)
+            self.scenes=ScenePool(slots,slot_bytes);pool=self.scenes.pool
+            startup.callback(self.scenes.close)
+            self.out,child_out=socket.socketpair(socket.AF_UNIX,socket.SOCK_DGRAM)
+            startup.callback(self.out.close)
+            startup.callback(child_out.close)
+            self.out.setblocking(False)
+            context=mp.get_context('spawn');self.connection,child=context.Pipe()
+            startup.callback(self.connection.close)
+            startup.callback(child.close)
+            self.process=context.Process(target=_run,args=(child,DupFd(pose_socket.fileno()),DupFd(child_out.fileno()),DupFd(pool.fd),
+                pool.owner,pool.slots,pool.slot_bytes,planning,motion,geometry,clock_domain,None if asset is None else str(asset.directory),settings,
+                None if self.chassis is None else DupFd(self.chassis.channel.fileno())),daemon=True)
+            self.ready=False;self.pending={}
+            self.send_lock=threading.Lock()
+            self.process.start()
+            startup.pop_all()
+        child.close()
+        child_out.close()
 
     def _send(self,message):
         with self.send_lock:self.connection.send(message)

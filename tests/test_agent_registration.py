@@ -46,6 +46,9 @@ class RegistrationTests(unittest.TestCase):
         second=requests[-1]
         self.assertEqual(second['tool_choice'],'auto')
         self.assertIn('navigate',{t['function']['name'] for t in second['tools']})
+        execution={t['function']['name'] for t in second['tools']}
+        self.assertIn('complete_subtask',execution)
+        self.assertTrue({'finish_local_task','check_goal','finish_task'}.isdisjoint(execution))
 
     def test_unoffered_tool_is_preserved_but_never_accepted_or_retried(self):
         native=reply('get_navigation_state').message['tool_calls']
@@ -72,11 +75,64 @@ class RegistrationTests(unittest.TestCase):
             self.assertFalse(event['automatically_retried'])
         finally:actor.close()
 
+    def test_execution_handoff_keeps_plan_and_consumed_ids_only(self):
+        lookup=reply('lookup_places',name='planning-only-query')
+        register=reply('record_task',goals=[dict(point_goal('elevator'),monitor={'interval_s':8.},
+                                                 execution_notes='到达后核对电梯入口')])
+        self.session.conversation.commit(lookup,dict(status='planning-only-result'))
+        self.session.state['clarifications']=[dict(question='哪一处？',answer='电梯入口')]
+        requests=[]
+        def work(payload,*_):
+            requests.append(payload)
+            return register if not payload['current_state']['requirements_registered'] else reply('get_navigation_state')
+        actor=AgentLoop(self.session,work)
+        try:
+            actor.tick();actor.model.thread.join(2);actor.tick();actor.model.thread.join(2)
+            execution=json.dumps(requests[1],default=str,ensure_ascii=False)
+            for value in ('planning-only-query','planning-only-result',register.message['tool_calls'][0]['id']):
+                self.assertNotIn(value,execution)
+            self.assertIn('到达后核对电梯入口',execution)
+            self.assertIn('哪一处？',execution)
+            self.assertEqual(self.session.monitor.settings['interval_s'],8.)
+            with self.assertRaises(ValueError):self.session.conversation.validate(register)
+        finally:actor.close()
+
+    def test_invalid_arguments_are_returned_to_model_without_dispatch(self):
+        native=reply('record_task',goals=[point_goal('elevator')]).message['tool_calls']
+        native[0]['function']['arguments']='{"goals":"not an array"}'
+        client=self.client(lambda _:httpx.Response(200,text=wire(native)))
+        message=client.decide(self.session.prompt())
+        actor=AgentLoop(self.session,lambda *_:message)
+        try:
+            actor.tick();actor.model.thread.join(2);actor.tick()
+            feedback=json.loads(self.session.conversation.messages()[-1]['content'])
+            self.assertEqual(feedback['path'],['goals'])
+            self.assertEqual(self.session.task_goals.goals,[])
+            self.assertEqual(self.session.state['status'],'ready')
+            self.assertEqual(self.store.db.execute("select count(*) from events where kind='tool_intent'").fetchone()[0],0)
+        finally:actor.close()
+
     def test_clarifying_tool_is_still_available(self):
         response=reply('ask_user',question='请选择哪个入口？')
         result=self.client(lambda _:httpx.Response(200,text=wire(response.message['tool_calls']))).decide(self.session.prompt())
         self.assertEqual(result.action['tool'],'ask_user')
         self.assertEqual(self.session.call('ask_user',**result.action['arguments'])['status'],'waiting_user_answer')
+
+    def test_bad_map_reference_can_be_corrected_without_changing_original_call(self):
+        self.session.call('record_task',goals=[point_goal('elevator')])
+        native=reply('check_candidate',view_id='invented',pose=[1,2,0]).message['tool_calls']
+        requests=[]
+        def handler(request):
+            requests.append(json.loads(request.content))
+            return httpx.Response(200,text=wire(native))
+        client=self.client(handler)
+        result=client.decide(self.session.prompt())
+        self.assertEqual(result.argument_error['reason'],'invalid_tool_reference')
+        self.assertIsNone(result.action)
+        self.session.conversation.commit(result,result.argument_error)
+        client.decide(self.session.prompt())
+        previous=next(m for m in requests[-1]['messages'] if m['role']=='assistant')
+        self.assertEqual(previous['tool_calls'][0]['function']['arguments'],native[0]['function']['arguments'])
 
 
 if __name__=='__main__':unittest.main()

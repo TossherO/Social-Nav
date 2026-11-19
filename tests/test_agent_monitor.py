@@ -200,8 +200,8 @@ class AgentMonitorTests(unittest.TestCase):
     def test_model_loop_applies_review_after_navigation_completion(self):
         self.session.call('record_task',goals=[point_goal('elevator')])
         navigate(self.session,'elevator');self.nav.arrive();self.session.tick()
-        actor=AgentLoop(self.session,lambda *_:reply('check_goal',goal_id='elevator',
-            review_result='satisfied',review_evidence='当前位置与任务目标一致，且已停稳'))
+        actor=AgentLoop(self.session,lambda *_:reply('complete_subtask',goal_id='elevator',
+            evidence='当前位置与任务目标一致，且已停稳'))
         try:
             actor.tick()
             self.assertIsNotNone(actor.model.thread)
@@ -210,7 +210,20 @@ class AgentMonitorTests(unittest.TestCase):
             self.assertEqual(self.session.task_goals.goals[0]['status'],'completed')
             self.assertEqual(self.session.task_goals.goals[0]['completion']['semantic']
                              ['agent_task_review']['result'],'satisfied')
+            self.assertEqual(self.session.state['status'],'succeeded')
+            self.assertEqual(actor.requests,1)
         finally:actor.close()
+
+    def test_completion_refuses_movement_after_offer(self):
+        self.session.record_task([point_goal('elevator')])
+        navigate(self.session,'elevator');self.nav.arrive();self.session.tick()
+        facts=self.session.prompt()['current_state']['completion_evidence']
+        self.assertEqual(facts['missing'],[])
+        context=self.session.context()
+        self.nav.state.update(stopped=False,pose=[1.,1.,0.])
+        result=self.session.call('complete_subtask',_context=context,goal_id='elevator',evidence='先前已到达')
+        self.assertEqual(result['status'],'unproven')
+        self.assertFalse(self.session.task_goals.finished())
 
     def test_stopped_trigger_restarts_after_missing_measurements(self):
         monitor=TaskMonitor(self.catalog);monitor.configure('g','停稳复核',stopped_s=1.)

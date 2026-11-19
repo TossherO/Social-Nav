@@ -63,7 +63,7 @@ class SimulationNavigation:
         return dict(scope=self.scope, clock_domain=self.clock_domain, stamp_s=10+self.t,
                     frame_id='sim_odom', session_id='agent', generation=0, source='synthetic_differential_drive_plant',
                     pose=self.pose.tolist(), velocity=self.velocity.tolist(), handle=copy.deepcopy(self.handle),
-                    origin_pose=self.pose.tolist(), origin_frame_id='sim_odom',
+                    origin_pose=self.pose.tolist(), origin_frame_id='sim_odom', origin_stamp_s=10+self.t,
                     status=self.status, collision=self.collision, goal=copy.deepcopy(self.goal), executable=False, execution_feedback=True,
                     stop_reason=self.stop_reason,
                     command_reason=self.last_command_reason,

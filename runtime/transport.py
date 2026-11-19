@@ -2,9 +2,21 @@
 import array
 import dataclasses
 import json
+import os
+from pathlib import Path
 import socket
 import struct
 from interfaces.runtime import ArrayRef,FrameRef
+
+
+def exchange_request(path, kind, value, *, timeout):
+    """Exchange one framed request with the runtime's local command socket."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)
+        sock.connect(str(Path(path).resolve()))
+        wire = Connection(sock)
+        wire.send(dict(kind=kind, value=value))
+        return wire.recv()
 
 
 class Connection:
@@ -32,8 +44,22 @@ class Connection:
         fds=array.array('i')
         for level,kind,data in control:
             if level==socket.SOL_SOCKET and kind==socket.SCM_RIGHTS:fds.frombytes(data[:len(data)-len(data)%fds.itemsize])
-        if marker!=b'F' or flags&socket.MSG_CTRUNC or len(fds)!=1:raise ValueError('Invalid descriptor handoff')
+        if marker!=b'F' or flags&socket.MSG_CTRUNC or len(fds)!=1:
+            for fd in fds:
+                os.close(fd)
+            raise ValueError('Invalid descriptor handoff')
         return fds[0]
+
+    def recv_array_reader(self):
+        from interfaces.shared import SharedArrayReader
+        fd = self.recv_fd()
+        try:
+            header = self.recv()
+            return SharedArrayReader(fd, header['owner'], header['slots'], header['slot_bytes'])
+        except BaseException:
+            os.close(fd)
+            raise
+
     def close(self):self.socket.close()
 
 

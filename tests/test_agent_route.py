@@ -39,7 +39,8 @@ class RouteFeedback(ScriptedFeedback):
                     task_id=self.handle['task_id'],goal_revision=self.handle['goal_revision']))
             else:
                 self.state['pose']=[*point,self.final_yaw or 0.]
-                measured=dict(self.state,origin_pose=self.state['pose'],origin_frame_id='sim_odom')
+                measured=dict(self.state,origin_pose=self.state['pose'],origin_frame_id='sim_odom',
+                              origin_stamp_s=self.state['stamp_s'])
                 record_route_visit(self.route,self.visits,self.handle,measured,len(self.visits),.2)
                 self.state['route_visits']=copy.deepcopy(self.visits)
                 if self.start_stamp is None:self.start_stamp=self.state['stamp_s']
@@ -48,6 +49,19 @@ class RouteFeedback(ScriptedFeedback):
 
 
 class AgentRouteTests(unittest.TestCase):
+    def test_circuit_uses_continuous_measured_direction(self):
+        from decision.agent.core.route import circuit_progress
+        poly=[[-.3,-.3],[.3,-.3],[.3,.3],[-.3,.3]]
+        samples=[dict(stamp_s=i*.1,pose=[math.cos(i*math.pi/8),math.sin(i*math.pi/8),0]) for i in range(17)]
+        proof=dict(context={},route_start_stamp_s=0.,stamp_s=1.6)
+        segment=dict(samples=samples)
+        self.assertEqual(circuit_progress([segment],poly,dict(turns=1),proof)['status'],'met')
+        self.assertEqual(circuit_progress([segment],poly,dict(turns=1,direction='clockwise'),proof)['status'],'not_met')
+        self.assertEqual(circuit_progress([dict(samples=samples[:8]),dict(samples=samples[8:])],
+                                         poly,dict(turns=1),proof)['status'],'unproven')
+        with_gap=[dict(p,stamp_s=p['stamp_s']+(4 if i>=8 else 0)) for i,p in enumerate(samples)]
+        self.assertEqual(circuit_progress([dict(samples=with_gap)],poly,dict(turns=1),
+                                          dict(proof,stamp_s=5.6))['status'],'unproven')
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         self.store=Store(Path(self.temp.name)/'session.sqlite')
@@ -78,6 +92,8 @@ class AgentRouteTests(unittest.TestCase):
                    clock_domain='simulation',session_id='unit',generation=0,frame_id='sim_odom',
                    source='synthetic_differential_drive_plant')
         self.assertFalse(record_route_visit(route,visits,handle,state,1,.5))
+        without_measurement_time = {key:value for key,value in state.items() if key != 'origin_stamp_s'}
+        self.assertFalse(record_route_visit(route,visits,handle,without_measurement_time,0,.2))
         self.assertTrue(record_route_visit(route,visits,handle,state,0,.2))
         state.update(origin_pose=[5.,4.,0.],stamp_s=12.,origin_stamp_s=10.)
         self.assertFalse(record_route_visit(route,visits,handle,state,1,.5))
@@ -194,7 +210,7 @@ class AgentRouteTests(unittest.TestCase):
                    orientation_source='autonomous',final_yaw=0.))
         try:
             for _ in range(4):
-                self.assertFalse(actor.repeated_route_refusal(value,dict(status='refused',reason='cancel_and_confirm_existing_call_first')))
+                self.assertFalse(actor.repeated_refusal(value,dict(status='refused',reason='cancel_and_confirm_existing_call_first')))
             self.assertEqual(self.session.skill.record['handle'],{'call_id':'active'})
             self.assertEqual(self.store.db.execute("select count(*) from events where kind='route_repeated_refusal'").fetchone()[0],0)
         finally:actor.close()
@@ -204,14 +220,14 @@ class AgentRouteTests(unittest.TestCase):
         try:
             value=dict(tool='navigate',arguments=dict(goal_id='goal',pose=[5.,4.,0.],view_id='v1',orientation_source='autonomous'))
             refusal=dict(status='refused',reason='current_stage_does_not_support_navigation')
-            self.assertFalse(actor.repeated_navigation_refusal(value,refusal))
+            self.assertFalse(actor.repeated_refusal(value,refusal))
             value['arguments']['view_id']='v2'
-            self.assertFalse(actor.repeated_navigation_refusal(value,refusal))
+            self.assertFalse(actor.repeated_refusal(value,refusal))
             value['arguments']['view_id']='v3'
-            self.assertTrue(actor.repeated_navigation_refusal(value,refusal))
+            self.assertTrue(actor.repeated_refusal(value,refusal))
             self.assertEqual(self.store.db.execute("select count(*) from events where kind='navigation_repeated_refusal'").fetchone()[0],1)
             self.session.skill.record['handle']={'call_id':'active'}
-            self.assertFalse(actor.repeated_navigation_refusal(value,refusal))
+            self.assertFalse(actor.repeated_refusal(value,refusal))
         finally:actor.close()
 
     def test_many_waypoints_request_review_but_allow_an_explained_route(self):

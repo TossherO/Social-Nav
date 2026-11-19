@@ -41,7 +41,7 @@ class Observation:
 
     @classmethod
     def from_scene(cls, scene, *, rgb=None, source=None, geometry=None, sensors=None, include_local_grid=False,
-                   follow_candidates=None, follow_error=None):
+                   follow_candidates=None):
         from navigation.planning.footprint import VehicleGeometry
         from .. import ROOT
         scene.verify()
@@ -91,8 +91,6 @@ class Observation:
             r['sensors'] = copy.deepcopy(sensors)
         if follow_candidates is not None:
             r['follow_candidates'] = copy.deepcopy(follow_candidates)
-        if follow_error is not None:
-            r['follow_candidates_error'] = str(follow_error)
         if include_local_grid and s['geometry']['status'] == 'valid' and prior.get('valid'):
             r['local_grid'] = local_grid_record(scene)
         r['input_fingerprint'] = fingerprint(r)

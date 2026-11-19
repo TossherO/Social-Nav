@@ -38,6 +38,22 @@ def cpu_preparer():
 
 
 class VLMImageBranchTests(unittest.TestCase):
+    def test_camera_info_must_match_the_source_rgb_for_track_association(self):
+        row,arrays,image,_=raw_observation(10.)
+        preparer=cpu_preparer()
+        for change in ({}, {'stamp_ns':image['rgb_stamp_ns']+1}, {'frame_id':'other'}, {'width':1}):
+            with self.subTest(change=change), patch('torch.cuda.stream',return_value=nullcontext()):
+                metadata=dict(image,camera_info=dict(image['camera_info'],**change))
+                entry=dict(association=None,buffer='frame',people=row,image_metadata=metadata)
+                prepared,=preparer.prepare([entry],[],lambda _:arrays)
+                association=prepared['association']
+                self.assertTrue(association['detections'])
+                self.assertEqual(association['image_input']['rgb_stamp_ns'],image['rgb_stamp_ns'])
+                self.assertEqual(association['result']['status'],'no_camera' if change else 'complete')
+                if change:
+                    self.assertIsNone(association['image_input']['camera_info_stamp_ns'])
+                    self.assertEqual(association['result']['matches'],0)
+
     def test_raw_rgb_window_keeps_source_time_without_requiring_early_yolo(self):
         buffer=DecisionBuffer(max_frames=16,slot_bytes=32768)
         try:

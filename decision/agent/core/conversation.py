@@ -30,10 +30,10 @@ class Conversation:
             if call['id'] in self.call_ids:
                 raise ValueError('Native tool call identity was already consumed')
 
-    def commit(self, reply, result=None, *, keyframe=None):
+    def commit(self, reply, result=None, *, keyframe=None, audit_only=False):
         self.validate(reply)
         messages = [reply.message]
-        if reply.action is not None:
+        if reply.message.get('tool_calls'):
             if result is None:
                 raise ValueError('Tool reply requires its corresponding result')
             identity = reply.message['tool_calls'][0]['id']
@@ -41,7 +41,20 @@ class Conversation:
             self.call_ids.add(identity)
         if keyframe is not None:
             messages.append(dict(role='user',content=encode(dict(source='historical_keyframe',keyframe=keyframe))))
-        self._append(messages)
+        if audit_only:
+            self.emit('planning_exchange',dict(messages=messages))
+        else:
+            self._append(messages)
+
+    def consume_transient(self, reply):
+        for call in reply.message.get('tool_calls') or ():
+            self.call_ids.add(call['id'])
+
+    def begin_execution(self, requirements, clarifications):
+        self.exchanges.clear()
+        self.revision += 1
+        self.introduction.append(dict(role='user',content=encode(dict(
+            source='registered_task_plan', requirements=requirements, clarifications=clarifications))))
 
     def notice(self, source, **value):
         self._append([dict(role='user', content=encode(dict(source=source, **value)))])

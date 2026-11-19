@@ -13,12 +13,13 @@ from decision.vlm.observations import render_window
 from decision.vlm.project_config import load_config
 from perception.environment.context import fingerprint
 from .decision import DecisionBuffer
+from .export import drain_worker
 
 
 class FollowDecisionWorker:
     """Prepare from sealed frames off the perception thread; never command motion."""
     def __init__(self, search_factory, *, metrics=None, image_policy=None, camera_calibration=None,
-                 image_preparer_factory=None, inference=None, buffer=None):
+                 image_preparer_factory=None, inference=None, buffer=None, publish_agent_frame=None):
         self.search_factory=search_factory
         self.buffer=buffer or DecisionBuffer(metrics=metrics)
         self.extent,self.view=perception_view()
@@ -32,6 +33,8 @@ class FollowDecisionWorker:
         self.epoch=0;self.task=None;self.result=None;self.inflight=False
         self.next_stamp=None;self.last_stamp=None;self.error=None;self.reference=None;self.crop=None
         self.closed=False
+        self.publish_agent_frame=publish_agent_frame
+        self.agent_frame_error=None
         self.thread=threading.Thread(target=self._work,name='follow-t2',daemon=True);self.thread.start()
 
     def begin(self, handle, description):
@@ -94,7 +97,7 @@ class FollowDecisionWorker:
     def snapshot(self):
         with self.lock:
             return dict(active=self.task is not None,inflight=self.inflight,error=self.error,
-                        reference_fixed=self.reference is not None)
+                        reference_fixed=self.reference is not None,agent_frame_error=self.agent_frame_error)
 
     def _work(self):
         while True:
@@ -118,6 +121,13 @@ class FollowDecisionWorker:
                     # Crop source pixels while their lease is held; inference must
                     # not retain shared views or block the observation history.
                     pixels=read(entries[-1]['buffer'])['rgb']
+                    if self.publish_agent_frame is not None:
+                        try:
+                            self.publish_agent_frame(item['task']['handle'],item['scene'],pixels,entries[-1]['association'],
+                                                     (entries[-1]['image_metadata'] or {}).get('camera_info'))
+                            self.agent_frame_error=None
+                        except (ValueError,KeyError,TypeError) as error:
+                            self.agent_frame_error=type(error).__name__
                     association=entries[-1]['association']['result']['tracks']
                     inverse={v:k for k,v in window['mapping'].items()};crops={}
                     for letter,choice in prepared['choices'].items():
@@ -157,6 +167,5 @@ class FollowDecisionWorker:
 
     def close(self):
         self.closed=True;self.stop()
-        self.queue.put(None);self.thread.join(timeout=20)
-        if self.thread.is_alive():raise RuntimeError('T2 worker did not stop')
+        drain_worker(self.thread, self.queue)
         self.buffer.close()

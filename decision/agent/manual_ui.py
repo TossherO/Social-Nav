@@ -345,14 +345,10 @@ class ManualWindow(QtWidgets.QMainWindow):
     def select_floor(self):
         floor=self.floor.currentData()
         if not floor:return
-        config_name='interactive_agent_floor1.yaml' if floor=='floor1' else 'interactive_agent.yaml'
-        config_path=ROOT/'navigation/commissioning'/config_name
+        from .workflows.manual import floor_files
         try:
-            config=yaml.safe_load(config_path.read_text()) or {}
-            if not isinstance(config,dict):raise ValueError('Invalid floor configuration')
-            configured=config.get('catalog')
-            catalog=(ROOT/configured if configured else ROOT/'outputs/decision/agent/lab_floors_20261114'/f'{floor}_catalog.json')
-        except (OSError,ValueError,yaml.YAMLError,TypeError):
+            _,catalog=floor_files(floor)
+        except (OSError,ValueError,yaml.YAMLError,TypeError,KeyError):
             self.catalog.clear();self.socket.clear()
             self.notice.setText('楼层配置无法读取，请手动选择与当前地图匹配的语义标注。');return
         self.catalog.setText(str(catalog))
@@ -442,7 +438,7 @@ class ManualWindow(QtWidgets.QMainWindow):
             elif event=='manual_target':self.show_target(value)
             elif event=='manual_reference_region_conflict':self.notice.setText(value.get('instruction','参考路径穿过绕行区域，请手动停稳。'))
             elif event=='manual_observation_stage':self.notice.setText(value.get('instruction','进入观察阶段'))
-            elif event=='elevator_stage_completed':
+            elif event in ('destination_localization_available','elevator_stage_completed'):
                 index=self.floor.findData(value.get('floor_id'))
                 if index>=0:self.floor.setCurrentIndex(index)
                 self.socket.setText(str(value.get('runtime_socket') or ''))

@@ -78,19 +78,23 @@ def display_final_yaw(pose, route):
     return float(pose[2]) if route is None else route.get('final_yaw')
 
 
-def floor_catalogs_for_manual(catalog):
-    """Load both configured and map-validated catalogs for this wheelchair."""
+def floor_files(floor):
     import yaml
     from .. import ROOT
+    filename={'floor1':'interactive_agent_floor1.yaml','floor2':'interactive_agent.yaml'}[floor]
+    path=ROOT/'navigation/commissioning'/filename
+    return path,ROOT/yaml.safe_load(path.read_text())['catalog']
+
+
+def floor_catalogs_for_manual(catalog):
+    """Load both configured and map-validated catalogs for this wheelchair."""
     from ..adapters.shadow import load_catalog_map
-    configs={'floor1':ROOT/'navigation/commissioning/interactive_agent_floor1.yaml',
-             'floor2':ROOT/'navigation/commissioning/interactive_agent.yaml'}
+    configs={}
     catalogs={}
-    for floor,path in configs.items():
-        settings=yaml.safe_load(path.read_text())
-        catalog_path=ROOT/settings.get('catalog',f'outputs/decision/agent/lab_floors_20261114/{floor}_catalog.json')
-        selected=catalog if floor==catalog.value.get('floor_id') else Catalog.load(catalog_path)
-        if selected.fingerprint!=Catalog.load(catalog_path).fingerprint:
+    for floor in ('floor1','floor2'):
+        configs[floor],catalog_path=floor_files(floor)
+        selected=Catalog.load(catalog_path)
+        if floor==catalog.value.get('floor_id') and selected.fingerprint!=catalog.fingerprint:
             raise ValueError('Cross-floor mode requires the configured, matching floor catalog')
         asset=load_catalog_map(selected)
         asset.close()
@@ -127,12 +131,15 @@ def run(args):
     actor=None
     display=RouteDisplay(catalog.value['frame_id'])
     reference=ManualReference(args.runtime_socket)
-    elevator_camera=elevator_monitor=elevator_transition=handoff=source_pose=floor_transform=None
+    equipment=None
     source_socket=args.runtime_socket
-    elevator_report=None
     try:
         session=AgentSession(args.instruction,catalog,navigation,store,use_memory=not args.no_memory,
                              floor_catalogs=catalogs)
+        if cross_floor:
+            from .floor_handoff import ElevatorRide
+            equipment=ElevatorRide(configs,source_socket,output)
+            session.elevator=equipment
         actor=make_loop(args,session,output/'session.sqlite')
         last=None
         last_progress=None
@@ -161,98 +168,36 @@ def run(args):
             trace_saved_at=time.monotonic()
         def report(_actor):
             nonlocal last,last_progress,last_observation,trace_cursor,trace_saved_at,last_status_at,last_reference
-            nonlocal navigation,reference,source_socket,elevator_camera,elevator_monitor,elevator_transition,handoff,source_pose,floor_transform,elevator_report
+            nonlocal navigation,reference,source_socket
             stage=next((g for g in session.task_goals.goals if g['status']!='completed'),None)
             requirement=None if stage is None else stage['requirement']
-            if (cross_floor and requirement is not None and requirement.get('stage_type')=='elevator' and
-                    session.state['status']=='ready' and elevator_monitor is None):
-                from ..adapters.elevator_camera import ElevatorCamera
-                from ..core.elevator_links import capture_source_pose,fit_floor_transform
-                from ..core.elevator_model import decide_elevator
-                from ..core.elevator_monitor import ElevatorMonitor
-                from ..core.elevator_transition import ElevatorTransition
-                try:
-                    reference.set(None,None)
-                    display.send([])
-                    current=navigation.tick()
-                    source_pose=capture_source_pose(current,session.catalog)
-                    target=session.task_goals.floor_catalogs[requirement['to_floor']]
-                    links=json.loads((Path(__file__).resolve().parents[1]/'configs/elevator_links.json').read_text())['links']
-                    floor_transform=fit_floor_transform(links,session.catalog,target)
-                    elevator_transition=ElevatorTransition(task_id=session.state['task_id'],goal_id=requirement['goal_id'],
-                        from_floor=requirement['floor_id'],to_floor=requirement['to_floor'],
-                        destination_map_id=target.value['localization_map_id'])
-                    elevator_camera=ElevatorCamera();elevator_camera.start()
-                    elevator_monitor=ElevatorMonitor(elevator_camera,elevator_transition,
-                        lambda context,history,frame:decide_elevator(args.api_config,output/'session.sqlite',context,history,frame,
-                            cache_mode=args.cache_mode,thinking_mode=args.thinking_mode),store,history_policy='agent')
-                    _actor.model.invalidate()
-                    session.state.update(status='waiting_elevator',reason=None,elevator_active=True)
-                    session._save('elevator_monitor_started',dict(goal_id=requirement['goal_id'],
-                        from_floor=requirement['floor_id'],to_floor=requirement['to_floor']))
-                    emit(dict(event='elevator_monitor_started',floor_id=requirement['floor_id'],to_floor=requirement['to_floor']))
-                except (OSError,EOFError,ValueError,KeyError,TypeError) as error:
-                    session.stop('needs_clarification','elevator_start_failed')
-                    session._save('elevator_start_failed',dict(error_type=type(error).__name__))
-                    return
-            if (elevator_monitor is not None and session.state.get('elevator_active') and
-                    session.state['status']=='ready'):
-                session.state['status']='waiting_elevator'
-            if (elevator_monitor is not None and session.state.get('elevator_active') and
-                    session.state['status']=='paused'):
+            if session.navigation is not navigation:
+                navigation=session.navigation
+                source_socket=session.elevator.socket_path
+                reference.close()
+                reference=ManualReference(source_socket)
+                last=last_progress=last_reference=trace_cursor=None
+                display.send([])
+                display.frame=session.catalog.value['frame_id']
+                emit(dict(event='destination_localization_available',floor_id=session.catalog.value['floor_id'],
+                          runtime_socket=source_socket))
+            if session.state.get('elevator_active'):
+                reference.set(None,None)
                 if time.monotonic()-last_status_at>=.5:
                     last_status_at=time.monotonic()
                     emit(dict(event='manual_status',task_id=session.state['task_id'],revision=session.state['revision'],
-                        goal_id=requirement['goal_id'],call_id=None,status='paused',floor_id=requirement['floor_id'],
-                        goal_description=requirement['description'],navigation_status='elevator',localization_status='unavailable',
-                        input_stale=True,model_busy=elevator_monitor.model.busy,elevator_status=elevator_transition.status))
-                return
-            if session.state['status']=='waiting_elevator' and elevator_monitor is not None:
-                from ..core.elevator_links import capture_source_pose,destination_lidar_seed
-                if elevator_transition.status=='awaiting_entry':
-                    try:source_pose=capture_source_pose(navigation.tick(),session.catalog)
-                    except (OSError,EOFError,ValueError,KeyError,TypeError):pass
-                monitor_state=elevator_monitor.tick()
-                if elevator_transition.status=='awaiting_destination_localization' and handoff is None and elevator_report is None:
-                    from .floor_handoff import FloorHandoff
-                    try:
-                        seed=destination_lidar_seed(floor_transform,source_pose,navigation.geometry.base_from_lidar)
-                        handoff=FloorHandoff(session=session,transition=elevator_transition,
-                            target_catalog=session.task_goals.floor_catalogs[requirement['to_floor']],config_path=configs[requirement['to_floor']],
-                            seed=seed,output=output,source_socket=source_socket)
-                        store.event('floor_handoff_started',dict(from_floor=requirement['floor_id'],to_floor=requirement['to_floor']))
-                    except (OSError,EOFError,ValueError,KeyError,TypeError) as error:
-                        elevator_report='floor_handoff_start_failed: '+type(error).__name__
-                handoff_state=None if handoff is None else handoff.tick()
-                if handoff_state and handoff_state['status']=='complete':
-                    navigation=session.navigation
-                    reference.close();source_socket=str(handoff.run_dir/'run/commands.sock')
-                    reference=ManualReference(source_socket)
-                    handoff.close();handoff=None
-                    elevator_monitor.close();elevator_monitor=None;elevator_camera=None;elevator_transition=None
-                    source_pose=floor_transform=None;last=last_progress=last_reference=None
-                    display.send([])
-                    session.state.update(status='ready',reason=None,elevator_active=False)
-                    session._save('elevator_stage_completed')
-                    emit(dict(event='elevator_stage_completed',floor_id=session.catalog.value['floor_id'],
-                              runtime_socket=source_socket))
-                    elevator_report=None
-                    return
-                if handoff_state and handoff_state['status']=='failed':elevator_report=handoff_state['error']
-                if monitor_state.get('error'):elevator_report=monitor_state['error']
-                if time.monotonic()-last_status_at>=.5:
-                    last_status_at=time.monotonic()
-                    emit(dict(event='manual_status',task_id=session.state['task_id'],revision=session.state['revision'],
-                        goal_id=requirement['goal_id'],call_id=None,status=session.state['status'],floor_id=requirement['floor_id'],
-                        goal_description=requirement['description'],navigation_status='elevator',
-                        localization_status='unavailable',input_stale=True,model_busy=monitor_state['model_busy'],
-                        elevator_status=monitor_state['status'],elevator_decision=monitor_state['latest_decision'],
-                        floor_handoff=handoff_state,error=elevator_report))
+                        goal_id=requirement['goal_id'],goal_description=requirement['description'],
+                        floor_id=requirement['floor_id'],call_id=None,status=session.state['status'],
+                        navigation_status='elevator',localization_status='unavailable',input_stale=True,
+                        elevator_status=session.elevator.transition.status,model_busy=_actor.model.busy,
+                        error=session.elevator.wait_reason or (session.elevator.last_attempt or {}).get('result'),
+                        floor_handoff=session.elevator.handoff.snapshot() if session.elevator.handoff else None))
                 return
             display.check()
             record=session.skill.record
             handle=record.get('handle')
-            if record['status']=='running' and handle is not None:
+            following=record['stage_type']=='follow'
+            if record['status']=='running' and handle is not None and not following:
                 request=reference_request(handle,record['selected_pose'],navigation.route,
                                           navigation.route_index,session.catalog,
                                           require_yaw=navigation.request['require_yaw'])
@@ -262,7 +207,7 @@ def run(args):
                 preview=(navigation.value.get('control') or {}).get('manual_preview') or {}
                 error=reference.status()
                 index=0 if navigation.route is None else navigation.route_index
-                expected=handle['call_id']+':'+str(index)
+                expected=handle['call_id'] if following else handle['call_id']+':'+str(index)
                 if preview.get('owner')!=handle['call_id'] or preview.get('request_id')!=expected:preview={}
                 summary=dict(status='unavailable' if error else preview.get('status','waiting'),
                     reason=error or preview.get('reason'),reference_stamp_s=preview.get('reference_stamp_s'))
@@ -301,7 +246,7 @@ def run(args):
                     monitor=session.monitor.snapshot(),
                     call_id=None if handle is None else handle['call_id'],status=session.state['status'],
                     confirmation_call_id=None if confirmation_handle is None else confirmation_handle['call_id'],
-                    manual_confirmation_available=bool(confirmation_handle is not None and navigation.status=='running'),
+                    manual_confirmation_available=bool(not following and confirmation_handle is not None and navigation.status=='running'),
                     reason=session.state.get('reason'),navigation_status=record['status'],
                     model_busy=_actor.model.busy,localization_status=feedback.get('localization_status'),
                     input_stale=feedback.get('input_stale'),origin_pose=feedback.get('origin_pose'),
@@ -312,7 +257,17 @@ def run(args):
                     reference_preview_error=reference.status()))
             if last is not None and navigation.route is not None:
                 save_trace(force=handle is None or record['status']!='running')
-            if record['status']=='running' and handle is not None and handle['call_id']!=last:
+            if following and handle is not None:
+                current_preview=(navigation.value.get('control') or {}).get('manual_preview') or {}
+                target=current_preview.get('goal') if current_preview.get('owner')==handle['call_id'] else None
+                key=(handle['call_id'],tuple(target or ()))
+                if last!=key:
+                    last=key
+                    if target:
+                        geometry,_=display_points(navigation.spatial_inputs()['global_grid'],[target[:2]])
+                        display.send(geometry,None,target[2] if len(target)>2 else None)
+                    else:display.send([])
+            elif record['status']=='running' and handle is not None and handle['call_id']!=last:
                 last=handle['call_id']
                 trace_cursor=None;trace_saved_at=0.
                 pose=record['selected_pose']
@@ -386,9 +341,7 @@ def run(args):
         return result
     finally:
         if actor:actor.close()
-        if elevator_monitor:elevator_monitor.close()
-        if elevator_camera:elevator_camera.close()
-        if handoff:handoff.close()
+        if equipment:equipment.close()
         reference.close()
         display.close()
         store.close()

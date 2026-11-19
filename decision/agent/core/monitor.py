@@ -68,13 +68,19 @@ class TaskMonitor:
                 feedback.get('localization_status','valid')!='valid'):
             self.last_review_at=self.started_at=None
             return
-        if self.last_review_at is None:self.last_review_at=now
+        self.update_clock(now)
+
+    def update_clock(self, now, *, first_observation=False):
+        """Independent sensors and located idle stages use their own source timestamps."""
+        first = self.last_review_at is None
+        if first:self.last_review_at=now
         if self.started_at is None:self.started_at=now
         if now < self.last_review_at or now < self.started_at:
             self.last_review_at=self.started_at=now
             return
         interval=self.settings['interval_s']
-        if interval is not None and now-self.last_review_at>=interval:
+        if (first_observation and (first or interval is None) or
+                interval is not None and now-self.last_review_at>=interval):
             self.pending['semantic_review_due']=dict(kind='semantic_review_due',stamp_s=now)
             self.last_review_at=now
         limit=self.settings['timeout_s']
@@ -106,19 +112,10 @@ class TaskMonitor:
             self.stop_since = None
             self.stop_notified = False
             return
-        if self.last_review_at is None:
-            self.last_review_at = now
-        elif now < self.last_review_at:
+        if self.last_review_at is not None and now < self.last_review_at:
             self.reset_runtime()
             return
-        elif self.settings['interval_s'] is not None and now-self.last_review_at >= self.settings['interval_s']:
-            self.pending['semantic_review_due'] = dict(kind='semantic_review_due', stamp_s=now)
-            self.last_review_at = now
-        if self.started_at is None:self.started_at=now
-        if (self.settings['timeout_s'] is not None and not self.timeout_notified and
-                now-self.started_at >= self.settings['timeout_s']):
-            self.pending['timeout'] = dict(kind='monitor_timeout',stamp_s=now,duration_s=now-self.started_at)
-            self.timeout_notified=True
+        self.update_clock(now)
 
         frame = self.catalog.value['frame_id']
         pose = feedback.get('origin_pose') if feedback.get('origin_frame_id') == frame else (

@@ -9,7 +9,6 @@ from unittest.mock import MagicMock,patch
 
 import numpy as np
 from decision.agent import CONFIG_DIR
-from decision.agent.core.elevator_monitor import ElevatorMonitor
 from decision.agent.tools.places import Catalog
 from decision.agent.workflows import manual
 
@@ -32,78 +31,104 @@ class Navigation:
 
 class Camera:
     def __init__(self):self.sequence=-1
-    def start(self):pass
+    def start(self,extrinsic):pass
     def close(self):pass
     def snapshot(self):
         self.sequence+=1
         return dict(status='available',record=dict(source='ros_camera_independent_of_localization',clock_domain='ros_time',
-            frame_id='camera',stamp_s=10.+self.sequence,sequence=self.sequence),image=b'\xff\xd8test\xff\xd9')
+            frame_id='camera',stamp_s=10.+self.sequence,sequence=self.sequence),image=b'\xff\xd8test\xff\xd9',
+            scan_image=b'scan',base_xy_dm=[[10,20]],
+            scan_record=dict(source='local_lidar_returns',frame_id='lidar',clock_domain='ros_time',stamp_s=10.+self.sequence))
 
 
 class CrossFloorWorkflowTests(unittest.TestCase):
-    def test_single_task_advances_after_visual_ride_and_destination_rebind(self):
+    def test_single_loop_reselects_after_failed_registration(self):
+        from decision.agent.core.loop import AgentLoop
+        from decision.agent.core.session import AgentSession
+        from decision.agent.core.store import Store
+        from decision.agent.tools.framework import Reply
+        from decision.agent.workflows.floor_handoff import ElevatorRide
+
         base=Catalog.load(CONFIG_DIR/'simulation.json')
-        a=copy.deepcopy(base.value);a.update(floor_id='floor2',localization_map_id='old-map')
-        b=copy.deepcopy(base.value);b.update(floor_id='floor1',localization_map_id='new-map')
-        source,target=Catalog(a),Catalog(b)
-        nav1=Navigation(source,'old-map','s1',10.);nav2=Navigation(target,'new-map','s2',20.)
-        monitors=[];emitted=[]
+        floors={}
+        for floor in ('floor1','floor2'):
+            value=copy.deepcopy(base.value)
+            value.update(floor_id=floor,localization_map_id=floor+'-map')
+            for idx in range(1,5):
+                value['places'].append(dict(value['places'][0],place_id='p-01-'+str(idx)))
+            floors[floor]=Catalog(value)
+        nav1=Navigation(floors['floor2'],'floor2-map','s1',10.)
+        nav2=Navigation(floors['floor1'],'floor1-map','s2',100.)
+        nav1.state.update(status='idle')
+        nav2.state.update(status='idle')
+        requirements=[
+            dict(goal_id='lift',kind='skill',stage_type='elevator',target_id='',description='乘电梯',
+                 floor_id='floor2',to_floor='floor1'),
+            dict(goal_id='next',kind='point',target_id='elevator',description='前往目标',floor_id='floor1')]
+        seeds=[];requests=[]
         class Handoff:
-            def __init__(self,*,session,transition,target_catalog,**_):
-                self.session,self.transition,self.catalog=session,transition,target_catalog
+            def __init__(self,*,session,transition,target_catalog,seed,**kwargs):
+                self.session,self.transition,self.target=session,transition,target_catalog
                 self.run_dir=Path('/tmp/mock-observation')
+                seeds.append(seed)
             def tick(self):
-                a=dict(nav2.binding,local_session_id='s2',local_generation=0,local_frame='odom',measurement_stamp_s=20.)
-                self.transition.accept_localization(association=a,now_s=20.,max_age_s=1.,clock_domain='runtime_live')
-                self.session.rebind_manual_floor(self.catalog,nav2,self.transition)
+                if len(seeds)==1:return dict(status='failed',error='registration_failed')
+                association=dict(nav2.binding,local_session_id='s2',local_generation=0,
+                                 local_frame='odom',measurement_stamp_s=100.)
+                self.transition.accept_localization(association=association,now_s=100.,max_age_s=1.,clock_domain='runtime_live')
+                self.session.rebind_manual_floor(self.target,nav2,self.transition)
                 return dict(status='complete')
             def close(self):pass
-        class Actor:
-            def __init__(self,session):
-                self.session=session;self.model=MagicMock();self.exit_reason='synthetic';self.requests=0
-            def run(self,*,on_tick,**_):
-                self.session.call('record_task',goals=[
-                    dict(goal_id='lift',kind='skill',target_id='',description='乘电梯到一楼',
-                         stage_type='elevator',floor_id='floor2',to_floor='floor1'),
-                    dict(goal_id='next',kind='point',target_id='elevator',description='到一楼电梯口',floor_id='floor1')])
-                for _ in range(30):
-                    on_tick(self)
-                    if monitors and monitors[0].model.thread:monitors[0].model.thread.join(1.)
-                    if self.session.catalog.value['floor_id']=='floor1':break
-                    time.sleep(.005)
-                self.assert_finished()
-            def assert_finished(self):
-                if self.session.catalog.value['floor_id']!='floor1':raise AssertionError('Handoff did not complete')
-                if self.session.task_goals.goals[0]['status']!='completed':raise AssertionError('Elevator not completed')
-                if self.session.task_goals.goals[1]['status']!='pending':raise AssertionError('Next goal was lost')
-            def close(self):pass
-        def monitor(*args,**kwargs):
-            kwargs['interval_s']=.001
-            result=ElevatorMonitor(*args,**kwargs);monitors.append(result);return result
-        def decide(_config,_session,context,_history,_frame,**_):
-            return dict(judgment='inside' if context['status']=='awaiting_entry' else 'outside',
-                        evidence='模拟观察',retain_observation=True)
-        fit=dict(from_floor='floor2',to_floor='floor1',to_map_id='new-map',matrix=np.eye(3).tolist())
-        with tempfile.TemporaryDirectory() as root,\
-             patch.object(manual.Catalog,'load',return_value=source),\
-             patch.object(manual,'floor_catalogs_for_manual',return_value=({'floor2':source,'floor1':target},
-                 {'floor1':Path('floor1.yaml'),'floor2':Path('floor2.yaml')})),\
-             patch.object(manual,'ManualRuntimeClient'),patch.object(manual,'ManualNavigation',return_value=nav1),\
-             patch.object(manual,'ManualReference'),patch.object(manual,'RouteDisplay'),\
-             patch.object(manual,'make_loop',side_effect=lambda _a,s,_p:Actor(s)),\
-             patch.object(manual,'shared_budget') as budget,patch.object(manual,'emit',side_effect=emitted.append),\
-             patch('decision.agent.workflows.floor_handoff.observation_owner'),\
-             patch('decision.agent.workflows.floor_handoff.FloorHandoff',Handoff),\
-             patch('decision.agent.adapters.elevator_camera.ElevatorCamera',Camera),\
-             patch('decision.agent.core.elevator_monitor.ElevatorMonitor',side_effect=monitor),\
-             patch('decision.agent.core.elevator_model.decide_elevator',side_effect=decide),\
-             patch('decision.agent.core.elevator_links.fit_floor_transform',return_value=fit):
-            budget.return_value.summary.return_value={}
-            args=SimpleNamespace(duration=10,interactive=True,catalog='unused',map_condition=None,cross_floor=True,
-                actions=None,runtime_socket='/tmp/source/run/commands.sock',output=str(Path(root)/'run'),
-                instruction='乘电梯到一楼',no_memory=False,gui_commands=False,api_config='unused',
-                cache_mode='implicit',thinking_mode='off')
-            result=manual.run(args)
-            self.assertEqual(result['task']['task_goals'][0]['status'],'completed')
-            self.assertTrue(any(x.get('event')=='elevator_stage_completed' for x in emitted))
-            self.assertEqual(monitors[0].history,[])
+
+        def work(payload,observation,spatial):
+            state=payload['current_state']
+            requests.append(payload)
+            if not state['requirements_registered']:
+                return Reply.fixture(dict(tool='record_task',arguments=dict(goals=requirements)))
+            if not state.get('ride'):
+                if state['completion_evidence'].get('destination_association'):
+                    return Reply.fixture(dict(tool='complete_subtask',arguments=dict(goal_id='lift',evidence='目标楼层关联成立，车辆已停稳。')))
+                return Reply.fixture(dict(tool='pause_map_localization',arguments=dict(goal_id='lift')))
+            phase=state['ride']['status']
+            if phase=='awaiting_destination_localization':
+                return Reply.fixture(dict(tool='restart_map_localization',arguments=dict(
+                    pose=[4.+len(seeds),5.,1.],evidence='matched corner')))
+            return Reply.fixture(dict(tool='record_elevator_observation',arguments=dict(
+                judgment='inside' if phase=='awaiting_entry' else 'outside',evidence='ephemeral',retain_observation=True)))
+        with tempfile.TemporaryDirectory() as root, patch('decision.agent.workflows.floor_handoff.os.kill'), \
+             patch('decision.agent.workflows.floor_handoff.observation_owner',return_value=123), \
+             patch('decision.agent.adapters.elevator_camera.ElevatorCamera',Camera), \
+             patch('decision.agent.adapters.shadow.load_catalog_map'),patch('decision.agent.tools.spatial.render',return_value=b'crop'), \
+             patch('decision.agent.workflows.floor_handoff.scan_alignment_preview',return_value=b'overlay'), \
+             patch('decision.agent.core.session.robot_context',return_value={}):
+            store=Store(Path(root)/'session.sqlite')
+            session=AgentSession('下楼',floors['floor2'],nav1,store,floor_catalogs=floors)
+            session.elevator=ElevatorRide({'floor1':'unused'},'source',root)
+            actor=AgentLoop(session,work)
+            try:
+                with patch.object(session,'prepare_reference'),patch('decision.agent.workflows.floor_handoff.FloorHandoff',Handoff):
+                    operator_reviewed=False
+                    for _ in range(25):
+                        if session.state.get('elevator_active') and not operator_reviewed:
+                            actor.event('review')
+                            self.assertEqual(session.state['status'],'waiting_monitor')
+                            operator_reviewed=True
+                        actor.tick()
+                        if actor.model.thread:actor.model.thread.join(1)
+                        if session.task_goals.goals and session.task_goals.goals[0]['status']=='completed':break
+                self.assertEqual([s['base_pose'] for s in seeds],[[4.,5.,1.],[5.,5.,1.]])
+                self.assertTrue(operator_reviewed)
+                self.assertEqual(session.task_goals.goals[0]['status'],'completed')
+                self.assertEqual(session.task_goals.goals[1]['status'],'pending')
+                self.assertFalse(session.state['elevator_active'])
+                self.assertIs(session.navigation,nav2)
+                rides=[p for p in requests if p.get('ride_inputs')]
+                self.assertTrue(all(p['reference_map'] is None for p in rides))
+                roles=[[row[0] for row in p['ride_inputs']] for p in rides]
+                self.assertIn('historical_elevator_rgb',roles[1])
+                self.assertNotIn('destination_waiting_area',roles[0])
+                self.assertEqual(roles[-1],['current_elevator_rgb','current_local_lidar','destination_waiting_area','failed_pose_scan_overlay'])
+                self.assertEqual(rides[-1]['current_state']['ride']['last_attempt']['result'],'registration_failed')
+                self.assertNotIn('ephemeral',str(store.db.execute('SELECT value FROM events').fetchall()))
+            finally:
+                actor.close();session.elevator.close();store.close()

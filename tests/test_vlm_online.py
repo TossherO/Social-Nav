@@ -99,14 +99,16 @@ class OnlineVlmTests(unittest.TestCase):
 
     def test_social_invalid_json_is_retained_and_never_applied(self):
         scene,window,images=self.window()
-        online=OnlineDecision(TaskPolicy('mission','social',self.planning,self.geometry))
-        prepared=online.social(scene,window,images,now=11.1)
-        factory,_=self.client('{"walking":[[0,0]]}')
-        answer=online.infer(prepared,client_factory=factory)
-        with self.assertRaises((ValueError,jsonschema.ValidationError)):
-            online.accept(prepared,answer,scene=scene,now=11.1)
-        self.assertEqual(online.gate.last_response['raw_response'],'{"walking":[[0,0]]}')
-        self.assertIsNone(online.policy.groups)
+        for raw in ('{"walking":[[0,0]]}', '{"walking":[[97,98]],"walking":[[0,1]]}'):
+            with self.subTest(raw=raw):
+                online=OnlineDecision(TaskPolicy('mission','social',self.planning,self.geometry))
+                prepared=online.social(scene,window,images,now=11.1)
+                factory,_=self.client(raw)
+                answer=online.infer(prepared,client_factory=factory)
+                with self.assertRaises((ValueError,jsonschema.ValidationError)):
+                    online.accept(prepared,answer,scene=scene,now=11.1)
+                self.assertEqual(online.gate.last_response['raw_response'],raw)
+                self.assertIsNone(online.policy.groups)
 
     def test_interrupted_or_invalid_completion_never_applies(self):
         for options in (dict(complete=False),dict(model='wrong'),dict(finish='length'),dict(reasoning=True)):

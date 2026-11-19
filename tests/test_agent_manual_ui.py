@@ -98,7 +98,7 @@ class ManualUiTests(unittest.TestCase):
     def test_actual_request_messages_keep_all_images_and_tool_arguments(self):
         image='data:image/png;base64,'+base64.b64encode(b'image').decode()
         messages=[dict(role='system',content='规则'),dict(role='user',content=[
-            dict(type='text',text='查看场景'),dict(type='image_url',image_url=dict(url=image)),
+            dict(type='text',text='查看场景'),dict(type='image_url',image_url=dict(url=image,detail='high')),
             dict(type='image_url',image_url=dict(url=image))]),
             dict(role='assistant',content=None,tool_calls=[dict(id='call',type='function',
                  function=dict(name='lookup_places',arguments='{"name":"门"}'))]),
@@ -114,10 +114,12 @@ class ManualUiTests(unittest.TestCase):
         self.assertEqual(messages[2]['tool_calls'][0]['function']['arguments'],'{"name":"门"}')
         with tempfile.TemporaryDirectory() as root:
             store=Store(Path(root)/'session.sqlite');store.event('api_request',value)
+            store.event('api_request',value)
             db=connect_readonly(Path(root)/'session.sqlite')
             try:
+                self.assertEqual(db.execute('select count(*) from request_images').fetchone()[0],1)
                 _,events=poll_session(db,0)
-                self.assertEqual(events[0]['context'],context)
+                self.assertEqual([event['context'] for event in events],[context,context])
                 _,detail,images=event_detail(db,events[0]['seq'])
                 self.assertEqual(len(images),2)
                 self.assertEqual(detail['request']['messages'][2]['tool_calls'][0]['function']['arguments'],

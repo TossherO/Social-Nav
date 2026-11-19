@@ -68,6 +68,7 @@ class ControlLoop:
         self.device=None;self.scene=None;self.done=threading.Event();self.error=None;self.count=0;self.clock=None
         self.cancelled_request=None
         self.follow_pending=None;self.follow=None
+        self.manual_follow=False
         self.follow_decision=follow_decision
         self.follow_search_anchor=None;self.follow_search_choice=None
         if commands.follow_enabled:
@@ -135,6 +136,7 @@ class ControlLoop:
                     for kind,value in self.commands.drain():
                         if kind=='follow_start':
                             self.follow_pending=value
+                            self.manual_follow=value.get('manual',False)
                             self.follow_search_anchor=self.follow_search_choice=None
                             if self.follow is not None:
                                 with self.lock:self.follow.handle=copy.deepcopy(value['handle'])
@@ -233,7 +235,7 @@ class ControlLoop:
                         self.batch.bind(self.device)
                     preview=self.commands.manual_preview_snapshot() if self.session is not None else None
                     preview_request=None if preview is None or self.request is not None else preview['request']
-                    preview_key=None if preview_request is None else (preview['owner'],preview_request['request_id'])
+                    preview_key=None if preview_request is None else (preview['owner'],preview_request['request_id'],preview_request['goal_revision'])
                     if self.request is None and preview_key!=self.manual_preview_key:
                         self.reference.invalidate('manual_preview_changed')
                     self.manual_preview_key=preview_key
@@ -244,9 +246,9 @@ class ControlLoop:
                         with self.metrics.span('reference_tick'):status=self.reference.tick(now=now,clock_domain=self.clock_domain)
                         self.record('reference',dict(event='status',as_of=now,reason=status['reason'],blocked=self.reference.blocked,
                             waiting=status['waiting'],start_evidence=status['start_evidence']))
+                    control_reference = status['result'] if status is not None and self.request is not None else None
                     with self.metrics.span('dwa_control'):
-                        packet=self.controller.step(self.request,self.scene,list(self.rows),
-                            self.reference.reference if self.request is not None else None,
+                        packet=self.controller.step(self.request,self.scene,list(self.rows),control_reference,
                             now=now,clock_domain=self.clock_domain,dt=dt)
                     self.reference.note_control(packet,monotonic_s=mono)
                     self.safety.packet(packet);self.record('control',packet);self.count+=1
@@ -269,8 +271,7 @@ class ControlLoop:
                         if self.scene is not None:
                             ground=self.scene.geometry.metadata.get('ground_tracking',{})
                             capture_required|=bool(ground.get('history_suspended') or ground.get('reference_pending'))
-                        self.planning_recorder.submit(packet,self.scene,self.device,
-                            self.reference.reference if self.request is not None else None,
+                        self.planning_recorder.submit(packet,self.scene,self.device,control_reference,
                             self.controller.controller.result,self.reference.worker.job,self.reference.last_reply,dt=dt,
                             capture_required=capture_required,
                             timing=dict(control_started_mono=mono,scene_offered_mono=offered_mono,
@@ -294,6 +295,7 @@ class ControlLoop:
                             reference_stamp_s=None if self.reference.current is None or self.request is not None
                                               else self.reference.current['as_of'],executable=False)
                         if self.request is None:
+                            preview_status['goal']=preview['request']['goal']
                             preview_status['reference_path']=manual_preview_path(self.reference.current,preview['request'])
                             preview_status['reference_frame']=preview['request']['frame_id']
                     mapped_pose=agent_mapped_pose(self.scene,self.rows[-1],self.controller.geometry,now,
@@ -416,12 +418,17 @@ class ControlLoop:
                     self.follow_search_choice=None;worker.request_fresh();action=None
             if action is not None and action['operation']=='plan':
                 request=action['request']
+                if getattr(self,'manual_follow',False):
+                    self._publish_follow_preview(handle,request)
+                    self.commands.agent_state.publish_follow(dict(status='running',handle=handle,
+                        target_identity=action['target_identity'],target_generation=action.get('target_generation'),reason=None))
+                    return
                 if not self.commands.follow_goal(handle,request):raise ValueError('follow_owner_arming_or_agent_heartbeat_lost')
                 if self.request is None or goal_binding(request)!=goal_binding(self.request):
                     self.reference.invalidate('follow_goal_changed');self.controller.controller.clear()
                 self.request=request
                 self.commands.agent_state.publish_follow(dict(status='running',handle=handle,
-                    target_identity=action['target_identity'],reason=None))
+                    target_identity=action['target_identity'],target_generation=action.get('target_generation'),reason=None))
                 return
             if self.follow.policy is None and self.follow_search_choice is not None:
                 choice,binding,valid_until=self.follow_search_choice;self.follow_search_choice=None
@@ -429,8 +436,11 @@ class ControlLoop:
                 except (ValueError,KeyError,TypeError) as error:
                     request=None;self.record('reference',dict(event='follow_search_rejected',reason=str(error)))
                 if request is not None:
-                    if not self.commands.follow_goal(handle,request):raise ValueError('follow_owner_arming_or_agent_heartbeat_lost')
-                    self.request=request;self.reference.invalidate('follow_search_goal');self.controller.controller.clear()
+                    if getattr(self,'manual_follow',False):
+                        self._publish_follow_preview(handle,request)
+                    else:
+                        if not self.commands.follow_goal(handle,request):raise ValueError('follow_owner_arming_or_agent_heartbeat_lost')
+                        self.request=request;self.reference.invalidate('follow_search_goal');self.controller.controller.clear()
             if self.follow.policy is None and self.request is not None and self.request.get('request_id')==handle['call_id']:
                 if not self.commands.follow_goal(handle,self.request):
                     raise ValueError('follow_owner_arming_or_agent_heartbeat_lost')
@@ -451,6 +461,22 @@ class ControlLoop:
             self.commands.agent_state.publish_follow(dict(status='failed' if target is not None else 'preempted',
                 handle=handle,reason=reason,cancelled_request=target,last_evidence=last_evidence,
                 recovery_available=False))
+
+    def _publish_follow_preview(self,handle,request):
+        import numpy as np
+        import math
+        inputs=self._follow_inputs(self.scene)
+        scene=self.scene.record
+        target=request['goal']
+        if request['mode']=='local':
+            if request['frame_id']!=scene['frame_id'] or request.get('local_identity')!=[scene[k] for k in ('session_id','generation','frame_id')]:
+                raise ValueError('follow_preview_localization_changed')
+            matrix=np.asarray(scene['prior']['map_from_local'])
+            xy=(matrix @ [target[0],target[1],0.,1.])[:2].tolist()
+            target=xy if len(target)==2 else xy+[target[2]+math.atan2(matrix[1,0],matrix[0,0])]
+        preview=dict(request,mode='mapped',frame_id=inputs['global_grid'].metadata['frame_id'],
+                     map_snapshot_id=self.asset.manifest['snapshot_id'],goal=target)
+        self.commands.follow_preview(handle,preview)
 
     def close(self):
         self.done.set();self.worker.join(timeout=10)

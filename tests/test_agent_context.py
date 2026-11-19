@@ -409,9 +409,9 @@ class AgentContextTests(unittest.TestCase):
         self.fixture.nav.geometry=geometry
         self.fixture.nav.spatial_inputs=lambda:dict(global_grid=grid,scene=None,pose=[4.,4.,0.],stamp_s=10.,
             clock_domain=self.fixture.nav.clock_domain,geometry=geometry)
-        self.session.prompt();view=self.session.spatial_view.record['view_id']
         self.session.call('record_task',goals=[dict(goal_id='target',kind='point',target_id='',
             position=[4.,4.],description='test')])
+        self.session.prompt();view=self.session.spatial_view.record['view_id']
         prior=self.session.call('check_candidate',pose=[4.,4.,float(np.pi)],view_id=view)
         self.assertEqual(prior['static_footprint']['status'],'free')
         result=self.session.call('navigate',goal_id='target',pose=[4.,4.,0.],view_id=view,orientation_source='autonomous')
@@ -431,8 +431,8 @@ class AgentContextTests(unittest.TestCase):
                 local_grid_observation_id='obs',local_grid_map_from_local=np.eye(4).tolist(),pose=[4.,4.,0.],
                 stamp_s=10.,clock_domain=self.fixture.nav.clock_domain,geometry=geometry)
             session=AgentSession('test',self.session.catalog,self.fixture.nav,self.fixture.store)
-            session.prompt();view=session.spatial_view.record['view_id']
             session.call('record_task',goals=[dict(goal_id='target',kind='point',target_id='',position=[4.,4.],description='test')])
+            session.prompt();view=session.spatial_view.record['view_id']
             result=session.call('navigate',goal_id='target',pose=[4.,4.,0.],view_id=view,orientation_source='autonomous')
             self.assertEqual(result['status'],expected)
 

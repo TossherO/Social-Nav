@@ -220,24 +220,29 @@ def validate_context(context, observation):
 def edge_candidates(context, observation, *, stations=4):
     """Perpendicular targets inside supported along-edge span; never feasible."""
     validate_context(context, observation)
-    if type(stations) is not int or stations < 1 or stations*len(context['front_gaps_m']) > 8:
+    return segment_candidates(context['edge'], context['footprint_xy_m'], context['front_gaps_m'], context['end_guard_m'], stations)
+
+
+def segment_candidates(edge, footprint, gaps, end_guard, stations):
+    """Sample base poses along a measured segment with the specified front clearance."""
+    if type(stations) is not int or stations < 1 or stations*len(gaps) > 8:
         raise ValueError('At most eight candidate hypotheses')
-    footprint = np.asarray(context['footprint_xy_m'])
+    footprint = np.asarray(footprint)
     front = float(footprint[:, 0].max())
-    a, b = np.asarray(context['edge']['observed_segment_xy'])
+    a, b = np.asarray(edge['observed_segment_xy'])
     length = float(np.linalg.norm(b-a)); direction = (b-a)/length
-    normal = np.asarray(context['edge']['estimated_interior_normal_xy'])
+    normal = np.asarray(edge['estimated_interior_normal_xy'])
     # Asymmetric Y extents also fit inside support; do not assume a centered body.
     yaw = math.atan2(normal[1], normal[0])
     local_y = np.array([-normal[1], normal[0]])
     along_extents = footprint[:, 1]*(local_y @ direction)
-    lo = context['end_guard_m']-along_extents.min()
-    hi = length-context['end_guard_m']-along_extents.max()
+    lo = end_guard-along_extents.min()
+    hi = length-end_guard-along_extents.max()
     if hi < lo:
         return []
     along = [float((lo+hi)/2)] if stations == 1 else np.linspace(lo, hi, stations)
     result = []
-    for gap in context['front_gaps_m']:
+    for gap in gaps:
         for distance in along:
             center = a+direction*distance-normal*(front+gap)
             result.append(dict(id=len(result), pose=[float(center[0]), float(center[1]), yaw],

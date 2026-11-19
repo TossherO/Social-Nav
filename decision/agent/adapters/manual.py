@@ -38,13 +38,14 @@ class ManualNavigation(RuntimeShadowNavigation):
         if (self.handle is not None and self.status not in ('arrived','stopped') and
                 self.released_handle!=self.handle):
             raise ValueError('An operator target is already active')
+        self.follow_active=False
         self.handle=copy.deepcopy(handle)
         self.released_handle=None
         self.arrival_invalidation=None
         self.route=self.route_index=self.route_start_stamp_s=None
         self.route_visits=[]
         requirement=place.get('requirement') or {}
-        require_yaw=('required_yaw' in requirement or any(requirement.get(key) for key in
+        require_yaw=(requirement.get('stage_type')=='seating' or 'required_yaw' in requirement or any(requirement.get(key) for key in
                      ('facing','semantic_conditions','visual_preferences')))
         self.request=dict(place_id=place['place_id'],pose=copy.deepcopy(place['pose']),require_yaw=require_yaw)
         self.confirmation=None
@@ -57,6 +58,14 @@ class ManualNavigation(RuntimeShadowNavigation):
         ack=self.start(place,handle)
         self.route=copy.deepcopy(place['route'])
         self.route_index=0
+        return ack
+
+    def start_follow(self,intent,handle):
+        ack=super().start_follow(intent,handle)
+        self.status='running'
+        self.route=self.route_index=self.route_start_stamp_s=None
+        self.confirmation=self.automatic_evidence=self.released_handle=None
+        self.route_visits=[]
         return ack
 
     def release_target(self,handle):
@@ -86,6 +95,7 @@ class ManualNavigation(RuntimeShadowNavigation):
 
     def tick(self):
         state=super().tick()
+        if self.follow_active:return state
         if (self.route is not None and self.status=='running' and
                 self.route_index < len(self.route['waypoints'])-1 and
                 not state.get('input_stale') and state.get('localization_status')=='valid' and
@@ -136,6 +146,8 @@ class ManualNavigation(RuntimeShadowNavigation):
     def cancel(self,handle):
         if handle != self.handle:
             raise ValueError('Wrong manual navigation target')
+        if self.follow_active:
+            return super().cancel(handle)
         self.confirmation=None
         self.automatic_evidence=None;self.arrival_since=None;self.arrival_last_stamp=None
         self.status='stopped'
@@ -157,6 +169,22 @@ class ManualNavigation(RuntimeShadowNavigation):
         stopped=(feedback_current and
             abs(velocity[0])<=self.settings['stopped_linear_mps'] and
             abs(velocity[1])<=self.settings['stopped_angular_rps'])
+        # Operator driving uses the idle estimator even with an Agent display target.
+        state['pose'] = copy.deepcopy(feedback.get('pose')) if feedback_current else None
+        if self.follow_active:
+            follow=state.get('follow_status') or {}
+            acknowledged=(follow.get('handle')==self.handle and follow.get('status') in ('failed','stopped'))
+            confirmed=bool(acknowledged and stopped and not state['input_stale'] and
+                           state['localization_status']=='valid' and state.get('origin_pose') is not None)
+            if follow.get('status') == 'preempted':
+                self.status = 'preempted'
+            else:
+                self.status = 'stopped' if confirmed else 'running'
+            state.update(source='runtime_manual_observer',handle=copy.deepcopy(self.handle),stopped=bool(stopped),
+                         status=('failed' if confirmed and follow.get('status')=='failed' else self.status),
+                         stop_observation=confirmed,stop_measurement_stamp_s=stamp,proposal_cancelled=confirmed,
+                         manual_arrival_observation=False,velocity=copy.deepcopy(velocity))
+            return state
         pose=state.get('origin_pose')
         confirmation=self.confirmation or self.automatic_evidence
         current=(not state['input_stale'] and state['localization_status']=='valid' and pose is not None and
@@ -203,7 +231,7 @@ class ManualNavigation(RuntimeShadowNavigation):
         return state
 
     def confirm_arrival(self):
-        if self.handle is None or self.status != 'running':
+        if self.follow_active or self.handle is None or self.status != 'running':
             raise ValueError('No manual target is awaiting confirmation')
         state=self.tick()
         deadline=time.monotonic()+2.

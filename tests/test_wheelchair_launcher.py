@@ -63,7 +63,9 @@ with pathlib.Path(os.environ['TEST_LAUNCH_LOG']).open('a') as out: out.write('ta
         self.assertIn('--execute',exe);self.assertIn('--chassis-port',exe)
         self.assertIn('navigation/commissioning/interactive_observation.yaml',obs)
         self.assertIn('navigation/commissioning/interactive.yaml',exe)
-        for flag in ('--motion-profile','--environment-update-hz','--environment-window-m','--vehicle-profile'):
+        for command in (obs,exe):
+            self.assertNotIn('--motion-profile',command)
+        for flag in ('--environment-update-hz','--environment-window-m','--vehicle-profile'):
             self.assertEqual(obs[obs.index(flag)+1],exe[exe.index(flag)+1])
         self.assertEqual(self.calls(),'')
 

@@ -47,51 +47,18 @@ class ImagePreparer:
                 if (str(image.get('rgb_frame') or '').lstrip('/')!=self.calibration['target_frame'].lstrip('/') or
                         row['detection_frame_id'].lstrip('/')!=self.calibration['source_frame'].lstrip('/')):
                     raise ValueError('VLM image calibration does not match the observed camera/LiDAR frames')
+                camera = image.get('camera_info')
+                if (not isinstance(camera,dict) or type(camera.get('stamp_ns')) is not int or
+                        camera['stamp_ns'] > rgb_ns or
+                        str(camera.get('frame_id') or '').lstrip('/') != image['rgb_frame'].lstrip('/') or
+                        (camera.get('height'),camera.get('width')) != pixels.shape[:2]):
+                    camera = None
                 detections,elapsed=self.detector.detect(pixels);self.calls+=1
                 people=causal_geometry(people_in_lidar(row),row,past,rgb_stamp,.05)
-                association=matcher.step(people,detections,self.transform,image.get('camera_info'),
+                association=matcher.step(people,detections,self.transform,camera,
                     row['stamp_s']-rgb_stamp,row['stamp_s'],local_scope(row),health=row['health'])
-                record=observation_record(row,pixels=pixels,rgb_stamp_ns=rgb_ns,camera_info=image.get('camera_info'),
+                record=observation_record(row,pixels=pixels,rgb_stamp_ns=rgb_ns,camera_info=camera,
                     calibration=self.calibration,detector=self.detector.metadata,detections=detections,
                     result=association,detector_s=elapsed)
                 result.append(dict(entry,association=record))
         return tuple(result)
-
-
-class FollowImagePreparer(ImagePreparer):
-    """Optional single-frame candidates for the Agent's first target selection."""
-    def __init__(self, policy=None, calibration=None):
-        super().__init__(policy, calibration)
-        from perception.detection_tracking.inference.rgb_association import ImageAssociator
-        self.matcher = ImageAssociator(self.policy)
-
-    def prepare_scene(self, scene, pixels, rgb_stamp_s, rgb_frame, camera_info, rgb_stamp_ns=None):
-        import torch
-        from perception.detection_tracking.inference.rgb_association import people_in_lidar
-        from .follow_target import candidates
-        scene.verify()
-        with torch.cuda.stream(self.stream):
-            detections, _ = self.detector.detect(pixels)
-        self.calls += 1
-        from perception.environment.scene import people_observation
-        row = people_observation(scene)
-        association = None
-        camera_valid = (isinstance(camera_info,dict) and type(camera_info.get('stamp_ns')) is int and
-            type(rgb_stamp_ns) is int and camera_info['stamp_ns'] <= rgb_stamp_ns and
-            str(camera_info.get('frame_id') or '').lstrip('/') == str(rgb_frame or '').lstrip('/') and
-            camera_info.get('width') == pixels.shape[1] and camera_info.get('height') == pixels.shape[0])
-        if (row is not None and str(rgb_frame or '').lstrip('/') == self.calibration['target_frame'].lstrip('/') and
-                row.get('detection_frame_id', '').lstrip('/') == self.calibration['source_frame'].lstrip('/') and
-                camera_valid and 0 <= scene.record['as_of']-row['stamp_s'] <= .3):
-            from .trajectory_inputs import local_scope
-            # A valid bound scene has already checked pose time and transform.
-            row['pose_health'] = 'valid'
-            try:
-                association = self.matcher.step(people_in_lidar(row), detections, self.transform, camera_info,
-                    row['stamp_s']-rgb_stamp_s, row['stamp_s'], local_scope(row), health=row.get('health'))
-            except (ValueError, KeyError, TypeError) as error:
-                association = dict(status='association_error_'+type(error).__name__,tracks={})
-        return candidates(scene, pixels, rgb_stamp_s, detections, association, detector=dict(
-            backend=self.detector.metadata['backend'],model_sha256=self.detector.metadata['sha256'],
-            calibration_sha256=self.calibration['sha256'],camera_frame=rgb_frame,
-            camera_info=copy.deepcopy(camera_info) if camera_valid else None),rgb_stamp_ns=rgb_stamp_ns)

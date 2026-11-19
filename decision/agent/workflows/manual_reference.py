@@ -1,20 +1,11 @@
 """Latest-only leased reference previews; no goal or chassis control channel."""
 import copy
-import socket
 import threading
-import time
-from pathlib import Path
-from runtime.transport import Connection
+from runtime.transport import exchange_request
 
 
 def request_preview(path, owner, request):
-    sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);sock.settimeout(.5)
-    try:
-        sock.connect(str(Path(path).resolve()))
-        wire=Connection(sock)
-        wire.send(dict(kind='agent_manual_preview',value=dict(owner=owner,request=request)))
-        result=wire.recv()
-    finally:sock.close()
+    result=exchange_request(path,'agent_manual_preview',dict(owner=owner,request=request),timeout=.5)
     if result.get('accepted') is not True:
         raise ValueError(result.get('error','manual_preview_refused'))
     return result

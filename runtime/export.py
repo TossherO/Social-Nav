@@ -3,6 +3,24 @@ import copy
 from pathlib import Path
 import queue
 import threading
+import time
+
+
+def drain_worker(worker, inbox, *, timeout=20.):
+    """Share the shutdown deadline between enqueueing the sentinel and joining."""
+    deadline = time.monotonic() + timeout
+    while worker.is_alive():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            inbox.put(None, timeout=min(.1, remaining))
+            break
+        except queue.Full:
+            continue
+    worker.join(timeout=max(0., deadline - time.monotonic()))
+    if worker.is_alive():
+        raise RuntimeError(f'{worker.name} failed to drain within {timeout:g}s')
 
 
 class SceneExporter:
@@ -38,12 +56,6 @@ class SceneExporter:
         except Exception as error:self.error=type(error).__name__+': '+str(error)
 
     def close(self):
-        # A failed worker has stopped consuming; never block a shutdown trying
-        # to insert a sentinel into its full queue.
-        while self.worker.is_alive():
-            try:self.queue.put(None,timeout=.1);break
-            except queue.Full:continue
-        self.worker.join(timeout=20)
-        if self.worker.is_alive():raise RuntimeError('Scene exporter failed to drain')
+        drain_worker(self.worker, self.queue)
         if self.error:raise RuntimeError('Scene export failed: '+self.error)
         return dict(written=self.written,dropped=self.dropped,complete=self.dropped==0)

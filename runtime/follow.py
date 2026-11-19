@@ -188,7 +188,8 @@ class FollowRunner:
         request['request_id']=self.handle['call_id']
         self.request=request
         self.revision_floor=max(self.revision_floor,request['goal_revision'])
-        return dict(operation='plan',request=copy.deepcopy(request),target_identity=result['target_identity'])
+        return dict(operation='plan',request=copy.deepcopy(request),target_identity=result['target_identity'],
+                    target_generation=self.policy.tracked_generation)
 
     def clear(self):
         if self.policy is not None:self.policy.cancel()

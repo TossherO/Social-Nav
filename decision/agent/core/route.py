@@ -8,7 +8,7 @@ def record_route_visit(route, visits, handle, state, index, tolerance):
     """Record one ordered waypoint from a fresh, measured pose."""
     points=route['waypoints']
     pose=state.get('origin_pose')
-    stamp=state.get('origin_stamp_s',state.get('stamp_s'))
+    stamp=state.get('origin_stamp_s')
     now=state.get('stamp_s')
     if (index != len(visits) or not 0<=index<len(points) or state.get('input_stale') or
             state.get('localization_status','valid')!='valid' or
@@ -58,6 +58,37 @@ def validate_route_progress(route, proof):
         last=stamp
     return dict(status='met',waypoint_count=len(visits),visits=copy.deepcopy(visits),
                 source='ordered_measured_waypoint_visits_not_semantic_completion')
+
+
+def circuit_progress(segments, polygon, circuit, proof):
+    """Measure angular travel around the region from one continuous measured trace."""
+    from .tasks import centroid, inside
+    start=proof.get('route_start_stamp_s')
+    end=proof['stamp_s']
+    center=centroid(polygon)
+    if start is None or not inside(center,polygon):
+        return dict(status='unproven',reason='circuit_trace_or_interior_reference_missing')
+    context=proof['context']
+    for segment in segments:
+        if any(segment.get(k)!=context.get(k) for k in ('local_identity','clock_domain','map_binding')):
+            continue
+        samples=[p for p in segment['samples'] if start<=p['stamp_s']<=end]
+        if len(samples)<3 or samples[0]['stamp_s']-start>.5 or end-samples[-1]['stamp_s']>.5:
+            continue
+        if any(b['stamp_s']-a['stamp_s']>3 for a,b in zip(samples,samples[1:])):
+            continue
+        xy=np.array([p['pose'][:2] for p in samples])
+        offsets=xy-center
+        angles=np.arctan2(offsets[:,1],offsets[:,0])
+        steps=(np.diff(angles)+math.pi)%(2*math.pi)-math.pi
+        if (np.abs(steps)>math.pi/2).any() or any(inside(point,polygon) for point in xy):
+            return dict(status='unproven',reason='circuit_trace_ambiguous')
+        signed=float(steps.sum()/(2*math.pi))
+        sign={'clockwise':-1,'counterclockwise':1,'either':0}[circuit.get('direction','either')]
+        measured=sign*signed if sign else abs(signed)
+        return dict(status='met' if measured+1e-6>=circuit['turns'] else 'not_met',
+                    signed_turns=signed,requested_turns=circuit['turns'],source='measured_trajectory')
+    return dict(status='unproven',reason='continuous_route_trace_missing')
 
 
 def waypoint_occupancy_diagnostics(inputs, points, margin):

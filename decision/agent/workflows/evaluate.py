@@ -2,6 +2,7 @@
 import argparse
 import copy
 import json
+import math
 from pathlib import Path
 import time
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from .drivers import SimulationDriver
 from ..adapters.simulation import SimulationNavigation
 from ..core.store import Store
 from ..core.session import AgentSession
+from ..core.tasks import angle_error
 from ..tools.framework import Reply
 
 
@@ -47,14 +49,12 @@ def scenario(name, output):
                   view_id='bound_by_explicit_fixture_at_request',orientation_source='user' if 'required_yaw' in goal else 'semantic'),
                   action('wait_for_event',event='navigation')]
         if name == 'missing_visual_evidence':
-            calls += [action('observe_scene'),action('check_goal',goal_id=goal['goal_id']),
+            calls += [action('observe_scene'),
                       action('ask_user',question='仿真无真实RGB，无法核验视觉条件。')]
         elif name == 'blocked_destination':
             calls = calls[:-1]+[action('ask_user',question='所选位姿几何检查未通过，请确认后续要求。')]
         else:
-            calls += [action('check_goal',goal_id=goal['goal_id'])]
-    if name not in ('blocked_destination','missing_visual_evidence'):
-        calls.append(action('finish_task',status='succeeded',evidence='对应仿真执行和子任务检查已完成。'))
+            calls += [action('complete_subtask',goal_id=goal['goal_id'],evidence='仿真到达与停稳。')]
     pending = iter(calls)
 
     def work(payload, observation, spatial_view):
@@ -73,6 +73,20 @@ def scenario(name, output):
             # This binding belongs only to an explicit scripted fixture. Actual
             # VLM responses must name the view and are never patched or repaired.
             call['arguments']['view_id'] = spatial_view.record['view_id']
+        elif call['tool']=='complete_subtask':
+            facts=payload['current_state']['completion_evidence']
+            if facts['missing']:
+                return action('ask_user',question='仿真缺少完成证据：'+str(facts['missing']))
+            evidence=f"仿真实际位姿 {facts['measured_pose']}，终点误差 {facts['distance_to_selected_m']:.2f} 米。"
+            target=facts['requirement'].get('facing')
+            if target:
+                pose=facts['measured_pose']
+                wx,wy=catalog.places[target]['pose'][:2]
+                error=angle_error(pose[2],math.atan2(wy-pose[1],wx-pose[0]))
+                if error>session.task_goals.settings['goal_yaw_tolerance_rad']:
+                    return action('ask_user',question='仿真中当前朝向未满足要求。')
+                evidence+=f'窗口方位与实际朝向相差 {error:.3f} 弧度。'
+            call['arguments']['evidence']=evidence
         return call
 
     actor = AgentLoop(session,lambda *args: Reply.fixture(work(*args)),max_requests=64)

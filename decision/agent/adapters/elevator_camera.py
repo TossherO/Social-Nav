@@ -1,4 +1,4 @@
-"""Read bounded, source-timed camera frames from the ROS-only bridge."""
+"""Read independent RGB and local LiDAR observations from the ROS bridge."""
 import base64
 import copy
 import json
@@ -14,12 +14,14 @@ class ElevatorCamera:
         self.thread=None
         self.lock=threading.Lock()
         self.latest=None
+        self.scan=None
         self.error=None
 
-    def start(self):
+    def start(self, base_from_lidar):
         if self.process is not None:raise ValueError('Camera bridge already started')
         self.process=subprocess.Popen(
-            ['bash','-c','source perception/scripts/ros1_env.sh && exec /usr/bin/python3 -B -m decision.agent.workflows.elevator_camera'],
+            ['bash','-c','source perception/scripts/ros1_env.sh && exec /usr/bin/python3 -B -m decision.agent.workflows.elevator_camera "$@"',
+             'elevator-sensors','--base-from-lidar',json.dumps(base_from_lidar.tolist(),allow_nan=False)],
             stdout=subprocess.PIPE,text=True,bufsize=1)
         self.thread=threading.Thread(target=self._read,daemon=True,name='elevator-camera')
         self.thread.start()
@@ -27,6 +29,21 @@ class ElevatorCamera:
     def _read(self):
         try:
             for line in self.process.stdout:
+                if line.startswith('SCAN '):
+                    if len(line)>2*1024*1024:raise ValueError('Local scan image exceeds size limit')
+                    record=json.loads(line[5:])
+                    data=base64.b64decode(record.pop('image_base64'),validate=True)
+                    points=record.pop('base_xy_dm')
+                    if (record['source']!='local_lidar_returns' or record['display_frame']!='base_link' or
+                            record['clock_domain']!='ros_time' or not record['frame_id'] or
+                            not math.isfinite(record['stamp_s']) or record['stamp_s']<=0 or
+                            not data.startswith(b'\x89PNG\r\n\x1a\n')):
+                        raise ValueError('Invalid local scan')
+                    with self.lock:
+                        if self.scan and record['stamp_s']<self.scan[0]['stamp_s']:
+                            raise ValueError('LiDAR source time regressed')
+                        self.scan=(record,data,time.monotonic(),points)
+                    continue
                 if not line.startswith('FRAME '):continue
                 if len(line)>2*1024*1024:raise ValueError('Camera frame exceeds size limit')
                 record=json.loads(line[6:])
@@ -54,7 +71,12 @@ class ElevatorCamera:
         if value is None:return dict(status='unavailable',reason='camera_frame_missing')
         age=time.monotonic()-value['received_mono']
         if age<0 or age>max_receive_age_s:return dict(status='unavailable',reason='camera_frame_stale')
-        return dict(status='available',record=value['record'],image=value['image'],receive_age_s=age)
+        result=dict(status='available',record=value['record'],image=value['image'],receive_age_s=age)
+        with self.lock:scan=self.scan
+        if (scan and 0<=time.monotonic()-scan[2]<=max_receive_age_s and
+                abs(scan[0]['stamp_s']-value['record']['stamp_s'])<=max_receive_age_s):
+            result.update(scan_record=scan[0],scan_image=scan[1],base_xy_dm=scan[3])
+        return result
 
     def close(self):
         if self.process is None:return
@@ -62,4 +84,4 @@ class ElevatorCamera:
         try:self.process.wait(timeout=2.)
         except subprocess.TimeoutExpired:self.process.kill();self.process.wait()
         if self.thread is not None:self.thread.join(timeout=2.)
-        with self.lock:self.latest=None
+        with self.lock:self.latest=self.scan=None

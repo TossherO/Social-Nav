@@ -18,14 +18,22 @@ STATE=struct.Struct('<QQ')
 class BufferFull(RuntimeError):pass
 
 
+def validate_pool_capacity(slots, slot_bytes):
+    if type(slots) is not int or slots < 1 or type(slot_bytes) is not int or slot_bytes < HEADER + 64:
+        raise ValueError('Invalid shared-buffer capacity')
+
+
 class SharedArrayPool:
     def __init__(self,slots=4,slot_bytes=4*1024*1024):
-        if type(slots) is not int or slots<1 or type(slot_bytes) is not int or slot_bytes<HEADER+64:
-            raise ValueError('Invalid shared-buffer capacity')
+        validate_pool_capacity(slots, slot_bytes)
         self.owner=uuid.uuid4().hex;self.slots=slots;self.slot_bytes=slot_bytes
         self.fd=os.memfd_create('social-nav-'+self.owner,os.MFD_CLOEXEC)
-        os.ftruncate(self.fd,slots*slot_bytes)
-        self.mapping=mmap.mmap(self.fd,slots*slot_bytes,access=mmap.ACCESS_WRITE)
+        try:
+            os.ftruncate(self.fd, slots * slot_bytes)
+            self.mapping = mmap.mmap(self.fd, slots * slot_bytes, access=mmap.ACCESS_WRITE)
+        except BaseException:
+            os.close(self.fd)
+            raise
         self.epochs=[0]*slots;self.leases={};self.closed=False
 
     def publish(self,arrays,*,readers):

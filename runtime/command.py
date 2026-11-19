@@ -11,7 +11,7 @@ import socket
 import threading
 import tempfile
 import time
-from .transport import Connection
+from .transport import Connection, exchange_request
 
 
 class AgentState:
@@ -21,6 +21,9 @@ class AgentState:
         self.vehicle_context = None
         self.goal_evidence = None
         self.follow = None
+        self.follow_observation = None
+        self.seating=None
+        self.follow_enabled=False
 
     def enable_goal_observations(self):
         with self.lock:
@@ -56,21 +59,37 @@ class AgentState:
                 value['goal_observation'] = self.goal_evidence.update(packet,map_binding)
             self.control, self.updated_mono = value, time.monotonic()
 
-    def publish_observation(self, record, image):
+    def publish_observation(self, record, image, *, follow_handle=None):
         encoded = None if image is None else base64.b64encode(image).decode()
         if encoded is not None and len(encoded) > 1500000:
             raise ValueError('Agent observation exceeds IPC budget')
         with self.lock:
-            self.observation, self.image = copy.deepcopy(record), encoded
+            if follow_handle is None:
+                self.observation, self.image = copy.deepcopy(record), encoded
+            elif (self.follow and self.follow.get('handle')==follow_handle and
+                  self.follow.get('status') in ('starting','running','searching')):
+                self.follow_observation=(copy.deepcopy(record),encoded)
 
     def publish_follow(self, value):
-        with self.lock:self.follow=copy.deepcopy(value)
+        with self.lock:
+            if ((self.follow or {}).get('handle')!=value.get('handle') or
+                    value.get('status') not in ('starting','running','searching')):
+                self.follow_observation=None
+            self.follow=copy.deepcopy(value)
 
     def snapshot(self, *, with_image=False):
         with self.lock:
+            observation,image=self.observation,self.image
+            if self.follow_observation and self.control:
+                record,encoded=self.follow_observation
+                if (record['clock_domain']==self.control['clock_domain'] and
+                        0<=self.control['stamp_s']-record['stamp_s']<=3):
+                    observation,image=record,encoded
             return dict(status='waiting_for_control' if self.control is None else 'available', control=copy.deepcopy(self.control),
-                observation=copy.deepcopy(self.observation), image_base64=self.image if with_image else None,
+                observation=copy.deepcopy(observation), image_base64=image if with_image else None,
                 vehicle_context=copy.deepcopy(self.vehicle_context), follow=copy.deepcopy(self.follow),
+                seating=None if self.seating is None else self.seating.snapshot(),
+                local_skills=dict(follow=self.follow_enabled,seating=self.seating is not None),
                 received_age_s=None if self.updated_mono is None else max(0., time.monotonic()-self.updated_mono),
                 scope='shadow_recommendation_not_execution', executable=False, execution_feedback=False)
 
@@ -133,6 +152,7 @@ class CommandInbox:
             raise ValueError('Agent execution requires an explicitly enabled live interactive session')
         self.agent_execution=agent_execution
         self.follow_enabled=follow_enabled
+        self.agent_state.follow_enabled=follow_enabled
         self.agent_owner=None
         self.manual_preview_owner=None
         self.route_preempted=False
@@ -174,6 +194,8 @@ class CommandInbox:
                 raise ValueError('Manual preview must be a bound mapped goal')
         now=time.monotonic()
         with self.lock:
+            if (self.agent_owner or {}).get('manual') and request is not None:
+                raise ValueError('Manual follow preview is active')
             old=self.manual_preview_owner
             if old is not None and old['expires_mono']<=now:old=self.manual_preview_owner=None
             if old is not None and old['owner']!=owner:
@@ -185,12 +207,27 @@ class CommandInbox:
     def manual_preview_snapshot(self):
         if self.session is None or not self.session.live or self.session.execute:return None
         with self.lock:
-            value=self.manual_preview_owner
-            if value is None:return None
-            if value['expires_mono']<=time.monotonic():
-                self.manual_preview_owner=None
-                return None
-            return copy.deepcopy(value)
+            return copy.deepcopy(self.manual_preview_snapshot_locked())
+
+    def manual_preview_snapshot_locked(self):
+        value=self.manual_preview_owner
+        if value is not None and value['expires_mono']<=time.monotonic():
+            self.manual_preview_owner=None
+        return self.manual_preview_owner
+
+    def follow_preview(self, handle, request):
+        request=validate('goal',request)
+        with self.lock:
+            owner=self.agent_owner
+            if (self.session is None or not self.session.live or self.session.execute or
+                    not owner or not owner.get('manual') or owner['request_id']!=handle['call_id'] or
+                    request['mode']!='mapped' or request['task_id']!=owner['internal_task_id'] or
+                    request['request_id']!=owner['request_id'] or request['goal_revision']<owner['internal_revision'] or
+                    time.monotonic()-owner['heartbeat_mono']>3.):
+                raise ValueError('manual_follow_preview_ownership_lost')
+            owner['internal_revision']=request['goal_revision']
+            self.manual_preview_owner=dict(owner=handle['call_id'],request=copy.deepcopy(request),
+                                           expires_mono=owner['heartbeat_mono']+3.)
 
     def agent_live(self, kind, value):
         """Admit only owned goal/cancel intents into the ordinary safety path."""
@@ -248,10 +285,12 @@ class CommandInbox:
             self.pending.append((command,value))
         return dict(accepted=True,scope='live_goal_intent',execution_feedback=False)
 
-    def agent_follow(self, kind, value, *, live):
+    def agent_follow(self, kind, value, *, live, manual=False):
         """Reserve or stop one follow owner; ACK never means the robot moved."""
         from perception.environment.context import fingerprint
         if not self.follow_enabled:raise ValueError('follow_candidates_not_enabled')
+        if manual and (live or self.session is None or not self.session.live or self.session.execute):
+            raise ValueError('Manual following requires live observation without hardware output')
         if live and not self.agent_execution:raise ValueError('Agent execution is not enabled')
         if not live and self.session is not None and self.session.execute:
             raise ValueError('Agent shadow commands are disabled when hardware execution is enabled')
@@ -281,10 +320,12 @@ class CommandInbox:
                       owner['task_id']!=handle['task_id'] or owner['goal_revision']>=handle['goal_revision'] or
                       owner.get('arm_revision')!=chassis.get('arm_revision')):
                     raise ValueError('previous_agent_goal_not_completed_or_preempted')
-                self.agent_owner=dict(kind='follow',request_id=handle['call_id'],task_id=handle['task_id'],
+                if manual and self.manual_preview_snapshot_locked() is not None:
+                    raise ValueError('Manual preview owned by another session')
+                self.agent_owner=dict(kind='follow',manual=manual,request_id=handle['call_id'],task_id=handle['task_id'],
                     goal_revision=handle['goal_revision'],internal_task_id='follow:'+handle['call_id'],internal_revision=0,
                     arm_revision=chassis.get('arm_revision'),live=live,heartbeat_mono=time.monotonic())
-                self.pending.append(('follow_start',copy.deepcopy(value)))
+                self.pending.append(('follow_start',dict(copy.deepcopy(value),manual=True) if manual else copy.deepcopy(value)))
             elif kind in ('finish','cancel','lost'):
                 if (set(value)!=({'call_id','reason'} if kind=='lost' else {'call_id'}) or
                         not isinstance(value['call_id'],str) or kind=='lost' and
@@ -292,6 +333,7 @@ class CommandInbox:
                     raise ValueError('Invalid follow stop')
                 owner=self.agent_owner
                 if (owner is None or owner.get('kind')!='follow' or owner['request_id']!=value['call_id'] or
+                        owner.get('manual',False)!=manual or owner['live']!=live or
                         kind in ('finish','lost') and owner.get('held')):
                     raise ValueError('agent_goal_ownership_lost')
                 chassis={} if not live else self.session.status().get('chassis') or {}
@@ -307,7 +349,10 @@ class CommandInbox:
 
     def _follow_stop_locked(self, owner, *, hold):
         target=dict(task_id=owner['internal_task_id'],goal_revision=owner['internal_revision'])
-        self.safety.command('goal_hold' if hold else 'cancel',target)
+        if owner.get('manual'):
+            self.manual_preview_owner=None
+        else:
+            self.safety.command('goal_hold' if hold else 'cancel',target)
         if hold:owner['held']=True
         else:self.agent_owner=None
         return target
@@ -316,7 +361,7 @@ class CommandInbox:
         request=validate('goal',request)
         with self.lock:
             owner=self.agent_owner
-            if (owner is None or owner.get('kind')!='follow' or owner.get('held') or
+            if (owner is None or owner.get('manual') or owner.get('kind')!='follow' or owner.get('held') or
                     owner['request_id']!=handle['call_id'] or request['task_id']!=owner['internal_task_id'] or
                     request['request_id']!=owner['request_id'] or request['goal_revision']<owner['internal_revision'] or
                     time.monotonic()-owner['heartbeat_mono']>3.):
@@ -351,7 +396,9 @@ class CommandInbox:
                     time.monotonic()-owner['heartbeat_mono']>3.):
                 raise ValueError('follow_owner_or_heartbeat_lost')
             target=dict(task_id=owner['internal_task_id'],goal_revision=owner['internal_revision'])
-            if owner['internal_revision']>0:
+            if owner.get('manual'):
+                self.manual_preview_owner=None
+            elif owner['internal_revision']>0:
                 self.safety.command('goal_hold' if owner['live'] else 'cancel',target)
             return target
 
@@ -408,7 +455,10 @@ class CommandInbox:
                 if request['kind'] in ('session_status','playback','arm'):
                     if self.session is None:raise ValueError('Interactive session is not enabled')
                     connection.send(self.session.handle(request['kind'],request['value']));continue
-                if request['kind']=='agent_state':
+                if request['kind'] in ('agent_state','agent_live_state'):
+                    live = request['kind']=='agent_live_state'
+                    if live and not self.agent_execution:
+                        raise ValueError('Agent execution is not enabled')
                     value=request['value']
                     if (not isinstance(value,dict) or set(value) not in ({'with_image'},{'with_image','follow_call_id'}) or
                             type(value['with_image']) is not bool or
@@ -416,32 +466,25 @@ class CommandInbox:
                         raise ValueError('State query requires a Boolean with_image')
                     state=self.agent_state.snapshot(with_image=value['with_image'])
                     with self.lock:
-                        if (self.agent_owner is not None and self.agent_owner.get('kind')=='follow' and not self.agent_owner['live'] and
+                        if (self.agent_owner is not None and self.agent_owner.get('kind')=='follow' and self.agent_owner['live']==live and
                                 value.get('follow_call_id')==self.agent_owner['request_id']):
                             self.agent_owner['heartbeat_mono']=time.monotonic()
+                        if live:
+                            state['agent_owner']=copy.deepcopy(self.agent_owner)
+                    if live:
+                        state.update(scope='live_observation',chassis=self.session.status().get('chassis'))
                     connection.send(state);continue
                 if request['kind']=='agent_manual_preview':
                     connection.send(self.manual_preview(request['value']));continue
-                if request['kind']=='agent_live_state':
-                    if not self.agent_execution:raise ValueError('Agent execution is not enabled')
-                    value=request['value']
-                    if (not isinstance(value,dict) or set(value) not in ({'with_image'},{'with_image','follow_call_id'}) or
-                            type(value['with_image']) is not bool or
-                            'follow_call_id' in value and (not isinstance(value['follow_call_id'],str) or not value['follow_call_id'])):
-                        raise ValueError('State query requires a Boolean with_image')
-                    state=self.agent_state.snapshot(with_image=value['with_image'])
-                    with self.lock:
-                        if (self.agent_owner is not None and self.agent_owner.get('kind')=='follow' and self.agent_owner['live'] and
-                                value.get('follow_call_id')==self.agent_owner['request_id']):
-                            self.agent_owner['heartbeat_mono']=time.monotonic()
-                        owner=copy.deepcopy(self.agent_owner)
-                    state.update(scope='live_observation',chassis=self.session.status().get('chassis'),agent_owner=owner)
-                    connection.send(state);continue
+                if request['kind']=='agent_seating_select':
+                    if self.agent_state.seating is None:raise ValueError('seating_observations_not_enabled')
+                    connection.send(self.agent_state.seating.select(request['value']));continue
                 if request['kind'] in ('agent_live_follow_start','agent_live_follow_finish','agent_live_follow_cancel',
+                                       'agent_manual_follow_start','agent_manual_follow_finish','agent_manual_follow_cancel','agent_manual_follow_lost',
                                        'agent_live_follow_lost','agent_shadow_follow_start','agent_shadow_follow_finish',
                                        'agent_shadow_follow_cancel','agent_shadow_follow_lost'):
                     parts=request['kind'].split('_')
-                    connection.send(self.agent_follow(parts[-1],request['value'],live=parts[1]=='live'));continue
+                    connection.send(self.agent_follow(parts[-1],request['value'],live=parts[1]=='live',manual=parts[1]=='manual'));continue
                 if request['kind'] in ('agent_live_goal','agent_live_cancel','agent_live_hold'):
                     kind={'agent_live_goal':'goal','agent_live_cancel':'cancel','agent_live_hold':'hold'}[request['kind']]
                     connection.send(self.agent_live(kind,request['value']));continue
@@ -468,13 +511,7 @@ def send_request(path,kind,value,*,timeout=2.):
     if kind not in ('session_status','playback','arm'):value=validate(kind,value)
     elif not isinstance(value,dict):raise ValueError('Session commands require an object')
     if not 0<timeout<=10:raise ValueError('Command timeout must be in (0,10] seconds')
-    sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);sock.settimeout(timeout)
-    wire=Connection(sock)
-    try:
-        sock.connect(str(Path(path).resolve()))
-        wire.send(dict(kind=kind,value=value))
-        return wire.recv()
-    finally:wire.close()
+    return exchange_request(path,kind,value,timeout=timeout)
 
 
 def main():

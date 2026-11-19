@@ -7,6 +7,23 @@ from perception.environment.shared_scene import ScenePool,read_scene
 from tests.navigation_fixtures import bundle
 
 class BufferTests(unittest.TestCase):
+    def test_interrupted_pool_handoff_releases_the_received_descriptor(self):
+        import os
+        import socket
+        import tempfile
+        from unittest.mock import patch
+        from runtime.transport import Connection
+        left, right = socket.socketpair()
+        with left, right, tempfile.TemporaryFile() as shared_file:
+            sender, receiver = Connection(left), Connection(right)
+            sender.send_fd(shared_file.fileno())
+            fd = receiver.recv_fd()
+            left.close()
+            with patch.object(receiver, 'recv_fd', return_value=fd), self.assertRaises(EOFError):
+                receiver.recv_array_reader()
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+
     def test_leases_read_only_and_epoch_reuse(self):
         pool=SharedArrayPool(1,1024);reader=pool.reader()
         ref=pool.publish({'xyz':np.arange(18,dtype=np.float32).reshape(6,3)},readers=['gpu','safety'])

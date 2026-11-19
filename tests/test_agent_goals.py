@@ -92,10 +92,18 @@ class IndoorGoalTests(unittest.TestCase):
         self.assertEqual(checked['status'],'completed')
         self.assertFalse(checked['real_robot_success'])
 
-    def test_reference_without_semantic_completion_condition_is_rejected(self):
-        result=self.session.call('record_task',goals=[dict(goal_id='near',kind='reference',target_id='front_window',description='By window')])
-        self.assertEqual(result['status'],'unavailable')
-        self.assertIn('observable original task condition',result['reason'])
+    def test_named_reference_without_radius_needs_fresh_map_review(self):
+        goal=dict(goal_id='near',kind='reference',target_id='front_window',description='By window')
+        self.assertEqual(self.select(goal,[5.,4.,0.])['status'],'accepted')
+        self.arrived()
+        self.assertEqual(self.session.call('check_goal',goal_id='near')['reason'],'review_proximity_on_the_post_arrival_map')
+        original=self.nav.spatial_inputs
+        self.nav.spatial_inputs=lambda:dict(original(),pose=self.nav.state['pose'],stamp_s=self.nav.state['stamp_s'])
+        query_map(self.session)
+        result=self.session.call('check_goal',goal_id='near',_context=self.session.context(),
+                                 review_result='satisfied',review_evidence='Fixture map shows the stop next to the window')
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(result['semantic']['reference']['target_id'],'front_window')
 
     def test_reference_does_not_complete_when_actual_pose_misses_selected_point(self):
         goal=dict(goal_id='near',kind='reference',target_id='front_window',description='Stop by window',

@@ -8,6 +8,23 @@ from tests import test_navigation_dwa as fixtures
 
 
 class PlanningRecordTests(unittest.TestCase):
+    def test_full_queue_uses_the_same_shutdown_deadline_as_join(self):
+        import queue
+        import threading
+        from runtime.export import drain_worker
+        release = threading.Event()
+        inbox = queue.Queue(1)
+        inbox.put('pending')
+        worker = threading.Thread(target=release.wait, args=(2.,))
+        worker.start()
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'failed to drain'):
+                drain_worker(worker, inbox, timeout=.03)
+            self.assertEqual(inbox.get_nowait(), 'pending')
+        finally:
+            release.set()
+            worker.join()
+
     def test_failure_capture_keeps_exact_scene_without_delaying_periodic_capture(self):
         from tests.navigation_fixtures import scene_at
         with tempfile.TemporaryDirectory() as directory:

@@ -4,6 +4,8 @@ from pathlib import Path
 import queue
 import threading
 
+from .export import drain_worker
+
 
 class PlanningRecorder:
     def __init__(self,directory,*,metrics=None):
@@ -73,10 +75,6 @@ class PlanningRecorder:
         except Exception as error:self.error=type(error).__name__+': '+str(error)
 
     def close(self):
-        while self.worker.is_alive():
-            try:self.queue.put(None,timeout=.1);break
-            except queue.Full:continue
-        self.worker.join(timeout=20.)
-        if self.worker.is_alive():raise RuntimeError('Planning recorder failed to drain')
+        drain_worker(self.worker, self.queue)
         return dict(written=self.written,dropped=self.dropped,scenes=len(self.scenes),queries=len(self.jobs),
             replies=len(self.replies),error=self.error,complete=self.error is None and self.dropped==0)

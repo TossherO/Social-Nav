@@ -99,7 +99,7 @@ class NavigationSkill:
 
     def start_follow(self, goal_id, intent, revision, requirement):
         r=self.record;state=self.navigation.snapshot()
-        if self.navigation.scope=='manual' or not callable(getattr(self.navigation,'start_follow',None)):
+        if not callable(getattr(self.navigation,'start_follow',None)):
             return dict(status='refused',reason='follow_not_supported_by_adapter')
         if (r['context_lost'] or not r['connected'] or state.get('input_stale') or
                 state.get('localization_status','valid')!='valid'):
@@ -139,7 +139,7 @@ class NavigationSkill:
                 state.get('status') not in ('running','proposed')):
             return dict(status='refused',reason='follow_not_running')
         proof=dict(goal_id=r['goal_id'],place_id=None,handle=copy.deepcopy(handle),stamp_s=state['stamp_s'],
-            scope=self.navigation.scope,source=state['source'],context=spatial_context(state),stopped=True,
+            scope=self.navigation.scope,source=state['source'],context=spatial_context(state),stopped=False,
             execution_feedback=False,physical_acceptance=False,evidence_kind='follow_condition_and_stop_observation',
             semantic=copy.deepcopy(semantic))
         r.update(status='holding',reason='follow_finish_requested',pending_completion=proof)
@@ -237,7 +237,7 @@ class NavigationSkill:
         if (r['stage_type']=='follow' and not r['follow_ready'] and follow.get('status')=='running' and
                 feedback.get('status') in ('running','proposed')):
             r['follow_ready']=True;self._emit('follow_started');return True
-        if self.navigation.scope in ('live','shadow') and feedback.get('status') == 'preempted':
+        if self.navigation.scope in ('live','shadow','manual') and feedback.get('status') == 'preempted':
             r.update(status='interrupted', handle=None, context_lost=True, reason='operator_goal_preempted_agent')
             self._mark_attempt(handle, 'interrupted')
             self._emit('navigation_interrupted')
@@ -255,9 +255,16 @@ class NavigationSkill:
                     and feedback.get('status') == 'stopped'):
                 proof = r.get('pending_completion')
                 if proof is not None:
-                    if r['stage_type']=='follow':proof['stop_stamp_s']=stamp
+                    if r['stage_type']=='follow':
+                        measured=feedback.get('stop_measurement_stamp_s',stamp)
+                        if type(measured) not in (int,float) or not proof['stamp_s']<measured<=stamp:
+                            return False
+                        proof.update(stopped=True,stop_stamp_s=measured)
                     r['completed'].append(proof)
-                    r.update(status='held', pending_completion=None, reason=None)
+                    if self.navigation.scope=='manual':
+                        r.update(status='succeeded',handle=None,pending_completion=None,reason=None)
+                    else:
+                        r.update(status='held', pending_completion=None, reason=None)
                     self._mark_attempt(handle, 'succeeded')
                     self._emit('navigation_completed')
                     return True

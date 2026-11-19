@@ -4,8 +4,6 @@ import json
 from pathlib import Path
 import time
 
-from jsonschema import Draft202012Validator
-
 def read_json(path):
     try:
         return json.loads(Path(path).read_text(encoding="utf-8-sig"))
@@ -49,6 +47,20 @@ def usage_numbers(data):
         if isinstance(detail, dict):
             result.update({k: detail[k] for k in names if type(detail.get(k)) is int and detail[k] >= 0})
     return result
+
+def parse_response(raw):
+    """Decode model output before task-specific schema and identity checks."""
+    def unique_fields(pairs):
+        fields = dict(pairs)
+        if len(fields) != len(pairs):
+            raise ValueError("Duplicate field in model response")
+        return fields
+
+    def invalid_constant(value):
+        raise ValueError("Invalid JSON number: " + value)
+
+    return json.loads(raw, object_pairs_hook=unique_fields, parse_constant=invalid_constant)
+
 
 def read_stream(response, started, timing, *, text_chunks=None):
     chunks, usage, finish, model = ([] if text_chunks is None else text_chunks), {}, None, None
@@ -94,6 +106,17 @@ def read_stream(response, started, timing, *, text_chunks=None):
             "reasoning_content_present": reasoning}
 
 
+def recorded_stream(response, started, timing, record):
+    """Keep the received output text even when transport or parsing fails."""
+    chunks = []
+    try:
+        return read_stream(response, started, timing, text_chunks=chunks)
+    except Exception:
+        if chunks:
+            record['raw_content'] = ''.join(chunks)
+        raise
+
+
 def request_dspark(body, *, client_factory=None, timeout_s=90):
     """One configured DSPARK request; retain partial output and never retry."""
     import httpx
@@ -107,7 +130,7 @@ def request_dspark(body, *, client_factory=None, timeout_s=90):
     base = 'http://' + deployment['host'] + ':' + str(deployment['port']) + '/v1'
     config = dict(base_url=base, origin=base[:-3], api_key='', model=model)
     result = dict(status='unavailable', raw_content=None, automatically_retried=False)
-    chunks, timing = [], {}
+    timing = {}
     factory = client_factory or httpx.Client
     try:
         with factory(timeout=timeout_s, trust_env=False, follow_redirects=False,
@@ -120,16 +143,15 @@ def request_dspark(body, *, client_factory=None, timeout_s=90):
             with client.stream('POST', base + '/chat/completions', json=body) as response:
                 if response.status_code != 200:
                     raise ValueError('non_success_http_response')
-                reply = read_stream(response, began, timing, text_chunks=chunks)
-            result.update(raw_content=reply['raw_content'], timing=timing, usage=reply['usage'],
+                reply = recorded_stream(response, began, timing, result)
+                result['raw_content'] = reply['raw_content']
+            result.update(timing=timing, usage=reply['usage'],
                           finish_reason=reply['finish_reason'],server_model=reply['server_model'])
             if (reply['server_model'] != model or reply['finish_reason']!='stop' or
                     reply['reasoning_content_present'] or reply['usage'].get('reasoning_tokens', 0)):
                 raise ValueError('invalid_completion_metadata')
             result['status'] = 'complete'
     except Exception as error:
-        if result['raw_content'] is None and chunks:
-            result['raw_content'] = ''.join(chunks)
         result['reason'] = type(error).__name__
     return result
 
@@ -154,6 +176,7 @@ def groups_schema(pids):
 
 
 def validate_groups(raw,pids,schema=None):
+    from jsonschema import Draft202012Validator
     Draft202012Validator(schema or groups_schema(pids)).validate(raw)
     claimed=[]
     for activity,groups in raw.items():

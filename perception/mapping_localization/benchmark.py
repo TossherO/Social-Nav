@@ -114,18 +114,20 @@ def main():
         raise ValueError('Require 0 <= warmup < duration')
     if args.component=='roll' and (args.gpu_deskew or args.gpu_linearize):raise ValueError('Select the frontend component for deskew/linearization trials')
     if args.gpu is not None:os.environ['CUDA_VISIBLE_DEVICES']=args.gpu
-    from perception.mapping_localization.configuration import algorithm_config
+    from perception.mapping_localization.configuration import algorithm_config, replay_start
     from perception.sensors.observations import bag_observations
     from .results import file_fingerprint
     source=Path(args.source_run).resolve();manifest=json.loads((source/'run.json').read_text())
-    mode=args.mode or manifest['mode'];config,_=algorithm_config(mode=mode,source_run=source)
+    start = replay_start(manifest)
+    bag = Path(manifest['bag']).resolve()
+    mode = args.mode or manifest['mode']
+    config, _ = algorithm_config(mode=mode, source_run=source, bag=bag, start=start)
     if args.component=='roll' and mode!='localization':raise ValueError('ROLL numerical comparison requires an immutable localization map')
     # Raw observations are frozen once, then replayed in order for each backend.
     # Bag I/O, CUDA construction and initialization are outside steady timings.
     output=Path(args.output).resolve()
     if output.exists():raise FileExistsError(output)
-    start=float(manifest.get('start',manifest.get('playback',{}).get('start_offset_s',0.)) or 0.)
-    bag=Path(manifest['bag']).resolve();batches=list(bag_observations(bag,config,duration=args.duration,start=start))
+    batches=list(bag_observations(bag,config,duration=args.duration,start=start))
     if not batches:raise ValueError('No usable scans in the requested interval')
     output.mkdir(parents=True,exist_ok=False)
     reports={};arrays={}

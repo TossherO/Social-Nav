@@ -50,6 +50,30 @@ class ManualTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'read-only'):
                 client.exchange(kind,{})
 
+    def test_follow_waits_for_matching_status_and_current_measured_stop(self):
+        self.client.exchange = MagicMock(return_value=dict(accepted=True))
+        handle = dict(task_id='task', goal_revision=1, call_id='follow')
+        self.nav.start_follow(dict(target_description='人物'), handle)
+        self.state['follow'] = dict(handle=handle, status='running')
+        self.update([4.,4.,0.], 10.1)
+        self.assertEqual(self.nav.tick()['pose'], self.feedback['pose'])
+        self.nav.finish_follow(handle)
+        self.state['follow'] = dict(handle=dict(handle, call_id='old'), status='stopped')
+        self.assertFalse(self.nav.tick()['stop_observation'])
+        self.state['follow'] = dict(handle=handle, status='stopped')
+        self.update([4.,4.,0.], 10.2, velocity=(.2,0.))
+        self.assertFalse(self.nav.tick()['stop_observation'])
+        self.update([4.,4.,0.], 10.3)
+        state = self.nav.tick()
+        self.assertTrue(state['stop_observation'])
+        self.assertEqual(state['stop_measurement_stamp_s'], 10.3)
+        self.assertEqual([call.args[0] for call in self.client.exchange.call_args_list],
+                         ['follow_start','follow_finish'])
+        self.state['follow'] = dict(handle=handle, status='preempted')
+        interrupted = self.nav.tick()
+        self.assertEqual(interrupted['status'], 'preempted')
+        self.assertFalse(interrupted['stop_observation'])
+
     def test_automatic_arrival_uses_fresh_stopped_localization_and_dwell(self):
         self.nav.automatic_arrival=True
         handle=dict(task_id='task',goal_revision=1,call_id='first')
@@ -360,16 +384,14 @@ class ManualTests(unittest.TestCase):
 
     def test_manual_client_refuses_runtime_with_hardware_output(self):
         client=ManualRuntimeClient('/unused')
-        wire=MagicMock()
-        with patch('decision.agent.adapters.runtime.socket.socket') as sock, \
-                patch('decision.agent.adapters.runtime.Connection',return_value=wire):
+        with patch('decision.agent.adapters.runtime.exchange_request') as exchange:
             for status in (dict(live=True,hardware_enabled=True),dict(live=False,hardware_enabled=False),{}):
-                wire.recv.return_value=status
+                exchange.return_value=status
                 with self.assertRaisesRegex(ValueError,'without chassis output'):
                     client.require_observation_only()
-            wire.recv.return_value=dict(live=True,hardware_enabled=False)
+            exchange.return_value=dict(live=True,hardware_enabled=False)
             client.require_observation_only()
-            wire.send.assert_called_with(dict(kind='session_status',value={}))
+            exchange.assert_called_with(client.path,'session_status',{},timeout=.5)
 
     def test_confirmation_requires_current_position_heading_and_stopped_estimate(self):
         handle=dict(task_id='task',goal_revision=1,call_id='first')
@@ -426,8 +448,8 @@ class ManualTests(unittest.TestCase):
             try:
                 session,_=self.prepared_arrival(store)
                 self.obs['stamp_s']=9.
-                with patch('decision.agent.core.session.time.monotonic',side_effect=[0.,0.,0.,2.,2.]), \
-                     patch('decision.agent.core.session.time.sleep'):
+                with patch('decision.agent.workflows.scripted_review.time.monotonic',side_effect=[0.,0.,0.,2.,2.]), \
+                     patch('decision.agent.workflows.scripted_review.time.sleep'):
                     result=session.call('check_goal',goal_id='elevator')
                 self.assertEqual(result['status'],'unproven',result)
                 self.assertIn('mapped_pose_unavailable',result['details'])
@@ -631,7 +653,8 @@ class ManualTests(unittest.TestCase):
                     rgb=dict(stamp_s=10.1),base_pose=[4.,4.,0.],input_fingerprint='source'))
                 session._applying_context=dict(observation_id='frame')
                 with patch.object(session,'_current_rgb_context',return_value=True):
-                    result=session._check_observation_stage('inspect',session.task_goals.current('inspect'),
+                    from decision.agent.workflows.scripted_review import _check_observation_stage
+                    result=_check_observation_stage(session,'inspect',session.task_goals.current('inspect'),
                         self.nav.snapshot(),'frame','satisfied','看到门')
                 self.assertEqual(result['status'],'completed',result)
                 self.assertEqual(session.finish_task('succeeded','观察完成')['status'],'succeeded')

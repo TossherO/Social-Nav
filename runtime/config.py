@@ -2,6 +2,7 @@
 import math
 from pathlib import Path
 import yaml
+from interfaces.shared import validate_pool_capacity
 from perception.mapping_localization.configuration import merge_config
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -11,6 +12,14 @@ def runtime_settings(path):
     """Partial machine overrides inherit current transport/display defaults."""
     defaults=yaml.safe_load((ROOT/'configs/runtime.yaml').read_text())
     settings=merge_config(defaults,yaml.safe_load(Path(path).read_text()))
+    for pool in ('scan', 'safety'):
+        validate_pool_capacity(settings[f'shared_{pool}_slots'], settings[f'shared_{pool}_slot_bytes'])
+    for key in ('control_period_s', 'scene_export_hz', 'sensor_input_timeout_s', 'startup_timeout_s', 'finalization_timeout_s'):
+        value = settings[key]
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError('Positive finite runtime setting required: ' + key)
+    if not .01 <= settings['control_period_s'] <= .2:
+        raise ValueError('Control period must stay in [0.01,0.2] seconds')
     display=settings['display'];route=settings['route_replay']
     for key in ('scan_hz','people_hz','map_hz','rgb_hz','navigation_hz'):
         value=display[key]

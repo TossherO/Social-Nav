@@ -68,6 +68,35 @@ class FollowDecisionWorkerTests(unittest.TestCase):
             self.assertTrue(worker.snapshot()['reference_fixed'])
         finally:worker.close()
 
+    def test_outer_agent_receives_same_t2_candidate_and_returns_to_ordinary_rgb_after_stop(self):
+        from decision.agent.adapters.runtime import follow_observation
+        from runtime.command import AgentState
+        state=AgentState()
+        state.control=dict(clock_domain='synthetic',stamp_s=11.2)
+        state.publish_observation({'source':'ordinary'},b'ordinary')
+        state.publish_follow(dict(status='starting',handle=self.handle))
+        def publish(handle,scene,pixels,association,camera_info):
+            frame=follow_observation(scene,pixels,association,None,camera_info)
+            state.publish_observation(frame.record,frame.image,follow_handle=handle)
+        worker=FollowDecisionWorker(search,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),
+                                    inference=lambda req:req.infer(client_factory=factory('P0')),publish_agent_frame=publish)
+        try:
+            worker.begin(self.handle,'red jacket')
+            for i in range(12):
+                row,pixels,assoc,scene=observation(round(10+i/10,1))
+                assoc['image_input']['camera_frame']='camera'
+                assoc.update(detector_identity='test',detections=[dict(box=[20.,5.,35.,40.],score=.9,class_id=0)])
+                assoc['result']['tracks']['a/g7']['detection_index']=0
+                worker.submit(row,pixels,association=assoc,scene=scene,image_metadata=None)
+            self.assertEqual(self.wait_result(worker)['result']['choice']['kind'],'person')
+            current=state.snapshot(with_image=True)['observation']
+            self.assertEqual(current['follow_candidates']['candidates'][0]['track']['identity'],['tracker_session',7,'a'])
+            self.assertEqual(current['follow_candidates']['rgb_stamp_ns'],current['rgb']['stamp_ns'])
+            state.publish_follow(dict(status='stopped',handle=self.handle))
+            state.publish_observation(current,b'late',follow_handle=self.handle)
+            self.assertEqual(state.snapshot()['observation'],{'source':'ordinary'})
+        finally:worker.close()
+
     def test_cancelled_result_is_discarded_and_cannot_adopt_reference(self):
         gate=threading.Event();worker=self.worker(factory('P0',gate))
         try:

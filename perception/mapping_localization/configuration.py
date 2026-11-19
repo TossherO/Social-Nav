@@ -1,6 +1,7 @@
 """Build localization parameters from module configuration and source provenance."""
 import copy
 import json
+import math
 from pathlib import Path
 import yaml
 
@@ -16,7 +17,34 @@ def merge_config(base, override):
     return result
 
 
-def algorithm_config(*,mode,source_run=None,map_directory=None,pose=None,pose_file=None,bag=None,start=0.,calibration=None,coverage=None,lio_backend=None,roll_backend=None,deskew_backend=None,linearization_backend=None):
+def replay_start(run):
+    playback = run.get('playback') or {}
+    start = run.get('start')
+    return float(playback.get('start_offset_s', 0.) or 0.) if start is None else float(start)
+
+
+def _check_replay_seed(run, directory, bag, start):
+    """Prefer the portable bag fingerprint. Older runs only recorded the path."""
+    from .results import file_fingerprint, map_fingerprint
+    playback = run.get('playback') or {}
+    expected_map = playback.get('map_fingerprint')
+    if expected_map is not None and map_fingerprint(directory) != expected_map:
+        raise ValueError('Changed localization map requires --pose or --pose-file')
+    if not math.isclose(start, replay_start(run), rel_tol=0., abs_tol=1e-9):
+        raise ValueError('Changed replay start requires --pose or --pose-file')
+    if bag is None:
+        raise ValueError('A recorded bag is required to reuse a replay pose')
+    expected = playback.get('bag_fingerprint')
+    if expected is not None:
+        same_bag = file_fingerprint(bag) == expected
+    else:
+        original = run.get('bag')
+        same_bag = original and Path(original).expanduser().resolve() == Path(bag).expanduser().resolve()
+    if not same_bag:
+        raise ValueError('Changed replay bag requires --pose or --pose-file')
+
+
+def algorithm_config(*,mode,source_run=None,map_directory=None,pose=None,pose_file=None,bag=None,start=None,calibration=None,coverage=None,lio_backend=None,roll_backend=None,deskew_backend=None,linearization_backend=None):
     """Bind source geometry while selecting current execution backends explicitly."""
     defaults={name:yaml.safe_load((ROOT/'perception/mapping_localization/configs'/(name+'.yaml')).read_text()) for name in ('fast_lio','roll')}
     if source_run is not None:
@@ -46,11 +74,18 @@ def algorithm_config(*,mode,source_run=None,map_directory=None,pose=None,pose_fi
         directory=Path(map_directory).resolve() if map_directory else Path(roll.get('saveKeyframeMapDirectory','')).parent
         if not (directory/'COMPLETE').is_file():raise ValueError('Localization needs a complete explicitly selected map')
         roll['saveKeyframeMapDirectory']=str(directory/'keyframes');roll['loopClosureEnableFlag']=False
+        if start is None:
+            start = replay_start(run)
+        if bag is None:
+            bag = run.get('bag')
         if pose_file:
             from perception.mapping_localization.initial_pose import load_seed
             pose=load_seed(pose_file,directory,bag,start)
         if pose is not None:roll['initialGuess']=list(pose)
-        elif source_run is None:raise ValueError('Localization needs --pose or a bound --pose-file')
+        elif source_run is None or roll.get('initialGuess') is None:
+            raise ValueError('Localization needs --pose or a bound --pose-file')
+        else:
+            _check_replay_seed(run, directory, bag, start)
         from perception.mapping_localization.coverage import PriorCoverage,asset_digest,full_map_coverage
         region=(PriorCoverage.load(coverage,asset_fingerprint=asset_digest(directory)) if coverage
                 else full_map_coverage(directory))

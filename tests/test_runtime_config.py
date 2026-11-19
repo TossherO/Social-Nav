@@ -12,6 +12,45 @@ from perception.sensors.image import rgb_array
 
 
 class RuntimeConfigTests(unittest.TestCase):
+    def test_invalid_command_schedule_precedes_device_setup_and_output_creation(self):
+        from unittest.mock import patch
+        from runtime import __main__ as entry
+        with tempfile.TemporaryDirectory() as directory:
+            schedule = Path(directory) / 'commands.json'
+            output = Path(directory) / 'output'
+            schedule.write_text('[{"offset_s": false, "kind": "cancel", "value": {}}]')
+            with patch('sys.argv', ['runtime', '--bag', str(schedule), '--output', str(output),
+                                    '--commands', str(schedule)]):
+                with self.assertRaisesRegex(ValueError, 'offset_s'):
+                    entry.main()
+            self.assertFalse(output.exists())
+
+    def test_failed_startup_closes_workers_before_their_handles(self):
+        from unittest.mock import Mock, patch
+        from runtime import __main__ as entry
+        closed = []
+        def fail_after_start(args, resources, handles):
+            handles.callback(closed.append, 'socket')
+            for name in ('environment', 'control'):
+                resources[name] = Mock(close=lambda name=name: closed.append(name))
+            raise RuntimeError('simulated startup failure')
+        with patch('sys.argv', ['runtime', '--output', 'unused']), patch.object(entry, '_run', fail_after_start):
+            with self.assertRaisesRegex(RuntimeError, 'simulated startup failure'):
+                entry.main()
+        self.assertEqual(closed, ['control', 'environment', 'socket'])
+
+    def test_invalid_transport_settings_are_rejected_by_shared_loader(self):
+        from runtime.config import runtime_settings
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'override.yaml'
+            for key, value in [('control_period_s', 0), ('scene_export_hz', float('nan')),
+                               ('startup_timeout_s', True), ('shared_scan_slots', 0),
+                               ('shared_safety_slot_bytes', 127)]:
+                with self.subTest(key=key):
+                    path.write_text(yaml.safe_dump({key: value}))
+                    with self.assertRaises(ValueError):
+                        runtime_settings(path)
+
     def test_fresh_mapping_and_odometry_load_module_and_calibration_keys(self):
         calibration=yaml.safe_load((ROOT/'perception/sensors/calibration/lidar_imu.yaml').read_text())
         for mode in ('mapping','odometry'):
@@ -47,6 +86,48 @@ class RuntimeConfigTests(unittest.TestCase):
             coverage=config['roll']['localization_coverage']
             self.assertEqual(coverage['source'],'automatic_map_point_xy_envelope_1m_margin')
             self.assertEqual(coverage['regions_xy'],[[[-1.,-1.],[5.,-1.],[5.,6.],[-1.,6.]]])
+
+    def test_replay_seed_tracks_bag_contents_map_and_start(self):
+        from perception.mapping_localization.results import file_fingerprint, map_fingerprint
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'COMPLETE').touch()
+            (root / 'keyframes').mkdir()
+            (root / 'keyframes/poses.txt').write_text('0 0 0 0 0 0 0 0 1\n')
+            (root / 'manifest.yaml').write_text('frame: map\n')
+            (root / 'GlobalMap.pcd').write_text(
+                'FIELDS x y z\nSIZE 4 4 4\nTYPE F F F\nCOUNT 1 1 1\nPOINTS 2\nDATA ascii\n0 0 0\n4 5 0\n')
+            bag = root / 'A.bag'
+            bag.write_bytes(b'synthetic A')
+            seed = [1., 2., 3., 0., 0., 0.]
+            config, _ = algorithm_config(mode='localization', map_directory=root, pose=seed)
+            playback = dict(start_offset_s=3., bag_fingerprint=file_fingerprint(bag), map_fingerprint=map_fingerprint(root))
+            run = dict(bag=str(bag), start=None, playback=playback, algorithm_parameters=config)
+            record = root / 'run.json'
+            record.write_text(json.dumps(run))
+            options = dict(mode='localization', source_run=root)
+            moved = root / 'copy.bag'
+            moved.write_bytes(bag.read_bytes())
+            for source in (bag, moved):
+                cfg, _ = algorithm_config(**options, bag=source)
+                self.assertEqual(cfg['roll']['initialGuess'], seed)
+            with self.assertRaisesRegex(ValueError, 'start'):
+                algorithm_config(**options, bag=bag, start=0.)
+            moved.write_bytes(b'synthetic B')
+            with self.assertRaisesRegex(ValueError, 'bag'):
+                algorithm_config(**options, bag=moved)
+            replacement, _ = algorithm_config(**options, bag=moved, pose=[0.] * 6)
+            self.assertEqual(replacement['roll']['initialGuess'], [0.] * 6)
+            (root / 'manifest.yaml').write_text('frame: changed_map\n')
+            with self.assertRaisesRegex(ValueError, 'map'):
+                algorithm_config(**options, bag=bag)
+            # Old records with only a path still replay at their original offset.
+            del run['playback']
+            run['start'] = 3.
+            record.write_text(json.dumps(run))
+            self.assertEqual(algorithm_config(**options)[0]['roll']['initialGuess'], seed)
+            with self.assertRaisesRegex(ValueError, 'bag'):
+                algorithm_config(**options, bag=moved)
 
     def test_source_parameters_remain_bound_unless_calibration_is_explicit(self):
         with tempfile.TemporaryDirectory() as directory:

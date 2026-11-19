@@ -46,6 +46,24 @@ def _z_bounds(candidate, timeline, config):
     return low, high
 
 
+def _person_mask(people, stamp, pose, correction, points, floor, origin, config, geometric, counts):
+    boxes, status = people_boxes(people.at(stamp), stamp, (pose['session_id'], pose['generation']),
+                                 pose['local_frame'], config['dynamic'], clock_domain=people.manifest['clock_domain'])
+    valid = status['status'] == 'valid'
+    counts['people_valid_scans'] += int(valid)
+    counts['people_unavailable_scans'] += int(not valid)
+    return person_points(points, transform_boxes(boxes, correction), floor, origin, config,
+                         ground_extrapolation=config['static']['mask_ground_extrapolation_m'] if geometric else 0.)
+
+
+def _count_mask(counts, mask, points, floor, origin, config, geometric):
+    counts['masked_scans'] += int(mask.any())
+    counts['masked_points'] += int(mask.sum())
+    if geometric:
+        heights = floor_at(points, floor, origin, config['resolution'])
+        counts['extrapolated_ground_mask_points'] += int((mask & ~np.isfinite(heights)).sum())
+
+
 def fuse_scans(candidate, path, timeline, config, fingerprint, *, people=None, filter_mode='none', candidate_points=None,
                scan_stamps=None, global_candidate=None, global_totals=None, z_bounds=None, defer_derived=False,
                scan_masks=None, grid_offset=None):
@@ -99,14 +117,8 @@ def fuse_scans(candidate, path, timeline, config, fingerprint, *, people=None, f
             if review is not None:
                 person_floor, person_origin = reference_floor, reference_origin
                 if scan_masks is None:
-                    row = people.at(stamp)
-                    boxes, status = people_boxes(row, stamp, (pose['session_id'], pose['generation']),
-                        pose['local_frame'], config['dynamic'], clock_domain=people.manifest['clock_domain'])
-                    boxes = transform_boxes(boxes, correction)
-                    mask = person_points(points, boxes, person_floor, person_origin, config,
-                        ground_extrapolation=config['static']['mask_ground_extrapolation_m'] if geometric else 0.)
-                    filter_counts['people_valid_scans'] += int(status['status'] == 'valid')
-                    filter_counts['people_unavailable_scans'] += int(status['status'] != 'valid')
+                    mask = _person_mask(people, stamp, pose, correction, points, person_floor,
+                                        person_origin, config, geometric, filter_counts)
                 else:
                     mask = np.unpackbits(scan_masks[record['stamp_ns']], count=len(points)).astype(bool)
                 if global_candidate is not None:
@@ -116,11 +128,7 @@ def fuse_scans(candidate, path, timeline, config, fingerprint, *, people=None, f
                     review.add(points[selected], mask[selected], stamp, person_floor, person_origin)
                 else:
                     review.add(points, mask, stamp, floor, origin)
-                filter_counts['masked_scans'] += int(mask.any())
-                filter_counts['masked_points'] += int(mask.sum())
-                if geometric:
-                    filter_counts['extrapolated_ground_mask_points'] += int((mask & ~np.isfinite(
-                        floor_at(points, person_floor, person_origin, config['resolution']))).sum())
+                _count_mask(filter_counts, mask, points, person_floor, person_origin, config, geometric)
                 masking = dict(transient_mask=mask, transient_ttl=config['dynamic']['transient_ttl_s'], omit_transient=True)
             tree.update(points, final[:3, 3], bounds, stamp, settings, rays=use_rays,
                         ray_origins=origins, read=False, **masking)
@@ -255,11 +263,8 @@ def fuse_scans_tiled(candidate, path, timeline, config, fingerprint, *, people=N
             raise ValueError('Invalid occupancy observation')
         count += 1; rays += int(bool(record['rays_used'])); last_stamp = stamp
         if people is not None and filter_mode != 'none':
-            boxes, status = people_boxes(people.at(stamp), stamp, (pose['session_id'], pose['generation']),
-                pose['local_frame'], config['dynamic'], clock_domain=people.manifest['clock_domain'])
-            boxes = transform_boxes(boxes, correction)
-            mask = person_points(cloud, boxes, floor, origin, config,
-                ground_extrapolation=config['static']['mask_ground_extrapolation_m'] if filter_mode == 'geometric' else 0.)
+            geometric = filter_mode == 'geometric'
+            mask = _person_mask(people, stamp, pose, correction, cloud, floor, origin, config, geometric, mask_counts)
             if scan_masks is not None:
                 packed = np.packbits(mask)
                 mask_bytes += packed.nbytes
@@ -267,13 +272,7 @@ def fuse_scans_tiled(candidate, path, timeline, config, fingerprint, *, people=N
                     scan_masks[record['stamp_ns']] = packed
                 else:
                     scan_masks = None  # Recompute per tile instead of retaining unbounded masks.
-            mask_counts['people_valid_scans'] += int(status['status'] == 'valid')
-            mask_counts['people_unavailable_scans'] += int(status['status'] != 'valid')
-            mask_counts['masked_scans'] += int(mask.any())
-            mask_counts['masked_points'] += int(mask.sum())
-            if filter_mode == 'geometric':
-                mask_counts['extrapolated_ground_mask_points'] += int((mask & ~np.isfinite(
-                    floor_at(cloud, floor, origin, resolution))).sum())
+            _count_mask(mask_counts, mask, cloud, floor, origin, config, geometric)
         if len(cloud):
             xy = np.asarray(cloud, np.float32)[:, :2]
             lo, hi = xy.min(axis=0).astype(float), xy.max(axis=0).astype(float)

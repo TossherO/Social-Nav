@@ -111,6 +111,9 @@ def poll_session(db, cursor, limit=100):
 
 def message_identity(message):
     def normalized(item):
+        if isinstance(item,dict) and isinstance(item.get('url'),str) and item['url'].startswith('data:image/'):
+            return {**{k:normalized(v) for k,v in item.items() if k not in ('cache_control','url')},
+                    'session_image_sha256':hashlib.sha256(item['url'].encode()).hexdigest()}
         if isinstance(item,dict):return {k:normalized(v) for k,v in item.items() if k!='cache_control'}
         if isinstance(item,list):return [normalized(v) for v in item]
         return item
@@ -126,10 +129,16 @@ def message_identity(message):
 def request_context(value):
     """Project actual request messages without copying image data into the GUI."""
     request=value.get('request') or {}
+    referenced_images=value.get('image_storage')=='session_sha256'
     messages=[];image_index=0
     def clean(item, images):
         nonlocal image_index
         if isinstance(item,dict):
+            if 'session_image_sha256' in item and referenced_images:
+                images.append(image_index)
+                image_index+=1
+                return {**{k:clean(v,images) for k,v in item.items() if k not in ('session_image_sha256','cache_control')},
+                        'url':'[图片]'}
             return {k:clean(v,images) for k,v in item.items() if k!='cache_control'}
         if isinstance(item,list):return [clean(v,images) for v in item]
         if isinstance(item,str) and item.startswith('data:image/') and ';base64,' in item:
@@ -282,6 +291,9 @@ def event_detail(db, seq):
     row=db.execute('SELECT kind,value FROM events WHERE seq=?',(seq,)).fetchone()
     if row is None:raise ValueError('事件不存在')
     kind,value=row[0],json.loads(row[1])
+    if kind=='api_request':
+        from .core.store import restore_request_images
+        value=restore_request_images(db,value)
     image_names=[]
     if kind=='api_request':
         for message in request_context(value)['messages']:

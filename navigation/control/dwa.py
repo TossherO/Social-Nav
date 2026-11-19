@@ -48,6 +48,15 @@ def approach_should_brake(remaining, tolerance, toward_speed, braking_time, cont
     return remaining <= tolerance + speed*(control_interval+braking_time/2.)
 
 
+def _record_sweep(statistics, check, phase, elapsed):
+    statistics[phase + '_sweep_ms'] += elapsed * 1000
+    for key, value in check.get('timing_ms', {}).items():
+        statistics[key + '_ms'] += value
+    statistics['cpu_fallbacks'] += int(check.get('adaptive_fallback', False))
+    for key in ('reused_segments', 'gpu_refinement_batches', 'gpu_refinement_enclosures'):
+        statistics[key] += check.get(key, 0)
+
+
 class DwaController:
     def __init__(self,planning,motion,geometry,*,asset=None,settings=None,device_batch=None,execution=False):
         self.device_batch=device_batch
@@ -332,11 +341,7 @@ class DwaController:
             def sweep(poses,margin,phase):
                 started=time.perf_counter()
                 check=self.sweep.check(grid,self.geometry,poses,margin,self.safety_settings['max_sweep_samples'],binding=binding,budget=budget)
-                certification[phase+'_sweep_ms']+=(time.perf_counter()-started)*1000
-                for key,value in check.get('timing_ms',{}).items():certification[key+'_ms']+=value
-                certification['cpu_fallbacks']+=int(check.get('adaptive_fallback',False))
-                certification['reused_segments']+=check.get('reused_segments',0)
-                for key in ('gpu_refinement_batches','gpu_refinement_enclosures'):certification[key]+=check.get(key,0)
+                _record_sweep(certification, check, phase, time.perf_counter() - started)
                 if not budget.check():raise ValueError(budget.reason)
                 return check
 
@@ -348,8 +353,10 @@ class DwaController:
                 if not budget.check():raise ValueError(budget.reason)
                 return result
 
-            out.update(candidate_count=len(choices),ranked_candidates=len(results),rejections=rejects,
-                valid_candidates=0,certification_attempts=0,unattempted_candidates=len(results),selection_stopped_early=False)
+            counts = dict(candidate_count=len(choices), ranked_candidates=len(results), rejections=rejects,
+                          valid_candidates=0, certification_attempts=0, unattempted_candidates=len(results),
+                          selection_stopped_early=False)
+            out.update(counts)
             if not budget.check():raise ValueError(budget.reason)
             for item in sorted(results,key=lambda x:x[0]):
                 if not budget.check():raise ValueError(budget.reason)
@@ -369,8 +376,10 @@ class DwaController:
                 if reason:rejects[reason]=rejects.get(reason,0)+1
                 else:chosen=(item[0],j,points,prediction);break
             timing['certification']=(time.perf_counter()-stage)*1000
-            out.update(valid_candidates=int(chosen is not None),certification_attempts=certified,
-                unattempted_candidates=len(results)-certified,selection_stopped_early=chosen is not None and certified<len(results))
+            counts.update(valid_candidates=int(chosen is not None), certification_attempts=certified,
+                          unattempted_candidates=len(results)-certified,
+                          selection_stopped_early=chosen is not None and certified<len(results))
+            out.update(counts)
             if chosen is None:raise ValueError('no_admissible_velocity')
             _,j,points,prediction=chosen;desired=choices[j];self.previous=desired.copy()
             # Prediction starts now; input_binding separately retains both source times.
@@ -382,9 +391,8 @@ class DwaController:
                 local_goal=dict(pose=goal.tolist(),actual_goal=True,goal_behavior=request.get('goal_behavior','pass_through')),
                 trajectory=dict(points=points.tolist(),frame_id=scene.record['frame_id'],initialization='dwa',people_check=prediction,
                     candidate_velocity=dict(linear_x_mps=float(desired[0]),angular_z_rps=float(desired[1]),executable=False)),
-                reference_binding=reference['binding'],candidate_count=len(choices),ranked_candidates=len(results),
-                valid_candidates=1,certification_attempts=certified,unattempted_candidates=len(results)-certified,
-                selection_stopped_early=certified<len(results),rejections=rejects,
+                reference_binding=reference['binding'],
+                **counts,
                 timing_ms=dict(timing),executable=False,task_completed=False)
             result['certification']=dict(certification,**budget.summary())
             result['result_binding']=fingerprint(result)

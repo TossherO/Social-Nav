@@ -107,8 +107,8 @@ def run(directory,base_url,*,prompt_path=None,result_name='remote'):
                 with client.stream('POST',config['base_url']+'/chat/completions',json=body) as response:
                     row['http_status']=response.status_code
                     if response.status_code!=200:raise ValueError('HTTP failure')
-                    row.update(common.read_stream(response,started,timing))
-                raw=json.loads(row['raw_content']);validate_selection(raw,item['candidate_set'])
+                    row.update(common.recorded_stream(response, started, timing, row))
+                raw=common.parse_response(row['raw_content']);validate_selection(raw,item['candidate_set'])
                 if row['finish_reason']!='stop' or row['server_model']!=model or row['reasoning_content_present'] or row['usage'].get('reasoning_tokens',0):
                     raise ValueError('Invalid completion metadata')
                 row.update(response=raw,valid=True)

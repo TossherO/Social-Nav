@@ -40,6 +40,10 @@ class ModelProjection:
         if isinstance(value, dict):
             result = {}
             for key, item in value.items():
+                if key == 'last_completion' and isinstance(item,list) and all(isinstance(p,dict) for p in item):
+                    # Full measurements for the current stage are in completion_evidence.
+                    item = [{field: proof[field] for field in ('goal_id','stamp_s','scope','source','stopped')
+                             if field in proof} for proof in item]
                 if (key in OMIT_FIELDS or key.endswith(('_sha256','_fingerprint')) or
                         key.endswith('_binding') and key != 'candidate_binding' and not isinstance(item,dict)):
                     continue
@@ -83,6 +87,12 @@ class ModelProjection:
                 for part in content:
                     if part.get('type')=='text':part['text']=text(part.get('text'))
             for call in message.get('tool_calls') or []:
+                next_message=material[index+1] if index+1<len(material) else {}
+                if next_message.get('role')=='tool' and next_message.get('tool_call_id')==call['id']:
+                    try:feedback=json.loads(next_message['content'])
+                    except (TypeError,ValueError):feedback=None
+                    if isinstance(feedback,dict) and feedback.get('reason') in ('invalid_tool_arguments','invalid_tool_reference'):
+                        continue
                 function=call.get('function') or {}
                 arguments=function.get('arguments')
                 if isinstance(arguments,str):
@@ -108,6 +118,6 @@ class ModelProjection:
             if key not in result['arguments']:continue
             token=result['arguments'][key]
             if not isinstance(token,str) or token not in self.references or self.references[token][0]!=kind:
-                raise ValueError('Model returned an unknown or wrong-type reference')
+                raise ValueError(f'{key}: use the {kind} reference from the current request')
             result['arguments'][key]=self.references[token][1]
         return result

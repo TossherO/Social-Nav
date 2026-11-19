@@ -26,8 +26,8 @@ def main():
         p.add_argument('--api-config', default=str(ROOT/'configs/agent_api.local.json'))
         p.add_argument('--cache-mode',choices=('explicit','implicit'),default='implicit',
                        help='默认隐式缓存；explicit显式标记稳定前缀，不自动降级或重试')
-        p.add_argument('--thinking-mode',choices=('off','low'),default='off',
-                       help='可选 low 思考用于对照；默认关闭，不自动切换或重试')
+        p.add_argument('--thinking-mode',choices=('planning','off','low'),default='planning',
+                       help='planning 仅登记时开启 low 思考；off 和 low 分别用于全程关闭或开启的对照')
         p.add_argument('--interactive', action='store_true')
         p.add_argument('--no-memory', action='store_true', help='关闭附加证据记忆，仍保留原任务与有界工具历史')
         if name == 'run':

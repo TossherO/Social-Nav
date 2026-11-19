@@ -44,7 +44,8 @@ class CompositionTests(unittest.TestCase):
         self.nav.hold = hold
         def start_follow(intent, handle):
             self.nav.state.update(status='running', handle=copy.deepcopy(handle), stopped=False, stop_observation=False,
-                follow_status=dict(status='running', handle=copy.deepcopy(handle), target_identity=['tracker_session',7,'a']))
+                follow_status=dict(status='running', handle=copy.deepcopy(handle), target_identity=['tracker_session',7,'a'],
+                                   target_generation=7))
             return dict(accepted=True, handle=copy.deepcopy(handle))
         def finish_follow(handle):
             self.nav.state.update(status='stopping', follow_status=dict(status='stopped', handle=copy.deepcopy(handle)))
@@ -75,6 +76,7 @@ class CompositionTests(unittest.TestCase):
         self.assertEqual(self.finish_navigation('elevator')['status'], 'completed')
         result=self.session.call('start_local_task',goal_id='person',task_type='follow',target_description='红衣人物')
         self.assertEqual(result['status'],'accepted')
+        self.assertEqual(self.session.monitor.settings['interval_s'],15.)
         self.assertEqual(self.session.skill.record['handle'],result['handle'])
         self.assertEqual(self.session.call('get_navigation_state')['stage_type'],'follow')
         self.assertFalse(self.session.task_goals.finished())
@@ -103,7 +105,71 @@ class CompositionTests(unittest.TestCase):
             self.assertFalse(self.session.task_goals.finished())
         finally:actor.close()
 
-    def test_future_skill_cannot_complete_or_be_relabelled_navigation(self):
+    def test_table_selection_arrival_and_single_agent_completion(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import numpy as np
+        from decision.agent.tools.observations import Observation
+        from decision.agent.tools.navigation import spatial_context
+        from navigation.planning.footprint import VehicleGeometry
+        from perception.environment.layers import load_config
+        from perception.environment.scene import assemble_scene
+        from tests.navigation_fixtures import scene_at
+
+        frame = self.session.catalog.value['frame_id']
+        self.nav.geometry = VehicleGeometry([[-.15,-.15],[.2,-.15],[.2,.15],[-.15,.15]],
+                                           np.eye(4), source='synthetic', assumed=False)
+        def observe_table():
+            stamp = self.nav.state['stamp_s']
+            grid = scene_at(stamp).geometry
+            grid.metadata['association']['map_frame'] = frame
+            scene = assemble_scene(grid, clock_domain='synthetic', settings=load_config()['scene'])
+            return Observation.from_scene(scene, geometry=self.nav.geometry, rgb=dict(
+                pixels=np.full((30,40,3), 180, np.uint8), stamp_s=stamp, frame_id='camera'))
+        self.nav.observe = observe_table
+        binding = observe_table().record['map_binding']
+        self.nav.state.update(map_binding=binding, idle_stop_observation=True)
+        self.nav.value = {}
+        self.nav.client = SimpleNamespace(exchange=lambda _, request:
+                                          dict(accepted=True, selection_id=request['selection_id']))
+        self.session.skill.context = spatial_context(self.nav.state)
+        self.session.record_task([dict(goal_id='seat', kind='skill', stage_type='seating', target_id='',
+                                       description='面向桌沿停靠')])
+        self.nav.tick()
+        obs = self.nav.observe()
+        self.assertEqual(self.session.observe_scene()['status'], 'available')
+        self.nav.state['pose'] = obs.record['base_pose']
+        context = self.session.context()
+        result = self.session.call('start_local_task', _context=context, goal_id='seat', task_type='seating',
+                                   target_description='面前桌沿', table_roi=[.1,.2,.8,.6])
+        self.assertEqual(result['status'], 'selecting', result)
+        self.nav.value['seating'] = dict(status='selected', selection_id=result['selection_id'],
+            observation_binding=context['observation_binding'], local_identity=['test',0,'odom'],
+            clock_domain='synthetic', map_binding=binding, geometry_stamp_s=self.nav.state['stamp_s'],
+            candidate_id=1, candidate_binding='table_view', source_stamp_s=obs.record['rgb']['stamp_s'],
+            pose=[4.,4.,0.], mapped_edge=dict(endpoints_xy_m=[[4.4,3.],[4.4,5.]], interior_yaw_rad=0.))
+        with patch.object(self.session, 'check_candidate', return_value=dict(status='available',
+                          static_footprint=dict(status='free'), local_footprint=dict(status='free'))):
+            self.session.tick()
+        self.assertEqual(self.session.state['status'], 'waiting_navigation')
+        self.assertFalse(self.session.task_goals.finished())
+        self.nav.arrive()
+        self.nav.state.update(arrival_observation=True, origin_pose=self.nav.target_pose)
+        self.session.tick()
+        self.session.tick()
+        self.assertEqual(self.session.skill.record['status'], 'held')
+        self.nav.tick()
+        stopped = self.nav.observe()
+        self.assertEqual(self.session.observe_scene()['status'], 'available')
+        self.nav.state['pose'] = stopped.record['base_pose']
+        facts = self.session.prompt()['current_state']['completion_evidence']
+        self.assertEqual(facts['missing'], [])
+        self.assertAlmostEqual(facts['table_selection']['measured_front_gap_m'], .2)
+        self.session.call('complete_subtask', _context=self.session.context(), goal_id='seat',
+                          evidence='实测车头距桌沿二十厘米，图像中仍为目标桌')
+        self.assertEqual(self.session.state['status'], 'succeeded')
+
+    def test_unavailable_skill_cannot_complete_or_be_relabelled_navigation(self):
         goal = dict(goal_id='seat', kind='skill', stage_type='seating', target_id='', description='桌边停靠')
         self.session.call('record_task', goals=[goal, point_goal('elevator')])
         self.assertEqual(self.session.call('start_local_task',goal_id='seat',task_type='seating',
@@ -207,7 +273,16 @@ class CompositionTests(unittest.TestCase):
         self.session.task_goals.current('person')['selected']=dict(handle=copy.deepcopy(started['handle']),
             follow_reference_id=ref['reference_id'],pose=None,orientation_source=None,view_id=None)
         self.session.tick()
+        other=self.observation('unrelated')
+        self.assertEqual(self.session.call('finish_local_task',_context=self.session.context(),goal_id='person',
+            observation_id=other.record['observation_id'],evidence='other person')['reason'],
+            'follow_target_not_identified_in_observed_rgb')
         obs = self.observation('a')
+        self.nav.state['follow_status']['target_generation']=8
+        self.assertEqual(self.session.call('finish_local_task',_context=self.session.context(),goal_id='person',
+            observation_id=obs.record['observation_id'],evidence='reused track ID')['reason'],
+            'follow_target_not_identified_in_observed_rgb')
+        self.nav.state['follow_status']['target_generation']=7
         self.assertEqual(self.session.call('finish_local_task',_context=self.session.context(),goal_id='person')['status'],'refused')
         context = self.session.context()
         self.nav.t += 4
@@ -231,6 +306,24 @@ class CompositionTests(unittest.TestCase):
         self.assertGreater(semantic['observation_age_s'],3.)
         self.assertFalse(semantic['current_scene_verified'])
 
+    def test_single_follow_verdict_survives_disappearance_until_stop(self):
+        self.session.record_task([follow_goal('person')])
+        self.session.start_local_task('person','follow','红衣')
+        self.session.tick()
+        obs=self.observation('a')
+        state=self.session.prompt()['current_state']
+        self.assertEqual(state['completion_evidence']['missing'],[])
+        result=self.session.call('complete_subtask',_context=self.session.context(),goal_id='person',evidence='目标举手')
+        self.assertEqual(result['status'],'stopping')
+        self.assertFalse(self.session.task_goals.finished())
+        self.nav.observe=lambda:None
+        self.nav.state.update(status='stopped',stopped=True,stop_observation=True)
+        self.session.tick()
+        self.assertEqual(self.session.state['status'],'succeeded')
+        proof=self.session.task_goals.goals[0]['completion']['proof']
+        self.assertEqual(proof['semantic']['observation_id'],obs.record['observation_id'])
+        self.assertGreater(proof['stop_stamp_s'],proof['semantic']['source_stamp_s'])
+
     def test_agent_tool_loop_completes_idle_observation_from_new_image(self):
         from decision.agent.core.loop import AgentLoop
         from tests.test_agent import reply
@@ -244,9 +337,8 @@ class CompositionTests(unittest.TestCase):
             if current['next_goal_id'] is not None:
                 if observation is None:
                     return reply('observe_scene')
-                return reply('check_goal',goal_id='inspect',observation_id=observation.record['observation_id'],
-                             semantic_result='satisfied',evidence='看到门')
-            return reply('finish_task',status='succeeded',evidence='观察已完成')
+                return reply('complete_subtask',goal_id='inspect',evidence='看到门')
+            self.fail('Unexpected second completion request')
         actor=AgentLoop(self.session,work)
         try:
             for _ in range(16):

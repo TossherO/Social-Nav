@@ -232,7 +232,7 @@ def run(args,engine_factory=LocalEngine):
         row.update(engine.generate(body))
         if row['finish_reason']!='stop' or not row['grammar_terminated']:
             raise ValueError('Incomplete constrained generation')
-        raw=json.loads(row['raw_content']);validate_result(raw,body,args.task,fields)
+        raw=common.parse_response(row['raw_content']);validate_result(raw,body,args.task,fields)
         row.update(response=raw,valid=True)
     except Exception as error:
         row['error_type']=type(error).__name__

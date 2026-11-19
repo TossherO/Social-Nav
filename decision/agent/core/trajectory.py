@@ -28,7 +28,7 @@ class Trajectory:
                 return
         pose = state.get('origin_pose') if state.get('origin_frame_id') == frame_id else (
             state.get('pose') if state.get('frame_id') == frame_id else None)
-        stamp = state.get('origin_stamp_s', state.get('stamp_s'))
+        stamp = state.get('origin_stamp_s') if state.get('origin_frame_id')==frame_id else state.get('stamp_s')
         valid = (state.get('localization_status', 'valid') == 'valid' and not state.get('input_stale') and
                  pose is not None and len(pose) == 3 and all(math.isfinite(v) for v in pose) and
                  isinstance(stamp, (float, int)) and math.isfinite(stamp) and
