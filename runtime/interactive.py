@@ -112,7 +112,7 @@ def handoff_initial_pose(value, asset, hint):
     from perception.mapping_localization.initial_pose import quaternion_rpy
     transform=value.get('destination') or {};pose=value.get('lidar_xy_yaw')
     if (value.get('verified_localization') is not False or
-            value.get('source')!='agent_destination_scan_and_map' or not value.get('scan_frame') or
+            value.get('source') not in ('agent_destination_scan_and_map','standard_destination_start') or not value.get('scan_frame') or
             not all(type(value.get(k)) in (int,float) and math.isfinite(value[k]) for k in ('scan_stamp_s','exit_stamp_s')) or
             value['scan_stamp_s']<=value['exit_stamp_s'] or
             transform.get('to_map_id')!=asset.snapshot.metadata.get('map_id') or
@@ -120,6 +120,13 @@ def handoff_initial_pose(value, asset, hint):
             not isinstance(pose,list) or len(pose)!=3 or
             not all(type(v) in (int,float) and math.isfinite(v) for v in pose)):
         raise ValueError('Floor handoff seed does not match the destination localization map')
+    if value['source']=='standard_destination_start':
+        full=value.get('lidar_pose_rpy_xyz')
+        if (not isinstance(full,list) or len(full)!=6 or
+                not all(type(v) in (int,float) and math.isfinite(v) for v in full) or
+                not np.allclose([full[3],full[4],full[2]],pose,rtol=0,atol=1e-9)):
+            raise ValueError('Invalid standard destination LiDAR pose')
+        return [float(x) for x in full]
     height=selected_initial_height(asset.snapshot,hint,pose[:2])
     roll,pitch,_=quaternion_rpy(hint['pose']['quaternion_xyzw'])
     return [roll,pitch,pose[2],pose[0],pose[1],height['lidar_z_m']]
@@ -200,6 +207,13 @@ def runtime_command(args, config, pose):
         command += ['--agent-observations']
     if getattr(args,'agent_follow_candidates',False):
         command += ['--agent-follow-candidates']
+        # Freeze the effective backend for later floor handoffs even when the
+        # original launcher relied on the local override or the default.
+        from decision.vlm.follow_hosted import follow_backend
+        command += ['--t2-backend',follow_backend(getattr(args,'t2_backend',None))]
+    if getattr(args,'t2_jpeg_quality',None) is not None:command += ['--t2-jpeg-quality',str(args.t2_jpeg_quality)]
+    if getattr(args,'t2_raw_rgb',False):command += ['--t2-raw-rgb']
+    if getattr(args,'record_t2_requests',False):command += ['--record-t2-requests']
     if getattr(args,'agent_seating',False):
         command += ['--agent-seating']
     if getattr(args,'agent_execution',False):
@@ -238,6 +252,10 @@ def parser():
     p.add_argument('--runtime-config', help='Same machine scheduling override inspected by runtime.preflight')
     p.add_argument('--agent-observations', action='store_true', help='Publish bounded RGB observations for the nonexecuting Agent')
     p.add_argument('--agent-follow-candidates', action='store_true', help='Prepare optional YOLO person candidates for Agent follow selection')
+    p.add_argument('--t2-backend',choices=('dspark','hosted'),help='Select the T2 decision backend')
+    p.add_argument('--t2-jpeg-quality',type=int,help='Optional T2 JPEG quality (1..95)')
+    p.add_argument('--t2-raw-rgb',action='store_true',help='Experimental nonexecuting T2 without 2D detection')
+    p.add_argument('--record-t2-requests',action='store_true',help='Save T2 inputs and results including RGB locally')
     p.add_argument('--agent-seating',action='store_true',help='Prepare RGB and lidar for current table-edge proposals')
     p.add_argument('--agent-execution', action='store_true', help='Allow Agent goal intents in this manually armed execution session')
     p.add_argument('--trace-timing', action='store_true', help='Record bounded scalar stage timings for diagnosis')
@@ -273,6 +291,14 @@ def main(argv=None):
         p.error('--agent-execution requires --execute and --agent-observations')
     if args.agent_follow_candidates and not args.agent_observations:
         p.error('--agent-follow-candidates requires --agent-observations')
+    if args.t2_backend and not args.agent_follow_candidates:
+        p.error('--t2-backend requires --agent-follow-candidates')
+    if args.t2_raw_rgb and (not args.agent_follow_candidates or args.execute or args.agent_execution):
+        p.error('--t2-raw-rgb requires follow candidates and nonexecuting observation')
+    if args.t2_jpeg_quality is not None and (not args.agent_follow_candidates or not 1<=args.t2_jpeg_quality<=95):
+        p.error('--t2-jpeg-quality requires --agent-follow-candidates and quality in 1..95')
+    if args.record_t2_requests and not args.agent_follow_candidates:
+        p.error('--record-t2-requests requires --agent-follow-candidates')
     if args.agent_seating and not (args.live and args.agent_observations):
         p.error('--agent-seating requires --live and --agent-observations')
     if args.chassis_port and not args.execute:

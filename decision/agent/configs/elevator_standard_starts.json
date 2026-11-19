@@ -1,0 +1,11 @@
+{
+  "floor1": {
+    "map_id": "roll:51de0bede55ab952462cc5f02bd1d44b0db0347c1cb44f4704f9eb9ad63b20fd",
+    "frame_id": "map",
+    "reference": "rslidar",
+    "reference_observation": "outputs/decision/agent/floor1_current/standard_start_reference_20261119/reference.json",
+    "pose_rpy_xyz": [0.00818070752432734, -0.05757735911287979, -0.05461936460395214, 0.7544114461690329, 0.07720594015507667, -0.13130580375753306],
+    "source": "live_map_association_at_reference_capture_20261119_215144",
+    "scope": "standard_destination_start_initial_guess_not_localization_proof"
+  }
+}

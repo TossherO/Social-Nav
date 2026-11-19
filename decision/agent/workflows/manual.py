@@ -2,6 +2,7 @@
 import json
 import copy
 import math
+import queue
 import subprocess
 from pathlib import Path
 import time
@@ -108,6 +109,19 @@ def run(args):
     if args.duration <= 0 or not args.interactive:
         raise ValueError('Manual driving requires interactive input and a positive duration')
     catalog=Catalog.load(args.catalog,condition=args.map_condition)
+    from ..core.reuse import load_registered_task,verify_registered_task,catalog_assets,import_registered_task
+    reuse_path=getattr(args,'reuse_session',None)
+    if not reuse_path and getattr(args,'reuse_digest',None):raise ValueError('历史任务校验值需要对应的历史会话')
+    plan=load_registered_task(reuse_path) if reuse_path else None
+    if plan is not None:
+        if getattr(args,'reuse_digest',None) and args.reuse_digest!=plan['digest']:
+            raise ValueError('历史任务在预览后发生变化，请重新选择')
+        if args.instruction and args.instruction!=plan['instruction']:
+            raise ValueError('复用历史登记时任务指令必须与历史指令一致')
+        args.instruction=plan['instruction']
+        if args.actions:raise ValueError('复用历史登记不能与动作回放同时使用')
+    elif not args.instruction or not args.instruction.strip():
+        raise ValueError('请输入任务指令，或选择历史任务登记')
     cross_floor=bool(getattr(args,'cross_floor',False))
     catalogs=configs=None
     if cross_floor:
@@ -115,6 +129,8 @@ def run(args):
         from .floor_handoff import observation_owner
         observation_owner(args.runtime_socket)
         catalogs,configs=floor_catalogs_for_manual(catalog)
+    configured=catalogs or {catalog.value.get('floor_id'):catalog}
+    verified_assets=verify_registered_task(plan,configured,catalog.value.get('floor_id')) if plan is not None else None
     navigation=ManualNavigation(catalog,ManualRuntimeClient(args.runtime_socket),automatic_arrival=True)
     state=navigation.snapshot()
     deadline=time.monotonic()+3.
@@ -132,20 +148,36 @@ def run(args):
     display=RouteDisplay(catalog.value['frame_id'])
     reference=ManualReference(args.runtime_socket)
     equipment=None
+    recorder=None
     source_socket=args.runtime_socket
     try:
         session=AgentSession(args.instruction,catalog,navigation,store,use_memory=not args.no_memory,
                              floor_catalogs=catalogs)
+        assets=verified_assets if verified_assets is not None else catalog_assets(configured)
+        store.event('task_asset_provenance',dict(floors=assets))
+        if plan is not None:
+            import_registered_task(session,plan,assets,reuse_path)
         if cross_floor:
             from .floor_handoff import ElevatorRide
             equipment=ElevatorRide(configs,source_socket,output)
             session.elevator=equipment
-        actor=make_loop(args,session,output/'session.sqlite')
+        transient_queue=queue.Queue(maxsize=32)
+        def transient_sink(value):
+            try:transient_queue.put_nowait(value)
+            except queue.Full:pass
+        actor=make_loop(args,session,output/'session.sqlite',
+                        transient_sink=transient_sink if getattr(args,'gui_commands',False) else None)
+        if getattr(args,'record_bag',False):
+            from .task_bag import TaskBagRecorder
+            recorder=TaskBagRecorder(output,session,emit,output_root=getattr(args,'bag_output_root','/home/tl/rosbag'))
+            actor.before_request=recorder.before_request
+            session.elevator_start_ready=lambda:recorder.before_request(actor)
         last=None
         last_progress=None
         last_observation=None
         last_status_at=0.
         last_reference=None
+        transient_phase=None
         trace_cursor=None
         trace_saved_at=0.
         def save_trace(force=False):
@@ -169,7 +201,20 @@ def run(args):
         def report(_actor):
             nonlocal last,last_progress,last_observation,trace_cursor,trace_saved_at,last_status_at,last_reference
             nonlocal navigation,reference,source_socket
-            stage=next((g for g in session.task_goals.goals if g['status']!='completed'),None)
+            nonlocal transient_phase
+            if recorder is not None:recorder.update()
+            ride=session.elevator if session.state.get('elevator_active') else None
+            phase=ride.transition.status if ride and ride.transition else None
+            if phase not in ('monitoring_ride','awaiting_destination_localization'):phase=None
+            if transient_phase and transient_phase!=phase:
+                emit(dict(event='elevator_transient_clear'))
+            transient_phase=phase
+            while True:
+                try:value=transient_queue.get_nowait()
+                except queue.Empty:break
+                if phase and value.get('phase')==phase:
+                    emit(dict(event='elevator_transient',data={k:v for k,v in value.items() if k!='phase'}))
+            stage=next((g for g in session.task_goals.goals if g['status'] not in ('completed','skipped')),None)
             requirement=None if stage is None else stage['requirement']
             if session.navigation is not navigation:
                 navigation=session.navigation
@@ -190,6 +235,8 @@ def run(args):
                         floor_id=requirement['floor_id'],call_id=None,status=session.state['status'],
                         navigation_status='elevator',localization_status='unavailable',input_stale=True,
                         elevator_status=session.elevator.transition.status,model_busy=_actor.model.busy,
+                        elevator_standard_start=session.elevator.standard is not None,
+                        elevator_decision=session.elevator.feedback,
                         error=session.elevator.wait_reason or (session.elevator.last_attempt or {}).get('result'),
                         floor_handoff=session.elevator.handoff.snapshot() if session.elevator.handoff else None))
                 return
@@ -220,7 +267,7 @@ def run(args):
             if getattr(args,'gui_commands',False) and time.monotonic()-last_status_at>=.5:
                 last_status_at=time.monotonic()
                 feedback=navigation.snapshot()
-                current=next((g for g in session.task_goals.goals if g['status']!='completed'),None)
+                current=next((g for g in session.task_goals.goals if g['status'] not in ('completed','skipped')),None)
                 selected=None if current is None else (current.get('selected') or {}).get('handle')
                 completed=record.get('completed') or []
                 recovery_confirmation=(handle is None and selected is not None and navigation.handle==selected and
@@ -239,6 +286,7 @@ def run(args):
                 emit(dict(event='manual_status',task_id=session.state['task_id'],revision=session.state['revision'],
                     goal_id=None if current is None else current['requirement']['goal_id'],
                     goal_description=None if current is None else current['requirement'].get('description'),
+                    completion_region_id=None if current is None else current['requirement'].get('robot_inside_region_id'),
                     floor_id=session.catalog.value.get('floor_id'),goal_distance_m=distance,
                     goal_tolerance_m=navigation.settings['goal_position_tolerance_m'],
                     goal_yaw_error_rad=yaw_error,goal_yaw_tolerance_rad=navigation.settings['goal_yaw_tolerance_rad'],
@@ -248,6 +296,7 @@ def run(args):
                     confirmation_call_id=None if confirmation_handle is None else confirmation_handle['call_id'],
                     manual_confirmation_available=bool(not following and confirmation_handle is not None and navigation.status=='running'),
                     reason=session.state.get('reason'),navigation_status=record['status'],
+                    stage_type=record['stage_type'],follow_status=copy.deepcopy(feedback.get('follow_status')),
                     model_busy=_actor.model.busy,localization_status=feedback.get('localization_status'),
                     input_stale=feedback.get('input_stale'),origin_pose=feedback.get('origin_pose'),
                     source_stamp_s=feedback.get('origin_stamp_s'),stopped=feedback.get('stopped'),
@@ -322,7 +371,7 @@ def run(args):
                     except (ValueError,KeyError,TypeError,OSError):pass
             elif last is not None and (handle is None or record['status']!='running'):
                 display.send([]);last=None;last_progress=None
-            stage=next((g for g in session.task_goals.goals if g['status']!='completed'),None)
+            stage=next((g for g in session.task_goals.goals if g['status'] not in ('completed','skipped')),None)
             key=None if stage is None else (session.state['revision'],stage['requirement']['goal_id'])
             if stage is not None and stage['requirement'].get('stage_type')=='observation' and key!=last_observation:
                 last_observation=key
@@ -340,6 +389,7 @@ def run(args):
                   autonomous_navigation_verified=False))
         return result
     finally:
+        if recorder:recorder.close()
         if actor:actor.close()
         if equipment:equipment.close()
         reference.close()

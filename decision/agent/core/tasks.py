@@ -4,7 +4,54 @@ import math
 import numpy as np
 from navigation.control.tracking import load_config
 from perception.environment.context import fingerprint
-from ..tools.framework import GOAL_VALIDATOR
+from ..tools.framework import GOAL_VALIDATOR, REGISTRATION_GOAL
+from jsonschema import Draft202012Validator
+
+REGISTRATION_VALIDATOR = Draft202012Validator(REGISTRATION_GOAL)
+
+
+def normalize_registration(goal):
+    """Convert the advertised registration contract to the internal record.
+
+    Legacy fixture and historical actions use the internal shape directly.
+    This is a field mapping, not a repair of malformed model arguments.
+    """
+    if 'stage' not in goal:
+        return copy.deepcopy(goal)
+    REGISTRATION_VALIDATOR.validate(goal)
+    stage=goal['stage']
+    navigation=stage in ('point','region','reference','route','sequence')
+    target=goal.get('target',{})
+    if not navigation and target:
+        raise ValueError('A skill stage cannot supply a navigation target')
+    if stage=='sequence':
+        if set(target)!={'checkpoints'}:
+            raise ValueError('Sequence target requires only ordered checkpoints')
+    elif stage=='point':
+        if set(target) not in ({'id'},{'position'}):
+            raise ValueError('Point target requires exactly one annotation ID or user-specified position')
+    elif stage=='region':
+        if set(target)!={'id'}:
+            raise ValueError('Region target requires one annotated region ID')
+    elif stage in ('reference','route'):
+        if set(target)-{'id'}:
+            raise ValueError('Reference or route target may contain only an annotation ID')
+    result=dict(goal_id=goal['goal_id'],kind=stage if navigation else 'skill',
+                target_id=target.get('id',''),description=goal['description'])
+    if not navigation:result['stage_type']=stage
+    for key in ('position','checkpoints'):
+        if key in target:result[key]=copy.deepcopy(target[key])
+    for key in ('floor_id','to_floor','monitor','execution_notes'):
+        if key in goal:result[key]=copy.deepcopy(goal[key])
+    conditions=goal.get('conditions',{})
+    for key in ('required_yaw','facing','position_rule','max_distance_m','robot_inside_region_id'):
+        if key in conditions:result[key]=copy.deepcopy(conditions[key])
+    for item in conditions.get('visual',[]):
+        key='semantic_conditions' if item['priority']=='required' else 'visual_preferences'
+        result.setdefault(key,[]).append(item['description'])
+        if len(result[key])>8:
+            raise ValueError('At most eight visual conditions are supported per priority')
+    return result
 
 
 def inside(point, polygon):
@@ -64,7 +111,7 @@ class TaskGoals:
             if stage=='navigation':
                 tools=['navigate_route' if req['kind'] in ('route','sequence') else 'navigate']
             elif stage=='elevator':
-                tools=['pause_map_localization','record_elevator_observation','restart_map_localization']
+                tools=['record_elevator_observation','restart_map_localization']
             elif stage=='observation':
                 tools=['observe_scene']
             else:
@@ -92,15 +139,20 @@ class TaskGoals:
             raise ValueError('Task requirements already recorded; replace the instruction before changing them')
         if not isinstance(goals, list) or not 1 <= len(goals) <= 16:
             raise ValueError('Use one to sixteen ordered requirements')
+        normalized=[]
+        for index,goal in enumerate(goals):
+            try:normalized.append(normalize_registration(goal))
+            except (ValueError,KeyError,TypeError) as error:
+                raise ValueError(f'goals[{index}]: {error}') from error
         ids = set()
         active_floor=self.catalog.value.get('floor_id')
-        for index,goal in enumerate(goals):
+        for index,goal in enumerate(normalized):
             try:
                 active_floor=self._validate_requirement(goal,active_floor,ids)
             except ValueError as error:
                 raise ValueError(f'goals[{index}]: {error}') from error
         self.goals = [dict(requirement=copy.deepcopy(g), binding=fingerprint(g), status='pending',
-                           selected=None, completion=None) for g in goals]
+                           selected=None, completion=None) for g in normalized]
         return self.snapshot()
 
     def _validate_requirement(self,goal,active_floor,ids):
@@ -118,6 +170,13 @@ class TaskGoals:
         regions = goal.get('monitor',{}).get('region_ids',[])
         if len(set(regions)) != len(regions) or any(region not in catalog.regions for region in regions):
             raise ValueError(f"Goal {goal['goal_id']} monitor.region_ids must identify distinct regions on its floor")
+        monitor=goal.get('monitor',{})
+        if ('continuous_region_id' in monitor) != ('review_mode' in monitor):
+            raise ValueError('Continuous regional review requires both continuous_region_id and review_mode')
+        if monitor.get('continuous_region_id') is not None and monitor['continuous_region_id'] not in catalog.regions:
+            raise ValueError('Continuous review requires a region on the current floor')
+        if goal.get('robot_inside_region_id') is not None and goal['robot_inside_region_id'] not in catalog.regions:
+            raise ValueError('Completion region must exist on the current floor')
         if goal.get('stage_type')=='elevator' and set(goal.get('monitor',{}))-{'focus','interval_s'}:
             raise ValueError('Elevator monitoring supports independent frame events and interval_s while localization is paused')
         target = goal['target_id']
@@ -189,7 +248,7 @@ class TaskGoals:
         return active_floor
 
     def current(self, goal_id):
-        current = next((g for g in self.goals if g['status'] != 'completed'), None)
+        current = next((g for g in self.goals if g['status'] not in ('completed','skipped')), None)
         if current is None or current['requirement']['goal_id'] != goal_id:
             raise ValueError('Only the next uncompleted task goal can be selected or checked')
         floor=current['requirement'].get('floor_id')
@@ -266,8 +325,15 @@ class TaskGoals:
         current.update(status='completed', completion=dict(proof=copy.deepcopy(proof),
                        checks=copy.deepcopy(checks), semantic=copy.deepcopy(semantic)))
 
+    def skip(self, goal_id):
+        current = self.current(goal_id)
+        current.update(status='skipped', skip=dict(source='operator', reason='operator_skipped_subtask'))
+
     def snapshot(self):
         return copy.deepcopy(self.goals)
 
     def finished(self):
         return bool(self.goals) and all(g['status'] == 'completed' for g in self.goals)
+
+    def resolved(self):
+        return bool(self.goals) and all(g['status'] in ('completed','skipped') for g in self.goals)

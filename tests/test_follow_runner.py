@@ -166,15 +166,20 @@ class FollowOwnershipTests(unittest.TestCase):
         self.inbox.lock=threading.Lock();self.inbox.pending=deque();self.inbox.route_preempted=False
         self.inbox.session=SimpleNamespace(execute=True,status=lambda:dict(chassis=self.chassis),note_command=lambda *_:None)
         self.inbox.safety=SimpleNamespace(command=lambda *args:self.events.append(args))
-        self.inbox.agent_state=SimpleNamespace(snapshot=lambda:dict(control=self.control,received_age_s=.01))
         self.handle=dict(task_id='f',goal_id='g',plan_revision=1,goal_revision=1,call_id='call')
-        self.ref=reference(scene(10.));self.ref.update(task_revision=1,goal_id='g')
-        self.ref['reference_id']=fingerprint({k:v for k,v in self.ref.items() if k!='reference_id'})
+        from tests.test_follow_recovery import candidate_observation
+        from decision.vlm.follow_target import reference as visual_reference
+        import base64
+        obs=candidate_observation(10.,mapped=True)
+        self.ref,_,_=visual_reference(obs,0,'red jacket',task_id='f',revision=1,goal_id='g')
+        self.control.update(stamp_s=10.,clock_domain=obs.record['clock_domain'],map_binding=obs.record['map_binding'])
+        self.inbox.agent_state=SimpleNamespace(snapshot=lambda:dict(control=self.control,received_age_s=.01),
+            follow_candidate=lambda *_:(obs.record,base64.b64encode(obs.image).decode()))
         self.req=dict(task_id='follow:call',request_id='call',goal_revision=1,frame_id='odom',mode='local',
                       target_reference='base_link',goal=[2.5,2.],valid_until_s=10.5)
 
     def start(self):
-        return self.inbox.agent_follow('start',dict(handle=self.handle,intent=dict(target_description='red jacket')),live=True)
+        return self.inbox.agent_follow('start',dict(handle=self.handle,intent=dict(target_description='red jacket',reference=self.ref)),live=True)
 
     def test_follow_finish_blocks_later_goal_renewal_and_preserves_owner(self):
         self.assertTrue(self.start()['accepted'])

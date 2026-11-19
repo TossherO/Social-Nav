@@ -18,6 +18,14 @@ spec.loader.exec_module(capture)
 
 
 class CaptureShortcutsTests(unittest.TestCase):
+    def test_parent_loss_requests_orderly_stop(self):
+        capture.STOP.clear()
+        try:
+            with patch.object(capture.os,'getppid',return_value=-1):
+                capture.stop_when_parent_exits(123)
+            self.assertTrue(capture.STOP.is_set())
+        finally:capture.STOP.clear()
+
     def test_dry_runs_do_not_open_devices_or_create_recordings(self):
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(capture.subprocess, 'Popen', side_effect=AssertionError('process started')), \

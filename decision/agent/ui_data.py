@@ -17,8 +17,8 @@ KINDS=('conversation_exchange','conversation_trimmed','tool_intent','model_actio
        'model_result_discarded','manual_arrival_confirmation','manual_goal_evidence_wait_started',
        'manual_goal_evidence_wait_finished','manual_goal_evidence_refresh_failed','manual_goal_evidence_unproven','manual_route_progress',
        'manual_route_trace','manual_reference_status','manual_reference_region_conflict','operator_command','navigation_completed','navigation_ack','navigation_cancel_confirmed',
-       'navigation_context_lost','task_connection_lost','user_event','task_created','assistant_message','agent_run_finished',
-       'route_repeated_refusal','reference_map_prepared')
+       'navigation_context_lost','task_connection_lost','user_event','subtask_skipped','registered_task_imported','task_created','assistant_message','agent_run_finished',
+       'route_repeated_refusal','reference_map_prepared','t2_replay','follow_target_confirmed','agent_bag_recording')
 
 _LONG_HEX = re.compile(r'(?<![0-9a-fA-F])[0-9a-fA-F]{32,}(?![0-9a-fA-F])')
 
@@ -43,15 +43,20 @@ def goal_requirements(goal,names):
     fields={'position':'指定坐标','required_yaw':'要求朝向（弧度）','facing':'面向',
             'position_rule':'位置规则','max_distance_m':'距离上限（米）','checkpoints':'依次经过',
             'semantic_conditions':'必须满足','visual_preferences':'视觉偏好','stage_type':'任务阶段',
-            'floor_id':'所在楼层','to_floor':'目标楼层'}
+            'floor_id':'所在楼层','to_floor':'目标楼层','robot_inside_region_id':'完成时轮椅所在区域'}
     for key,label in fields.items():
         value=req.get(key)
         if value in (None,'',[]):continue
-        if key=='facing':value=names.get(value,value)
+        if key in ('facing','robot_inside_region_id'):value=names.get(value,value)
         elif key=='stage_type' and value=='elevator':value='乘坐电梯'
         elif key=='checkpoints':value=[names.get(item,item) for item in value]
         elif key=='position_rule' and value=='region_centroid':value='区域正中'
         lines.append(label+'：'+('、'.join(map(str,value)) if isinstance(value,list) and key!='position' else str(value)))
+    monitored=(req.get('monitor') or {}).get('continuous_region_id')
+    if monitored:
+        lines.append('持续复核区域：'+str(names.get(monitored,monitored)))
+        if not req.get('robot_inside_region_id'):
+            lines.append('完成时区域检查：未登记')
     if 'required_yaw' not in req and not req.get('facing'):lines.append('用户要求朝向：未指定')
     return '\n'.join(lines)
 
@@ -61,7 +66,7 @@ def display_value(value):
     if isinstance(value,dict):
         result={}
         for key,item in value.items():
-            if (key in ('task_id','call_id','tool_call_id','session_id','association_session') or
+            if (key in ('task_id','source_task_id','source_digest','call_id','tool_call_id','session_id','association_session') or
                     key.endswith(('_sha256','_fingerprint')) or
                     key.endswith('_binding') and key!='candidate_binding' and not isinstance(item,dict)):
                 result[key]='[内部标识]'
@@ -101,7 +106,9 @@ def poll_session(db, cursor, limit=100):
         for event in events:
             if event['kind']=='api_request':
                 request_row=db.execute('SELECT value FROM events WHERE seq=?',(event['seq'],)).fetchone()
-                event['context']=request_context(json.loads(request_row[0]))
+                request_value=json.loads(request_row[0])
+                if request_value.get('purpose')!='elevator_monitor':
+                    event['context']=request_context(request_value)
         db.commit()
     except BaseException:
         db.rollback()
@@ -173,7 +180,11 @@ def request_context(value):
             previous=''
             labels={'static_reference_map':'标注地图','current_rgb_observation':'当前 RGB',
                     'trajectory_global_overview':'全局轨迹地图','target_or_robot_local_map':'历史局部地图',
-                    'target_or_robot_static_crop':'静态地图附近放大图'}
+                    'target_or_robot_static_crop':'静态地图附近放大图',
+                    'historical_elevator_rgb':'历史乘梯 RGB','current_elevator_rgb':'当前乘梯 RGB',
+                    'standard_start_reference_rgb':'标准起点历史 RGB','standard_start_reference_lidar':'标准起点历史雷达图',
+                    'current_local_lidar':'当前局部雷达图','destination_waiting_area':'目标楼层地图',
+                    'failed_pose_scan_overlay':'上次定位叠图'}
             for part in message['content']:
                 if not isinstance(part,dict):continue
                 if part.get('type')=='text':
@@ -294,6 +305,11 @@ def event_detail(db, seq):
     if kind=='api_request':
         from .core.store import restore_request_images
         value=restore_request_images(db,value)
+    return format_event_detail(kind,value)
+
+
+def format_event_detail(kind,value):
+    """Prepare saved or in-memory request details without retaining images."""
     image_names=[]
     if kind=='api_request':
         for message in request_context(value)['messages']:
@@ -319,10 +335,24 @@ def event_detail(db, seq):
 
 def event_summary(event):
     kind,value=event['kind'],event['value']
+    if kind=='agent_bag_recording':
+        labels={'preparing':'准备中','recording':'录制中','finalizing':'正在关闭与校验',
+                'saved':'已保存','failed':'失败','needs_review':'需要检查','finished':'已结束'}
+        return '自动录包：'+labels.get(value.get('status'),str(value.get('status') or '未知'))+(('；'+str(value['bag'])) if value.get('bag') else '')+(('；'+str(value['error'])) if value.get('error') else '')
+    if kind=='follow_target_confirmed':
+        ref=value.get('reference') or {}
+        return 'Agent 已确认跟随参考：候选 '+str(ref.get('candidate_id'))+'；'+str(ref.get('description') or '')
+    if kind=='t2_replay':
+        return 'T2 回放：'+str(value.get('status') or value.get('event') or '未知')+(
+            '；选择 '+str(value['selection']) if value.get('selection') else '')+(
+            '；'+str(value['reason']) if value.get('reason') else '')
+    if kind=='subtask_skipped':return '操作者跳过当前子任务；该子任务未完成。'
+    if kind=='registered_task_imported':return '已复用历史登记，从第一项重新执行。'
     if kind=='task_monitor_event':
         labels={'navigation_state_changed':'导航状态变化','operator_review_requested':'用户请求复核',
                 'semantic_review_due':'周期复核','region_entered':'进入区域','no_measured_progress':'暂无测量进展',
-                'distance_progress':'行驶距离','rotation_progress':'转角','stopped_duration':'持续停稳','monitor_timeout':'等待超时'}
+                'distance_progress':'行驶距离','rotation_progress':'转角','stopped_duration':'持续停稳','monitor_timeout':'等待超时',
+                'conditional_review_due':'条件式持续复核'}
         return '复核触发：'+'、'.join(labels.get(r.get('kind'),str(r.get('kind','未知'))) for r in value.get('reasons',[]))
     if kind=='conversation_exchange':
         parts=[]

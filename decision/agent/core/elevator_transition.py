@@ -17,7 +17,7 @@ class ElevatorTransition:
         self.task_id,self.goal_id=task_id,goal_id
         self.from_floor,self.to_floor=from_floor,to_floor
         self.destination_map_id=destination_map_id
-        self.status='awaiting_entry'
+        self.status='monitoring_ride'
         self.observations=[]
         self.last_observation_stamp_s=None
         self.last_observation_sequence=None
@@ -27,13 +27,13 @@ class ElevatorTransition:
 
     def observe(self, *, camera_record, image, judgment, evidence):
         """Record the Agent's judgment against an actual source camera frame."""
-        if self.status not in ('awaiting_entry','awaiting_exit'):
+        if self.status!='monitoring_ride':
             raise ValueError('No elevator image judgment is currently expected')
         stamp=camera_record.get('stamp_s');sequence=camera_record.get('sequence')
         if (camera_record.get('source')!='ros_camera_independent_of_localization' or
                 camera_record.get('clock_domain')!='ros_time' or not camera_record.get('frame_id') or
                 type(stamp) not in (int,float) or not math.isfinite(stamp) or stamp<=0 or
-                type(sequence) is not int or sequence<0 or judgment not in ('inside','outside','unknown') or
+                type(sequence) is not int or sequence<0 or judgment not in ('completed','not_completed','unknown') or
                 not isinstance(evidence,str) or not evidence.strip() or not isinstance(image,bytes) or
                 not image.startswith(b'\xff\xd8') or not image.endswith(b'\xff\xd9')):
             raise ValueError('A source-bound camera observation and reason are required')
@@ -49,8 +49,7 @@ class ElevatorTransition:
         self.last_observation_sequence=sequence
         self.camera_frame_id=camera_record['frame_id']
         self.observation_count+=1
-        if self.status=='awaiting_entry' and judgment=='inside':self.status='awaiting_exit'
-        elif self.status=='awaiting_exit' and judgment=='outside':self.status='awaiting_destination_localization'
+        if judgment=='completed':self.status='awaiting_destination_localization'
         return self.snapshot()
 
     def accept_localization(self, *, association, now_s, max_age_s, clock_domain):

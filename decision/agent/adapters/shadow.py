@@ -242,6 +242,7 @@ class RuntimeShadowNavigation:
     def tick(self):
         try:
             options=dict(with_image=True)
+            if getattr(self,'want_follow_candidates',False):options['with_follow_candidates']=True
             if self.follow_active and self.handle is not None:options['follow_call_id']=self.handle['call_id']
             value = self.client.snapshot(**options)
             if not isinstance(value.get('control'), dict):
@@ -350,6 +351,16 @@ class RuntimeLiveNavigation(RuntimeShadowNavigation):
         ack = self.client.exchange('hold', {k:handle[k] for k in ('task_id','goal_revision')})
         if ack.get('accepted') is not True:
             raise ValueError('Runtime hold was not accepted')
+
+    def retarget(self,place,old_handle,new_handle):
+        if self.handle!=old_handle or self.cancel_requested or self.follow_active:
+            raise ValueError('Live target no longer active')
+        request=copy.deepcopy(self.request)
+        request.update(goal_revision=new_handle['goal_revision'],goal=copy.deepcopy(place['pose']))
+        ack=self.client.exchange('retarget',dict(previous_revision=old_handle['goal_revision'],goal=request))
+        if ack.get('accepted') is not True:raise ValueError('Retarget was not accepted')
+        self.handle,self.request=copy.deepcopy(new_handle),request
+        return dict(accepted=True,handle=copy.deepcopy(new_handle),execution_feedback=False)
 
     def snapshot(self):
         result = apply_runtime_mapped_pose(super().snapshot(),self.value['control'],self.catalog)

@@ -32,6 +32,14 @@ class InputEstimateExceeded(ValueError):
 
 
 REGISTRATION_TOOLS=('record_task','lookup_places','query_map','observe_scene','wait_for_event','ask_user')
+ELEVATOR_TOOLS={
+    'monitoring_ride':('record_elevator_observation','set_navigation_monitor','wait_for_event','ask_user'),
+    'awaiting_destination_localization':('restart_map_localization','set_navigation_monitor','wait_for_event','ask_user'),
+}
+ELEVATOR_GUIDANCE={
+    'monitoring_ride':'来源楼层定位已暂停，独立传感器观察已经启动，无需再次暂停定位。请结合本轮观察调用 record_elevator_observation 判断整次乘梯是否完成。',
+    'awaiting_destination_localization':'乘梯已判断完成，正在准备目标楼层定位。请结合本轮扫描与目标地图调用 restart_map_localization 选择初值；失败时可依据反馈重新选择。',
+}
 
 
 def input_estimate(messages, tools):
@@ -131,16 +139,17 @@ def observation_context(messages, source, key, record):
 class Model:
     model = 'qwen3.8-flash'
 
-    def __init__(self, private_config, budget, store, *, transport=None, cache_mode='implicit', thinking_mode='off', output_limit=None):
+    def __init__(self, private_config, budget, store, *, transport=None, cache_mode='implicit', thinking_mode='off', output_limit=None, transient_sink=None):
         if cache_mode not in ('implicit','explicit'):
             raise ValueError('Choose an explicit cache policy; no automatic fallback')
-        if thinking_mode not in ('off','low'):
-            raise ValueError('Choose off or low thinking; no automatic fallback')
+        if thinking_mode not in ('off','low','medium'):
+            raise ValueError('Choose off, low or medium thinking; no automatic fallback')
         if output_limit is not None and (type(output_limit) is not int or not 1 <= output_limit <= 8192):
             raise ValueError('Output limit must be between 1 and 8192 tokens')
         self.cache_mode = cache_mode
         self.thinking_mode = thinking_mode
         self.output_limit = output_limit
+        self.transient_sink = transient_sink
         # Read credentials only for an explicitly requested API operation.
         self._private = json.loads(Path(private_config).read_text())
         self._key = os.environ.get('SOCIAL_NAV_AGENT_API_KEY') or self._private['api_key']
@@ -157,13 +166,13 @@ class Model:
         tools = native_tools(tool_names)
         offered={tool['function']['name'] for tool in tools}
         body = dict(model=self.model,messages=cache_messages(system,messages,self.cache_mode),tools=tools,
-                    tool_choice=tool_choice,parallel_tool_calls=False,enable_thinking=self.thinking_mode=='low',temperature=0,
+                    tool_choice=tool_choice,parallel_tool_calls=False,enable_thinking=self.thinking_mode!='off',temperature=0,
                     stream=True,stream_options=dict(include_usage=True))
-        if self.thinking_mode == 'low':
+        if self.thinking_mode != 'off':
             # Bound reasoning and final output together, including reservation.
             # Historical thinking is not used as dialogue context.
-            output_bound = self.output_limit or 6144
-            body.update(reasoning_effort='low',preserve_thinking=False,max_completion_tokens=output_bound)
+            output_bound = self.output_limit or (24576 if self.thinking_mode=='medium' else 6144)
+            body.update(reasoning_effort=self.thinking_mode,preserve_thinking=False,max_completion_tokens=output_bound)
         else:
             output_bound = self.output_limit or max_tokens
             body['max_tokens'] = output_bound
@@ -187,6 +196,8 @@ class Model:
         try:
             if request_cancelled():
                 raise ApiError('Request cancelled before transport')
+            if transient and self.transient_sink is not None:
+                self.transient_sink(dict(kind='request',call_id=call_id,request=copy.deepcopy(body)))
             with httpx.Client(timeout=httpx.Timeout(120.,connect=10),transport=self.transport,
                               follow_redirects=False,trust_env=False) as client:
                 with client.stream('POST',self._url,headers={'Authorization':'Bearer '+self._key},json=body) as response:
@@ -262,7 +273,9 @@ class Model:
             expected = 'tool_calls' if calls else 'stop'
             if returned_model!=self.model or finish_reason!=expected or self.thinking_mode=='off' and record['reasoning']:
                 raise ApiError('Unexpected model, finish reason or thinking output')
-            reply=Reply.parse(message,report_argument_error=True)
+            reply=Reply.parse(message,report_argument_error=True,model_schema=True)
+            if transient and self.transient_sink is not None:
+                self.transient_sink(dict(kind='response',call_id=call_id,message=copy.deepcopy(message)))
             if calls and message['tool_calls'][0]['function']['name'] not in offered:
                 raise ValueError('Model called a tool not offered for this phase')
             if reply.action is not None and projection is not None:
@@ -272,7 +285,7 @@ class Model:
                 except ValueError as error:
                     return Reply(reply.message,None,dict(status='refused',reason='invalid_tool_reference',
                                 tool=reply.action['tool'],detail=str(error)))
-                validate_call(action)
+                validate_call(action,model_schema=True)
                 reply=Reply(reply.message,action)
             return reply
         except (httpx.HTTPError,ValueError,KeyError,TypeError,jsonschema.ValidationError,ApiError) as error:
@@ -290,9 +303,17 @@ class Model:
         reference = payload.get('reference_map')
         messages = project_dialogue(payload['messages'],reference)
         state = copy.deepcopy(payload['current_state'])
+        ride_inputs=payload.get('ride_inputs')
+        phase=(state.get('ride') or {}).get('status') if ride_inputs else None
+        if ride_inputs:
+            if phase not in ELEVATOR_TOOLS:
+                raise ValueError('Unknown elevator phase for transient model request')
+            state['ride']['phase_guidance']=ELEVATOR_GUIDANCE[phase]
+            if state['ride'].get('standard_start') and phase=='monitoring_ride':
+                state['ride']['phase_guidance']='独立观察已启动。对比当前 RGB 和雷达图与历史标准起点参考，判断轮椅是否已抵达目标楼层标准起点并调整至参考朝向；确认后调用 record_elevator_observation 选择 completed，系统自动使用固定初值启动定位。不能确认时选择 unknown 或 not_completed。'
         state['visual_inputs'] = visual_inputs(state,observation,spatial_view,reference,
             payload.get('keyframes',{}),payload.get('input_status',{}))
-        if payload.get('ride_inputs'):
+        if ride_inputs:
             state['visual_inputs'].update(rgb=dict(available=True,source='current_elevator_rgb'),
                 maps=dict(available=False,reason='map_localization_paused'),
                 local_lidar_available=any(row[0]=='current_local_lidar' for row in payload['ride_inputs']))
@@ -321,7 +342,10 @@ class Model:
             if observation.record.get('follow_candidates') is not None:
                 from decision.vlm.follow_target import annotated
                 rgb = annotated(observation)
-                content.append(dict(type='text',text='当前RGB中的黄色数字是本观察的跟随候选编号；原图和检测框另行绑定。'))
+                if observation.record['follow_candidates'].get('mode')=='raw_rgb':
+                    content.append(dict(type='text',text='当前 RGB 为原图，持续跟随期间未进行二维人物检测或关联。'))
+                else:
+                    content.append(dict(type='text',text='当前RGB中的黄色数字是本观察的跟随候选编号；原图和检测框另行绑定。'))
             content += [dict(type='text',text=encode(observation_context(messages,
                 'current_rgb_observation','observation',observation.prompt()))),
                 image_part(rgb,768,'JPEG')]
@@ -367,16 +391,17 @@ class Model:
         projection=ModelProjection()
         messages=projection.messages(messages,protected_indices=(1 if reference is not None else 0,))
         return self.request(system,messages,observation_id=None if observation is None else observation.record['observation_id'],
-                            tool_names=REGISTRATION_TOOLS if registration else EXECUTION_TOOLS,
+                            tool_names=(ELEVATOR_TOOLS[phase] if ride_inputs else
+                                        REGISTRATION_TOOLS if registration else EXECUTION_TOOLS),
                             tool_choice='required' if registration and self.thinking_mode=='off' else 'auto',projection=projection,
                             transient=bool(payload.get('ride_inputs')))
 
 
-def api_work(config, session, payload, observation=None, spatial_view=None, *, cache_mode='implicit', thinking_mode='off'):
+def api_work(config, session, payload, observation=None, spatial_view=None, *, cache_mode='implicit', thinking_mode='off',transient_sink=None):
     # Background operations own their database connections and credentials.
     store, budget = Store(session), shared_budget()
     try:
-        return Model(config,budget,store,cache_mode=cache_mode,thinking_mode=thinking_mode).decide(payload,observation=observation,spatial_view=spatial_view)
+        return Model(config,budget,store,cache_mode=cache_mode,thinking_mode=thinking_mode,transient_sink=transient_sink).decide(payload,observation=observation,spatial_view=spatial_view)
     finally:
         budget.close()
         store.close()

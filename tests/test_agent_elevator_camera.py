@@ -68,3 +68,8 @@ class ElevatorCameraTests(unittest.TestCase):
             self.assertEqual(self.read(records).snapshot()['reason'],'invalid_camera_stream')
         bad=self.record();bad['image_base64']='not-valid'
         self.assertEqual(self.read([bad]).snapshot()['status'],'unavailable')
+
+    def test_exited_sensor_bridge_is_not_reported_as_a_live_frame(self):
+        camera=self.read([self.record()])
+        camera.process.poll=lambda:1
+        self.assertEqual(camera.snapshot()['reason'],'elevator_sensor_bridge_exited')

@@ -25,10 +25,17 @@ class LocalTaskTests(unittest.TestCase):
         inbox.manual_preview_owner=inbox.agent_owner=None
         inbox.pending=deque()
         inbox.follow_enabled=True
-        inbox.agent_state=SimpleNamespace(snapshot=lambda:dict(received_age_s=.1,control=dict(request=None)))
+        from tests.test_follow_recovery import candidate_observation
+        from decision.vlm.follow_target import reference
+        import base64
+        obs=candidate_observation(10.)
+        control=dict(request=None,stamp_s=10.,clock_domain=obs.record['clock_domain'],map_binding=obs.record['map_binding'])
+        inbox.agent_state=SimpleNamespace(snapshot=lambda:dict(received_age_s=.1,control=control),
+            follow_candidate=lambda *_:(obs.record,base64.b64encode(obs.image).decode()))
         inbox.safety=SimpleNamespace(command=lambda *_:self.fail('Manual preview called the safety command channel'))
         handle=dict(task_id='mission',goal_id='follow',call_id='turn',plan_revision=1,goal_revision=1)
-        inbox.agent_follow('start',dict(handle=handle,intent=dict(target_description='红衣')),live=False,manual=True)
+        ref,_,_=reference(obs,0,'红衣',task_id='mission',revision=1,goal_id='follow')
+        inbox.agent_follow('start',dict(handle=handle,intent=dict(target_description='红衣',reference=ref)),live=False,manual=True)
         goal=dict(request_id='turn',task_id='follow:turn',goal_revision=1,mode='mapped',frame_id='map',
                   target_reference='base_link',goal=[1,2],map_snapshot_id='map-a')
         self.assertFalse(inbox.follow_goal(handle,goal))
@@ -55,7 +62,7 @@ class LocalTaskTests(unittest.TestCase):
                        observation_binding=obs.record['input_fingerprint'])
         feedback_time=time.monotonic()
         with patch('runtime.seating.time.monotonic',return_value=feedback_time), \
-             patch('decision.vlm.online.request_dspark',return_value=dict(status='complete',raw_content='{"p":1,"s":"v"}')):
+             patch('decision.vlm.online.request_dspark',return_value=dict(status='complete',raw_content='{"p":1,"s":"v"}')) as infer:
             try:
                 worker.observe(scene,obs,rgb,scan,camera,time.monotonic())
                 worker.update_scene(scene,feedback_time)
@@ -68,6 +75,28 @@ class LocalTaskTests(unittest.TestCase):
                 self.assertEqual(result['source_stamp_s'],10.)
                 self.assertEqual(result['geometry_stamp_s'],10.)
                 self.assertTrue(np.isfinite(result['pose']).all())
+                from tests.navigation_fixtures import scene_at
+                next_scene=scene_at(10.1)
+                next_obs=Observation.from_scene(next_scene,geometry=geometry,rgb=dict(pixels=rgb,stamp_s=10.1,frame_id='camera'),
+                    sensors=dict(camera=dict(view=dict(status='approximate_pinhole'))))
+                worker.update_scene(next_scene,feedback_time)
+                worker.observe(next_scene,next_obs,rgb,scan,camera,feedback_time)
+                worker.thread.join(6)
+                updated=worker.snapshot()
+                self.assertEqual(updated['status'],'selected',updated)
+                self.assertEqual(updated['source_stamp_s'],10.1)
+                self.assertEqual(updated['sequence'],2)
+                self.assertEqual(infer.call_count,2)
+                worker.cancel(selection['selection_id'])
+                gate=threading.Event();started=threading.Event()
+                def delayed(*_args,**_kwargs):
+                    started.set();gate.wait(3.)
+                    return dict(status='complete',raw_content='{"p":1,"s":"v"}')
+                infer.side_effect=delayed
+                worker.select(dict(selection,selection_id='late'))
+                self.assertTrue(started.wait(3.))
+                worker.cancel('late');gate.set();worker.thread.join(6)
+                self.assertEqual(worker.snapshot()['status'],'cancelled')
                 with self.assertRaisesRegex(ValueError,'expired'):
                     worker.select(dict(selection,observation_binding='wrong-frame'))
             finally:worker.close()

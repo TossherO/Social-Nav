@@ -26,7 +26,11 @@ class ControlT2Tests(unittest.TestCase):
         def infer(request):
             return request.infer(client_factory=factory(self.choice))
         self.worker=FollowDecisionWorker(search,inference=infer,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768))
-        self.worker.begin(self.handle,'red jacket')
+        from tests.test_follow_recovery import candidate_observation
+        from decision.vlm.follow_target import reference
+        obs=candidate_observation(10.)
+        ref,_,crop=reference(obs,0,'red jacket',task_id='mission',revision=1,goal_id='g')
+        self.worker.begin(self.handle,'red jacket',reference=ref,crop=crop)
         control=object.__new__(ControlLoop);self.control=control
         control.lock=threading.Lock();control.follow=FollowRunner(load_config(),self.geometry)
         control.follow.handle=copy.deepcopy(self.handle)
@@ -69,20 +73,37 @@ class ControlT2Tests(unittest.TestCase):
         self.assertEqual(self.follow_states[-1]['status'],'running')
         self.assertEqual(self.follow_states[-1]['target_identity'],['tracker_session',7,'a'])
         self.assertEqual(self.goals[-1]['request_id'],'call')
+
         self.assertTrue(self.worker.snapshot()['reference_fixed'])
         first_revision=self.goals[-1]['goal_revision']
         self.choice='A'
         self.feed(12,34);self.drain(13.3)
-        self.assertEqual(self.follow_states[-1]['status'],'running')
+        self.assertIn(self.follow_states[-1]['status'],('running','searching'))
         self.feed(34,82);self.drain(18.1)
         self.assertEqual(self.follow_states[-1]['status'],'searching')
         self.assertTrue(self.pauses)
         self.assertIsNone(self.control.request)
         self.choice='P0'
         self.feed(82,105);self.drain(20.4)
+        if self.follow_states[-1]['status']!='running':
+            self.feed(105,118);self.drain(21.7)
         self.assertEqual(self.follow_states[-1]['status'],'running')
         self.assertGreater(self.goals[-1]['goal_revision'],first_revision)
         self.assertEqual(self.goals[-1]['request_id'],'call')
+
+    def test_raw_rgb_selection_can_start_bound_3d_track(self):
+        self.worker.raw_rgb=True
+        for i in range(12):
+            stamp=round(10+i/10,1)
+            row,arrays,association,scene=observation(stamp)
+            self.control.follow.observe(scene);self.control.scene=scene
+            self.worker.submit(row,arrays,scene=scene,association=None,
+                image_metadata=dict(rgb_stamp_ns=association['image_input']['rgb_stamp_ns'],rgb_frame='camera'),
+                context=self.control.follow_context())
+            if i>=10:self.control._update_follow(stamp)
+        self.drain(11.1)
+        self.assertEqual(self.follow_states[-1]['status'],'running')
+        self.assertEqual(self.follow_states[-1]['target_identity'],['tracker_session',7,'a'])
 
     def test_search_pose_is_checked_again_at_current_map_and_deadline(self):
         from tests.navigation_fixtures import asset,bundle

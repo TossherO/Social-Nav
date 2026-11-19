@@ -169,6 +169,92 @@ class AgentMonitorTests(unittest.TestCase):
         monitor.update(nav, value)
         self.assertEqual(monitor.take()['reasons'][0]['kind'], 'region_entered')
 
+    def test_conditional_review_serializes_new_observations_and_resets_on_exit(self):
+        monitor=TaskMonitor(self.catalog)
+        monitor.configure('g','观察举手',continuous_region_id='lobby_area',review_mode='after_result')
+        nav=dict(handle={'call_id':'c'},status='running',goal_id='g',context_lost=False,connected=True)
+        feedback=dict(handle={'call_id':'c'},stamp_s=20.,origin_stamp_s=20.,origin_frame_id='sim_odom',
+                      origin_pose=[0.,0.,0.],localization_status='valid')
+        monitor.update(nav,feedback)
+        self.assertEqual(monitor.snapshot()['conditional_review']['region_state'],'outside')
+        self.assertIsNone(monitor.take())
+        feedback.update(stamp_s=21.,origin_stamp_s=21.,origin_pose=[7.,4.,0.])
+        monitor.update(nav,feedback)
+        self.assertEqual(monitor.take()['reasons'][0]['kind'],'conditional_review_due')
+        monitor.observe('frame-2',21.)
+        self.assertIsNone(monitor.take())  # no second review while one is being judged
+        self.assertTrue(monitor.await_next_observation('frame-1'))
+        monitor.observe('frame-1',21.)
+        self.assertIsNone(monitor.take())
+        monitor.observe('frame-2',21.1)
+        self.assertEqual(monitor.take()['reasons'][0]['kind'],'conditional_review_due')
+        epoch=monitor.region_epoch
+        feedback.update(stamp_s=22.,origin_stamp_s=22.,origin_pose=[0.,0.,0.])
+        monitor.update(nav,feedback)
+        self.assertGreater(monitor.region_epoch,epoch)
+        self.assertEqual(monitor.snapshot()['conditional_review']['region_state'],'outside')
+        self.assertFalse(monitor.await_next_observation('frame-2'))
+        monitor.observe('frame-3',22.)
+        self.assertIsNone(monitor.take())
+        feedback.update(stamp_s=23.,origin_stamp_s=23.,origin_pose=[7.,4.,0.])
+        monitor.update(nav,feedback)
+        self.assertEqual(monitor.take()['reasons'][0]['kind'],'conditional_review_due')
+        feedback.update(stamp_s=24.,input_stale=True)
+        monitor.update(nav,feedback)
+        self.assertEqual(monitor.snapshot()['conditional_review']['region_state'],'unknown')
+
+    def test_conditional_review_registration_checks_regions(self):
+        goal=dict(goal_id='person',stage='follow',description='进入大厅后观察',
+            conditions=dict(robot_inside_region_id='lobby_area'),
+            monitor=dict(continuous_region_id='lobby_area',review_mode='after_result',focus='观察目标'))
+        self.assertEqual(self.session.call('record_task',goals=[goal])['status'],'recorded')
+        req=self.session.task_goals.goals[0]['requirement']
+        self.assertEqual(req['robot_inside_region_id'],'lobby_area')
+        self.assertEqual(self.session.monitor.settings['continuous_region_id'],'lobby_area')
+
+    def test_conditional_monitor_rejects_incomplete_or_unknown_region(self):
+        base=dict(goal_id='g',stage='follow',description='跟随')
+        for monitor in (dict(continuous_region_id='lobby_area'),
+                        dict(continuous_region_id='missing',review_mode='after_result')):
+            result=self.session.call('record_task',goals=[dict(base,monitor=monitor)])
+            self.assertNotEqual(result['status'],'recorded')
+        result=self.session.call('record_task',goals=[dict(base,conditions=dict(robot_inside_region_id='missing'))])
+        self.assertNotEqual(result['status'],'recorded')
+
+    def test_inflight_review_is_discarded_after_region_exit(self):
+        self.start(continuous_region_id='lobby_area',review_mode='after_result')
+        entered,gate=threading.Event(),threading.Event()
+        def work(*_):
+            entered.set();gate.wait(2.)
+            return reply('wait_for_event',event='monitor')
+        actor=AgentLoop(self.session,work)
+        try:
+            self.nav.state['pose']=[7.,4.,0.]
+            actor.tick();self.assertTrue(entered.wait(1))
+            self.nav.state['pose']=[4.,4.,0.]
+            actor.tick()
+            self.assertTrue(actor.model.busy)
+            gate.set();actor.model.thread.join(1);actor.tick()
+            self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM events WHERE kind='model_result_discarded'").fetchone()[0],1)
+            self.assertEqual(self.nav.state['status'],'running')
+            self.assertEqual(self.session.state['status'],'waiting_monitor')
+            self.assertEqual(self.session.monitor.snapshot()['conditional_review']['region_state'],'outside')
+            self.nav.state['pose']=[7.,4.,0.]
+            actor.tick()
+            self.assertEqual(actor.requests,2)
+            self.assertEqual(self.session.monitor.snapshot()['conditional_review']['region_state'],'inside')
+        finally:
+            gate.set()
+            if actor.model.thread is not None:actor.model.thread.join(1)
+            actor.close()
+
+    def test_idle_observation_can_use_conditional_region_review(self):
+        monitor=TaskMonitor(self.catalog)
+        monitor.configure('g','观察',continuous_region_id='lobby_area',review_mode='after_result')
+        feedback=dict(stamp_s=10.,frame_id='sim_odom',pose=[7.,4.,0.],localization_status='valid')
+        monitor.update_idle('g',feedback)
+        self.assertEqual(monitor.take()['reasons'][0]['kind'],'conditional_review_due')
+
     def test_agent_review_is_required_and_cannot_override_execution_evidence(self):
         self.session.call('record_task',goals=[point_goal('elevator')])
         navigate(self.session,'elevator')

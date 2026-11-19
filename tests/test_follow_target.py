@@ -53,10 +53,49 @@ class FollowTargetTests(unittest.TestCase):
         modified['candidates'][0]['box'][0]+=1
         with self.assertRaises(ValueError):verify_candidates(modified,self.obs)
 
-    def test_old_agent_selection_is_unavailable(self):
-        self.assertNotIn('select_follow_target',self.session.registry)
+    def test_candidate_view_is_only_selected_for_follow_stage(self):
+        from runtime.command import AgentState
+        state=AgentState()
+        state.control=dict(clock_domain=self.obs.record['clock_domain'],stamp_s=10.)
+        state.publish_observation({'kind':'ordinary'},b'ordinary')
+        state.publish_follow_candidate(self.obs.record,self.obs.image)
+        self.assertEqual(state.snapshot()['observation']['kind'],'ordinary')
+        self.assertEqual(state.snapshot(with_follow_candidates=True)['observation']['input_fingerprint'],
+                         self.obs.record['input_fingerprint'])
+
+    def test_raw_follow_observation_does_not_claim_a_visual_identity(self):
+        from decision.agent.adapters.runtime import follow_observation
+        obs=follow_observation(self.scene,self.arrays['rgb'],None,None,None,
+            image_metadata=dict(rgb_stamp_ns=9980000000,rgb_frame='camera'))
+        obs.verify()
+        self.assertEqual(obs.record['follow_candidates']['mode'],'raw_rgb')
+        self.assertEqual(obs.record['follow_candidates']['candidates'],[])
+        self.assertEqual(annotated(obs),obs.image)
+
+    def test_agent_selects_reference_without_starting_motion(self):
+        context=self.session.context()
+        selected=self.session.call('select_follow_target',_context=context,goal_id='follow',
+            observation_id=self.obs.record['observation_id'],candidate_id=0,target_description='穿红衣的人')
+        self.assertEqual(selected['status'],'selected')
         self.assertIsNone(self.session.skill.record['handle'])
-        self.assertIsNone(self.store.read_follow_reference(self.session.state['task_id'],1,'follow'))
+        record,image,crop=self.store.read_follow_reference(self.session.state['task_id'],1,'follow',selected['reference_id'])
+        self.assertEqual(record['candidate_id'],0)
+        self.assertEqual(hashlib.sha256(crop).hexdigest(),record['crop_sha256'])
+        self.assertEqual(image,self.obs.image)
+        self.assertEqual(self.session.call('start_local_task',goal_id='follow',task_type='follow',
+            target_description='穿红衣的人')['reason'],'agent_confirmed_follow_reference_required')
+
+    def test_altered_saved_reference_is_not_used_to_start_follow(self):
+        selected=self.session.call('select_follow_target',_context=self.session.context(),goal_id='follow',
+            observation_id=self.obs.record['observation_id'],candidate_id=0,target_description='穿红衣的人')
+        with self.store.db:
+            self.store.db.execute('UPDATE follow_reference_versions SET crop=? WHERE reference_id=?',
+                                  (b'changed',selected['reference_id']))
+        result=self.session.call('start_local_task',goal_id='follow',task_type='follow',
+                                 reference_id=selected['reference_id'])
+        self.assertEqual(result['status'],'unavailable')
+        self.assertEqual(result['reason'],'Follow visual reference changed')
+        self.assertIsNone(self.session.skill.record['handle'])
 
     def test_invalid_association_and_future_image_are_rejected(self):
         wrong=copy.deepcopy(self.association)

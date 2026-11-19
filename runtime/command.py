@@ -22,6 +22,8 @@ class AgentState:
         self.goal_evidence = None
         self.follow = None
         self.follow_observation = None
+        self.follow_candidate_history = deque(maxlen=16)
+        self.follow_candidates_requested_mono = None
         self.seating=None
         self.follow_enabled=False
 
@@ -70,6 +72,19 @@ class AgentState:
                   self.follow.get('status') in ('starting','running','searching')):
                 self.follow_observation=(copy.deepcopy(record),encoded)
 
+    def publish_follow_candidate(self,record,image):
+        encoded=None if image is None else base64.b64encode(image).decode()
+        if encoded is None or len(encoded)>1500000:raise ValueError('Agent candidate image unavailable or too large')
+        with self.lock:self.follow_candidate_history.append((copy.deepcopy(record),encoded))
+
+    def follow_candidate(self,observation_id,candidate_binding):
+        with self.lock:
+            for record,image in reversed(self.follow_candidate_history):
+                if (record.get('observation_id')==observation_id and
+                        (record.get('follow_candidates') or {}).get('binding')==candidate_binding):
+                    return copy.deepcopy(record),image
+        return None
+
     def publish_follow(self, value):
         with self.lock:
             if ((self.follow or {}).get('handle')!=value.get('handle') or
@@ -77,9 +92,15 @@ class AgentState:
                 self.follow_observation=None
             self.follow=copy.deepcopy(value)
 
-    def snapshot(self, *, with_image=False):
+    def snapshot(self, *, with_image=False, with_follow_candidates=False):
         with self.lock:
+            if with_follow_candidates:self.follow_candidates_requested_mono=time.monotonic()
             observation,image=self.observation,self.image
+            if with_follow_candidates and self.follow_candidate_history and self.control:
+                record,encoded=self.follow_candidate_history[-1]
+                if (record['clock_domain']==self.control['clock_domain'] and
+                        0<=self.control['stamp_s']-record['stamp_s']<=3):
+                    observation,image=record,encoded
             if self.follow_observation and self.control:
                 record,encoded=self.follow_observation
                 if (record['clock_domain']==self.control['clock_domain'] and
@@ -92,6 +113,11 @@ class AgentState:
                 local_skills=dict(follow=self.follow_enabled,seating=self.seating is not None),
                 received_age_s=None if self.updated_mono is None else max(0., time.monotonic()-self.updated_mono),
                 scope='shadow_recommendation_not_execution', executable=False, execution_feedback=False)
+
+    def follow_candidates_requested(self):
+        with self.lock:
+            return (self.follow_candidates_requested_mono is not None and
+                    time.monotonic()-self.follow_candidates_requested_mono<=2.)
 
 
 class GoalObservationEvidence:
@@ -285,6 +311,48 @@ class CommandInbox:
             self.pending.append((command,value))
         return dict(accepted=True,scope='live_goal_intent',execution_feedback=False)
 
+    def agent_live_retarget(self, value):
+        """Replace an owned active goal without acquiring or changing its owner."""
+        if not self.agent_execution or not isinstance(value,dict) or set(value)!={'previous_revision','goal'}:
+            raise ValueError('Invalid Agent retarget request')
+        request=validate('goal',value['goal'])
+        previous=value['previous_revision']
+        with self.lock:
+            state=self.agent_state.snapshot();control=state.get('control') or {}
+            active=control.get('request') or {};owner=self.agent_owner
+            chassis=self.session.status().get('chassis') or {}
+            if (len(self.pending)>=64 or not owner or owner.get('kind')=='follow' or owner.get('held') or
+                    type(previous) is not int or owner['goal_revision']!=previous or
+                    active.get('request_id')!=owner['request_id'] or active.get('goal_revision')!=previous or
+                    request['request_id']!=owner['request_id'] or request['task_id']!=owner['task_id'] or
+                    request['goal_revision']!=previous+1 or request['mode']!='mapped' or
+                    any(request.get(k)!=active.get(k) for k in ('frame_id','target_reference','map_snapshot_id','goal_behavior')) or
+                    chassis.get('state')!='armed' or not chassis.get('status_fresh') or
+                    chassis.get('arm_revision')!=owner['arm_revision'] or
+                    state.get('received_age_s') is None or state['received_age_s']>.5 or
+                    not (control.get('map_binding') or {}).get('valid')):
+                raise ValueError('agent_retarget_ownership_or_state_invalid')
+            owner['goal_revision']=request['goal_revision']
+            self.route_preempted=True
+            self.session.note_command('goal',request)
+            self.safety.command('goal',request)
+            self.pending.append(('goal',request))
+        return dict(accepted=True,scope='live_goal_intent',execution_feedback=False)
+
+    def agent_live_cancel_owned(self, value):
+        if not self.agent_execution or not isinstance(value,dict) or set(value)!={'task_id','call_id'}:
+            raise ValueError('Invalid owned cancellation')
+        with self.lock:
+            owner=self.agent_owner
+            if (not owner or owner.get('kind')=='follow' or owner['task_id']!=value['task_id'] or
+                    owner['request_id']!=value['call_id'] or len(self.pending)>=64):
+                raise ValueError('agent_goal_ownership_lost')
+            cancel=dict(task_id=owner['task_id'],goal_revision=owner['goal_revision'])
+            self.agent_owner=None;self.route_preempted=True
+            self.session.note_command('cancel',cancel);self.safety.command('cancel',cancel)
+            self.pending.append(('cancel',cancel))
+        return dict(accepted=True,scope='live_goal_intent',execution_feedback=False)
+
     def agent_follow(self, kind, value, *, live, manual=False):
         """Reserve or stop one follow owner; ACK never means the robot moved."""
         from perception.environment.context import fingerprint
@@ -302,11 +370,29 @@ class CommandInbox:
                 if set(value)!={'handle','intent'}:raise ValueError('Invalid follow start')
                 handle,intent=value['handle'],value['intent']
                 if (not isinstance(handle,dict) or not isinstance(intent,dict) or
-                        set(intent)!={'target_description'} or not isinstance(intent['target_description'],str) or
+                        set(intent)!={'target_description','reference'} or not isinstance(intent['target_description'],str) or
                         not 1<=len(intent['target_description'].strip())<=2048 or
                         any(not isinstance(handle.get(k),str) or not handle[k] or len(handle[k])>128 for k in ('task_id','goal_id','call_id')) or
                         any(type(handle.get(k)) is not int or handle[k]<0 for k in ('plan_revision','goal_revision'))):
                     raise ValueError('follow_handle_or_intent_invalid')
+                ref=intent['reference']
+                if (not isinstance(ref,dict) or ref.get('task_id')!=handle['task_id'] or
+                        ref.get('task_revision')!=handle['plan_revision'] or ref.get('goal_id')!=handle['goal_id'] or
+                        ref.get('description')!=intent['target_description'].strip()):
+                    raise ValueError('follow_agent_reference_invalid')
+                candidate=self.agent_state.follow_candidate(ref.get('observation_id'),ref.get('candidate_binding'))
+                if candidate is None:raise ValueError('follow_agent_observation_unavailable')
+                from decision.agent.tools.observations import Observation
+                from decision.vlm.follow_target import reference as build_reference
+                record,encoded=candidate
+                observation=Observation(record,base64.b64decode(encoded,validate=True)).verify()
+                checked,_,crop=build_reference(observation,ref.get('candidate_id'),intent['target_description'],
+                    task_id=handle['task_id'],revision=handle['plan_revision'],goal_id=handle['goal_id'])
+                if checked!=ref:raise ValueError('follow_agent_reference_mismatch')
+                if (record.get('clock_domain')!=control.get('clock_domain') or
+                        record.get('map_binding')!=control.get('map_binding') or
+                        type(record.get('stamp_s')) not in (int,float) or record['stamp_s']>control.get('stamp_s',-1)):
+                    raise ValueError('follow_agent_observation_context_changed')
                 chassis={} if not live else self.session.status().get('chassis') or {}
                 if live and (chassis.get('state')!='armed' or not chassis.get('status_fresh')):
                     raise ValueError('manual_arming_required')
@@ -325,7 +411,9 @@ class CommandInbox:
                 self.agent_owner=dict(kind='follow',manual=manual,request_id=handle['call_id'],task_id=handle['task_id'],
                     goal_revision=handle['goal_revision'],internal_task_id='follow:'+handle['call_id'],internal_revision=0,
                     arm_revision=chassis.get('arm_revision'),live=live,heartbeat_mono=time.monotonic())
-                self.pending.append(('follow_start',dict(copy.deepcopy(value),manual=True) if manual else copy.deepcopy(value)))
+                pending=dict(copy.deepcopy(value),reference_crop=crop)
+                if manual:pending['manual']=True
+                self.pending.append(('follow_start',pending))
             elif kind in ('finish','cancel','lost'):
                 if (set(value)!=({'call_id','reason'} if kind=='lost' else {'call_id'}) or
                         not isinstance(value['call_id'],str) or kind=='lost' and
@@ -460,11 +548,14 @@ class CommandInbox:
                     if live and not self.agent_execution:
                         raise ValueError('Agent execution is not enabled')
                     value=request['value']
-                    if (not isinstance(value,dict) or set(value) not in ({'with_image'},{'with_image','follow_call_id'}) or
+                    if (not isinstance(value,dict) or not {'with_image'}<=set(value) or
+                            set(value)-{'with_image','follow_call_id','with_follow_candidates'} or
                             type(value['with_image']) is not bool or
+                            'with_follow_candidates' in value and type(value['with_follow_candidates']) is not bool or
                             'follow_call_id' in value and (not isinstance(value['follow_call_id'],str) or not value['follow_call_id'])):
                         raise ValueError('State query requires a Boolean with_image')
-                    state=self.agent_state.snapshot(with_image=value['with_image'])
+                    state=self.agent_state.snapshot(with_image=value['with_image'],
+                        with_follow_candidates=value.get('with_follow_candidates',False))
                     with self.lock:
                         if (self.agent_owner is not None and self.agent_owner.get('kind')=='follow' and self.agent_owner['live']==live and
                                 value.get('follow_call_id')==self.agent_owner['request_id']):
@@ -479,6 +570,15 @@ class CommandInbox:
                 if request['kind']=='agent_seating_select':
                     if self.agent_state.seating is None:raise ValueError('seating_observations_not_enabled')
                     connection.send(self.agent_state.seating.select(request['value']));continue
+                if request['kind']=='agent_seating_cancel':
+                    if self.agent_state.seating is None:raise ValueError('seating_observations_not_enabled')
+                    value=request['value']
+                    if not isinstance(value,dict) or set(value)!={'selection_id'}:raise ValueError('Invalid seating cancel')
+                    connection.send(self.agent_state.seating.cancel(value['selection_id']));continue
+                if request['kind']=='agent_live_retarget':
+                    connection.send(self.agent_live_retarget(request['value']));continue
+                if request['kind']=='agent_live_cancel_owned':
+                    connection.send(self.agent_live_cancel_owned(request['value']));continue
                 if request['kind'] in ('agent_live_follow_start','agent_live_follow_finish','agent_live_follow_cancel',
                                        'agent_manual_follow_start','agent_manual_follow_finish','agent_manual_follow_cancel','agent_manual_follow_lost',
                                        'agent_live_follow_lost','agent_shadow_follow_start','agent_shadow_follow_finish',

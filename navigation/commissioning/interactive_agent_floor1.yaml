@@ -1,7 +1,8 @@
 # Agent 人工驾驶观察使用的一楼独立定位图及静态环境图。
-map: outputs/perception/lab_floors_20261114/floor1/map
-static_map: outputs/perception/lab_floors_20261114/floor1/static_map_manual_ground
-catalog: outputs/decision/agent/lab_floors_20261114/floor1_catalog.json
-initial_pose_hint: outputs/decision/agent/lab_floors_20261114/floor1_height_hint.json
+map: outputs/perception/floor1_current/mapping/map
+static_map: outputs/perception/floor1_current/static_manual
+# 同源关键帧转换的标注，位置仍需现场审查。
+catalog: outputs/decision/agent/floor1_current/floor1_catalog.json
+initial_pose_hint: outputs/decision/agent/floor1_current/floor1_height_hint.json
 motion_config: navigation/planning/configs/motion.yaml
 motion_profile: trial

@@ -337,6 +337,29 @@ class AgentTests(unittest.TestCase):
         finally:
             budget.close()
 
+    def test_medium_thinking_sends_effort_and_larger_completion_limit(self):
+        native=reply('lookup_places',name='').message['tool_calls'][0]
+        chunks=[dict(model='qwen3.8-flash',choices=[dict(delta=dict(reasoning_content='thought'),finish_reason=None)]),
+                dict(model='qwen3.8-flash',choices=[dict(delta=dict(tool_calls=[dict(native,index=0)]),finish_reason='tool_calls')]),
+                dict(choices=[],usage=dict(prompt_tokens=100,completion_tokens=80))]
+        wire=''.join('data: '+json.dumps(v)+'\n\n' for v in chunks)+'data: [DONE]\n\n'
+        requests=[]
+        def respond(request):
+            requests.append(json.loads(request.content))
+            return httpx.Response(200,text=wire)
+        config=self.root/'private.json';config.write_text(json.dumps(dict(base_url='https://example.invalid/v1',api_key='test-secret')))
+        budget=Budget(self.root/'medium.sqlite')
+        try:
+            model=Model(config,budget,self.store,transport=httpx.MockTransport(respond),thinking_mode='medium')
+            self.assertEqual(model.decide(self.tools.prompt()).action,action('lookup_places',name=''))
+            self.assertTrue(requests[0]['enable_thinking'])
+            self.assertEqual(requests[0]['reasoning_effort'],'medium')
+            self.assertEqual(requests[0]['max_completion_tokens'],24576)
+            self.assertNotIn('thinking_budget',requests[0])
+            self.assertFalse(requests[0]['preserve_thinking'])
+        finally:
+            budget.close()
+
     def test_bad_native_tool_arguments_remain_raw_without_unwrapping(self):
         for arguments in ([{}],dict(question='wrong argument')):
             with self.subTest(arguments=arguments):

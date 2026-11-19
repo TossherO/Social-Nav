@@ -10,21 +10,24 @@ from runtime.transport import exchange_request
 from ..tools.observations import Observation
 
 
-def follow_observation(scene,pixels,association,geometry,camera_info):
+def follow_observation(scene,pixels,association,geometry,camera_info,*,image_metadata=None):
     """Expose the exact frame and associations already prepared by the T2 worker."""
-    from decision.vlm.follow_target import candidates
+    from decision.vlm.follow_target import candidates,raw_candidates
     from ..tools.sensors import sensor_context
-    image=association['image_input']
+    image=association['image_input'] if association is not None else image_metadata
     stamp_ns=image['rgb_stamp_ns']
     stamp=stamp_ns/1e9
-    frame=image['camera_frame']
+    frame=image.get('camera_frame',image.get('rgb_frame'))
     people=scene.record['people'].get('data') or {}
-    if association['perception_input_fingerprint']!=people.get('input_fingerprint'):
-        raise ValueError('T2 associations do not refer to this scene')
-    detected=candidates(scene,pixels,stamp,association['detections'],association['result'],
-                        detector=dict(identity=association['detector_identity']),rgb_stamp_ns=stamp_ns)
-    if detected['rgb_pixel_sha256']!=image['raw_rgb_sha256']:
-        raise ValueError('T2 associations do not refer to these RGB pixels')
+    if association is None:
+        detected=raw_candidates(scene,pixels,stamp,rgb_stamp_ns=stamp_ns)
+    else:
+        if association['perception_input_fingerprint']!=people.get('input_fingerprint'):
+            raise ValueError('T2 associations do not refer to this scene')
+        detected=candidates(scene,pixels,stamp,association['detections'],association['result'],
+                            detector=dict(identity=association['detector_identity']),rgb_stamp_ns=stamp_ns)
+        if detected['rgb_pixel_sha256']!=image['raw_rgb_sha256']:
+            raise ValueError('T2 associations do not refer to these RGB pixels')
     return Observation.from_scene(scene,geometry=geometry,
         rgb=dict(pixels=pixels,stamp_s=stamp,stamp_ns=stamp_ns,frame_id=frame,source=dict(kind='t2_window_current_rgb')),
         sensors=sensor_context(geometry,camera_info,rgb_shape=pixels.shape,rgb_frame=frame,rgb_stamp=stamp),
@@ -92,7 +95,7 @@ class RuntimeClient:
         self.path = Path(path)
 
     def exchange(self, kind, value):
-        if kind not in ('agent_state','agent_seating_select', 'goal', 'cancel','follow_start','follow_finish','follow_cancel','follow_lost'):
+        if kind not in ('agent_state','agent_seating_select','agent_seating_cancel', 'goal', 'cancel','follow_start','follow_finish','follow_cancel','follow_lost'):
             raise ValueError('Agent runtime client cannot issue override or safety-management commands')
         if kind.startswith('follow_'):
             wire_kind = 'agent_'+self.follow_channel+'_'+kind
@@ -105,9 +108,10 @@ class RuntimeClient:
             raise ValueError('Agent client only supports a nonexecuting shadow runtime')
         return result
 
-    def snapshot(self, *, with_image=False, follow_call_id=None):
+    def snapshot(self, *, with_image=False, follow_call_id=None, with_follow_candidates=False):
         value=dict(with_image=with_image)
         if follow_call_id is not None:value['follow_call_id']=follow_call_id
+        if with_follow_candidates:value['with_follow_candidates']=True
         result = self.exchange('agent_state', value)
         if result.get('scope') != self.state_scope:
             raise ValueError('Unexpected runtime scope')
@@ -126,11 +130,11 @@ class LiveRuntimeClient(RuntimeClient):
     state_scope = 'live_observation'
 
     def exchange(self, kind, value):
-        if kind not in ('agent_state','agent_seating_select', 'goal', 'cancel', 'hold','follow_start','follow_finish','follow_cancel','follow_lost'):
+        if kind not in ('agent_state','agent_seating_select','agent_seating_cancel', 'goal', 'cancel', 'hold','retarget','cancel_owned','follow_start','follow_finish','follow_cancel','follow_lost'):
             raise ValueError('Live Agent cannot arm or manage safety')
         if kind == 'agent_state':
             wire_kind = 'agent_live_state'
-        elif kind == 'agent_seating_select':
+        elif kind in ('agent_seating_select','agent_seating_cancel'):
             wire_kind = kind
         else:
             wire_kind = 'agent_live_'+kind
@@ -146,7 +150,7 @@ class ManualRuntimeClient(RuntimeClient):
     """Observation and display-only follow channel."""
     follow_channel = 'manual'
     def exchange(self, kind, value):
-        if kind not in ('agent_state','agent_seating_select','follow_start','follow_cancel','follow_finish','follow_lost'):
+        if kind not in ('agent_state','agent_seating_select','agent_seating_cancel','follow_start','follow_cancel','follow_finish','follow_lost'):
             raise ValueError('Manual Agent client is read-only')
         return super().exchange(kind,value)
 
@@ -154,3 +158,4 @@ class ManualRuntimeClient(RuntimeClient):
         status=exchange_request(self.path,'session_status',{},timeout=.5)
         if status.get('live') is not True or status.get('hardware_enabled') is not False:
             raise ValueError('Manual Agent requires a live observation session without chassis output')
+        return status

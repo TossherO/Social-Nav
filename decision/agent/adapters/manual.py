@@ -10,7 +10,8 @@ class ManualNavigation(RuntimeShadowNavigation):
     scope = 'manual'
 
     def __init__(self,catalog,client,*,automatic_arrival=False):
-        client.require_observation_only()
+        session_status=client.require_observation_only() or {}
+        self.ros_master_uri=session_status.get('ros_master_uri')
         from navigation.control.tracking import load_config
         self.settings=load_config()
         # Manual confirmation is a task-level observation, not an automatic
@@ -59,6 +60,15 @@ class ManualNavigation(RuntimeShadowNavigation):
         self.route=copy.deepcopy(place['route'])
         self.route_index=0
         return ack
+
+    def retarget(self,place,old_handle,new_handle):
+        if self.handle!=old_handle or self.status!='running' or self.follow_active:
+            raise ValueError('Manual target no longer active')
+        self.handle=copy.deepcopy(new_handle)
+        self.request['pose']=copy.deepcopy(place['pose'])
+        self.confirmation=self.automatic_evidence=None
+        self.arrival_since=self.arrival_last_stamp=None
+        return dict(accepted=True,handle=copy.deepcopy(new_handle),execution_feedback=False)
 
     def start_follow(self,intent,handle):
         ack=super().start_follow(intent,handle)

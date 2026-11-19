@@ -42,16 +42,6 @@ def navigation_facts(session, goal, state, selected, proofs):
         if progress['status']!='met':
             return dict(status='unproven',reason=progress['reason'],route_progress=progress)
         checks['route_progress']=progress
-        requirement=goal['requirement']
-        if requirement.get('circuit'):
-            from .route import circuit_progress
-            segments=session.trajectory.snapshot(frame_id=proof['frame_id'],clock_domain=proof['context']['clock_domain'],
-                                              now=proof['stamp_s'])
-            circuit=circuit_progress(segments,session.catalog.regions[requirement['target_id']]['polygon'],
-                                     requirement['circuit'],proof)
-            checks['circuit']=circuit
-            if circuit['status']!='met':
-                return dict(status=circuit['status'],reason='circuit_not_verified',checks=checks)
     if goal['requirement']['kind']=='reference':
         import numpy as np
         actual=np.asarray(measured_pose,float);chosen=np.asarray(selected.get('pose'),float)
@@ -92,6 +82,23 @@ def stage_evidence(session, goal):
         missing.append('fresh_localization')
     if session.navigation.scope=='shadow':
         missing.append('execution_feedback_unavailable_in_shadow')
+    region_id=req.get('robot_inside_region_id')
+    if region_id:
+        from .tasks import inside
+        stamp=state.get('origin_stamp_s') if session.navigation.scope!='simulation' else state.get('stamp_s')
+        valid=(state.get('origin_frame_id')==session.catalog.value['frame_id'] if session.navigation.scope!='simulation'
+               else state.get('frame_id')==session.catalog.value['frame_id'])
+        valid=(valid and not state.get('input_stale') and state.get('localization_status','valid')=='valid' and
+               isinstance(pose,(tuple,list)) and len(pose)==3 and
+               all(type(v) in (int,float) and math.isfinite(v) for v in pose) and
+               type(stamp) in (int,float) and type(state.get('stamp_s')) in (int,float) and
+               0<=state['stamp_s']-stamp<=.5)
+        if session.navigation.scope!='simulation':
+            binding=state.get('map_binding') or {}
+            valid=valid and binding.get('valid') is True and binding.get('map_frame')==session.catalog.value['frame_id']
+        region_state='unknown' if not valid else 'inside' if inside(pose[:2],session.catalog.regions[region_id]['polygon']) else 'outside'
+        facts['completion_region']=dict(region_id=region_id,status=region_state,stamp_s=stamp if valid else None)
+        if region_state!='inside':missing.append('completion_region_'+region_state)
     rgb = (session.observation.record if session.observation else {})
     view = (session.spatial_view.record if session.spatial_view else {})
     if stage in ('navigation','seating'):

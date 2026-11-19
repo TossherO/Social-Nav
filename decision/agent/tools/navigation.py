@@ -132,6 +132,36 @@ class NavigationSkill:
         self._emit('follow_ack')
         return dict(status='accepted',handle=copy.deepcopy(handle),scope=self.navigation.scope,execution_completed=False)
 
+    def retarget(self,destination):
+        """Update the active seating goal without treating it as a completed stage."""
+        r=self.record;old=r['handle'];state=self.navigation.snapshot()
+        if (old is None or r['status'] not in ('running','blocked') or r['context_lost'] or
+                not r['connected'] or state.get('input_stale') or state.get('localization_status')!='valid' or
+                destination['goal_id']!=r['goal_id'] or not callable(getattr(self.navigation,'retarget',None))):
+            return dict(status='refused',reason='seating_target_no_longer_active')
+        new=copy.deepcopy(old);new['goal_revision']=r['goal_revision']+1
+        new['view_id']=destination['view_id']
+        try:
+            ack=self.navigation.retarget(destination,old,new)
+            if ack.get('accepted') is not True or ack.get('handle')!=new:raise ValueError('Retarget ACK invalid')
+        except IntentRejected as error:
+            return dict(status='refused',reason=str(error))
+        except (OSError,EOFError,ValueError) as error:
+            if self.navigation.scope=='live':
+                try:self.navigation.client.exchange('cancel_owned',dict(task_id=old['task_id'],call_id=old['call_id']))
+                except (OSError,EOFError,ValueError):pass
+            else:
+                try:self.navigation.cancel(old)
+                except (OSError,EOFError,ValueError):pass
+            r.update(status='stopping',reason='retarget_uncertain_'+type(error).__name__)
+            self._emit('navigation_stop_intent')
+            return dict(status='uncertain',reason=r['reason'])
+        r.update(goal_revision=new['goal_revision'],handle=new,selected_pose=copy.deepcopy(destination['pose']),
+                 status='running',reason=None,pending_completion=None)
+        self.last_stamp=None;self.blocked_since=None;self.blocked_notified=False
+        self._emit('navigation_retargeted')
+        return dict(status='accepted',handle=copy.deepcopy(new),execution_completed=False)
+
     def finish_follow(self, semantic):
         r=self.record;handle=r['handle'];state=self.navigation.snapshot()
         if (r['stage_type']!='follow' or handle is None or r['status'] not in ('running','blocked','shadow_proposed') or

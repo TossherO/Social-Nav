@@ -48,6 +48,7 @@ class Store:
         self.db.execute('CREATE TABLE IF NOT EXISTS request_images (digest TEXT PRIMARY KEY,url TEXT NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS keyframes (keyframe_id TEXT PRIMARY KEY, task_id TEXT, revision INTEGER, metadata TEXT, image BLOB)')
         self.db.execute('CREATE TABLE IF NOT EXISTS follow_references (task_id TEXT, revision INTEGER, goal_id TEXT, metadata TEXT, image BLOB, crop BLOB, PRIMARY KEY(task_id,revision,goal_id))')
+        self.db.execute('CREATE TABLE IF NOT EXISTS follow_reference_versions (reference_id TEXT PRIMARY KEY, task_id TEXT, revision INTEGER, goal_id TEXT, metadata TEXT, image BLOB, crop BLOB)')
         self.db.commit()
 
     def save(self, state, kind, value):
@@ -91,17 +92,25 @@ class Store:
 
     def follow_reference(self, record, image, crop):
         with self.db:
-            self.db.execute('INSERT INTO follow_references VALUES (?,?,?,?,?,?)',
-                (record['task_id'],record['task_revision'],record['goal_id'],encode(record),image,crop))
+            self.db.execute('INSERT OR IGNORE INTO follow_reference_versions VALUES (?,?,?,?,?,?,?)',
+                (record['reference_id'],record['task_id'],record['task_revision'],record['goal_id'],encode(record),image,crop))
 
-    def read_follow_reference(self, task_id, revision, goal_id):
+    def read_follow_reference(self, task_id, revision, goal_id, reference_id=None):
         import hashlib
         from perception.environment.context import fingerprint
-        row = self.db.execute('SELECT metadata,image,crop FROM follow_references WHERE task_id=? AND revision=? AND goal_id=?',
-                              (task_id,revision,goal_id)).fetchone()
+        if reference_id is None:
+            row=self.db.execute('SELECT metadata,image,crop FROM follow_reference_versions WHERE task_id=? AND revision=? AND goal_id=? ORDER BY rowid DESC LIMIT 1',
+                                (task_id,revision,goal_id)).fetchone()
+        else:
+            row=self.db.execute('SELECT metadata,image,crop FROM follow_reference_versions WHERE task_id=? AND revision=? AND goal_id=? AND reference_id=?',
+                                (task_id,revision,goal_id,reference_id)).fetchone()
+        if row is None:
+            row = self.db.execute('SELECT metadata,image,crop FROM follow_references WHERE task_id=? AND revision=? AND goal_id=?',
+                                  (task_id,revision,goal_id)).fetchone()
         if row is None:
             return None
         record, image, crop = json.loads(row[0]), bytes(row[1]), bytes(row[2])
+        if reference_id is not None and record.get('reference_id')!=reference_id:return None
         if (record['reference_id'] != fingerprint({k:v for k,v in record.items() if k != 'reference_id'}) or
                 record['image_sha256'] != hashlib.sha256(image).hexdigest() or
                 record['crop_sha256'] != hashlib.sha256(crop).hexdigest()):
@@ -149,7 +158,7 @@ class Budget:
             if recorded_model==model and mode==thinking_mode and type(value) is int and value>=0:
                 values.append(value)
                 if len(values)==16:break
-        estimated=math.ceil(sum(values)/len(values)) if values else (1024 if thinking_mode=='low' else 512)
+        estimated=math.ceil(sum(values)/len(values)) if values else (1024 if thinking_mode in ('low','medium') else 512)
         return min(maximum,max(1,estimated))
 
     def finish(self, call_id, record):

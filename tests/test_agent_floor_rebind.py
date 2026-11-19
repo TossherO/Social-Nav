@@ -76,7 +76,7 @@ class FloorRebindTests(unittest.TestCase):
                     dict(point_goal('elevator'),floor_id='floor1')])
                 transition=ElevatorTransition(task_id=session.state['task_id'],goal_id='lift',from_floor='floor2',
                                               to_floor='floor1',destination_map_id='new-map')
-                for seq,judgment in enumerate(('inside','outside')):
+                for seq,judgment in enumerate(('not_completed','completed')):
                     transition.observe(camera_record=dict(source='ros_camera_independent_of_localization',
                         clock_domain='ros_time',frame_id='camera',stamp_s=10.+seq,sequence=seq),
                         image=b'\xff\xd8test\xff\xd9',judgment=judgment,evidence='可见场景')

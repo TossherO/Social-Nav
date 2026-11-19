@@ -1,10 +1,11 @@
-"""One display/navigation proposal from a current RGB-lidar table observation."""
+"""Continuously select a table approach from current RGB-lidar observations."""
 import copy
 import threading
 import time
 from collections import deque
 
 import numpy as np
+import cv2
 
 from decision.vlm.image_inputs import camera_calibration
 from decision.vlm.online import OnlineDecision
@@ -22,12 +23,22 @@ class SeatingWorker:
         self.thread = None
         self.result = None
         self.closed = False
+        self.active = None
+        self.epoch = 0
+        self.sequence = 0
+        self.last_stamp = None
 
     def observe(self, scene, observation, image, points, camera, received):
         if points is None or camera is None:
             return
         with self.lock:
             self.frames.append((scene, observation, image, points, camera, received))
+            if (self.active is not None and (self.thread is None or not self.thread.is_alive()) and
+                    self.last_stamp is not None and scene.record['as_of']>self.last_stamp):
+                value,original,original_edge,epoch=self.active
+                self.thread=threading.Thread(target=self._run,args=(value,original,original_edge,epoch),
+                    name='seating-t3',daemon=True)
+                self.thread.start()
 
     def update_scene(self,scene,measured_mono):
         with self.lock:
@@ -43,13 +54,16 @@ class SeatingWorker:
                 not (0<=roi[0]<roi[2]<=1 and 0<=roi[1]<roi[3]<=1)):
             raise ValueError('Normalized table ROI must lie within the current RGB')
         with self.lock:
-            if self.closed or self.thread and self.thread.is_alive():
+            if self.closed or self.active is not None or self.thread and self.thread.is_alive():
                 raise ValueError('seating_selection_busy')
             original=next((f for f in reversed(self.frames) if f[1].record['input_fingerprint']==value['observation_binding']),None)
             if original is None:
                 raise ValueError('seating_rgb_observation_expired')
             self.result=dict(status='selecting',selection_id=value['selection_id'])
-            self.thread=threading.Thread(target=self._run,args=(copy.deepcopy(value),original),name='seating-t3',daemon=True)
+            self.epoch+=1;self.sequence=0;self.last_stamp=None
+            value=copy.deepcopy(value)
+            self.active=(value,original,None,self.epoch)
+            self.thread=threading.Thread(target=self._run,args=(value,original,None,self.epoch),name='seating-t3',daemon=True)
             self.thread.start()
         return dict(accepted=True,selection_id=value['selection_id'],executable=False,execution_feedback=False)
 
@@ -70,6 +84,45 @@ class SeatingWorker:
                 raise ValueError('seating_observation_unavailable')
             return self.frames[-1]
 
+    def cancel(self, selection_id):
+        with self.lock:
+            if self.active is None or self.active[0]['selection_id']!=selection_id:
+                return dict(accepted=False,error='seating_selection_not_active')
+            self.epoch+=1;self.active=None
+            self.result=dict(status='cancelled',selection_id=selection_id)
+        return dict(accepted=True,selection_id=selection_id,execution_feedback=False)
+
+    def _project_roi(self,frame,edge):
+        scene,_,rgb,_,camera,_=frame
+        world=np.asarray(edge['observed_segment_xyz'],dtype=float)
+        lidar_from_world=np.linalg.inv(np.asarray(scene.record['localization']['world_from_lidar']))
+        transform=np.asarray(self.calibration['matrix'])@lidar_from_world
+        optical=world@transform[:3,:3].T+transform[:3,3]
+        if np.any(optical[:,2]<=.3):raise ValueError('seating_table_out_of_view')
+        uv=cv2.projectPoints(optical,np.zeros(3),np.zeros(3),np.asarray(camera['K']).reshape(3,3),
+                             np.asarray(camera['D'],dtype=float))[0].reshape(-1,2)
+        h,w=rgb.shape[:2]
+        # Expand around the projected supported edge to include nearby surface returns.
+        lo=uv.min(axis=0)-[.08*w,.15*h];hi=uv.max(axis=0)+[.08*w,.15*h]
+        lo=np.maximum(lo,[0,0]);hi=np.minimum(hi,[w,h])
+        if np.any(hi-lo<4):raise ValueError('seating_table_out_of_view')
+        return [float(lo[0]/w),float(lo[1]/h),float(hi[0]/w),float(hi[1]/h)]
+
+    @staticmethod
+    def _same_edge(reference,current,margin):
+        a=np.asarray(reference['observed_segment_xyz'],dtype=float)
+        b=np.asarray(current['observed_segment_xyz'],dtype=float)
+        direction=a[1,:2]-a[0,:2];length=np.linalg.norm(direction)
+        other=b[1,:2]-b[0,:2];other_length=np.linalg.norm(other)
+        if length<.1 or other_length<.1:return False
+        direction/=length;other/=other_length
+        normal=np.array([-direction[1],direction[0]])
+        along=(b[:,:2]-a[0,:2])@direction
+        return bool(abs(direction@other)>.94 and
+            np.max(np.abs((b[:,:2]-a[0,:2])@normal))<=margin and
+            abs(np.mean(b[:,2])-np.mean(a[:,2]))<=margin and
+            max(along.min(),0.)<=min(along.max(),length)+margin)
+
     @staticmethod
     def _binding(scene):
         record=scene.record
@@ -81,19 +134,19 @@ class SeatingWorker:
         return ([record[k] for k in ('session_id','generation','frame_id')],record['clock_domain'],
                 {k:prior.get(k) for k in ('map_id','map_frame','map_revision','association_session','association_generation')})
 
-    def _run(self,value,original):
+    def _run(self,value,original,original_edge,epoch):
         result=dict(selection_id=value['selection_id'],observation_binding=value['observation_binding'])
         try:
-            original_edge=self._edge(original,value['roi'])
+            if original_edge is None:original_edge=self._edge(original,value['roi'])
             frame=self._latest()
             scene,obs=frame[:2]
             binding=self._binding(scene)
             if self._binding(original[0])!=binding:
                 raise ValueError('seating_observation_identity_changed')
-            edge=self._edge(frame,value['roi'])
+            roi=value['roi'] if frame is original else self._project_roi(frame,original_edge)
+            edge=self._edge(frame,roi)
             margin=self.planning['safety_margin_m']
-            if np.max(np.linalg.norm(np.asarray(original_edge['observed_segment_xyz'])-
-                    edge['observed_segment_xyz'],axis=1))>margin:
+            if not self._same_edge(original_edge,edge,margin):
                 raise ValueError('seating_table_edge_changed')
             poses=segment_candidates(edge,self.geometry.footprint,[2*margin],margin,3)
             if not poses:raise ValueError('seating_edge_too_short_for_vehicle')
@@ -141,7 +194,19 @@ class SeatingWorker:
                 local_identity=binding[0],clock_domain=binding[1],map_binding=binding[2])
         except Exception as error:
             result.update(status='unavailable',reason=str(error)[:240] if isinstance(error,ValueError) else type(error).__name__)
-        with self.lock:self.result=result
+        with self.lock:
+            if self.closed or self.active is None or epoch!=self.epoch:return
+            self.sequence+=1;result['sequence']=self.sequence
+            self.result=result
+            if result['status']=='selected':
+                self.last_stamp=result['source_stamp_s']
+                self.active=(value,original,original_edge,epoch)
+                if self.frames and self.frames[-1][0].record['as_of']>self.last_stamp:
+                    self.thread=threading.Thread(target=self._run,args=(value,original,original_edge,epoch),
+                        name='seating-t3',daemon=True)
+                    self.thread.start()
+            else:
+                self.active=None
 
     def snapshot(self):
         with self.lock:return copy.deepcopy(self.result)
@@ -149,5 +214,6 @@ class SeatingWorker:
     def close(self):
         with self.lock:
             self.closed=True
+            self.epoch+=1;self.active=None
             self.frames.clear()
         if self.thread:self.thread.join(timeout=2.)

@@ -66,6 +66,9 @@ class ElevatorCamera:
             with self.lock:self.error=type(error).__name__
 
     def snapshot(self, *, max_receive_age_s=2.):
+        poll=getattr(self.process,'poll',None)
+        if callable(poll) and poll() is not None:
+            return dict(status='unavailable',reason='elevator_sensor_bridge_exited')
         with self.lock:value=copy.deepcopy(self.latest);error=self.error
         if error is not None:return dict(status='unavailable',reason='invalid_camera_stream')
         if value is None:return dict(status='unavailable',reason='camera_frame_missing')

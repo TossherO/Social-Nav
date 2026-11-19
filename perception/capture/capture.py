@@ -41,6 +41,19 @@ def save(path, value):
     temporary.replace(path)
 
 
+def recording_status(args, status, **fields):
+    if getattr(args,'status_file',None):
+        save(Path(args.status_file),dict(status=status,updated_at=now(),**fields))
+
+
+def stop_when_parent_exits(parent_pid):
+    """An orphaned recorder finishes normally instead of recording indefinitely."""
+    while not STOP.wait(.25):
+        if os.getppid()!=parent_pid:
+            STOP.set()
+            return
+
+
 @contextmanager
 def exclusive(name):
     lock_dir = ROOT/'outputs/local_capture'
@@ -236,6 +249,7 @@ def record(args):
         return 0
     if not Path(RECORDER).is_file():
         raise RuntimeError('找不到 ROS bag 录制程序：'+RECORDER)
+    recording_status(args,'preparing')
     with exclusive('recorder'):
         value = master()
         wall_clock(value)
@@ -254,6 +268,7 @@ def record(args):
                           topics=TOPICS, clock_group=args.clock_group, command=command,
                           complete=False, status='recording', autonomous_navigation=False)
             save(output/'capture.json', report)
+            recording_status(args,'starting',bag=str(bag),capture_report=str(output/'capture.json'))
             process = None
             reason = 'recorder_finished'
             try:
@@ -262,6 +277,7 @@ def record(args):
                                                start_new_session=True)
                     print('正在录制：{}\n按 Ctrl+C 正常结束，随后会自动检查和刷盘。'.format(bag), flush=True)
                     next_status = time.monotonic()+10.
+                    ready=False
                     while process.poll() is None:
                         if STOP.wait(.25):
                             reason = 'operator_stop'
@@ -270,11 +286,20 @@ def record(args):
                             reason = 'low_disk_space'
                             print('剩余空间低于 5 GiB，正在正常停止录制。', flush=True)
                             break
+                        active=Path(str(bag)+'.active')
+                        # The file header alone does not prove that any message
+                        # reached the recorder. Wait until recorded data exists.
+                        try:active_size=active.stat().st_size
+                        except FileNotFoundError:active_size=0
+                        if not ready and active_size>8192:
+                            ready=True
+                            recording_status(args,'recording',bag=str(bag),capture_report=str(output/'capture.json'))
                         if time.monotonic() >= next_status:
                             active = Path(str(bag)+'.active')
                             size = active.stat().st_size if active.exists() else 0
                             print('录制中：{:.2f} GiB；剩余 {:.1f} GiB'.format(size/1024**3, available(output)/1024**3), flush=True)
                             next_status = time.monotonic()+10.
+                    recording_status(args,'finalizing',bag=str(bag),capture_report=str(output/'capture.json'))
                     stop_process(process)
                 report.update(recorder_exit_code=process.returncode, stop_reason=reason)
                 warnings = []
@@ -290,6 +315,7 @@ def record(args):
                 report['complete'] = process.returncode == 0 and reason != 'low_disk_space' and not warnings
                 report['status'] = 'saved' if report['complete'] else 'needs_review'
                 finish_bag(bag, output, report, args.clock_group)
+                recording_status(args,report['status'],bag=str(bag),capture_report=str(output/'capture.json'))
                 if not report['complete']:
                     print('文件已保留，但录制存在异常或丢帧警告，请检查 record.log。\n'+ '\n'.join(tail), flush=True)
                     return 1
@@ -298,6 +324,7 @@ def record(args):
             except BaseException as error:
                 report.update(complete=False, status='failed', error=type(error).__name__+': '+str(error))
                 save(output/'capture.json', report)
+                recording_status(args,'failed',bag=str(bag),capture_report=str(output/'capture.json'),error=str(error)[:300])
                 raise
             finally:
                 stop_process(process)
@@ -330,16 +357,32 @@ def main(argv=None):
     capture.add_argument('--clock-group', help='可选：由操作者明确声明的连续驱动会话标识')
     capture.add_argument('--note', default='', help='地点、雷达起点位置与朝向等人工记录')
     capture.add_argument('--dry-run', action='store_true', help='只打印计划，不连接 ROS 或创建 bag')
+    capture.add_argument('--status-file', help=argparse.SUPPRESS)
+    capture.add_argument('--parent-pid', type=int, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.command == 'record' and args.clock_group is not None:
         from perception.sensors.clock_session import clock_group
         clock_group(args.clock_group)
     STOP.clear()
+    if args.command=='record' and args.status_file:
+        status=Path(args.status_file)
+        if status.exists() or status.is_symlink() or not status.parent.is_dir():
+            raise ValueError('录制状态文件必须是已有目录下的新文件')
+    if args.command=='record' and args.parent_pid is not None:
+        if args.parent_pid!=os.getppid():raise ValueError('录制父进程身份不匹配')
+        threading.Thread(target=stop_when_parent_exits,args=(args.parent_pid,),daemon=True).start()
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(number, lambda *_: STOP.set())
     try:
         return sensors(args) if args.command == 'sensors' else record(args)
     except Exception as error:
+        if args.command=='record':
+            try:
+                path=Path(args.status_file) if args.status_file else None
+                previous=json.loads(path.read_text()) if path and path.is_file() else {}
+                recording_status(args,'failed',error=str(error)[:300],
+                                 **{k:previous[k] for k in ('bag','capture_report') if k in previous})
+            except OSError:pass
         print('采集失败：'+str(error), file=sys.stderr, flush=True)
         return 1
 

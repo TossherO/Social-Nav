@@ -41,8 +41,12 @@ def parser():
     p.add_argument('--record-planning',action='store_true',help='Bounded asynchronous planning evidence: 2 Hz maps plus footprint/ground/budget failure snapshots; preserves normal map scheduling')
     p.add_argument('--trace-timing',action='store_true',help='Bounded scalar timing events, flushed at shutdown; no map/image recording or scheduling change')
     p.add_argument('--record-decision-inputs',action='store_true',help='Optional VLM worker: prepare YOLO associations and freeze causal three-frame task windows; no VLM request')
+    p.add_argument('--record-t2-requests',action='store_true',help='Save actual T2 requests and results locally, including RGB images')
     p.add_argument('--agent-observations',action='store_true',help='Bounded optional Agent RGB/scene outlet; no YOLO, API or chassis output')
     p.add_argument('--agent-follow-candidates',action='store_true',help='Enable optional continuous T2 follow input and candidate preparation')
+    p.add_argument('--t2-backend',choices=('dspark','hosted'),help='Explicit T2 inference backend; otherwise use the local override or dspark')
+    p.add_argument('--t2-jpeg-quality',type=int,help='Optional T2 JPEG image quality (1..95)')
+    p.add_argument('--t2-raw-rgb',action='store_true',help='Experimental nonexecuting T2 without 2D detection or association')
     p.add_argument('--agent-seating',action='store_true',help='Enable current RGB/lidar table-edge selection for T3')
     p.add_argument('--agent-execution',action='store_true',help='Allow owned Agent goal intents through the existing safety path; requires manual arming')
     p.add_argument('--no-image',action='store_true',help='Compatibility flag: the core never loads YOLO; disallows optional VLM image preparation')
@@ -87,6 +91,14 @@ def _runtime_inputs(args):
         raise ValueError('--agent-execution requires --execute and --agent-observations')
     if args.agent_follow_candidates and (not args.agent_observations or args.no_image):
         raise ValueError('--agent-follow-candidates requires --agent-observations and RGB input')
+    if args.t2_backend and not args.agent_follow_candidates:
+        raise ValueError('--t2-backend requires --agent-follow-candidates')
+    if args.t2_raw_rgb and (not args.agent_follow_candidates or args.execute or args.agent_execution):
+        raise ValueError('--t2-raw-rgb requires follow candidates and nonexecuting observation')
+    if args.t2_jpeg_quality is not None and (not args.agent_follow_candidates or not 1<=args.t2_jpeg_quality<=95):
+        raise ValueError('--t2-jpeg-quality requires --agent-follow-candidates and quality in 1..95')
+    if args.record_t2_requests and not args.agent_follow_candidates:
+        raise ValueError('--record-t2-requests requires --agent-follow-candidates')
     if args.agent_seating and (not args.agent_observations or args.no_image or not args.live):
         raise ValueError('--agent-seating requires live agent observations with RGB')
     if args.chassis_port and not args.execute:raise ValueError('--chassis-port requires --execute')
@@ -304,17 +316,23 @@ def _run(args, resources, handles):
             metrics=metrics,geometry=geometry,seating=commands.agent_state.seating)
     if args.agent_follow_candidates:
         from .follow_decision import FollowDecisionWorker
+        from decision.vlm.follow_hosted import follow_backend
         from decision.agent.adapters.runtime import follow_observation
         from navigation.search import follow_candidates
-        def publish_agent_frame(handle,scene,pixels,association,camera_info):
-            observation=follow_observation(scene,pixels,association,geometry,camera_info)
-            commands.agent_state.publish_observation(observation.record,observation.image,follow_handle=handle)
+        def publish_agent_frame(handle,scene,pixels,association,camera_info,*,image_metadata=None):
+            observation=follow_observation(scene,pixels,association,geometry,camera_info,image_metadata=image_metadata)
+            if handle is None:commands.agent_state.publish_follow_candidate(observation.record,observation.image)
+            else:commands.agent_state.publish_observation(observation.record,observation.image,follow_handle=handle)
         def search_factory(source,context):
             value=context or {}
             return follow_candidates(source,asset,geometry,value.get('last'),anchor=value.get('anchor'),
                                      margin=planning['safety_margin_m'])
         follow_decision = resources['follow_decision'] = FollowDecisionWorker(search_factory,metrics=metrics,image_policy=det_cfg['image_association'],
-                                             camera_calibration=args.camera_calibration,publish_agent_frame=publish_agent_frame)
+                                             camera_calibration=args.camera_calibration,publish_agent_frame=publish_agent_frame,
+                                             backend=follow_backend(args.t2_backend),
+                                             record_directory=output/'t2_requests' if args.record_t2_requests else None,
+                                             jpeg_quality=args.t2_jpeg_quality,raw_rgb=args.t2_raw_rgb,
+                                             preview_requested=commands.agent_state.follow_candidates_requested if args.t2_raw_rgb else None)
     first_observation = None
     state_parent.close()
     parent, child = _socket_pair(handles)
@@ -322,7 +340,11 @@ def _run(args, resources, handles):
     worker = reader = None
     names=('localization','people','control','safety','reference')+(('route',) if route_replay is not None else ())
     streams = {name: handles.enter_context((output / (name + '.jsonl')).open('x')) for name in names}
-    def record(name,value):streams[name].write(json.dumps(value,allow_nan=False,separators=(',',':'))+'\n')
+    def record(name,value):
+        streams[name].write(json.dumps(value,allow_nan=False,separators=(',',':'))+'\n')
+        # T2 outcomes are consumed by the offline replay monitor while the run is active.
+        if name=='reference' and value.get('event','').startswith('follow_t2_'):
+            streams[name].flush()
     scene=None;next_env=-np.inf;next_export=-np.inf;control_loop=None;safety_telemetry=None;initial_goal=None;map_worker=None;map_stream=None;scan_inbox=None;input_epoch=None
     if args.goal is not None:
         initial_goal=dict(request_id='runtime-goal',task_id='runtime-shadow',goal_revision=0,mode='mapped' if args.goal_frame=='map' else 'local',
@@ -568,6 +590,8 @@ def _run(args, resources, handles):
         manifest['interactive']=dict(enabled=args.interactive_session,execution_requested=args.execute,
             vehicle_source=motion.get('vehicle_source'),chassis_port=args.chassis_port,
             physical_acceptance=False,task_completed=False)
+        manifest['t2_follow']=dict(enabled=follow_decision is not None,
+                                   backend=None if follow_decision is None else follow_decision.backend)
         if route_replay is not None:manifest['route_replay']=route_replay.summary()
         if decision_report is not None:manifest['decision_inputs']=dict(directory='decision_inputs',**decision_report)
         if mode in ('mapping','localization'):

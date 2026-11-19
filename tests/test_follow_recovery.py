@@ -17,10 +17,14 @@ from tests.test_agent import ScriptedFeedback
 from tests.test_decision_runtime import observation
 
 
-def candidate_observation(stamp,track_id='a',*,associated=True):
+def candidate_observation(stamp,track_id='a',*,associated=True,mapped=False):
     row,arrays,_,scene=observation(stamp)
     row['tracks'][0]['track_id']=track_id
     row['input_fingerprint']=fingerprint({k:v for k,v in row.items() if k!='input_fingerprint'})
+    if mapped:
+        from tests.navigation_fixtures import bundle
+        scene.geometry.metadata['association']=copy.deepcopy(bundle().geometry.metadata['association'])
+        scene.geometry.metadata['association'].update(stamp_s=stamp,measurement_stamp_s=stamp-.1)
     scene=assemble_scene(scene.geometry,clock_domain='synthetic',people=row,settings=load_config()['scene'])
     detections=[dict(box=[20.,5.,35.,40.],score=.9,class_id=0)]
     association=dict(status='complete',tracks={track_id+'/g7':dict(status='matched' if associated else 'unmatched',
@@ -40,7 +44,7 @@ class FollowInterfaceTests(unittest.TestCase):
                 session=AgentSession('跟随红衣人物',Catalog(catalog),nav,store)
                 session.call('record_task',goals=[dict(goal_id='g',kind='skill',stage_type='follow',
                     target_id='',description='跟随红衣人物')])
-                self.assertNotIn('select_follow_target',session.registry)
+                self.assertIn('select_follow_target',session.registry)
                 self.assertNotIn('request_follow_recovery',session.registry)
                 self.assertEqual(session.call('start_local_task',goal_id='g',task_type='follow',target_description='红衣人物')['status'],'refused')
                 self.assertIsNone(session.skill.record['handle'])

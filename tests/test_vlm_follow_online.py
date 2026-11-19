@@ -1,7 +1,9 @@
 import copy
 import json
 import re
+import tempfile
 import unittest
+from pathlib import Path
 
 import httpx
 
@@ -49,6 +51,50 @@ class FollowOnlineTests(unittest.TestCase):
         self.assertEqual(result['reason'],'invalid_t2_response')
         self.assertEqual(result['raw_content'],'C')
 
+    def test_hosted_backend_uses_same_candidates_and_validates_raw_response(self):
+        from decision.agent.core.store import Budget
+        from decision.vlm.follow_hosted import hosted_body
+        prepared=prepare(self.window,self.images,'red jacket',self.search)
+        with tempfile.TemporaryDirectory() as directory:
+            config=Path(directory)/'config.json';config.write_text(json.dumps(dict(base_url='https://example.invalid/v1',api_key='fixture')))
+            requests=[]
+            def factory_for(raw):
+                def respond(request):
+                    requests.append(json.loads(request.content))
+                    event=dict(model='qwen3.8-flash',choices=[dict(index=0,delta=dict(content=raw),finish_reason='stop')],
+                               usage=dict(prompt_tokens=100,completion_tokens=8))
+                    return httpx.Response(200,text='data: '+json.dumps(event)+'\n\ndata: [DONE]\n\n')
+                return lambda **kw:httpx.Client(transport=httpx.MockTransport(respond),**kw)
+            budget=lambda:Budget(Path(directory)/'budget.sqlite')
+            request=FollowRequest(prepared)
+            result=request.infer(backend='hosted',private_config=config,budget_factory=budget,
+                                 client_factory=factory_for('{"target":"P0","observation":null}'))
+            self.assertEqual(result['status'],'complete');self.assertEqual(result['backend'],'hosted')
+            self.assertEqual(request.accept(result)['kind'],'person')
+            body=requests[-1]
+            self.assertEqual(body['model'],'qwen3.8-flash');self.assertEqual(body['response_format'],{'type':'json_object'})
+            self.assertFalse(body['enable_thinking']);self.assertNotIn('regex',body)
+            self.assertEqual(body['messages'][1],prepared['body']['messages'][1])
+            self.assertIn('LETTER KEY',body['messages'][0]['content'])
+            self.assertEqual(result['transport_request_binding'],fingerprint(body))
+            for raw in ('{"target":"P9","observation":null}',
+                        '{"target":"P0","observation":"A"}',
+                        '{"target":"P0","target":"P0","observation":null}'):
+                result=FollowRequest(prepared).infer(backend='hosted',private_config=config,budget_factory=budget,client_factory=factory_for(raw))
+                self.assertEqual(result['status'],'unavailable');self.assertEqual(result['reason'],'invalid_t2_response')
+                self.assertEqual(result['raw_content'],raw)
+
+    def test_follow_backend_is_explicit_and_never_falls_back(self):
+        from decision.vlm.follow_hosted import follow_backend
+        with tempfile.TemporaryDirectory() as root:
+            path=Path(root)/'backend.json'
+            self.assertEqual(follow_backend(path=path),'dspark')
+            path.write_text('{"backend":"hosted"}')
+            self.assertEqual(follow_backend(path=path),'hosted')
+            self.assertEqual(follow_backend('dspark',path=path),'dspark')
+            path.write_text('{"backend":"unknown"}')
+            with self.assertRaises(ValueError):follow_backend(path=path)
+
     def test_truncated_or_invalid_structured_completion_is_not_accepted(self):
         prepared=prepare(self.window,self.images,'red jacket',self.search)
         for raw,finish in [('{"target":"P0","observation":null}','length'),
@@ -73,6 +119,27 @@ class FollowOnlineTests(unittest.TestCase):
         prepared=prepare(self.window,self.images,'red jacket',self.search)
         prepared['choices']['P0']['identity']=['wrong']
         with self.assertRaises(ValueError):FollowRequest(prepared).infer()
+
+    def test_jpeg_transport_preserves_source_binding_and_candidate_mapping(self):
+        import base64
+        import io
+        from PIL import Image
+        original=prepare(self.window,self.images,'red jacket',self.search)
+        compressed=prepare(self.window,self.images,'red jacket',self.search,jpeg_quality=70)
+        self.assertEqual(compressed['window_binding'],original['window_binding'])
+        self.assertEqual(compressed['source_stamp_s'],original['source_stamp_s'])
+        self.assertEqual(compressed['choices'],original['choices'])
+        self.assertNotEqual(compressed['binding'],original['binding'])
+        pictures=[p['image_url']['url'] for m in compressed['body']['messages'] if isinstance(m['content'],list)
+                  for p in m['content'] if p.get('type')=='image_url']
+        self.assertEqual(len(pictures),3)
+        for url in pictures:
+            self.assertTrue(url.startswith('data:image/jpeg;base64,'))
+            image=Image.open(io.BytesIO(base64.b64decode(url.split(',',1)[1],validate=True)))
+            self.assertEqual(image.format,'JPEG');self.assertEqual(image.size,(1280,576))
+        with self.assertRaises(ValueError):prepare(self.window,self.images,'red jacket',self.search,jpeg_quality=0)
+        with self.assertRaises(ValueError):prepare(self.window,(self.images[0]+b'x',*self.images[1:]),
+                                                  'red jacket',self.search,jpeg_quality=70)
 
     def test_prediction_is_explicitly_opt_in(self):
         person=dict(kind='track',box=[0,0,0,1,1,1,0],confirmed=True,observed=False)

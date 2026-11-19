@@ -16,6 +16,15 @@ from runtime.command import CommandInbox
 from runtime.control import ControlLoop
 from runtime.follow import FollowRunner
 from tests.test_follow_continuity import reference,scene
+from tests.test_follow_recovery import candidate_observation
+from decision.vlm.follow_target import reference as visual_reference
+
+
+def install_reference(inbox,handle,description='red jacket'):
+    obs=candidate_observation(10.,mapped=True)
+    ref,_,_=visual_reference(obs,0,description,task_id=handle['task_id'],revision=handle['plan_revision'],goal_id=handle['goal_id'])
+    inbox.agent_state.publish_follow_candidate(obs.record,obs.image)
+    return ref,obs.record['map_binding']
 
 
 class FollowIpcTests(unittest.TestCase):
@@ -37,17 +46,17 @@ class FollowIpcTests(unittest.TestCase):
                 inbox.agent_state.publish_control(packet,map_binding=dict(valid=True))
                 self.assertTrue(client.exchange('hold',dict(task_id='f',goal_revision=1))['accepted'])
                 handle=dict(task_id='f',goal_id='g',plan_revision=1,goal_revision=2,call_id='follow')
-                initial=scene(10.);ref=reference(initial);ref.update(task_revision=1,goal_id='g')
-                ref['reference_id']=fingerprint({k:v for k,v in ref.items() if k!='reference_id'})
+                ref,binding=install_reference(inbox,handle)
+                inbox.agent_state.publish_control(packet,map_binding=binding)
                 with self.assertRaisesRegex(ValueError,'previous_agent_goal_not_completed'):
-                    client.exchange('follow_start',dict(handle=handle,intent=dict(target_description='red jacket')))
+                    client.exchange('follow_start',dict(handle=handle,intent=dict(target_description='red jacket',reference=ref)))
                 packet.update(request=None)
                 localization=dict(health=0,session_id='s',generation=0,frame_id='odom')
                 idle=dict(status='valid',source='causal_algorithm_poses_not_chassis_feedback',
                           local_identity=['s',0,'odom'],stamp_s=10.,velocity=[0.,0.])
-                inbox.agent_state.publish_control(packet,localization,map_binding=dict(valid=True),
+                inbox.agent_state.publish_control(packet,localization,map_binding=binding,
                     cancelled_request=dict(task_id='f',goal_revision=1),idle_feedback=idle)
-                self.assertTrue(client.exchange('follow_start',dict(handle=handle,intent=dict(target_description='red jacket')))['accepted'])
+                self.assertTrue(client.exchange('follow_start',dict(handle=handle,intent=dict(target_description='red jacket',reference=ref)))['accepted'])
                 self.assertTrue(client.exchange('follow_finish',dict(call_id='follow'))['accepted'])
                 next_goal=dict(goal,request_id='nav2',goal_revision=3)
                 with self.assertRaisesRegex(ValueError,'previous_agent_goal_not_completed'):
@@ -70,9 +79,9 @@ class FollowIpcTests(unittest.TestCase):
                                                   map_binding=dict(valid=True))
                 client=LiveRuntimeClient(inbox.path)
                 handle=dict(task_id='f',goal_id='g',plan_revision=1,goal_revision=1,call_id='call')
-                initial=scene(10.);ref=reference(initial);ref.update(task_revision=1,goal_id='g')
-                ref['reference_id']=fingerprint({k:v for k,v in ref.items() if k!='reference_id'})
-                self.assertTrue(client.exchange('follow_start',dict(handle=handle,intent=dict(target_description='red jacket')))['accepted'])
+                ref,binding=install_reference(inbox,handle)
+                inbox.agent_state.publish_control(dict(request=None,stamp_s=10.,clock_domain='synthetic',feedback={}),map_binding=binding)
+                self.assertTrue(client.exchange('follow_start',dict(handle=handle,intent=dict(target_description='red jacket',reference=ref)))['accepted'])
                 inbox.drain()
                 self.assertTrue(client.exchange('follow_lost',dict(call_id='call',reason='follow_visual_lost'))['accepted'])
                 self.assertEqual(events[-1][0],'goal_hold')
@@ -94,9 +103,12 @@ class FollowIpcTests(unittest.TestCase):
                 inbox.agent_state.publish_control(packet,map_binding=dict(valid=True))
                 client=LiveRuntimeClient(inbox.path)
                 handle=dict(task_id='f',goal_id='g',plan_revision=1,goal_revision=1,call_id='call')
-                initial=scene(10.);ref=reference(initial);ref.update(task_revision=1,goal_id='g')
-                ref['reference_id']=fingerprint({k:v for k,v in ref.items() if k!='reference_id'})
-                self.assertTrue(client.exchange('follow_start',dict(handle=handle,intent=dict(target_description='red jacket')))['accepted'])
+                ref,binding=install_reference(inbox,handle)
+                inbox.agent_state.publish_control(packet,map_binding=binding)
+                corrupted=dict(ref,crop_sha256='0'*64)
+                with self.assertRaisesRegex(ValueError,'reference_mismatch'):
+                    client.exchange('follow_start',dict(handle=handle,intent=dict(target_description='red jacket',reference=corrupted)))
+                self.assertTrue(client.exchange('follow_start',dict(handle=handle,intent=dict(target_description='red jacket',reference=ref)))['accepted'])
                 inbox.agent_owner['heartbeat_mono']=time.monotonic()-4.
                 client.snapshot()
                 self.assertGreater(time.monotonic()-inbox.agent_owner['heartbeat_mono'],3.)

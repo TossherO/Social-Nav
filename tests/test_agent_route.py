@@ -49,19 +49,6 @@ class RouteFeedback(ScriptedFeedback):
 
 
 class AgentRouteTests(unittest.TestCase):
-    def test_circuit_uses_continuous_measured_direction(self):
-        from decision.agent.core.route import circuit_progress
-        poly=[[-.3,-.3],[.3,-.3],[.3,.3],[-.3,.3]]
-        samples=[dict(stamp_s=i*.1,pose=[math.cos(i*math.pi/8),math.sin(i*math.pi/8),0]) for i in range(17)]
-        proof=dict(context={},route_start_stamp_s=0.,stamp_s=1.6)
-        segment=dict(samples=samples)
-        self.assertEqual(circuit_progress([segment],poly,dict(turns=1),proof)['status'],'met')
-        self.assertEqual(circuit_progress([segment],poly,dict(turns=1,direction='clockwise'),proof)['status'],'not_met')
-        self.assertEqual(circuit_progress([dict(samples=samples[:8]),dict(samples=samples[8:])],
-                                         poly,dict(turns=1),proof)['status'],'unproven')
-        with_gap=[dict(p,stamp_s=p['stamp_s']+(4 if i>=8 else 0)) for i,p in enumerate(samples)]
-        self.assertEqual(circuit_progress([dict(samples=with_gap)],poly,dict(turns=1),
-                                          dict(proof,stamp_s=5.6))['status'],'unproven')
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         self.store=Store(Path(self.temp.name)/'session.sqlite')
@@ -352,6 +339,26 @@ class AgentRouteTests(unittest.TestCase):
         outcome=self.session.call('check_goal',goal_id='visit')
         self.assertEqual(outcome['status'],'completed')
         self.assertEqual(outcome['checks']['route_progress']['waypoint_count'],3)
+
+    def test_legacy_circuit_uses_generic_route_evidence_without_automatic_completion(self):
+        # A historical task may still contain circuit metadata. Passing ordered
+        # waypoints makes evidence available; it does not complete the user's
+        # semantic requirement or add a separate geometric circuit gate.
+        goal=dict(goal_id='loop',kind='route',target_id='lobby_area',description='绕区域一圈',
+                  circuit=dict(turns=1,direction='clockwise'))
+        self.assertEqual(self.session.call('record_task',goals=[goal])['status'],'recorded')
+        view=query_map(self.session)
+        ack=self.session.call('navigate_route',goal_id='loop',view_id=view,orientation_source='autonomous',
+                              waypoints=[[5.,4.],[6.,4.],[8.,4.]],final_yaw=0.)
+        self.assertEqual(ack['status'],'accepted')
+        for _ in range(4):self.session.tick()
+        from decision.agent.core.completion import stage_evidence
+        stage=self.session.task_goals.current('loop')
+        facts,_=stage_evidence(self.session,stage)
+        self.assertEqual(facts['status'],'available')
+        self.assertEqual(facts['checks']['route_progress']['waypoint_count'],3)
+        self.assertNotIn('circuit',facts['checks'])
+        self.assertEqual(stage['status'],'pending')
 
     def test_route_cancel_never_completes_requirement(self):
         goal=dict(goal_id='visit',kind='sequence',target_id='',description='经过电梯口和大厅门口',

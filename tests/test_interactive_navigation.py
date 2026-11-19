@@ -46,6 +46,15 @@ class PlaybackTests(unittest.TestCase):
         index=command.index('--environment-window-m')
         self.assertEqual(command[index+1],'12.0')
 
+    def test_follow_backend_is_frozen_for_floor_handoff(self):
+        from runtime.interactive import parser,runtime_command
+        args=parser().parse_args(['--live','--output','/tmp/example','--agent-observations',
+                                  '--agent-follow-candidates'])
+        config=dict(map='map',static_map='prior',coverage='coverage',motion_config='motion')
+        with patch('decision.vlm.follow_hosted.follow_backend',return_value='hosted'):
+            command=runtime_command(args,config,[0.]*6)
+        self.assertEqual(command[command.index('--t2-backend')+1],'hosted')
+
     def test_display_goal_follows_processed_intent_and_clears_on_cancel_or_replay_change(self):
         session=InteractiveSession(live=True,safety=None,output=Path('/tmp'))
         goal=dict(request_id='g',frame_id='map',goal=[1.,2.,.3])

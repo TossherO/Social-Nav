@@ -32,21 +32,22 @@ GOAL = parameters({
         description='仅用户明确要求必须满足、需到达后用RGB确认的条件；“尽量”要求只放visual_preferences，不要同时登记为硬条件。'),
     'visual_preferences': dict(type='array',items=TEXT,maxItems=8,
         description='用户提出的尽量满足的视觉偏好；不要把同一要求重复放入semantic_conditions，也不要推断用户要求固定面向或距离。'),
+    'robot_inside_region_id': dict(TEXT,description='仅用户明确要求完成时轮椅位于某标注区域内时填写该区域的正式 ID。'),
 }, ['goal_id', 'kind', 'target_id', 'description'])
 TOOL_SPECS = {
-    'pause_map_localization': ('乘梯前在来源楼层等候区停稳后，暂停地图定位并开始独立传感器观察。',
+    'pause_map_localization': ('在人工驾驶乘梯阶段关闭来源楼层观察定位并启动独立传感器观察，不要求停稳或来源地图关联有效。',
                                parameters({'goal_id':dict(TEXT,description='当前乘梯子任务的 goal_id。')},['goal_id'])),
     'restart_map_localization': ('出梯后留在目标楼层等候区。比较本轮局部雷达图和目标地图裁剪，选择车体初值。配准未成功时可重新选点。',
         parameters({'pose':dict(POSE,description='目标地图中的车体中心 [x米,y米,yaw弧度]'),
                     'evidence':dict(TEXT,description='本次扫描与目标地图中的对应结构')},['pose','evidence'])),
-    'record_elevator_observation': ('仅用于乘梯状态观察：结合当前及历史图像判断当前是否已进入或离开轿厢。证据不足选择unknown，不推断楼层，不把画面猜测当作定位结果。',
-        parameters({'judgment':dict(type='string',enum=['inside','outside','unknown'],description='当前画面能支持的轿厢内、轿厢外或未知。'),
+    'record_elevator_observation': ('结合任务、当前RGB、雷达及可选历史观察，判断是否完成乘梯；提供标准起点时判断是否已到标准起点并调整至参考朝向。不能确认时继续观察。判断不是目标地图定位结果。',
+        parameters({'judgment':dict(type='string',enum=['completed','not_completed','unknown'],description='已完成、尚未完成或证据不足；若有标准起点，完成表示已到该点并调整至参考朝向。'),
                     'evidence':dict(type='string',minLength=1,maxLength=512,description='简述画面中直接可见的依据。'),
                     'retain_observation':dict(type='boolean',description='当前观察是否值得保留供本次乘梯后续判断参考；乘梯结束后自动清除。')},
                    ['judgment','evidence','retain_observation'])),
     'record_task': ('登记用户提出的全部有序任务要求；只在 requirements_registered=false 时调用。先到某处并尽量观察，登记导航目标及视觉偏好，不要只登记无法移动的 observation 阶段。目标身份不清楚可先查询。登记不会执行导航。',
                     parameters({'goals': dict(type='array',items=GOAL,minItems=1,maxItems=16,
-                        description='原生 JSON 数组，按原指令顺序放入1至16个要求对象；例如 [{"goal_id":"g1","kind":"point","target_id":"p1","description":"到p1"}]。不要把数组写成字符串。')}, ['goals'])),
+                        description='按原指令顺序放入 1 至 16 个要求对象。')}, ['goals'])),
     'lookup_places': ('检索正式标注点和区域，返回身份与几何；目标名称不清楚时使用，不产生新对象。跨楼层任务可指定楼层。',
                       parameters({'name':dict(type='string',description='名称、别名或正式身份；空字符串返回全部登记对象。'),
                                   'floor_id':dict(TEXT,description='可选楼层身份；省略表示当前楼层。')}, ['name'])),
@@ -58,13 +59,20 @@ TOOL_SPECS = {
                                     'view_id':dict(TEXT,description='原样填写本轮当前空间图提供的短 view_id。'),
                                     'point_ids':dict(type='array',items=TEXT,maxItems=16,description='需要检查视野的已标注点ID；区域和未知目标不能当作点。')}, ['pose','view_id'])),
     'observe_scene': ('当前RGB缺失或需要显式重新读取时使用，返回available或不可用原因；不移动轮椅、不主动推进录包，等新帧用wait_for_event。', parameters()),
-    'start_local_task': ('启动当前跟随或桌边停靠。T2 持续选人，running 后再通知人物开始行走。T3 需要本轮图像中目标桌沿的区域。',
+    'select_follow_target': ('从本轮带编号的当前 RGB 人物候选中确认跟随对象，保存该人物的视觉参考。此操作不启动跟随或运动；观察不足时重新观察。',
+                 parameters({'goal_id':dict(TEXT,description='当前跟随阶段的 goal_id。'),
+                             'observation_id':dict(TEXT,description='本轮当前 RGB 的 observation_id。'),
+                             'candidate_id':dict(type='integer',minimum=0,description='RGB 标注中的人物候选编号。'),
+                             'target_description':dict(TEXT,description='与用户要求一致的目标外观描述。')},
+                            ['goal_id','observation_id','candidate_id','target_description'])),
+    'start_local_task': ('启动当前跟随或桌边停靠。跟随必须先调用 select_follow_target，再传其返回的 reference_id；系统使用已确认的描述，跟随时不需要重填描述。T2 running 后再通知人物行走。桌边停靠需要描述和本轮图像中的桌沿区域。',
         parameters({'goal_id':dict(TEXT,description='当前阶段的goal_id。'),
                     'task_type':dict(type='string',enum=['follow','seating'],description='必须与登记阶段的stage_type一致。'),
-                    'target_description':dict(TEXT,description='用户提供的人物或桌边停靠要求。'),
+                    'target_description':dict(TEXT,description='桌边停靠时填写用户要求；跟随时无需填写，系统使用已确认参考中的人物描述。'),
+                    'reference_id':dict(TEXT,description='跟随时填写 Agent 已确认的目标参考 reference_id；桌边停靠不使用。'),
                     'table_roi':dict(type='array',minItems=4,maxItems=4,items=dict(type='number',minimum=0,maximum=1),
                         description='仅 seating 必填，当前 RGB 中目标桌面近侧边缘的归一化 [左,上,右,下]。')},
-                   ['goal_id','task_type','target_description'])),
+                   ['goal_id','task_type'])),
     'finish_local_task': ('本轮当前RGB支持用户指定的局部任务结束条件时请求结束并等待停稳。follow 不以目标丢失或保持距离视为完成；seating 尚不可执行。',
         parameters({'goal_id':dict(TEXT,description='当前局部任务阶段的goal_id。'),
                     'observation_id':dict(TEXT,description='跟随结束时必须提供本轮实际读取并支持判断的当前RGB观察。'),
@@ -84,7 +92,7 @@ TOOL_SPECS = {
                              'orientation_source': dict(type='string',enum=['user','semantic','autonomous'],
                                 description='只从selected_goal.allowed_orientation_sources选择；user须有已登记required_yaw，否则用semantic或autonomous，不把资产旧yaw当用户要求。')},
                             ['goal_id', 'view_id', 'orientation_source'])),
-    'navigate_route': ('route 和 sequence 专用。提交有车体余量的有序 XY。绕区域从第一个实际经过的途经点开始计圈，末点应满足要求的方向和圈数。用少量点表达不同侧，增加点时用 waypoint_reason 说明具体要求或地图依据。点间实际路径由导航器规划。若某点被拒，查看 diagnostics 的点序号及占据原因。仅仿真和人工驾驶支持。',
+    'navigate_route': ('route 和 sequence 专用。提交有车体余量的有序 XY；绕区域时结合原任务选择少量位置，用户要求返回时才将返回位置作为硬条件。增加点时用 waypoint_reason 说明具体要求或地图依据。点间实际路径由导航器规划。若某点被拒，查看 diagnostics 的点序号及占据原因。仅仿真和人工驾驶支持。',
                        parameters({'goal_id':dict(TEXT,description='当前next_goal_id。'),
                                    'view_id':dict(TEXT,description='当前地图view_id。'),
                                    'orientation_source':dict(type='string',enum=['user','semantic','autonomous'],description='终点朝向来源。'),
@@ -112,12 +120,19 @@ TOOL_SPECS = {
                     'focus':dict(type='string',minLength=1,maxLength=512,description='结合原任务简述需要关注的语义条件或进展。'),
                     'interval_s':dict(type='number',minimum=5,maximum=300,description='可选语义复核间隔，秒。'),
                     'region_ids':dict(type='array',items=TEXT,maxItems=8,description='可选的正式region_id；有效定位进入时产生事件。'),
+                    'continuous_region_id':dict(TEXT,description='轮椅在该正式区域内时持续复核；进入即复核，离开或定位不可用时停止。'),
+                    'review_mode':dict(type='string',enum=['after_result'],description='与 continuous_region_id 一起填写 after_result；每次判断结束并收到新观察后再复核。'),
                     'progress_interval_s':dict(type='number',minimum=10,maximum=300,description='可选的无测量进展复核间隔，秒；事件本身不表示故障。'),
                     'distance_m':dict(type='number',minimum=.5,maximum=50,description='可选累计行驶距离触发阈值，米。'),
                     'rotation_rad':dict(type='number',minimum=.2,maximum=6.3,description='可选累计转角触发阈值，弧度。'),
                     'stopped_s':dict(type='number',minimum=.5,maximum=300,description='可选连续定位估计停稳后触发，秒。'),
                     'timeout_s':dict(type='number',minimum=10,maximum=3600,description='可选活动阶段超时，一次性触发，秒；不自动判失败。')},
                    ['goal_id','focus'])),
+    'record_monitor_review': ('记录条件式持续复核中尚未满足或证据不足的判断及其当前观察依据；记录后等待新观察继续复核，不代表任务完成。满足时调用 complete_subtask。',
+        parameters({'goal_id':dict(TEXT,description='正在复核的当前子任务 ID。'),
+                    'result':dict(type='string',enum=['not_satisfied','unknown'],description='本轮条件尚未满足，或当前观察不足以判断。'),
+                    'evidence':dict(type='string',minLength=1,maxLength=512,description='简述本轮观察及未满足或无法判断的原因。')},
+                   ['goal_id','result','evidence'])),
     'cancel_navigation': ('撤销活动导航或局部任务并等待对应取消或停稳反馈；取消请求本身不证明已经停稳。', parameters()),
     'wait_for_event': ('挂起模型决策，等待明确事件；不把等待当任务完成，也不反复查询同一状态。',
                        parameters({'event': dict(type='string',enum=['navigation','observation','monitor','user_continue'],
@@ -155,11 +170,57 @@ GOAL['allOf'] = [
      'then':{'required':['floor_id','to_floor']}},
 ]
 
+# The model-facing registration contract groups the target and constraints.
+# Legacy recorded actions remain valid for replay, but are not advertised to
+# the model. Conversion to the existing internal requirement is explicit.
+REGISTRATION_TARGET = parameters({
+    'id': dict(TEXT, description='正式标注点或区域 ID；自主选点可省略。'),
+    'position': dict(XY, description='用户明确指定的匿名地图坐标 [x,y]，单位米。'),
+    'checkpoints': dict(type='array', items=TEXT, minItems=2, maxItems=16,
+                        description='sequence 的用户指定地点 ID，按要求顺序填写。'),
+})
+VISUAL_CONDITION = parameters({
+    'description': dict(TEXT, description='用户提出的视觉要求。'),
+    'priority': dict(type='string', enum=['required','preferred'],
+                     description='required 为必须满足；preferred 为尽量满足。'),
+}, ['description','priority'])
+REGISTRATION_CONDITIONS = parameters({
+    'required_yaw': GOAL['properties']['required_yaw'],
+    'facing': dict(type='string',description='用户要求面向的正式点或区域 ID；结合连通关系判断朝向，不强制指向几何中心。'),
+    'position_rule': GOAL['properties']['position_rule'],
+    'max_distance_m': GOAL['properties']['max_distance_m'],
+    'robot_inside_region_id': GOAL['properties']['robot_inside_region_id'],
+    'visual': dict(type='array', items=VISUAL_CONDITION, maxItems=16,
+                   description='必须满足和尽量满足的视觉要求；按用户原意区分。'),
+})
+REGISTRATION_GOAL = parameters({
+    'goal_id': GOAL['properties']['goal_id'],
+    'stage': dict(type='string', enum=['point','region','reference','route','sequence',
+                                      'follow','observation','seating','elevator'],
+                  description='导航目标类型或独立技能类型；无需额外填写 kind 或 stage_type。'),
+    'description': GOAL['properties']['description'],
+    'target': dict(REGISTRATION_TARGET, description='标注对象、用户指定坐标或有序地点；无目标时省略。'),
+    'conditions': dict(REGISTRATION_CONDITIONS, description='用户明确提出的约束；无约束时省略。'),
+    'floor_id': GOAL['properties']['floor_id'],
+    'to_floor': GOAL['properties']['to_floor'],
+    'monitor': GOAL['properties']['monitor'],
+    'execution_notes': GOAL['properties']['execution_notes'],
+}, ['goal_id','stage','description'])
+REGISTRATION_ARGS = parameters({'goals': dict(type='array', items=REGISTRATION_GOAL,
+    minItems=1,maxItems=16,description='按用户顺序登记的阶段数组；先登记要求，再在执行时选点。')}, ['goals'])
+TOOL_SPECS['record_task'] = (TOOL_SPECS['record_task'][0], REGISTRATION_ARGS)
+
 ACTION = parameters({'tool': dict(type='string', enum=list(TOOL_SPECS)),
                      'arguments': dict(type='object')}, ['tool', 'arguments'])
 ACTION_VALIDATOR=jsonschema.Draft202012Validator(ACTION)
 GOAL_VALIDATOR=jsonschema.Draft202012Validator(GOAL)
 TOOL_VALIDATORS={name:jsonschema.Draft202012Validator(schema) for name,(_,schema) in TOOL_SPECS.items()}
+# Direct programmatic callers and saved fixtures may still use the legacy
+# schema; the advertised native tool above only exposes the new contract.
+TOOL_VALIDATORS['record_task'] = jsonschema.Draft202012Validator(parameters({
+    'goals': dict(type='array', items={}, minItems=1, maxItems=16)
+}, ['goals']))
+REGISTRATION_GOAL_VALIDATOR = jsonschema.Draft202012Validator(REGISTRATION_GOAL)
 SCRIPTED_TOOLS={'check_goal','finish_local_task','finish_task'}
 EXECUTION_TOOLS=tuple(name for name in TOOL_SPECS if name!='record_task' and name not in SCRIPTED_TOOLS)
 
@@ -173,11 +234,23 @@ def unique_fields(pairs):
     return result
 
 
-def validate_call(value):
+def validate_call(value, *, model_schema=False):
     ACTION_VALIDATOR.validate(value)
     # Includes overflowed exponents in native replies and non-finite fixture inputs.
     json.dumps(value['arguments'], allow_nan=False)
-    TOOL_VALIDATORS[value['tool']].validate(value['arguments'])
+    if value['tool']=='record_task' and model_schema:
+        jsonschema.Draft202012Validator(REGISTRATION_ARGS).validate(value['arguments'])
+    else:
+        TOOL_VALIDATORS[value['tool']].validate(value['arguments'])
+    if value['tool']=='record_task' and not model_schema:
+        for index,goal in enumerate(value['arguments']['goals']):
+            validator = GOAL_VALIDATOR if isinstance(goal,dict) and 'kind' in goal and 'stage' not in goal else REGISTRATION_GOAL_VALIDATOR
+            try:
+                validator.validate(goal)
+            except jsonschema.ValidationError as error:
+                error.path.appendleft(index)
+                error.path.appendleft('goals')
+                raise
     if value['tool']=='navigate':
         args=value['arguments']
         if not (('pose' in args and 'point_id' not in args and 'yaw' not in args) or
@@ -201,7 +274,7 @@ class Reply:
     argument_error: dict | None = None
 
     @classmethod
-    def parse(cls, message, *, report_argument_error=False):
+    def parse(cls, message, *, report_argument_error=False, model_schema=False):
         """Validate the native reply without fixing content, arguments or identities."""
         if not isinstance(message,dict) or message.get('role') != 'assistant' or message.get('content') is not None and not isinstance(message['content'], str):
             raise ValueError('Expected an assistant message with optional text')
@@ -219,7 +292,7 @@ class Reply:
                 raise ValueError('Function arguments must be a JSON string')
             try:
                 arguments = json.loads(function['arguments'], object_pairs_hook=unique_fields)
-                action = validate_call(dict(tool=function.get('name'), arguments=arguments))
+                action = validate_call(dict(tool=function.get('name'), arguments=arguments),model_schema=model_schema)
             except (ValueError,jsonschema.ValidationError) as error:
                 if not report_argument_error or function.get('name') not in TOOL_SPECS:
                     raise

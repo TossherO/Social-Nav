@@ -11,30 +11,41 @@ class TaskMonitor:
         self.settings = None
         self.last_trigger = None
         self.last_review = None
+        self.region_epoch = 0
         self.reset_runtime()
 
     def configure(self, goal_id, focus, interval_s=None, region_ids=None, progress_interval_s=None,
-                  distance_m=None, rotation_rad=None, stopped_s=None, timeout_s=None):
+                  distance_m=None, rotation_rad=None, stopped_s=None, timeout_s=None,
+                  continuous_region_id=None, review_mode=None):
         regions = list(region_ids or [])
         if len(regions) != len(set(regions)) or any(region not in self.catalog.regions for region in regions):
             raise ValueError('Monitor regions must be distinct and present in the current catalog')
-        if all(v is None for v in (interval_s,progress_interval_s,distance_m,rotation_rad,stopped_s,timeout_s)) and not regions:
+        if (continuous_region_id is None)!=(review_mode is None) or (continuous_region_id is not None and
+                (continuous_region_id not in self.catalog.regions or review_mode!='after_result')):
+            raise ValueError('Continuous review requires a known region and after_result mode')
+        if all(v is None for v in (interval_s,progress_interval_s,distance_m,rotation_rad,stopped_s,timeout_s,continuous_region_id)) and not regions:
             raise ValueError('Monitor requires a review interval, region or progress interval')
         for value in (interval_s, progress_interval_s, distance_m, rotation_rad, stopped_s, timeout_s):
             if value is not None and (not math.isfinite(value) or value <= 0):
                 raise ValueError('Monitor intervals must be finite and positive')
         self.settings = dict(goal_id=goal_id, focus=focus, interval_s=interval_s,
                              region_ids=regions, progress_interval_s=progress_interval_s,
-                             distance_m=distance_m, rotation_rad=rotation_rad, stopped_s=stopped_s, timeout_s=timeout_s)
+                             distance_m=distance_m, rotation_rad=rotation_rad, stopped_s=stopped_s, timeout_s=timeout_s,
+                             continuous_region_id=continuous_region_id,review_mode=review_mode)
         self.reset_runtime()
 
     def watch(self, goal_id, focus):
         """Every stage receives navigation-event review; other triggers are opt-in."""
         self.settings=dict(goal_id=goal_id,focus=focus,interval_s=None,region_ids=[],
-            progress_interval_s=None,distance_m=None,rotation_rad=None,stopped_s=None,timeout_s=None)
+            progress_interval_s=None,distance_m=None,rotation_rad=None,stopped_s=None,timeout_s=None,
+            continuous_region_id=None,review_mode=None)
         self.reset_runtime()
 
     def reset_runtime(self):
+        if getattr(self,'conditional_region_state','unknown')!='unknown':self.region_epoch+=1
+        self.conditional_region_state='unknown'
+        self.review_phase='inactive'
+        self.review_observation_binding=None
         self.handle = None
         self.last_review_at = None
         self.regions = {}
@@ -52,7 +63,36 @@ class TaskMonitor:
             return None
         value=copy.deepcopy(self.settings) if self.settings is not None else {}
         value.update(last_trigger=copy.deepcopy(self.last_trigger),last_review=copy.deepcopy(self.last_review))
+        if value.get('continuous_region_id') is not None:
+            value['conditional_review']=dict(region_id=value['continuous_region_id'],
+                region_state=self.conditional_region_state,phase=self.review_phase)
         return value
+
+    def _region_state(self,state,stamp=None):
+        previous=self.conditional_region_state
+        if state!=previous:
+            self.region_epoch+=1;self.conditional_region_state=state
+            self.pending.pop('conditional_review',None)
+            self.review_observation_binding=None
+            self.review_phase='inactive'
+            if state=='inside':
+                self.pending['conditional_review']=dict(kind='conditional_review_due',
+                    region_id=self.settings['continuous_region_id'],stamp_s=stamp)
+                self.review_phase='pending'
+
+    def await_next_observation(self,binding):
+        if self.conditional_region_state=='inside' and self.review_phase=='reviewing':
+            self.review_observation_binding=binding
+            self.review_phase='waiting_observation'
+            return True
+        return False
+
+    def observe(self,binding,stamp):
+        if (self.conditional_region_state=='inside' and self.review_phase=='waiting_observation' and
+                binding is not None and binding!=self.review_observation_binding):
+            self.pending['conditional_review']=dict(kind='conditional_review_due',
+                region_id=self.settings['continuous_region_id'],stamp_s=stamp)
+            self.review_phase='pending'
 
     def note_trigger(self, event):
         self.last_trigger=copy.deepcopy(event)
@@ -67,7 +107,21 @@ class TaskMonitor:
         if (type(now) not in (int,float) or not math.isfinite(now) or feedback.get('input_stale') or
                 feedback.get('localization_status','valid')!='valid'):
             self.last_review_at=self.started_at=None
+            self._region_state('unknown')
             return
+        frame=self.catalog.value['frame_id']
+        pose=feedback.get('origin_pose') if feedback.get('origin_frame_id')==frame else (
+            feedback.get('pose') if feedback.get('frame_id')==frame else None)
+        stamp=feedback.get('origin_stamp_s',now) if feedback.get('origin_frame_id')==frame else now
+        binding=feedback.get('map_binding') or {}
+        valid=(isinstance(pose,(list,tuple)) and len(pose)==3 and
+               all(type(v) in (int,float) and math.isfinite(v) for v in pose) and
+               type(stamp) in (int,float) and math.isfinite(stamp) and 0<=now-stamp<=.5 and
+               (feedback.get('scope') not in ('live','manual') or
+                binding.get('valid') is True and binding.get('map_frame')==frame))
+        region=self.settings.get('continuous_region_id')
+        if region is not None:
+            self._region_state('unknown' if not valid else 'inside' if inside(pose[:2],self.catalog.regions[region]['polygon']) else 'outside',stamp if valid else None)
         self.update_clock(now)
 
     def update_clock(self, now, *, first_observation=False):
@@ -103,6 +157,7 @@ class TaskMonitor:
         now = feedback.get('stamp_s')
         if (type(now) not in (int, float) or not math.isfinite(now) or feedback.get('input_stale') or
                 feedback.get('localization_status', 'valid') != 'valid'):
+            self._region_state('unknown')
             self.pending = {}
             self.last_review_at = None
             self.regions = {}
@@ -118,12 +173,17 @@ class TaskMonitor:
         self.update_clock(now)
 
         frame = self.catalog.value['frame_id']
+        map_valid=True
+        if feedback.get('scope') in ('live','manual'):
+            binding=feedback.get('map_binding') or {}
+            map_valid=binding.get('valid') is True and binding.get('map_frame')==frame
         pose = feedback.get('origin_pose') if feedback.get('origin_frame_id') == frame else (
             feedback.get('pose') if feedback.get('frame_id') == frame else None)
         stamp = feedback.get('origin_stamp_s', now) if feedback.get('origin_frame_id') == frame else now
-        if (not isinstance(pose, (list, tuple)) or len(pose) != 3 or
+        if (not map_valid or not isinstance(pose, (list, tuple)) or len(pose) != 3 or
                 not all(type(v) in (int, float) and math.isfinite(v) for v in pose) or
                 type(stamp) not in (int, float) or not math.isfinite(stamp) or not 0 <= now-stamp <= .5):
+            self._region_state('unknown')
             self.regions = {}
             self.progress = None
             self.travel = None
@@ -138,6 +198,9 @@ class TaskMonitor:
         if self.last_pose_stamp is not None and stamp-self.last_pose_stamp > .5:
             self.stop_since=None;self.stop_notified=False
         self.last_pose_stamp = stamp
+        if self.settings.get('continuous_region_id') is not None:
+            region=self.settings['continuous_region_id']
+            self._region_state('inside' if inside(pose[:2],self.catalog.regions[region]['polygon']) else 'outside',stamp)
         if self.travel is None or stamp-self.travel['stamp_s'] > 2:
             self.travel=dict(pose=list(pose),stamp_s=stamp,distance=0.,rotation=0.)
         else:
@@ -193,6 +256,7 @@ class TaskMonitor:
             return None
         event = dict(goal_id=self.settings['goal_id'], focus=self.settings['focus'],
                      handle=copy.deepcopy(self.handle), reasons=list(self.pending.values()))
+        if 'conditional_review' in self.pending:self.review_phase='reviewing'
         self.pending = {}
         self.note_trigger(event)
         return event

@@ -16,6 +16,8 @@ class AgentLoop:
         self.requests, self.max_requests = 0, max_requests
         self.exit_reason = None
         self.refusals = {}
+        self.before_model = None
+        self.before_request = None
 
     @property
     def state(self):
@@ -128,11 +130,19 @@ class AgentLoop:
 
     def tick(self):
         s = self.session.tick()
+        if self.before_model is not None:self.before_model(self)
         result = self.model.poll()
         if result is not None:
             valid = not result['stale'] and self.session.valid_context(result['context'])
             if not valid:
                 self.session.store.event('model_result_discarded', dict(context=result['context'], reason='cancelled_or_superseded'))
+                if (result['context'].get('conditional_review_cycle') and s['status']=='ready' and
+                        result['context'].get('conditional_review_epoch')!=self.session.monitor.region_epoch and
+                        self.session.skill.record['handle'] is not None):
+                    self.session.observation=None
+                    s.update(status='waiting_monitor',waiting_binding=None)
+                    self.session._save('conditional_review_superseded')
+                    return s
                 if s['status'] == 'ready' and self.session.observation is not None:
                     self.session.observation = None
                     current = self.session.context()
@@ -190,7 +200,8 @@ class AgentLoop:
                         output = self.session.call(value['tool'], _context=result['context'], **value['arguments'])
                     if transient:
                         self.session.conversation.consume_transient(reply)
-                        self.session.elevator.feedback=output
+                        self.session.elevator.feedback=(None if value['tool']=='record_elevator_observation' and
+                            output.get('status')=='awaiting_destination_localization' else output)
                         if s['status']=='ready':
                             self.session.wait_for_event('monitor')
                         return s
@@ -227,6 +238,8 @@ class AgentLoop:
             return s
         if self.requests >= self.max_requests:
             self.session.stop('needs_clarification', 'model_request_limit')
+            return s
+        if self.before_request is not None and not self.before_request(self):
             return s
         now = self.session.navigation.snapshot()['stamp_s']
         if self.session.observation is not None and not 0 <= now-self.session.observation.record['stamp_s'] <= 3:

@@ -1,6 +1,7 @@
 """Small interactive-session state beside the existing command and control owners."""
 import copy
 import json
+import os
 import socket
 import threading
 import time
@@ -93,6 +94,7 @@ class InteractiveSession:
                     if not chassis['status_fresh']:
                         chassis.update(reported_state=chassis.get('state'),state='unavailable',reason='chassis_status_stale')
             return dict(live=self.live, hardware_enabled=self.execute,
+                        ros_master_uri=os.environ.get('ROS_MASTER_URI','http://localhost:11311'),
                         chassis=chassis,
                         paused=self.paused, pause_requested=self.pause_requested,
                         source_ended=self.source_ended, epoch=self.epoch,

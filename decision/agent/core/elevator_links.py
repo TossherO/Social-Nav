@@ -1,7 +1,30 @@
 """Convert a measured destination-floor base pose proposal to a provisional LiDAR seed."""
 import math
+import copy
 
 import numpy as np
+
+
+def standard_destination_seed(transition, standard, scan):
+    """Bind a user-selected, map-specific LiDAR seed to a fresh post-ride scan."""
+    pose=standard.get('pose_rpy_xyz')
+    if (transition.status!='awaiting_destination_localization' or
+            standard.get('map_id')!=transition.destination_map_id or
+            standard.get('frame_id')!='map' or standard.get('reference')!='rslidar' or
+            not isinstance(pose,list) or len(pose)!=6 or
+            not all(type(v) in (int,float) and math.isfinite(v) for v in pose) or
+            scan.get('source')!='local_lidar_returns' or scan.get('clock_domain')!='ros_time' or
+            not isinstance(scan.get('frame_id'),str) or scan['frame_id'].lstrip('/')!=standard['reference'] or
+            type(scan.get('stamp_s')) not in (int,float) or
+            not math.isfinite(scan['stamp_s']) or scan['stamp_s']<=transition.last_observation_stamp_s):
+        raise ValueError('Standard start requires a matching map and a fresh post-ride scan')
+    return dict(floor_id=transition.to_floor,scan_stamp_s=scan['stamp_s'],task_id=transition.task_id,
+                goal_id=transition.goal_id,exit_stamp_s=transition.last_observation_stamp_s,
+                scan_frame=scan['frame_id'],source='standard_destination_start',
+                destination=dict(from_floor=transition.from_floor,to_floor=transition.to_floor,
+                                 to_map_id=transition.destination_map_id),
+                lidar_xy_yaw=[pose[3],pose[4],pose[2]],lidar_pose_rpy_xyz=copy.deepcopy(pose),
+                verified_localization=False)
 
 
 def destination_seed(transition, base_pose, scan, base_from_lidar):

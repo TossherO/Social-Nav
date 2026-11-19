@@ -116,6 +116,7 @@ class Observation:
             value['follow_candidates'] = dict(binding=candidates['binding'], association_status=candidates['association_status'],
                 candidates=[dict(id=c['id'],box=copy.deepcopy(c['box']),has_3d_track=c['track'] is not None)
                             for c in candidates['candidates']])
+            if candidates.get('mode')=='raw_rgb':value['follow_candidates']['mode']='raw_rgb'
         if 'follow_candidates_error' in self.record:
             value['follow_candidates_error'] = self.record['follow_candidates_error']
         return value

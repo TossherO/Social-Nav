@@ -44,6 +44,91 @@ class ManualTests(unittest.TestCase):
         self.obs['map_base_pose']=list(pose)
         self.feedback['velocity']=list(velocity)
 
+    def test_skip_active_route_waits_for_cancel_then_advances_without_claiming_arrival(self):
+        self.nav.automatic_arrival=True
+        grid=GridSnapshot(dict(frame_id='sim_odom',shape=[100,140],resolution=.1,origin_xy=[0.,0.],snapshot_id='unit-static'),
+                          dict(occupancy=np.zeros((100,140),np.int8)))
+        self.nav.spatial_inputs=lambda:dict(global_grid=grid,scene=None,stamp_s=self.control['stamp_s'],
+            clock_domain='runtime_live',pose=list(self.obs['map_base_pose']),geometry=self.nav.geometry)
+        with tempfile.TemporaryDirectory() as root:
+            store=Store(Path(root)/'session.sqlite')
+            try:
+                session=AgentSession('绕行后到电梯',self.catalog,self.nav,store)
+                session.call('record_task',goals=[dict(goal_id='route',kind='route',target_id='',description='绕行'),point_goal('elevator')])
+                session.call('query_map')
+                result=session.call('navigate_route',goal_id='route',view_id=session.spatial_view.record['view_id'],
+                    orientation_source='autonomous',waypoints=[[4.,4.],[5.,4.],[6.,4.]])
+                self.assertEqual(result['status'],'accepted',result)
+                session.event('skip')
+                self.assertEqual(session.state['status'],'stopping')
+                self.assertEqual(session.task_goals.goals[0]['status'],'pending')
+                self.update([4.,4.,0.],10.2);session.tick()
+                self.assertEqual(session.task_goals.goals[0]['status'],'skipped')
+                self.assertIsNone(session.task_goals.goals[0]['completion'])
+                self.assertEqual(session.state['status'],'ready')
+                self.assertEqual(session.task_goals.current('elevator')['status'],'pending')
+                self.assertFalse(session.task_goals.finished())
+                self.assertEqual(store.db.execute("select count(*) from events where kind='subtask_skipped'").fetchone()[0],1)
+                session.call('query_map')
+                result=session.call('navigate',goal_id='elevator',pose=self.catalog.places['elevator']['pose'],
+                    view_id=session.spatial_view.record['view_id'],orientation_source='autonomous')
+                self.assertEqual(result['status'],'accepted',result)
+                pose=self.catalog.places['elevator']['pose']
+                for stamp in (10.4,10.7,11.):self.update(pose,stamp);session.tick()
+                self.assertEqual(session.call('check_goal',goal_id='elevator')['status'],'completed')
+                self.assertEqual(session.call('finish_task',status='succeeded',evidence='到达')['status'],'partial')
+                self.assertEqual(session.state['completed_revisions'],[])
+            finally:store.close()
+
+    def test_skipping_last_stage_ends_partial_not_succeeded(self):
+        with tempfile.TemporaryDirectory() as root:
+            store=Store(Path(root)/'session.sqlite')
+            try:
+                session=AgentSession('到电梯',self.catalog,self.nav,store)
+                session.call('record_task',goals=[point_goal('elevator')])
+                session.event('skip')
+                self.assertEqual(session.state['status'],'partial')
+                self.assertEqual(session.task_goals.goals[0]['status'],'skipped')
+                self.assertTrue(session.task_goals.resolved())
+                self.assertFalse(session.task_goals.finished())
+                self.assertEqual(session.state['completed_revisions'],[])
+            finally:store.close()
+
+    def test_skip_is_not_available_in_other_modes_or_elevator_transition(self):
+        with tempfile.TemporaryDirectory() as root:
+            store=Store(Path(root)/'session.sqlite')
+            try:
+                session=AgentSession('到电梯',self.catalog,self.nav,store)
+                session.call('record_task',goals=[point_goal('elevator')])
+                session.state['elevator_active']=True
+                with self.assertRaisesRegex(ValueError,'floor transition'):session.event('skip')
+                session.state['elevator_active']=False
+                self.nav.scope='live'
+                with self.assertRaises(ValueError):session.event('skip')
+                self.assertEqual(session.task_goals.goals[0]['status'],'pending')
+            finally:store.close()
+
+    def test_imported_registration_creates_new_pending_task_without_old_target(self):
+        from decision.agent.core.reuse import import_registered_task,load_registered_task
+        with tempfile.TemporaryDirectory() as root:
+            path=Path(root)/'session.sqlite';store=Store(path)
+            try:
+                session=AgentSession('到电梯',self.catalog,self.nav,store)
+                assets={'floor2':dict(frame_id='sim_odom',localization_map_id='map-id',global_binding='static',
+                                     annotations=dict(points=[],regions=[]))}
+                floor=session.state['initial_floor'];assets={floor:assets['floor2']}
+                plan=dict(instruction='到电梯',goals=[point_goal('elevator')],clarifications=[dict(question='去哪里',answer='电梯')],
+                          source_task_id='old',source_revision=1,source_event_seq=3,digest='source')
+                import_registered_task(session,plan,assets,Path(root)/'old.sqlite')
+                goal=session.task_goals.goals[0]
+                self.assertEqual(goal['status'],'pending');self.assertIsNone(goal['selected']);self.assertIsNone(goal['completion'])
+                self.assertNotEqual(session.state['task_id'],'old');self.assertIsNone(session.skill.record['handle'])
+                self.assertTrue(any('registered_task_plan' in m.get('content','') for m in session.conversation.messages()))
+                self.assertEqual(session.state['clarifications'],plan['clarifications'])
+                restored=load_registered_task(path)
+                self.assertEqual(restored['goals'],plan['goals']);self.assertEqual(restored['clarifications'],plan['clarifications'])
+            finally:store.close()
+
     def test_manual_client_refuses_motion_commands(self):
         client=ManualRuntimeClient('/unused')
         for kind in ('goal','cancel','hold','arm'):

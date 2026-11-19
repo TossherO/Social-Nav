@@ -79,6 +79,24 @@ with pathlib.Path(os.environ['TEST_LAUNCH_LOG']).open('a') as out: out.write('ta
         self.assertNotIn('--chassis-port',command)
         self.assertEqual(self.calls(),'')
 
+    def test_follow_observation_defaults_to_jpeg_80_and_allows_png(self):
+        args=('observe','--dry-run','--agent-observations','--agent-follow-candidates','--t2-backend','dspark')
+        result=self.run_script('scripts/interactive.sh',*args)
+        self.assertEqual(result.returncode,0,result.stderr)
+        command=shlex.split(result.stdout)
+        self.assertEqual(command[command.index('--t2-jpeg-quality')+1],'80')
+        result=self.run_script('scripts/interactive.sh',*args,'--t2-image-format','png')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertNotIn('--t2-jpeg-quality',shlex.split(result.stdout))
+        result=self.run_script('scripts/interactive.sh',*args,'--t2-jpeg-quality','96')
+        self.assertNotEqual(result.returncode,0)
+        result=self.run_script('scripts/interactive.sh',*args,'--t2-raw-rgb')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('--t2-raw-rgb',shlex.split(result.stdout))
+        result=self.run_script('scripts/interactive.sh','execute','--dry-run','--agent-observations',
+                               '--agent-follow-candidates','--t2-raw-rgb')
+        self.assertNotEqual(result.returncode,0)
+
     def test_check_uses_same_python_and_does_not_start_runtime(self):
         result=self.run_script('scripts/interactive.sh','execute','--check')
         self.assertEqual(result.returncode,0,result.stderr)

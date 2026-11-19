@@ -29,6 +29,196 @@ class ManualUiTests(unittest.TestCase):
         value.update(changes)
         return json.dumps(value,ensure_ascii=False)
 
+    def test_elevator_requests_and_replies_are_visible_then_cleared(self):
+        import os
+        os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
+        from PyQt5 import QtCore, QtWidgets
+        from decision.agent.manual_ui import ManualWindow
+        app=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        window=ManualWindow()
+        try:
+            image='data:image/jpeg;base64,'+base64.b64encode(b'image').decode()
+            request=dict(messages=[dict(role='user',content=[dict(type='image_url',image_url=dict(url=image))])])
+            window.show_elevator_transient(dict(kind='request',call_id='call',request=request))
+            self.assertIn('1 条消息 · 1 张图片',window.request_summary.text())
+            item=window.transient_items[0][1]
+            window.show_elevator_transient(dict(kind='response',call_id='call',message=dict(content='尚未完成')))
+            self.assertEqual(item.childCount(),1)
+            self.assertIn('尚未完成',item.child(0).text(2))
+            seq=item.data(0,QtCore.Qt.UserRole)
+            self.assertEqual(window.transient_requests[seq]['response']['content'],'尚未完成')
+            window.clear_elevator_transient()
+            self.assertFalse(window.transient_requests)
+            self.assertFalse(window.transient_calls)
+            self.assertEqual(window.current_tree.topLevelItemCount(),0)
+            self.assertEqual(window.context_tree.indexOfTopLevelItem(item),-1)
+            self.assertFalse(window.request_button.isEnabled())
+        finally:
+            window.close();app.processEvents()
+
+    def test_planning_thinking_selection_is_passed_to_each_new_task(self):
+        import os
+        os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
+        from PyQt5 import QtWidgets
+        from decision.agent.manual_ui import ManualWindow
+        app=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        with tempfile.TemporaryDirectory() as root:
+            socket=Path(root)/'commands.sock';socket.touch()
+            catalog=Path(root)/'catalog.json';catalog.write_text('{}')
+            window=ManualWindow(socket=str(socket),catalog=str(catalog))
+            try:
+                self.assertEqual(window.planning_thinking.currentData(),'low')
+                window.instruction.setText('测试任务')
+                with patch.object(window,'set_reader',return_value=True), patch.object(window.process,'start') as start:
+                    for mode in ('off','low','medium'):
+                        window.planning_thinking.setCurrentIndex(window.planning_thinking.findData(mode))
+                        window.start_task()
+                        args=start.call_args.args[1]
+                        self.assertEqual(args[args.index('--thinking-mode')+1],'planning')
+                        self.assertEqual(args[args.index('--planning-thinking-mode')+1],mode)
+            finally:
+                window.close();app.processEvents()
+
+    def test_optional_task_bag_is_only_enabled_for_live_manual_session(self):
+        import os
+        os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
+        from PyQt5 import QtWidgets
+        from decision.agent.manual_ui import ManualWindow
+        app=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        with tempfile.TemporaryDirectory() as root:
+            socket=Path(root)/'commands.sock';socket.touch()
+            catalog=Path(root)/'catalog.json';catalog.write_text('{}')
+            window=ManualWindow(socket=str(socket),catalog=str(catalog))
+            try:
+                window.instruction.setText('测试任务')
+                with patch.object(window,'set_reader',return_value=True),patch.object(window.process,'start') as start:
+                    window.start_task();self.assertNotIn('--record-bag',start.call_args.args[1])
+                    window.record_bag.setChecked(True);window.start_task()
+                    self.assertIn('--record-bag',start.call_args.args[1])
+            finally:window.close();app.processEvents()
+            replay=ManualWindow(socket=str(socket),catalog=str(catalog),replay=True)
+            try:
+                replay.instruction.setText('测试任务');replay.record_bag.setChecked(True)
+                with patch.object(replay,'set_reader',return_value=True),patch.object(replay.process,'start') as start:
+                    replay.start_task();self.assertNotIn('--record-bag',start.call_args.args[1])
+            finally:replay.close();app.processEvents()
+
+    def test_bag_finalization_status_stays_visible_after_agent_exits(self):
+        import os
+        os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
+        from PyQt5 import QtWidgets
+        from decision.agent.manual_ui import ManualWindow
+        app=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        with tempfile.TemporaryDirectory() as root:
+            window=ManualWindow()
+            try:
+                window.session_path=Path(root)/'session.sqlite'
+                status=Path(root)/'bag_recording_1.json'
+                status.write_text(json.dumps(dict(status='finalizing',bag='/tmp/session/navigation.bag')))
+                window.refresh_recording()
+                self.assertIn('正在关闭与校验',window.recording_label.text())
+                status.write_text(json.dumps(dict(status='saved',bag='/tmp/session/navigation.bag')))
+                window.refresh_recording()
+                self.assertIn('已保存',window.recording_label.text())
+                self.assertIn('/tmp/session/navigation.bag',window.recording_label.text())
+            finally:window.close();app.processEvents()
+
+    def test_replay_uses_guarded_shadow_and_disables_manual_confirmation(self):
+        import os
+        os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
+        from PyQt5 import QtWidgets
+        from decision.agent.manual_ui import ManualWindow
+        app=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        with tempfile.TemporaryDirectory() as root:
+            socket=Path(root)/'commands.sock';socket.touch()
+            catalog=Path(root)/'catalog.json';catalog.write_text('{}')
+            window=ManualWindow(socket=str(socket),catalog=str(catalog),replay=True)
+            try:
+                window.instruction.setText('跟随前方行人')
+                with patch.object(window,'set_reader',return_value=True), patch.object(window.process,'start') as start:
+                    window.start_task();args=start.call_args.args[1]
+                self.assertIn('shadow',args);self.assertIn('--require-bag',args);self.assertNotIn('manual',args)
+            finally:
+                window.close();app.processEvents()
+
+    def test_shadow_gui_rejects_arrival_but_permits_cancel(self):
+        self.session.navigation.scope='shadow'
+        used=set()
+        self.assertEqual(dispatch_structured(self.command(),self.actor,used)['reason'],'unavailable_in_shadow')
+        result=dispatch_structured(self.command(command_id='cancel',name='cancel'),self.actor,used)
+        self.assertTrue(result['accepted'])
+        self.assertEqual(self.calls,[('cancel',None)])
+
+    def test_replay_guard_requires_bag_and_no_hardware(self):
+        from decision.agent.workflows.shadow import require_bag_session
+        with patch('runtime.transport.exchange_request') as exchange:
+            for status in (dict(live=True,hardware_enabled=False),dict(live=False,hardware_enabled=True),{}):
+                exchange.return_value=status
+                with self.assertRaises(ValueError):require_bag_session('commands.sock')
+            exchange.return_value=dict(live=False,hardware_enabled=False)
+            require_bag_session('commands.sock')
+
+    def test_reuse_preview_locks_instruction_and_passes_checked_source(self):
+        import os
+        os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
+        from PyQt5 import QtWidgets
+        from decision.agent.manual_ui import ManualWindow
+        app=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        with tempfile.TemporaryDirectory() as root:
+            path=Path(root)/'session.sqlite';path.touch()
+            socket=Path(root)/'commands.sock';socket.touch()
+            catalog=Path(root)/'catalog.json';catalog.write_text('{}')
+            plan=dict(instruction='先到门，再到电梯',initial_floor='floor2',digest='selection-digest',clarifications=[],
+                      goals=[dict(goal_id='one',kind='point',target_id='door',description='到门')])
+            window=ManualWindow(socket=str(socket),catalog=str(catalog))
+            try:
+                with patch.object(QtWidgets.QFileDialog,'getOpenFileName',return_value=(str(path),'')), \
+                     patch('decision.agent.core.reuse.load_registered_task',return_value=plan), \
+                     patch.object(QtWidgets.QDialog,'exec_',return_value=QtWidgets.QDialog.Accepted):
+                    window.choose_reuse()
+                self.assertTrue(window.instruction.isReadOnly());self.assertEqual(window.instruction.text(),plan['instruction'])
+                self.assertFalse(window.planning_thinking.isEnabled())
+                with patch.object(window,'set_reader',return_value=True),patch.object(window.process,'start') as start:
+                    window.start_task();args=start.call_args.args[1]
+                    self.assertEqual(args[args.index('--reuse-session')+1],str(path))
+                    self.assertEqual(args[args.index('--reuse-digest')+1],plan['digest'])
+                window.clear_reuse();self.assertFalse(window.instruction.isReadOnly())
+                self.assertTrue(window.planning_thinking.isEnabled())
+            finally:window.close();app.processEvents()
+
+    def test_planning_thinking_does_not_extend_to_execution(self):
+        from decision.agent.workflows.common import make_loop
+        args=SimpleNamespace(actions=None,api_config='unused',cache_mode='implicit',thinking_mode='planning',
+                             planning_thinking_mode='medium',max_requests=32)
+        with patch('decision.agent.core.model.api_work',return_value=None) as api:
+            loop=make_loop(args,SimpleNamespace(),Path('/unused'))
+            for mode in ('off','low','medium'):
+                args.planning_thinking_mode=mode
+                loop.work(dict(current_state=dict(requirements_registered=False)),None,None)
+                self.assertEqual(api.call_args.kwargs['thinking_mode'],mode)
+                loop.work(dict(current_state=dict(requirements_registered=True)),None,None)
+                self.assertEqual(api.call_args.kwargs['thinking_mode'],'off')
+            args.thinking_mode='low'
+            loop.work(dict(current_state=dict(requirements_registered=True)),None,None)
+            self.assertEqual(api.call_args.kwargs['thinking_mode'],'low')
+
+    def test_late_elevator_message_does_not_leak_into_a_new_ride(self):
+        from decision.agent.workflows.common import make_loop
+        args=SimpleNamespace(actions=None,api_config='unused',cache_mode='implicit',thinking_mode='off',max_requests=32)
+        old=SimpleNamespace(status='monitoring_ride')
+        session=SimpleNamespace(elevator=SimpleNamespace(transition=old))
+        received=[]
+        with patch('decision.agent.core.model.api_work',return_value=None) as api:
+            loop=make_loop(args,session,Path('/unused'),transient_sink=received.append)
+            loop.work(dict(current_state=dict(requirements_registered=True)),None,None)
+            sink=api.call_args.kwargs['transient_sink']
+            sink(dict(kind='current'))
+            old.status='awaiting_destination_localization'
+            sink(dict(kind='previous_phase'))
+            session.elevator.transition=SimpleNamespace(status='monitoring_ride')
+            sink(dict(kind='late'))
+        self.assertEqual(received,[dict(kind='current',phase='monitoring_ride')])
+
     def test_command_checks_task_goal_handle_and_never_replays(self):
         used=set()
         bad=dispatch_structured(self.command(call_id='old'),self.actor,used)
@@ -39,6 +229,34 @@ class ManualUiTests(unittest.TestCase):
         self.session.navigation.scope='live'
         bad=dispatch_structured(self.command(command_id='live'),self.actor,used)
         self.assertFalse(bad['accepted']);self.assertEqual(len(self.calls),1)
+
+    def test_skip_command_is_bound_to_the_current_goal_and_manual_scope(self):
+        used=set()
+        self.assertFalse(dispatch_structured(self.command(name='skip',goal_id='old'),self.actor,used)['accepted'])
+        self.assertTrue(dispatch_structured(self.command(command_id='skip',name='skip'),self.actor,used)['accepted'])
+        self.assertEqual(self.calls,[('skip',None)])
+        self.session.navigation.scope='live'
+        self.assertFalse(dispatch_structured(self.command(command_id='live',name='skip'),self.actor,used)['accepted'])
+
+    def test_skip_button_requires_confirmation_and_submits_current_identity(self):
+        import os
+        os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
+        from PyQt5 import QtWidgets
+        from decision.agent.manual_ui import ManualWindow
+        app=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        window=ManualWindow()
+        try:
+            window.status=dict(task_id='task',revision=2,goal_id='route',goal_description='绕圈',call_id='call',status='waiting_navigation')
+            window.status_received=time.monotonic()
+            with patch.object(QtWidgets.QMessageBox,'question',return_value=QtWidgets.QMessageBox.No), patch.object(window.process,'write') as write:
+                window.send_command('skip');write.assert_not_called()
+            with patch.object(QtWidgets.QMessageBox,'question',return_value=QtWidgets.QMessageBox.Yes), patch.object(window.process,'write',return_value=1) as write:
+                window.send_command('skip')
+                value=json.loads(write.call_args.args[0])
+                self.assertEqual((value['name'],value['task_id'],value['revision'],value['goal_id'],value['call_id']),
+                                 ('skip','task',2,'route','call'))
+        finally:
+            window.close();app.processEvents()
 
     def test_answer_is_single_structured_event(self):
         result=dispatch_structured(self.command(name='answer',text='第一行\n第二行'),self.actor,set())
@@ -251,7 +469,7 @@ class ManualUiTests(unittest.TestCase):
         window=ManualWindow(floor='floor2')
         try:
             self.assertTrue(window.catalog.text().endswith('floor2_catalog.json'))
-            self.assertIn('floor2_ground_refined',window.catalog.text())
+            self.assertIn('floor2_current',window.catalog.text())
             if not Path(window.catalog.text()).is_file():
                 self.assertIn('尚无对应语义标注',window.notice.text())
             window.socket.setText('/old/socket')
@@ -261,11 +479,14 @@ class ManualUiTests(unittest.TestCase):
             window.status=dict(status='waiting_navigation',navigation_status='running',localization_status='valid',
                 input_stale=False,origin_pose=[0.,0.,0.],floor_id='floor1',goal_description='到停靠点',
                 goal_distance_m=.1,goal_tolerance_m=.2,arrival_dwell_s=.3,arrival_dwell_required_s=.5,
-                goal_yaw_error_rad=.1,goal_yaw_tolerance_rad=.2,stopped=True,monitor=dict(focus='关注入口'))
+                goal_yaw_error_rad=.1,goal_yaw_tolerance_rad=.2,stopped=True,stage_type='follow',
+                follow_status=dict(status='running'),model_busy=True,
+                monitor=dict(focus='关注入口',conditional_review=dict(region_id='region',region_state='inside',phase='reviewing')))
+            window.annotation_names={'region':'中转等候区'}
             window.status_received=time.monotonic()
             with patch.object(window.process,'state',return_value=QtCore.QProcess.Running):window.refresh_status()
             value=window.task_monitor.toPlainText()
-            for expected in ('floor1','到停靠点','0.10 m','连续停稳','朝向偏差','关注入口'):
+            for expected in ('floor1','到停靠点','0.10 m','连续停稳','朝向偏差','关注入口','中转等候区','区域内','模型判断中','running','完成时区域检查：未登记'):
                 self.assertIn(expected,value)
         finally:
             window.close();app.processEvents()

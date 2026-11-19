@@ -1,5 +1,6 @@
 """Stepwise saved observations or live runtime shadow; neither executes motion."""
 import json
+import time
 from pathlib import Path
 from .. import ROOT
 from ..tools.places import Catalog
@@ -13,10 +14,82 @@ from ..core.store import Store, shared_budget
 from ..core.session import AgentSession
 
 
+def require_bag_session(path):
+    from runtime.transport import exchange_request
+    status=exchange_request(path,'session_status',{},timeout=.5)
+    if status.get('live') is not False or status.get('hardware_enabled') is not False:
+        raise ValueError('Bag replay requires a nonexecuting bag session')
+
+
+def wait_for_bag_navigation(catalog, path, *, timeout_s=300., emit_status=emit):
+    """Wait for a fresh, map-associated bag observation before creating a task."""
+    from runtime.transport import exchange_request
+    deadline=time.monotonic()+timeout_s
+    navigation=None
+    emit_status(dict(event='replay_preparing',instruction='等待 bag 定位与当前地图观察就绪。'))
+    while time.monotonic()<deadline:
+        if not Path(path).exists():
+            time.sleep(.05);continue
+        try:
+            status=exchange_request(path,'session_status',{},timeout=.5)
+        except (OSError,EOFError,TimeoutError):
+            time.sleep(.05);continue
+        if status.get('live') is not False or status.get('hardware_enabled') is not False:
+            raise ValueError('Bag replay requires a nonexecuting bag session')
+        if status.get('source_ended'):
+            raise ValueError('Bag ended before localization became ready')
+        try:
+            if navigation is None:navigation=RuntimeShadowNavigation(catalog,RuntimeClient(path))
+            else:navigation.tick()
+            state=navigation.snapshot()
+            if (not state.get('input_stale') and state.get('localization_status')=='valid' and
+                    state.get('origin_pose') is not None and state.get('origin_frame_id')==catalog.value['frame_id'] and
+                    (state.get('map_binding') or {}).get('valid') is True and
+                    navigation.clock_domain=='runtime_bag'):
+                return navigation
+        except (OSError,EOFError,ValueError,KeyError,TypeError):
+            navigation=None
+        time.sleep(.05)
+    raise ValueError('Timed out waiting for fresh bag localization and observation')
+
+
+def hold_after_t2_failure(session, actor):
+    """A transport or model failure needs explicit operator action, never an automatic retry."""
+    record=session.skill.record
+    reason=record.get('reason') or ''
+    if (record.get('stage_type')!='follow' or record.get('status')!='failed' or
+            not reason.startswith('follow_t2_') or session.state.get('reason')==reason and
+            session.state.get('status')=='needs_clarification'):
+        return False
+    actor.model.invalidate()
+    session.stop('needs_clarification',reason)
+    session._save('replay_t2_failure_waiting',dict(reason=reason,automatically_retried=False))
+    return True
+
+
 def run(args):
     if args.duration <= 0 or args.interactive and args.observations:
         raise ValueError('Positive duration required; interactive input is for runtime shadow')
     catalog = Catalog.load(args.catalog,condition=args.map_condition)
+    reuse_path=getattr(args,'reuse_session',None)
+    auto_follow=bool(getattr(args,'auto_follow',False))
+    if (reuse_path or auto_follow) and (not getattr(args,'require_bag',False) or args.observations):
+        raise ValueError('Task reuse and automatic follow require a nonexecuting bag runtime')
+    if auto_follow and not reuse_path:raise ValueError('Automatic follow requires a registered task session')
+    if getattr(args,'reuse_digest',None) and not reuse_path:raise ValueError('Task digest requires its source session')
+    plan=assets=None
+    if reuse_path:
+        from ..core.reuse import load_registered_task,verify_registered_task
+        plan=load_registered_task(reuse_path)
+        if getattr(args,'reuse_digest',None) and args.reuse_digest!=plan['digest']:
+            raise ValueError('历史任务在预览后发生变化，请重新选择')
+        if args.instruction and args.instruction!=plan['instruction']:
+            raise ValueError('复用历史登记时任务指令必须与历史指令一致')
+        args.instruction=plan['instruction']
+        if args.actions:raise ValueError('任务复用不能与动作回放同时使用')
+        assets=verify_registered_task(plan,{catalog.value.get('floor_id'):catalog},catalog.value.get('floor_id'))
+        if auto_follow and (not plan['goals'] or plan['goals'][0].get('stage_type')!='follow'):
+            raise ValueError('Automatic T2 start requires a follow task as the first registered stage')
     dataset = ObservationSet(args.observations) if args.observations else None
     if dataset is not None:
         sequences = args.sequences or dataset.sequences()
@@ -26,23 +99,73 @@ def run(args):
         navigation = SavedShadowNavigation(catalog, dataset.read(sequences[0]))
     else:
         sequences = None
-        navigation = RuntimeShadowNavigation(catalog, RuntimeClient(args.runtime_socket))
+        if auto_follow:
+            navigation=wait_for_bag_navigation(catalog,args.runtime_socket)
+        else:
+            if getattr(args,'require_bag',False):
+                require_bag_session(args.runtime_socket)
+            navigation = RuntimeShadowNavigation(catalog, RuntimeClient(args.runtime_socket))
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=False)
     store = Store(output/'session.sqlite')
     actor = None
     try:
         session = AgentSession(args.instruction, catalog, navigation, store, use_memory=not args.no_memory)
+        if plan is not None:
+            from ..core.reuse import import_registered_task
+            import_registered_task(session,plan,assets,reuse_path)
+        if auto_follow:
+            emit(dict(event='replay_auto_follow_started',instruction='任务登记已载入；Agent 将观察并确认本次的跟随人物。'))
         actor = make_loop(args, session, output/'session.sqlite')
-        console = Console() if args.interactive else None
+        if auto_follow:
+            def before_model(actor):
+                if hold_after_t2_failure(session,actor):
+                    emit(dict(event='replay_t2_failed',instruction='T2 请求失败，已暂停自动推进；请检查失败原因后手动决定如何继续。'))
+            actor.before_model=before_model
+        console = Console(structured=getattr(args,'gui_commands',False)) if args.interactive else None
         seen, previous = [], None
+        last_status=0.
+        reference_path=Path(args.runtime_socket).parent/'reference.jsonl' if getattr(args,'require_bag',False) else None
+        reference_offset=reference_path.stat().st_size if reference_path is not None and reference_path.exists() else 0
+        last_t2=None
         def record(actor):
-            nonlocal previous
+            nonlocal previous,last_status,reference_offset,last_t2
             key = (session._observation_key(), session.state['status'], actor.requests)
             if key != previous:
                 seen.append(dict(observation_binding=key[0], task_status=key[1],
                                  decision_turns=actor.requests, navigation_status=session.skill.record['status']))
                 previous = key
+            if getattr(args,'gui_commands',False) and time.monotonic()-last_status>=.5:
+                last_status=time.monotonic()
+                if reference_path is not None and reference_path.exists():
+                    with reference_path.open(encoding='utf-8') as stream:
+                        stream.seek(reference_offset)
+                        for _ in range(50):
+                            line=stream.readline()
+                            if not line or not line.endswith('\n'):break
+                            reference_offset=stream.tell()
+                            item=json.loads(line)
+                            event=item.get('event')
+                            if event not in ('follow_t2_result','follow_t2_rejected','follow_t2_input_unavailable'):continue
+                            choice=(item.get('choices') or {}).get(item.get('selection'))
+                            last_t2=dict(event=event,source_stamp_s=item.get('source_stamp_s'),
+                                backend=item.get('backend'),status=item.get('status'),selection=item.get('selection'),
+                                choice=choice,raw_content=item.get('raw_content'),timing=item.get('timing'),reason=item.get('reason'))
+                            session.store.event('t2_replay',last_t2)
+                feedback=navigation.snapshot()
+                current=next((g for g in session.task_goals.goals if g['status'] not in ('completed','skipped')),None)
+                requirement={} if current is None else current['requirement']
+                record=session.skill.record
+                handle=record.get('handle') or {}
+                follow=feedback.get('follow_status') or {}
+                emit(dict(event='manual_status',task_id=session.state['task_id'],revision=session.state['revision'],
+                    goal_id=requirement.get('goal_id'),goal_description=requirement.get('description'),
+                    floor_id=session.catalog.value.get('floor_id'),call_id=handle.get('call_id'),
+                    status=session.state['status'],reason=session.state.get('reason'),
+                    navigation_status=record['status'],model_busy=actor.model.busy,
+                    localization_status=feedback.get('localization_status'),input_stale=feedback.get('input_stale'),
+                    origin_pose=feedback.get('origin_pose'),source_stamp_s=feedback.get('origin_stamp_s'),
+                    stopped=None,monitor=session.monitor.snapshot(),follow_status=follow,t2_result=last_t2,mode='bag_shadow'))
         driver = SavedObservationDriver(navigation, dataset, sequences) if dataset is not None else None
         actor.run(console=console, driver=driver, timeout_s=args.duration, on_tick=record, emit=emit)
         session._save('shadow_finished', dict(real_robot_success=False, execution_feedback=False))

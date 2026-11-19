@@ -8,7 +8,7 @@ def emit(value):
     print(json.dumps(value, ensure_ascii=False, allow_nan=False), flush=True)
 
 
-def make_loop(args, session, session_path):
+def make_loop(args, session, session_path, *, transient_sink=None):
     if args.actions:
         from .replay import ActionReplay
         actions = json.loads(Path(args.actions).read_text())
@@ -16,8 +16,19 @@ def make_loop(args, session, session_path):
         work = ActionReplay(actions)
     else:
         from ..core.model import api_work
-        work = lambda payload, observation, spatial_view: api_work(
-            args.api_config,session_path,payload,observation,spatial_view,cache_mode=args.cache_mode,
-            thinking_mode=(('off' if payload['current_state']['requirements_registered'] else 'low')
-                           if args.thinking_mode=='planning' else args.thinking_mode))
+        def work(payload, observation, spatial_view):
+            elevator=getattr(session,'elevator',None)
+            transition=getattr(elevator,'transition',None)
+            request_phase=getattr(transition,'status',None)
+            def active_ride_sink(value):
+                if (transient_sink is not None and transition is not None and
+                        getattr(getattr(session,'elevator',None),'transition',None) is transition and
+                        request_phase in ('monitoring_ride','awaiting_destination_localization') and
+                        transition.status==request_phase):
+                    transient_sink(dict(value,phase=request_phase))
+            return api_work(
+                args.api_config,session_path,payload,observation,spatial_view,cache_mode=args.cache_mode,
+                thinking_mode=(('off' if payload['current_state']['requirements_registered'] else getattr(args,'planning_thinking_mode','low'))
+                               if args.thinking_mode=='planning' else args.thinking_mode),
+                transient_sink=active_ride_sink if transient_sink is not None else None)
     return AgentLoop(session, work, max_requests=args.max_requests)

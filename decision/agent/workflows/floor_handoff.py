@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import uuid
+import hashlib
 
 import numpy as np
 from decision.agent import ROOT, CONFIG_DIR
@@ -69,6 +70,51 @@ def observation_owner(socket_path, *, allow_missing=False):
     return pid
 
 
+def follow_runtime_options(socket_path):
+    """Preserve the source session's explicitly selected follow input settings."""
+    path=Path(socket_path).resolve().parent.parent/'command.json'
+    command=json.loads(path.read_text())
+    if not isinstance(command,list) or not all(isinstance(x,str) for x in command):
+        raise ValueError('Source runtime command is invalid')
+    result=[]
+    for flag in ('--t2-backend','--t2-jpeg-quality'):
+        indexes=[i for i,value in enumerate(command) if value==flag]
+        if len(indexes)>1 or indexes and indexes[0]+1>=len(command):
+            raise ValueError('Source T2 option is ambiguous')
+        if indexes:
+            value=command[indexes[0]+1]
+            if flag=='--t2-backend' and value not in ('dspark','hosted'):
+                raise ValueError('Source T2 backend is invalid')
+            if flag=='--t2-jpeg-quality' and (not value.isdigit() or not 1<=int(value)<=95):
+                raise ValueError('Source T2 JPEG quality is invalid')
+            result.extend((flag,value))
+    if '--t2-backend' not in result:
+        raise ValueError('Source T2 backend was not recorded; restart the observation with an explicit backend')
+    if command.count('--t2-raw-rgb')>1:raise ValueError('Source T2 mode is ambiguous')
+    if '--t2-raw-rgb' in command:result.append('--t2-raw-rgb')
+    return result
+
+
+def load_standard_start(target,floor):
+    standards=json.loads((CONFIG_DIR/'elevator_standard_starts.json').read_text())
+    standard=standards.get(floor)
+    if standard is None:return None,None
+    pose=standard.get('pose_rpy_xyz')
+    if (standard.get('map_id')!=target.value['localization_map_id'] or
+            standard.get('frame_id')!=target.value['frame_id'] or standard.get('reference')!='rslidar' or
+            not isinstance(pose,list) or len(pose)!=6 or not np.isfinite(pose).all()):
+        raise ValueError('Standard elevator start does not match the destination map')
+    path=(ROOT/standard['reference_observation']).resolve()
+    if not path.is_relative_to(ROOT.resolve()):raise ValueError('Standard reference must be inside the project')
+    meta=json.loads(path.read_text());rgb=(path.parent/'rgb.jpg').read_bytes();scan=(path.parent/'lidar.png').read_bytes()
+    if (meta.get('map_id')!=standard['map_id'] or hashlib.sha256(rgb).hexdigest()!=meta.get('rgb_sha256') or
+            hashlib.sha256(scan).hexdigest()!=meta.get('lidar_sha256') or
+            not rgb.startswith(b'\xff\xd8') or not rgb.endswith(b'\xff\xd9') or
+            not scan.startswith(b'\x89PNG\r\n\x1a\n')):
+        raise ValueError('Standard elevator reference is missing or changed')
+    return copy.deepcopy(standard),(meta,rgb,scan)
+
+
 class ElevatorRide:
     """Observation-only equipment used by the ordinary task loop."""
     def __init__(self, configs, socket_path, output):
@@ -79,6 +125,9 @@ class ElevatorRide:
         self.attempt_overlay=None
         self.last_stamp=None
         self.wait_reason=None
+        self.standard=None
+        self.standard_reference=None
+        self.standard_attempted=False
 
     def start(self, session, goal_id):
         from ..core.elevator_transition import ElevatorTransition
@@ -86,11 +135,16 @@ class ElevatorRide:
         from ..adapters.shadow import load_catalog_map
         from ..tools.spatial import render
         requirement=session.task_goals.current(goal_id)['requirement']
-        state=session.navigation.snapshot()
-        if (self.transition or requirement.get('stage_type')!='elevator' or session.skill.record['handle'] or
-                state.get('stopped') is not True or state.get('input_stale') or state.get('localization_status')!='valid'):
-            raise ValueError('Pausing localization requires the current elevator stage, stopped and localized')
+        if (self.transition or session.navigation.scope!='manual' or requirement.get('stage_type')!='elevator' or
+                session.skill.record['handle'] is not None):
+            raise ValueError('Elevator observation requires a manual elevator stage without an active navigation call')
+        enabled=session.navigation.value.get('local_skills') or {}
+        if enabled.get('follow') is True:
+            # Detect unrecorded legacy settings before stopping the source
+            # observer; otherwise a later floor could silently switch backend.
+            follow_runtime_options(self.socket_path)
         target=session.task_goals.floor_catalogs[requirement['to_floor']]
+        standard,reference=load_standard_start(target,requirement['to_floor'])
         links=json.loads((CONFIG_DIR/'elevator_links.json').read_text())['links']
         exits=np.array([target.places[item[requirement['to_floor']]]['pose'][:2] for item in links])
         self.bounds=np.r_[exits.min(axis=0)-5,exits.max(axis=0)+5].tolist()
@@ -109,6 +163,9 @@ class ElevatorRide:
             self.camera.close()
             raise
         self.transition=transition
+        self.standard=copy.deepcopy(standard)
+        self.standard_reference=reference
+        self.standard_attempted=False
         self.frame=None
         self.last_attempt=None
         self.feedback=None
@@ -128,7 +185,12 @@ class ElevatorRide:
             self.last_attempt.update(result=result.get('error') or result.get('wait_reason') or 'association_wait_expired')
             self.handoff.close()
             self.handoff=None
+            if self.standard is not None:
+                self.wait_reason='standard_start_localization_failed: '+str(self.last_attempt['result'])
+                return
         if session.state['status']!='waiting_monitor':
+            return
+        if self.standard is not None and self.standard_attempted:
             return
         sample=self.camera.snapshot()
         if sample.get('status')!='available':
@@ -145,10 +207,17 @@ class ElevatorRide:
                 return
         self.last_stamp=stamp
         self.wait_reason=None
+        if self.standard is not None and self.transition.status=='awaiting_destination_localization':
+            self.frame=sample
+            try:self.restart_standard(session)
+            except (OSError,EOFError,ValueError,KeyError,TypeError) as error:
+                self.standard_attempted=True
+                self.wait_reason='standard_start_localization_failed: '+str(error)[:180]
+            return
         return sample
 
     def observe(self,judgment,evidence,retain_observation):
-        if self.frame is None or self.transition.status not in ('awaiting_entry','awaiting_exit'):
+        if self.frame is None or self.transition.status!='monitoring_ride':
             raise ValueError('Ride observation no longer pending')
         self.transition.observe(camera_record=self.frame['record'],image=self.frame['image'],
                                 judgment=judgment,evidence=evidence)
@@ -158,7 +227,8 @@ class ElevatorRide:
         self.transition.observations.clear()
         if self.transition.status=='awaiting_destination_localization':
             self.retained.clear()
-        return dict(status=self.transition.status)
+        return dict(status=self.transition.status,judgment=judgment,evidence=evidence,
+                    source_stamp_s=self.frame['record']['stamp_s'])
 
     def restart(self,session,pose,evidence):
         from ..core.elevator_links import destination_seed
@@ -178,11 +248,29 @@ class ElevatorRide:
         self.attempt_deadline=time.monotonic()+90.
         return dict(status='waiting_destination_localization',attempt=self.handoff.run_dir.name)
 
+    def restart_standard(self,session):
+        from ..core.elevator_links import standard_destination_seed
+        if (self.standard is None or self.standard_attempted or not self.frame or
+                not self.frame.get('scan_record') or self.handoff is not None):
+            raise ValueError('Standard start needs a fresh scan and no active localization attempt')
+        seed=standard_destination_seed(self.transition,self.standard,self.frame['scan_record'])
+        target=session.task_goals.floor_catalogs[self.transition.to_floor]
+        self.handoff=FloorHandoff(session=session,transition=self.transition,target_catalog=target,
+            config_path=self.configs[self.transition.to_floor],seed=seed,output=self.output,source_socket=self.socket_path)
+        self.last_attempt=dict(source='configured_standard_start',scan_stamp_s=seed['scan_stamp_s'])
+        self.standard_attempted=True
+        self.attempt_deadline=time.monotonic()+90.
+
     def attachments(self):
-        items=[('historical_elevator_rgb',f['record'],f['image'],'JPEG') for f in self.retained]
+        history=self.retained[-2:] if self.standard_reference else self.retained
+        items=[('historical_elevator_rgb',f['record'],f['image'],'JPEG') for f in history]
         items.append(('current_elevator_rgb',self.frame['record'],self.frame['image'],'JPEG'))
         if self.frame.get('scan_record'):
             items.append(('current_local_lidar',self.frame['scan_record'],self.frame['scan_image'],'PNG'))
+        if self.standard_reference and self.transition.status=='monitoring_ride':
+            meta,rgb,scan=self.standard_reference
+            items.extend([('standard_start_reference_rgb',meta['rgb'],rgb,'JPEG'),
+                          ('standard_start_reference_lidar',meta['lidar'],scan,'PNG')])
         if self.transition.status=='awaiting_destination_localization':
             items.append(('destination_waiting_area',dict(floor_id=self.transition.to_floor,
                 map_id=self.transition.destination_map_id,bounds_xy_m=self.bounds),self.crop,'PNG'))
@@ -198,6 +286,8 @@ class ElevatorRide:
         self.transition=self.camera=self.handoff=self.frame=None
         self.retained.clear()
         self.feedback=self.last_attempt=None
+        self.standard=self.standard_reference=None
+        self.standard_attempted=False
         self.attempt_overlay=None
         self.last_stamp=None
 
@@ -217,13 +307,21 @@ class FloorHandoff:
             raise ValueError('Floor handoff does not match the active task and catalogs')
         transform=seed.get('destination') or {}
         if (seed.get('verified_localization') is not False or seed.get('floor_id')!=target_catalog.value.get('floor_id') or
-                seed.get('source')!='agent_destination_scan_and_map' or
+                seed.get('source') not in ('agent_destination_scan_and_map','standard_destination_start') or
                 (seed.get('task_id'),seed.get('goal_id'))!=(transition.task_id,transition.goal_id) or
                 seed.get('exit_stamp_s')!=transition.last_observation_stamp_s or
                 not isinstance(seed.get('scan_stamp_s'),(int,float)) or not seed['scan_stamp_s']>seed['exit_stamp_s'] or
                 transform.get('from_floor')!=transition.from_floor or transform.get('to_floor')!=transition.to_floor or
                 transform.get('to_map_id')!=transition.destination_map_id):
             raise ValueError('Expected a provisional seed for the destination floor')
+        if seed['source']=='standard_destination_start':
+            pose=seed.get('lidar_pose_rpy_xyz');xy_yaw=seed.get('lidar_xy_yaw')
+            if (not isinstance(pose,list) or len(pose)!=6 or
+                    not isinstance(xy_yaw,list) or len(xy_yaw)!=3 or
+                    not all(type(v) in (int,float) and np.isfinite(v) for v in pose+xy_yaw) or
+                    not np.allclose([pose[3],pose[4],pose[2]],xy_yaw,rtol=0,atol=1e-9) or
+                    not isinstance(seed.get('scan_frame'),str) or seed['scan_frame'].lstrip('/')!='rslidar'):
+                raise ValueError('Invalid standard destination LiDAR seed')
         self.session,self.transition,self.target_catalog=session,transition,target_catalog
         self.config=Path(config_path).resolve();self.output=Path(output).resolve()
         self.output.mkdir(parents=True,exist_ok=True)
@@ -233,6 +331,8 @@ class FloorHandoff:
         self.seed_path.write_text(json.dumps(seed,ensure_ascii=False,allow_nan=False,indent=2))
         self.run_dir=self.output/('floor_observation_'+identity)
         self.log_path=self.output/('floor_observation_'+identity+'.log')
+        enabled=self.session.navigation.value.get('local_skills') or {}
+        self.follow_options=follow_runtime_options(source_socket) if enabled.get('follow') is True else []
         self.owner_pid=observation_owner(source_socket,allow_missing=True)
         self.process=None;self.log=None;self.status='stopping_source';self.error=None;self.wait_reason=None
         if self.owner_pid is not None:
@@ -256,7 +356,7 @@ class FloorHandoff:
                   '--vehicle-profile','configs/wheelchair_vehicle.yaml',
                   '--gpu',os.environ.get('GPU_ID','0')]
             enabled=self.session.navigation.value.get('local_skills') or {}
-            if enabled.get('follow') is True:args.append('--agent-follow-candidates')
+            if enabled.get('follow') is True:args.extend(['--agent-follow-candidates',*self.follow_options])
             if enabled.get('seating') is True:args.append('--agent-seating')
             try:
                 self.log=self.log_path.open('x')

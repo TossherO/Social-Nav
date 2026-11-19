@@ -16,7 +16,7 @@ from ..tools.navigation import NavigationSkill, spatial_context
 from ..tools.spatial import SpatialView, ReferenceMap, spatial_source_binding, layer_binding
 from perception.environment.context import fingerprint
 
-TERMINAL = {'succeeded', 'failed', 'cancelled'}
+TERMINAL = {'succeeded', 'partial', 'failed', 'cancelled'}
 
 
 class AgentSession:
@@ -44,6 +44,7 @@ class AgentSession:
         self._applying_context = None
         self.presented_completion = None
         self.seating_pending = None
+        self.seating_active = None
         self._revalidated_view = None
         task_id = uuid.uuid4().hex
         self.catalog = catalog.bind_start(navigation.snapshot(), task_id)
@@ -180,7 +181,7 @@ class AgentSession:
         return self.elevator.restart(self,pose,evidence)
 
     def context(self):
-        stage = next((g for g in self.task_goals.goals if g['status'] != 'completed'), None)
+        stage = next((g for g in self.task_goals.goals if g['status'] not in ('completed','skipped')), None)
         value = dict(task_id=self.state['task_id'], revision=self.state['revision'],
                      current_stage=None if stage is None else stage['binding'],
                      handle=copy.deepcopy(self.skill.record['handle']),
@@ -205,6 +206,9 @@ class AgentSession:
             follow=self.navigation.snapshot().get('follow_status') or {}
             value['follow_target_identity']=copy.deepcopy(follow.get('target_identity'))
             value['follow_target_generation']=follow.get('target_generation')
+        if (self.monitor.settings or {}).get('continuous_region_id') is not None:
+            value['conditional_review_epoch']=self.monitor.region_epoch
+            if self.monitor.review_phase=='reviewing':value['conditional_review_cycle']=True
         if self.state.get('elevator_active'):
             frame=self.elevator.frame or {}
             value['ride_input']=(self.elevator.transition.status,(frame.get('record') or {}).get('stamp_s'),
@@ -372,6 +376,8 @@ class AgentSession:
             outcome = self.finish_local_task(goal_id,context.get('observation_id'),evidence)
             if outcome['status']=='stopping' and self.skill.record.get('pending_completion'):
                 self.skill.record['pending_completion']['agent_decision'] = evidence.strip()
+                if facts.get('completion_region') is not None:
+                    self.skill.record['pending_completion']['semantic']['completion_region']=copy.deepcopy(facts['completion_region'])
                 self.monitor.note_review(goal_id,'satisfied',evidence.strip(),source_stamp_s=facts['rgb']['source_stamp_s'])
             return outcome
         semantic = dict(source='agent_decision',evidence=evidence.strip(),rgb=facts.get('rgb'),map_view=facts.get('map_view'))
@@ -389,9 +395,9 @@ class AgentSession:
 
     def _close_after_decision(self, goal_id, evidence):
         self.presented_completion = None
-        if self.task_goals.finished():
+        if self.task_goals.resolved():
             result = self.finish_task('succeeded',evidence)
-            if result['status']!='succeeded':
+            if result['status'] not in ('succeeded','partial'):
                 self.state.update(status='waiting_navigation',reason='awaiting_final_stop')
                 self._save('awaiting_final_stop')
             return dict(status='completed',goal_id=goal_id,task_status=self.state['status'])
@@ -400,6 +406,9 @@ class AgentSession:
     def _complete_stage(self, goal_id, proof, checks, semantic):
         """Retain completion evidence, then discard only stage-scoped working state."""
         goal = self.task_goals.current(goal_id)
+        if goal['requirement'].get('stage_type')=='seating':
+            from .seating import cancel_selection
+            cancel_selection(self)
         semantic=copy.deepcopy(semantic)
         if self.monitor.last_review is not None:
             semantic['agent_task_review']=copy.deepcopy(self.monitor.last_review)
@@ -418,7 +427,7 @@ class AgentSession:
         self._enter_current_stage()
 
     def _enter_current_stage(self):
-        stage = next((g for g in self.task_goals.goals if g['status'] != 'completed'), None)
+        stage = next((g for g in self.task_goals.goals if g['status'] not in ('completed','skipped')), None)
         if stage is not None:
             state = self.navigation.snapshot()
             stage['entered'] = dict(stamp_s=state['stamp_s'], clock_domain=state['clock_domain'])
@@ -650,22 +659,55 @@ class AgentSession:
         self.observation = observation
         return dict(status='available', observation=observation.prompt())
 
-    def start_local_task(self, goal_id, task_type, target_description, table_roi=None):
+    def select_follow_target(self,goal_id,observation_id,candidate_id,target_description):
+        current=self.task_goals.current(goal_id)
+        if current['requirement'].get('stage_type')!='follow':
+            return dict(status='refused',reason='current_stage_is_not_follow')
+        if self.skill.record.get('handle') is not None and not self._confirmed_live_hold(self.navigation.snapshot()):
+            return dict(status='refused',reason='cancel_and_confirm_existing_call_first')
+        context=self._applying_context or {};observation=self.observation
+        if (observation is None or not self.valid_context(context) or
+                context.get('observation_id')!=observation_id or
+                observation.record.get('observation_id')!=observation_id or
+                context.get('observation_binding')!=observation.record.get('input_fingerprint') or
+                context.get('input_view_binding')!=fingerprint(observation.prompt()) or
+                'follow_candidates' not in observation.record):
+            return dict(status='refused',reason='current_model_observation_with_follow_candidates_required')
+        from decision.vlm.follow_target import reference
+        record,image,crop=reference(observation,candidate_id,target_description,
+            task_id=self.state['task_id'],revision=self.state['revision'],goal_id=goal_id)
+        self.store.follow_reference(record,image,crop)
+        self.follow_reference=record
+        self._save('follow_target_confirmed',dict(reference=record,executable=False))
+        return dict(status='selected',reference_id=record['reference_id'],candidate_id=candidate_id,
+                    has_3d_track=record['track'] is not None,executable=False,execution_completed=False)
+
+    def start_local_task(self, goal_id, task_type, target_description=None, table_roi=None, reference_id=None):
         current=self.task_goals.current(goal_id)
         if current['requirement'].get('stage_type')!=task_type:
             return dict(status='refused',reason='local_task_type_does_not_match_stage')
         if task_type=='seating':
+            if not isinstance(target_description,str) or not target_description.strip():
+                return dict(status='refused',reason='seating_description_required')
             from .seating import start_selection
-            return start_selection(self,current,target_description,table_roi)
+            return start_selection(self,current,target_description.strip(),table_roi)
         if table_roi is not None:
             return dict(status='refused',reason='table_roi_only_applies_to_seating')
-        if not isinstance(target_description,str) or not target_description.strip():
-            return dict(status='refused',reason='follow_target_description_required')
-        intent=dict(target_description=target_description.strip())
+        ref=self.follow_reference
+        if (not isinstance(ref,dict) or not isinstance(reference_id,str) or not reference_id or
+                reference_id!=ref.get('reference_id') or ref.get('goal_id')!=goal_id or
+                ref.get('task_id')!=self.state['task_id'] or ref.get('task_revision')!=self.state['revision'] or
+                not isinstance(ref.get('description'),str) or not ref['description'].strip() or
+                ref.get('reference_id')!=fingerprint({k:v for k,v in ref.items() if k!='reference_id'})):
+            return dict(status='refused',reason='agent_confirmed_follow_reference_required')
+        saved=self.store.read_follow_reference(self.state['task_id'],self.state['revision'],goal_id,reference_id)
+        if saved is None or saved[0]!=ref:
+            return dict(status='refused',reason='agent_confirmed_follow_reference_unavailable')
+        intent=dict(target_description=ref['description'],reference=copy.deepcopy(ref))
         result=self.skill.start_follow(goal_id,intent,self.state['revision'],current['requirement'])
         if result['status'] in ('accepted','uncertain'):
             self.follow_loss=self.follow_search=None
-            current['selected']=dict(handle=copy.deepcopy(result['handle']),follow_reference_id=None,
+            current['selected']=dict(handle=copy.deepcopy(result['handle']),follow_reference_id=ref['reference_id'],
                                      pose=None,orientation_source=None,view_id=None)
             self.observation=self.spatial_view=None;self._clear_candidates()
         return result
@@ -884,10 +926,11 @@ class AgentSession:
         return self.navigation_summary()
 
     def set_navigation_monitor(self, goal_id, focus, interval_s=None, region_ids=None, progress_interval_s=None,
-                               distance_m=None, rotation_rad=None, stopped_s=None, timeout_s=None):
+                               distance_m=None, rotation_rad=None, stopped_s=None, timeout_s=None,
+                               continuous_region_id=None,review_mode=None):
         requirement=self.task_goals.current(goal_id)['requirement']
         if requirement.get('stage_type')=='elevator':
-            if any(v for v in (region_ids,progress_interval_s,distance_m,rotation_rad,stopped_s,timeout_s)):
+            if any(v for v in (region_ids,progress_interval_s,distance_m,rotation_rad,stopped_s,timeout_s,continuous_region_id,review_mode)):
                 return dict(status='refused',reason='only_independent_frame_or_periodic_review_available')
             if interval_s is None:
                 self.monitor.watch(goal_id,focus)
@@ -896,10 +939,29 @@ class AgentSession:
         if active['handle'] is not None and active['goal_id'] != goal_id:
             return dict(status='refused', reason='another_goal_owns_navigation')
         self.monitor.configure(goal_id, focus, interval_s, region_ids, progress_interval_s,
-                               distance_m,rotation_rad,stopped_s,timeout_s)
+                               distance_m,rotation_rad,stopped_s,timeout_s,continuous_region_id,review_mode)
         return dict(status='configured', monitor=self.monitor.snapshot(), execution_completed=False)
 
+    def record_monitor_review(self,goal_id,result,evidence):
+        self.task_goals.current(goal_id)
+        context=self._applying_context or {}
+        if ((self.monitor.settings or {}).get('goal_id')!=goal_id or
+                self.monitor.conditional_region_state!='inside' or self.monitor.review_phase!='reviewing' or
+                not isinstance(evidence,str) or not evidence.strip() or
+                not self.valid_context(context) or self.observation is None or
+                context.get('observation_binding')!=self.observation.record.get('input_fingerprint')):
+            return dict(status='refused',reason='conditional_review_or_observation_unavailable')
+        evidence=evidence.strip()
+        self.monitor.note_review(goal_id,result,evidence,source_stamp_s=context.get('source_stamp_s'))
+        self.monitor.await_next_observation(context.get('observation_binding'))
+        self.state.update(status='waiting_monitor',waiting_binding=None)
+        self._save('monitor_review',dict(goal_id=goal_id,result=result,evidence=evidence,
+                                         source_stamp_s=context.get('source_stamp_s')))
+        return dict(status='recorded',result=result,execution_completed=False)
+
     def cancel_navigation(self):
+        from .seating import cancel_selection
+        cancel_selection(self)
         result = self.skill.cancel()
         if self.skill.record['handle'] is not None:
             self.state['status'] = 'waiting_navigation'
@@ -913,6 +975,27 @@ class AgentSession:
         else:
             value = self.navigation.observe() if hasattr(self.navigation, 'observe') else None
             r = {} if value is None else value.record
+        return r.get('input_fingerprint')
+
+    def _monitor_observation_key(self):
+        """Use only a current RGB observation for the next conditional review."""
+        if hasattr(self.navigation,'value'):
+            value=self.navigation.value
+            r=value.get('observation') or {}
+            image_available=value.get('image_base64') is not None
+        elif hasattr(self.navigation,'observe'):
+            observation=self.navigation.observe()
+            r={} if observation is None else observation.record
+            image_available=observation is not None and observation.image is not None
+        else:return None
+        state=self.navigation.snapshot();stamp=r.get('stamp_s');now=state.get('stamp_s')
+        if (not image_available or (r.get('rgb') or {}).get('status')!='valid' or
+                r.get('clock_domain')!=state.get('clock_domain') or
+                r.get('local_identity')!=spatial_context(state)['local_identity'] or
+                state.get('map_binding') is not None and r.get('map_binding')!=state.get('map_binding') or
+                state.get('input_stale') or state.get('localization_status','valid')!='valid' or
+                type(stamp) not in (int,float) or type(now) not in (int,float) or not 0<=now-stamp<=3):
+            return None
         return r.get('input_fingerprint')
 
     def _confirmed_live_hold(self, feedback):
@@ -935,6 +1018,10 @@ class AgentSession:
             self.elevator.frame=None
             self.state['status']='waiting_monitor'
             return dict(status='waiting',event=event)
+        if event in ('navigation','observation','monitor') and self.monitor.await_next_observation(
+                (self._applying_context or {}).get('observation_binding')):
+            self.state.update(status='waiting_monitor',waiting_binding=None)
+            return dict(status='waiting',event='monitor')
         if event == 'navigation':
             if self.skill.record['handle'] is None:
                 return dict(status='available', navigation=self.skill.snapshot())
@@ -943,7 +1030,7 @@ class AgentSession:
             self.state.update(status='waiting_observation', waiting_binding=self._observation_key())
         elif event == 'monitor':
             if self.monitor.settings is None or all(self.monitor.settings.get(k) in (None,[]) for k in
-                    ('interval_s','region_ids','progress_interval_s','distance_m','rotation_rad','stopped_s','timeout_s')):
+                    ('interval_s','region_ids','progress_interval_s','distance_m','rotation_rad','stopped_s','timeout_s','continuous_region_id')):
                 return dict(status='refused',reason='configure_monitor_trigger_first')
             self.state['status']='waiting_monitor'
         else:
@@ -991,24 +1078,28 @@ class AgentSession:
                        elevator_proof.get('handle')==f.get('handle') and elevator_proof.get('agent_decision'))
         held = self.navigation.scope == 'live' and r['status'] == 'held'
         if (not (simulation_arrival or live_arrival or manual_arrival or manual_observation or manual_elevator or manual_follow) or (r['handle'] is not None and not held) or r['context_lost'] or
-                not r['connected'] or not self.task_goals.finished() or
+                not r['connected'] or not self.task_goals.resolved() or
                 not f.get('stopped') or f.get('input_stale') or
                 f.get('localization_status', 'valid') != 'valid'):
             return dict(status='refused', reason='task_execution_not_proven',
                         uncompleted_goals=[g['requirement']['goal_id'] for g in self.task_goals.goals if g['status']!='completed'])
-        self.state.update(status='succeeded', reason=evidence)
-        self.state['completed_revisions'].append(revision)
+        result_status='succeeded' if self.task_goals.finished() else 'partial'
+        self.state.update(status=result_status, reason=evidence)
+        if result_status=='succeeded':self.state['completed_revisions'].append(revision)
         manual_source=(f.get('manual_arrival_evidence') or f.get('manual_confirmation') or {}).get('source') if manual_arrival else None
-        return dict(status='succeeded', scope=self.navigation.scope, real_robot_success=False,
+        return dict(status=result_status, scope=self.navigation.scope, real_robot_success=False,
                     evidence_kind=('follow_condition_and_manual_stop' if manual_follow else
                                    'agent_elevator_judgment_and_destination_localization' if manual_elevator else
                                    'agent_visual_judgement_and_localization_stop_estimate' if manual_observation else
                                    ('automatic_localization_and_stop_estimate' if manual_source=='automatic_localization_and_stop_estimate'
                                     else 'operator_confirmation_and_localization_estimate') if manual_arrival else
                                    'localization_estimate' if live_arrival else 'simulation'),
-                    completed_goals=[g['requirement']['goal_id'] for g in self.task_goals.goals])
+                    completed_goals=[g['requirement']['goal_id'] for g in self.task_goals.goals if g['status']=='completed'],
+                    skipped_goals=[g['requirement']['goal_id'] for g in self.task_goals.goals if g['status']=='skipped'])
 
     def stop(self, target, reason):
+        from .seating import cancel_selection
+        cancel_selection(self)
         self.seating_pending=None
         self.state.update(stop_target=target, reason=reason)
         if self.skill.record.get('pending_completion') is not None:
@@ -1042,7 +1133,7 @@ class AgentSession:
             raise ValueError('Map arrival is unavailable while localization is paused')
         if (name == 'review' and s['status'] in ('ready','waiting_navigation','waiting_observation','waiting_monitor') and
                 not self.skill.record['context_lost'] and self.skill.record['connected']):
-            goal=next((g for g in self.task_goals.goals if g['status']!='completed'),None)
+            goal=next((g for g in self.task_goals.goals if g['status'] not in ('completed','skipped')),None)
             if goal is None:raise ValueError('No current subtask to review')
             event=dict(goal_id=goal['requirement']['goal_id'],focus=goal['requirement'].get('description'),
                        handle=copy.deepcopy(self.skill.record.get('handle')),
@@ -1053,7 +1144,7 @@ class AgentSession:
             self.conversation.notice('task_monitor',**event)
             self.store.event('task_monitor_event',event)
         elif name == 'arrived' and self.navigation.scope == 'manual':
-            goal=next((g for g in self.task_goals.goals if g['status']!='completed'),None)
+            goal=next((g for g in self.task_goals.goals if g['status'] not in ('completed','skipped')),None)
             confirmation=self.navigation.confirm_arrival()
             self._history('user',dict(event='manual_arrival_confirmation',confirmation=confirmation))
             self.conversation.notice('manual_arrival_confirmation',confirmation=confirmation)
@@ -1061,6 +1152,16 @@ class AgentSession:
             self._save('manual_arrival_confirmation',confirmation)
         elif name in ('pause', 'cancel'):
             self.stop('paused' if name == 'pause' else 'cancelled', name)
+        elif name == 'skip' and self.navigation.scope == 'manual':
+            goal=next((g for g in self.task_goals.goals if g['status'] not in ('completed','skipped')),None)
+            if goal is None:raise ValueError('No current subtask to skip')
+            if s.get('elevator_active') or goal['requirement'].get('stage_type')=='elevator':
+                raise ValueError('Cannot skip an elevator stage; floor transition must be reconciled')
+            if s['status']=='stopping' or self.skill.record['context_lost']:
+                raise ValueError('Cannot skip while navigation is stopping or its context is lost')
+            s['pending_skip_goal']=goal['requirement']['goal_id']
+            self.stop('skipping','operator_skipped_subtask')
+            self._apply_skip()
         elif name == 'resume' and s['status'] == 'paused' and not self.skill.record['context_lost']:
             s.update(status='ready', reason=None)
             self._history('user', dict(event='resume'))
@@ -1111,6 +1212,26 @@ class AgentSession:
             s['assistant_text'] = None
             self._history('user', dict(event='replacement', instruction=s['instruction']))
 
+    def _apply_skip(self):
+        s=self.state
+        if s['status']!='skipping':return
+        goal_id=s.pop('pending_skip_goal')
+        goal=self.task_goals.current(goal_id)
+        selected=(goal.get('selected') or {}).get('handle')
+        if selected is not None and getattr(self.navigation,'handle',None)==selected:
+            self.navigation.release_target(selected)
+        self.task_goals.skip(goal_id)
+        self.monitor=TaskMonitor(self.catalog)
+        self.observation=self.spatial_view=None
+        self.requested_bounds=None;self.requested_static_crop=False
+        self.presented_completion=None;self._clear_candidates()
+        self._history('user',dict(event='subtask_skipped',goal_id=goal_id))
+        self.conversation.notice('subtask_skipped',goal_id=goal_id,operator='user',completed=False)
+        s.update(status='partial' if self.task_goals.resolved() else 'ready',
+                 reason='operator_skipped_subtask' if self.task_goals.resolved() else None,waiting_binding=None,stop_target=None)
+        if s['status']=='ready':self._enter_current_stage()
+        self._save('subtask_skipped',dict(goal_id=goal_id,source='operator',completed=False))
+
     def _drain_manual_arrival_events(self):
         drain=getattr(self.navigation,'drain_arrival_events',None)
         if callable(drain):
@@ -1126,7 +1247,35 @@ class AgentSession:
                     if self._wake_monitor():
                         self.elevator.frame=sample
             return s
+        stage=next((g for g in self.task_goals.goals if g['status'] not in ('completed','skipped')),None)
+        # Starting the independent observation is equipment setup for an
+        # already registered elevator stage, not a model judgment about entry.
+        # Do it before checking the source map again: movement into the lift can
+        # invalidate that map while an asynchronous model request is in flight.
+        if (stage is not None and stage['requirement'].get('stage_type')=='elevator' and
+                not stage.get('destination_localization') and self.elevator is not None and
+                self.navigation.scope=='manual' and self.skill.record.get('handle') is None and
+                s['status'] in ('ready','waiting_navigation','waiting_observation','waiting_monitor')):
+            ready=getattr(self,'elevator_start_ready',None)
+            if ready is not None and not ready():return s
+            try:
+                result=self.pause_map_localization(stage['requirement']['goal_id'])
+                if result.get('status')!='accepted':
+                    raise ValueError(result.get('reason','elevator_observation_start_refused'))
+                self._save('elevator_observation_started',dict(source='registered_elevator_stage',result=result))
+            except (OSError,EOFError,ValueError,KeyError,TypeError) as error:
+                s.update(status='needs_clarification',reason='elevator_observation_start_failed')
+                self._save('elevator_observation_start_failed',dict(error_type=type(error).__name__,
+                    reason=str(error)[:240],automatically_retried=False))
+            return s
+        self.navigation.want_follow_candidates=bool(stage and stage['requirement'].get('stage_type')=='follow')
         changed = self.skill.tick()
+        if self.seating_active is not None:
+            from .seating import poll_updates
+            try:poll_updates(self)
+            except (ValueError,KeyError,TypeError,OSError,EOFError) as error:
+                self.stop('needs_clarification','seating_update_unavailable')
+                self._save('seating_update_unavailable',dict(error_type=type(error).__name__))
         if self.seating_pending is not None:
             if s['status']=='waiting_seating' and self.skill.record['connected'] and not self.skill.record['context_lost']:
                 from .seating import poll_selection
@@ -1148,7 +1297,7 @@ class AgentSession:
         if r['stage_type']=='follow' and r['status']=='failed' and r['goal_id'] is not None:
             self._remember_follow_loss(r['goal_id'])
         if s['status'] in ('ready','waiting_navigation','waiting_monitor') and not r['context_lost'] and r['connected']:
-            stage = next((g for g in self.task_goals.goals if g['status']!='completed'),None)
+            stage = next((g for g in self.task_goals.goals if g['status'] not in ('completed','skipped')),None)
             proof = r['completed'][-1] if r['completed'] else {}
             if (stage and proof.get('agent_decision') and stage['requirement']['goal_id']==proof['goal_id'] and
                     (stage.get('selected') or {}).get('handle')==proof['handle'] and
@@ -1158,9 +1307,9 @@ class AgentSession:
                 self._close_after_decision(proof['goal_id'],proof['agent_decision'])
                 self._save('follow_stop_confirmed')
                 return s
-            if s.get('reason')=='awaiting_final_stop' and self.task_goals.finished():
+            if s.get('reason')=='awaiting_final_stop' and self.task_goals.resolved():
                 self.finish_task('succeeded',self.task_goals.goals[-1]['completion']['semantic']['evidence'])
-                if s['status']=='succeeded':
+                if s['status'] in ('succeeded','partial'):
                     self._save('final_stop_confirmed')
                 return s
         if not r['connected'] and s['status'] == 'ready':
@@ -1178,6 +1327,7 @@ class AgentSession:
         if s['status'] == 'stopping' and r['handle'] is None:
             s['status'] = s['stop_target']
             self._apply_replacement()
+            self._apply_skip()
             self._save('task_stop_confirmed')
         elif s['status'] in ('waiting_navigation','waiting_monitor') and (changed or
                 s['status']=='waiting_navigation' and r['handle'] is None):
@@ -1195,7 +1345,7 @@ class AgentSession:
             self._history('navigation', self.skill.snapshot())
             self.conversation.notice('navigation_event',navigation=self.navigation_summary())
             self._save('navigation_event')
-        stage=next((g for g in self.task_goals.goals if g['status']!='completed'),None)
+        stage=next((g for g in self.task_goals.goals if g['status'] not in ('completed','skipped')),None)
         if (changed and stage is not None and stage['requirement']['goal_id']==r.get('goal_id') and
                 not r.get('context_lost')):
             trigger=dict(goal_id=r['goal_id'],focus=(self.monitor.settings or {}).get('focus'),
@@ -1214,6 +1364,8 @@ class AgentSession:
             self.monitor.reset_runtime()
         else:
             self.monitor.update(r, monitor_feedback)
+        if self.monitor.review_phase=='waiting_observation':
+            self.monitor.observe(self._monitor_observation_key(),monitor_feedback.get('stamp_s'))
         self._wake_monitor()
         return s
 
@@ -1256,8 +1408,8 @@ class AgentSession:
         current = dict(task_id=s['task_id'],revision=s['revision'],status=s['status'],reason=s['reason'],scope=self.navigation.scope,
             clarifications=copy.deepcopy(s['clarifications']),
             task_goals=[dict(goal_id=g['requirement']['goal_id'],status=g['status']) for g in goals],
-            next_goal_id=next((g['requirement']['goal_id'] for g in goals if g['status']!='completed'),None),
-            stage_entered=next((copy.deepcopy(g.get('entered')) for g in goals if g['status']!='completed'),None),
+            next_goal_id=next((g['requirement']['goal_id'] for g in goals if g['status'] not in ('completed','skipped')),None),
+            stage_entered=next((copy.deepcopy(g.get('entered')) for g in goals if g['status'] not in ('completed','skipped')),None),
             navigation=self.navigation_summary(), task_monitor=self.monitor.snapshot(), follow_reference=copy.deepcopy(self.follow_reference),
             follow_recovery_reference=copy.deepcopy(self.follow_recovery_reference),
             follow_loss=copy.deepcopy(self.follow_loss),follow_search=copy.deepcopy(self.follow_search),
@@ -1268,11 +1420,14 @@ class AgentSession:
         if self.navigation.scope == 'manual':
             current['execution_mode'] = dict(mode='operator_driven',
                 meaning='目标或少量有序途经点交给操作者使用原车手柄移动，程序不控制底盘；中间经过点无须停车或模型逐点决策，终点根据当前定位与持续停稳估计自动检查，人工确认是备用方式；结合途经记录、实际轨迹和当前观察判断任务。')
+        elif self.navigation.scope == 'shadow':
+            current['execution_mode'] = dict(mode='nonexecuting_shadow',
+                meaning='只观察记录或回放并生成建议，不控制底盘；记录中的运动不能证明建议已执行或目标已到达。')
         if len(self.task_goals.floor_catalogs)>1:
             current['cross_floor']=dict(current_floor=self.catalog.value['floor_id'],
                                         available_floors=list(self.task_goals.floor_catalogs))
         current['keyframes'] = self.keyframes.index(s['revision'])
-        stage = next((g for g in goals if g['status']!='completed'),None)
+        stage = next((g for g in goals if g['status'] not in ('completed','skipped')),None)
         self.presented_completion = None
         if stage is not None and ride is None:
             facts,proof = stage_evidence(self,stage)
@@ -1287,7 +1442,7 @@ class AgentSession:
             dict({k:copy.deepcopy(g['selected'][k]) for k in ('pose','orientation_source','view_id')},
                  **({'route':{k:copy.deepcopy(g['selected']['route'].get(k)) for k in
                     ('waypoints','final_yaw','waypoint_reason')}} if 'route' in g['selected'] else {})))
-            for g in goals if g['status']!='completed'),None)
+            for g in goals if g['status'] not in ('completed','skipped')),None)
         current['last_tool_feedback'] = None
         for entry in reversed(s['history']):
             if entry['kind']=='tool' and entry['revision']==s['revision']:
@@ -1305,10 +1460,10 @@ class AgentSession:
         messages = self.conversation.messages()
         attachments = self.keyframes.attachments(messages,s['revision'])
         follow_image=None
-        pending_follow=next((g for g in goals if g['status']!='completed'),None)
+        pending_follow=next((g for g in goals if g['status'] not in ('completed','skipped')),None)
         if (pending_follow is not None and pending_follow['requirement'].get('stage_type')=='follow' and
                 self.follow_reference is not None):
-            saved=self.store.read_follow_reference(s['task_id'],s['revision'],self.follow_reference['goal_id'])
+            saved=self.store.read_follow_reference(s['task_id'],s['revision'],self.follow_reference['goal_id'],self.follow_reference['reference_id'])
             if saved is not None:
                 follow_image=(saved[0],saved[2])
                 attachments=dict(list(attachments.items())[-1:])
@@ -1319,6 +1474,12 @@ class AgentSession:
             current.update(navigation=dict(feedback=feedback),task_start=None,recent_model_tool_choices=[],
                            ride=dict(status=ride.transition.status,last_attempt=ride.last_attempt,
                                      previous_feedback=getattr(ride,'feedback',None)))
+            standard=getattr(ride,'standard',None)
+            if standard is not None:
+                current['ride']['standard_start']=dict(floor_id=ride.transition.to_floor,reference='rslidar',
+                    pose_rpy_xyz=copy.deepcopy(standard['pose_rpy_xyz']),
+                    reference_lidar_pose_xyz_yaw=copy.deepcopy(ride.standard_reference[0]['lidar_in_map']),
+                    meaning='用户指定的标准起点初值；参考图是历史观察，不能证明当前位置或定位成功。')
             attachments={}
         return dict(messages=messages,current_state=current,reference_map=None if ride else self.reference_map,
                     ride_inputs=ride.attachments() if ride else None,keyframes=attachments,

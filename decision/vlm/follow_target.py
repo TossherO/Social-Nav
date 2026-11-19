@@ -10,6 +10,14 @@ from PIL import Image, ImageDraw
 from perception.environment.context import fingerprint
 
 
+def raw_candidates(scene, pixels, rgb_stamp_s, *, rgb_stamp_ns=None):
+    """Bind an unannotated RGB frame without claiming any detected person."""
+    value=candidates(scene,pixels,rgb_stamp_s,[],None,detector={'mode':'raw_rgb'},rgb_stamp_ns=rgb_stamp_ns)
+    value['mode']='raw_rgb'
+    value['binding']=fingerprint({k:v for k,v in value.items() if k!='binding'})
+    return value
+
+
 def candidates(scene, pixels, rgb_stamp_s, detections, association, *, detector, rgb_stamp_ns=None):
     """Bind every 2D candidate to one scene and, only when justified, a 3D track."""
     from navigation.planning.people import stable_identity
@@ -109,6 +117,8 @@ def verify_candidates(value, observation):
 def annotated(observation):
     observation.verify()
     value = verify_candidates(observation.record['follow_candidates'], observation)
+    if value.get('mode')=='raw_rgb':
+        return observation.image
     with Image.open(io.BytesIO(observation.image)) as raw:
         image = raw.convert('RGB')
     draw = ImageDraw.Draw(image)

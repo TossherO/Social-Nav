@@ -42,6 +42,116 @@ class Camera:
 
 
 class CrossFloorWorkflowTests(unittest.TestCase):
+    def test_standard_ride_automatically_rebinds_after_real_association(self):
+        from decision.agent.core.loop import AgentLoop
+        from decision.agent.core.session import AgentSession
+        from decision.agent.core.store import Store
+        from decision.agent.tools.framework import Reply
+        from decision.agent.workflows.floor_handoff import ElevatorRide
+        base=Catalog.load(CONFIG_DIR/'simulation.json');floors={}
+        for floor in ('floor1','floor2'):
+            value=copy.deepcopy(base.value);value.update(floor_id=floor,localization_map_id=floor+'-map')
+            for index in range(1,5):value['places'].append(dict(value['places'][0],place_id='p-01-'+str(index)))
+            floors[floor]=Catalog(value)
+        nav1=Navigation(floors['floor2'],'floor2-map','s1',10.)
+        nav2=Navigation(floors['floor1'],'floor1-map','s2',100.)
+        standard=dict(map_id='floor1-map',frame_id='map',reference='rslidar',pose_rpy_xyz=[0.,0.,.3,1.,2.,-.14])
+        meta=dict(rgb={},lidar={},lidar_in_map=[1.,2.,-.14,.3]);seeds=[];requests=[]
+        class StandardCamera(Camera):
+            def snapshot(self):
+                sample=super().snapshot();sample['scan_record']['frame_id']='rslidar';return sample
+        class Handoff:
+            def __init__(self,*,session,transition,target_catalog,seed,**kwargs):
+                self.session,self.transition,self.target=session,transition,target_catalog
+                self.run_dir=Path('/tmp/standard-mock-observation');seeds.append(seed)
+            def tick(self):
+                association=dict(nav2.binding,local_session_id='s2',local_generation=0,
+                                 local_frame='odom',measurement_stamp_s=100.)
+                self.transition.accept_localization(association=association,now_s=100.,max_age_s=1.,clock_domain='runtime_live')
+                self.session.rebind_manual_floor(self.target,nav2,self.transition)
+                return dict(status='complete')
+            def close(self):pass
+        def work(payload,observation,spatial):
+            state=payload['current_state'];requests.append(payload)
+            if not state['requirements_registered']:
+                return Reply.fixture(dict(tool='record_task',arguments=dict(goals=[dict(goal_id='lift',kind='skill',
+                    stage_type='elevator',target_id='',description='乘电梯',floor_id='floor2',to_floor='floor1')])))
+            if state.get('ride'):
+                return Reply.fixture(dict(tool='record_elevator_observation',arguments=dict(
+                    judgment='completed',evidence='已经到达标准点',retain_observation=False)))
+            return Reply.fixture(dict(tool='complete_subtask',arguments=dict(goal_id='lift',evidence='目标地图关联成立且已停稳')))
+        with tempfile.TemporaryDirectory() as root,patch('decision.agent.workflows.floor_handoff.os.kill'), \
+             patch('decision.agent.workflows.floor_handoff.observation_owner',return_value=123), \
+             patch('decision.agent.workflows.floor_handoff.load_standard_start',return_value=(standard,(meta,b'jpg',b'png'))), \
+             patch('decision.agent.adapters.elevator_camera.ElevatorCamera',StandardCamera), \
+             patch('decision.agent.adapters.shadow.load_catalog_map'),patch('decision.agent.tools.spatial.render',return_value=b'crop'), \
+             patch('decision.agent.core.session.robot_context',return_value={}):
+            store=Store(Path(root)/'session.sqlite');session=AgentSession('下楼',floors['floor2'],nav1,store,floor_catalogs=floors)
+            session.elevator=ElevatorRide({'floor1':'unused'},'source',root);actor=AgentLoop(session,work)
+            try:
+                with patch.object(session,'prepare_reference'),patch('decision.agent.workflows.floor_handoff.FloorHandoff',Handoff):
+                    for _ in range(35):
+                        actor.tick()
+                        if actor.model.thread:actor.model.thread.join(1)
+                        if session.task_goals.goals and session.task_goals.goals[0]['status']=='completed':break
+                self.assertEqual(len(seeds),1)
+                self.assertEqual(seeds[0]['source'],'standard_destination_start')
+                self.assertEqual(seeds[0]['lidar_pose_rpy_xyz'],standard['pose_rpy_xyz'])
+                self.assertEqual(session.task_goals.goals[0]['status'],'completed')
+                self.assertIs(session.navigation,nav2)
+                self.assertTrue(any(p['current_state'].get('ride',{}).get('standard_start') for p in requests))
+            finally:actor.model.close();session.elevator.close();store.close()
+
+    def test_elevator_stage_starts_observation_before_context_loss_check(self):
+        from decision.agent.core.session import AgentSession
+        from decision.agent.core.store import Store
+        base=Catalog.load(CONFIG_DIR/'simulation.json')
+        value=copy.deepcopy(base.value);value.update(floor_id='floor2',localization_map_id='floor2-map')
+        catalog=Catalog(value);nav=Navigation(catalog,'floor2-map','s',10.)
+        with tempfile.TemporaryDirectory() as root:
+            store=Store(Path(root)/'session.sqlite')
+            try:
+                session=AgentSession('乘梯',catalog,nav,store)
+                session.task_goals.goals=[dict(requirement=dict(goal_id='lobby',stage_type='navigation'),status='completed'),
+                                          dict(requirement=dict(goal_id='lift',stage_type='elevator'),status='pending')]
+                session.elevator=MagicMock()
+                session.elevator.start.return_value=dict(status='accepted')
+                nav.state.update(stopped=False,input_stale=True,localization_status='invalid',map_binding=None)
+                session.tick()
+                self.assertEqual(session.state['status'],'waiting_monitor')
+                self.assertTrue(session.state['elevator_active'])
+                session.elevator.start.assert_called_once_with(session,'lift')
+            finally:store.close()
+
+    def test_elevator_does_not_start_while_task_is_paused(self):
+        from decision.agent.core.session import AgentSession
+        from decision.agent.core.store import Store
+        catalog=Catalog.load(CONFIG_DIR/'simulation.json');nav=Navigation(catalog,'map','s',10.)
+        with tempfile.TemporaryDirectory() as root:
+            store=Store(Path(root)/'session.sqlite')
+            try:
+                session=AgentSession('乘梯',catalog,nav,store)
+                session.task_goals.goals=[dict(requirement=dict(goal_id='lift',stage_type='elevator'),status='pending')]
+                session.elevator=MagicMock();session.state['status']='paused'
+                session.tick()
+                session.elevator.start.assert_not_called()
+            finally:store.close()
+
+    def test_elevator_waits_for_required_recording_before_start(self):
+        from decision.agent.core.session import AgentSession
+        from decision.agent.core.store import Store
+        catalog=Catalog.load(CONFIG_DIR/'simulation.json');nav=Navigation(catalog,'map','s',10.)
+        with tempfile.TemporaryDirectory() as root:
+            store=Store(Path(root)/'session.sqlite')
+            try:
+                session=AgentSession('乘梯',catalog,nav,store)
+                session.task_goals.goals=[dict(requirement=dict(goal_id='lift',stage_type='elevator'),status='pending')]
+                session.elevator=MagicMock();session.elevator.start.return_value=dict(status='accepted')
+                ready=[False];session.elevator_start_ready=lambda:ready[0]
+                session.tick();session.elevator.start.assert_not_called()
+                ready[0]=True;session.tick();session.elevator.start.assert_called_once()
+            finally:store.close()
+
     def test_single_loop_reselects_after_failed_registration(self):
         from decision.agent.core.loop import AgentLoop
         from decision.agent.core.session import AgentSession
@@ -65,7 +175,7 @@ class CrossFloorWorkflowTests(unittest.TestCase):
             dict(goal_id='lift',kind='skill',stage_type='elevator',target_id='',description='乘电梯',
                  floor_id='floor2',to_floor='floor1'),
             dict(goal_id='next',kind='point',target_id='elevator',description='前往目标',floor_id='floor1')]
-        seeds=[];requests=[]
+        seeds=[];requests=[];ride_reviews=[]
         class Handoff:
             def __init__(self,*,session,transition,target_catalog,seed,**kwargs):
                 self.session,self.transition,self.target=session,transition,target_catalog
@@ -93,9 +203,11 @@ class CrossFloorWorkflowTests(unittest.TestCase):
             if phase=='awaiting_destination_localization':
                 return Reply.fixture(dict(tool='restart_map_localization',arguments=dict(
                     pose=[4.+len(seeds),5.,1.],evidence='matched corner')))
+            ride_reviews.append(phase)
             return Reply.fixture(dict(tool='record_elevator_observation',arguments=dict(
-                judgment='inside' if phase=='awaiting_entry' else 'outside',evidence='ephemeral',retain_observation=True)))
+                judgment='not_completed' if len(ride_reviews)==1 else 'completed',evidence='ephemeral',retain_observation=True)))
         with tempfile.TemporaryDirectory() as root, patch('decision.agent.workflows.floor_handoff.os.kill'), \
+             patch('decision.agent.workflows.floor_handoff.load_standard_start',return_value=(None,None)), \
              patch('decision.agent.workflows.floor_handoff.observation_owner',return_value=123), \
              patch('decision.agent.adapters.elevator_camera.ElevatorCamera',Camera), \
              patch('decision.agent.adapters.shadow.load_catalog_map'),patch('decision.agent.tools.spatial.render',return_value=b'crop'), \

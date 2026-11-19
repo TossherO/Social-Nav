@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 import numpy as np
-from decision.agent.core.elevator_links import destination_seed
+from decision.agent.core.elevator_links import destination_seed,standard_destination_seed
 
 
 class ElevatorSeedTests(unittest.TestCase):
@@ -31,6 +31,20 @@ class ElevatorSeedTests(unittest.TestCase):
             self.assertEqual(handoff_initial_pose(value,asset,hint),[0.,0.,.4,2.,3.,1.2])
             value['destination']['to_map_id']='another-map'
             with self.assertRaises(ValueError):handoff_initial_pose(value,asset,hint)
+
+    def test_standard_seed_preserves_all_six_rviz_values_and_checks_map_and_time(self):
+        from runtime.interactive import handoff_initial_pose
+        transition=SimpleNamespace(status='awaiting_destination_localization',task_id='t',goal_id='lift',
+            from_floor='floor2',to_floor='floor1',destination_map_id='target-map',last_observation_stamp_s=10.)
+        standard=dict(map_id='target-map',frame_id='map',reference='rslidar',pose_rpy_xyz=[.01,-.02,.3,1.,2.,-.14])
+        scan=dict(source='local_lidar_returns',clock_domain='ros_time',frame_id='rslidar',stamp_s=11.)
+        seed=standard_destination_seed(transition,standard,scan)
+        asset=SimpleNamespace(snapshot=SimpleNamespace(metadata={'map_id':'target-map'}))
+        self.assertEqual(handoff_initial_pose(seed,asset,{}),standard['pose_rpy_xyz'])
+        with self.assertRaises(ValueError):standard_destination_seed(transition,dict(standard,map_id='wrong'),scan)
+        with self.assertRaises(ValueError):standard_destination_seed(transition,standard,dict(scan,stamp_s=10.))
+        seed['lidar_xy_yaw'][0]+=1
+        with self.assertRaises(ValueError):handoff_initial_pose(seed,asset,{})
 
     def test_handoff_seed_is_rejected_for_execution_and_bag_before_runtime_start(self):
         import contextlib,io

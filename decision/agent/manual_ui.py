@@ -12,14 +12,14 @@ import uuid
 from PyQt5 import QtCore, QtGui, QtWidgets
 import yaml
 from . import ROOT
-from .ui_data import ContextTimeline,connect_readonly,display_value,event_detail,event_summary,goal_requirements,poll_session,select_detail
+from .ui_data import ContextTimeline,connect_readonly,display_value,event_detail,event_summary,format_event_detail,goal_requirements,poll_session,request_context,select_detail
 
 STATUS={'ready':'准备决策','waiting_navigation':'等待人工驾驶和自动到达检查','waiting_observation':'等待新观察',
         'waiting_monitor':'等待任务监控触发',
         'waiting_user':'等待用户继续','needs_clarification':'等待用户答复','paused':'已暂停',
-        'stopping':'正在结束任务','cancelled':'已取消','succeeded':'已完成','failed':'未完成',
+        'stopping':'正在结束任务','cancelled':'已取消','succeeded':'已完成','partial':'部分完成','failed':'未完成',
         'idle':'空闲','running':'进行中',
-        'blocked':'受阻','refused':'未接收','pending':'待执行','completed':'已完成'}
+        'blocked':'受阻','refused':'未接收','pending':'待执行','completed':'已完成','skipped':'已跳过'}
 OPERATION_EVENTS={'manual_goal_evidence_wait_started':'等待到达证据',
     'manual_goal_evidence_wait_finished':'到达证据等待结果',
     'manual_goal_evidence_refresh_failed':'到达证据读取失败',
@@ -27,14 +27,15 @@ OPERATION_EVENTS={'manual_goal_evidence_wait_started':'等待到达证据',
     'manual_arrival_invalidated':'到达证据失效','manual_arrival_recovered':'到达证据恢复',
     'manual_reference_status':'参考路径预览','manual_reference_region_conflict':'绕行路径冲突','manual_route_progress':'路线进度',
     'api_input_rejected':'模型输入超过估算限制',
-    'operator_command':'操作结果','task_monitor_event':'任务复核触发','navigation_context_lost':'定位或地图变化',
+    'operator_command':'操作结果','subtask_skipped':'子任务已跳过','registered_task_imported':'复用历史登记','task_monitor_event':'任务复核触发','navigation_context_lost':'定位或地图变化',
     'task_connection_lost':'连接中断','model_failed':'模型错误',
     'model_protocol_rejected':'模型格式错误','conversation_trimmed':'上下文裁剪','route_repeated_refusal':'路线重复被拒绝',
     'navigation_repeated_refusal':'导航目标重复被拒绝',
     'agent_run_finished':'会话结束'}
 MONITOR_TRIGGER_LABELS={'navigation_state_changed':'导航状态变化','operator_review_requested':'用户请求复核',
     'semantic_review_due':'周期复核','region_entered':'进入区域','no_measured_progress':'暂无测量进展',
-    'distance_progress':'行驶距离','rotation_progress':'转角','stopped_duration':'持续停稳','monitor_timeout':'等待超时'}
+    'distance_progress':'行驶距离','rotation_progress':'转角','stopped_duration':'持续停稳','monitor_timeout':'等待超时',
+    'conditional_review_due':'条件式持续复核'}
 MONITOR_REVIEW_LABELS={'satisfied':'已满足','not_satisfied':'未满足','unknown':'证据不足'}
 
 
@@ -195,18 +196,22 @@ class DetailDialog(QtWidgets.QDialog):
 
 
 class ManualWindow(QtWidgets.QMainWindow):
-    def __init__(self, socket='', catalog='', duration=1200, floor=''):
+    def __init__(self, socket='', catalog='', duration=1200, floor='', replay=False, auto_follow=False):
         super().__init__();self.setWindowTitle('Social-Nav · Agent 人工调试');self.resize(1380,900)
+        self.replay=replay
+        self.auto_follow=auto_follow
         self.process=QtCore.QProcess(self);self.process.setWorkingDirectory(str(ROOT))
         self.process.readyReadStandardOutput.connect(self.read_stdout)
         self.process.readyReadStandardError.connect(self.read_stderr)
         self.process.finished.connect(self.process_finished)
         self.process.errorOccurred.connect(self.process_error)
-        self.buffer=b'';self.reader=None;self.detail_reader=None;self.session_path=None
+        self.buffer=b'';self.reader=None;self.detail_reader=None;self.session_path=None;self.last_error=''
         self.state=None;self.status=None;self.status_received=0.;self.pending={};self.target=None
         self.annotation_names={}
         self.timeline=ContextTimeline();self.timeline_items=[];self.active_tools=[];self.detail_selection=None
+        self.transient_requests={};self.transient_calls={};self.transient_items=[];self.transient_seq=0;self.transient_dialogs=[]
         self.latest_request_seq=None
+        self.reuse_plan=None;self.reuse_path=None
         self._build(socket,catalog,duration,floor)
         self.timer=QtCore.QTimer(self);self.timer.timeout.connect(self.refresh_status);self.timer.start(500)
 
@@ -222,7 +227,8 @@ class ManualWindow(QtWidgets.QMainWindow):
             QPushButton:disabled { color: #9ca7b8; background: #f0f2f6; }
             QHeaderView::section { background: #e9eef6; border: 0; padding: 6px; font-weight: bold; }
         """)
-        self.banner=QtWidgets.QLabel('人工驾驶 · 观察会话不连接底盘 · 任务取消不会让手柄停车')
+        self.banner=QtWidgets.QLabel('bag 回放 · 仅生成影子建议，录制运动不是算法执行反馈' if self.replay else
+                                     '人工驾驶 · 观察会话不连接底盘 · 任务取消不会让手柄停车')
         self.banner.setStyleSheet('font-weight:bold;color:#8a4b00;padding:6px;background:#fff3d4')
         outer.addWidget(self.banner)
         self.settings_toggle=QtWidgets.QToolButton();self.settings_toggle.setCheckable(True);self.settings_toggle.setChecked(True)
@@ -238,10 +244,22 @@ class ManualWindow(QtWidgets.QMainWindow):
         self.floor.addItem('一楼新地图','floor1');self.floor.addItem('二楼新地图','floor2')
         self.floor.currentIndexChanged.connect(self.select_floor)
         self.cross_floor=QtWidgets.QCheckBox('跨楼层任务（人工驾驶与操作电梯）')
+        if self.replay:self.cross_floor.setVisible(False)
+        self.record_bag=QtWidgets.QCheckBox('任务执行时自动录制传感器 bag')
+        self.record_bag.setToolTip('任务登记后开始录制导航原始话题；任务结束后自动关闭并检查 bag。')
+        if self.replay:self.record_bag.setVisible(False)
+        self.planning_thinking=QtWidgets.QComboBox()
+        for label,value in (('无','off'),('low','low'),('medium','medium')):self.planning_thinking.addItem(label,value)
+        self.planning_thinking.setCurrentIndex(self.planning_thinking.findData('low'))
+        self.planning_thinking.setToolTip('仅影响任务登记和分解；登记完成后的选点、任务监控等决策仍关闭思考。')
         self.instruction=QtWidgets.QLineEdit();self.instruction.setPlaceholderText('输入长程任务，例如：先到停靠点1，再绕圆形区域一圈')
         self.duration=QtWidgets.QSpinBox();self.duration.setRange(1,86400);self.duration.setValue(duration);self.duration.setSuffix(' 秒')
         self.start_button=QtWidgets.QPushButton('开始新任务');self.start_button.clicked.connect(self.start_task)
         self.history_button=QtWidgets.QPushButton('打开历史会话');self.history_button.clicked.connect(self.open_history)
+        self.reuse_label=QtWidgets.QLabel('未选择历史任务');self.reuse_label.setWordWrap(True)
+        self.reuse_button=QtWidgets.QPushButton('选择历史任务');self.reuse_button.clicked.connect(self.choose_reuse)
+        self.reuse_clear=QtWidgets.QPushButton('取消复用');self.reuse_clear.clicked.connect(self.clear_reuse)
+        if self.replay and self.auto_follow:self.reuse_label.setText('启动后 Agent 将确认本次跟随人物')
         self.browse_buttons=[]
         for row,(label,edit) in enumerate((('观察 socket',self.socket),('语义标注',self.catalog))):
             form.addWidget(QtWidgets.QLabel(label),row,0);form.addWidget(edit,row,1)
@@ -253,10 +271,16 @@ class ManualWindow(QtWidgets.QMainWindow):
         form.addWidget(self.duration,2,2);form.addWidget(self.start_button,0,3);form.addWidget(self.history_button,1,3)
         form.addWidget(QtWidgets.QLabel('楼层预设'),3,0);form.addWidget(self.floor,3,1)
         form.addWidget(self.cross_floor,3,2,1,2)
+        form.addWidget(QtWidgets.QLabel('任务登记思考强度'),4,0);form.addWidget(self.planning_thinking,4,1)
+        form.addWidget(QtWidgets.QLabel('历史任务'),5,0);form.addWidget(self.reuse_label,5,1)
+        form.addWidget(self.reuse_button,5,2);form.addWidget(self.reuse_clear,5,3)
+        form.addWidget(self.record_bag,6,1,1,3)
         outer.addWidget(QtWidgets.QLabel('任务、地图、实时状态和 RGB 可能发送至已配置的托管模型服务。'))
         self.status_label=QtWidgets.QPlainTextEdit('未连接');self.status_label.setReadOnly(True)
         self.status_label.setFixedHeight(self.status_label.fontMetrics().lineSpacing()*2+14)
         self.status_label.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded);outer.addWidget(self.status_label)
+        self.recording_label=QtWidgets.QLineEdit('自动录包：未启用');self.recording_label.setReadOnly(True)
+        self.recording_label.setVisible(not self.replay);outer.addWidget(self.recording_label)
         split=QtWidgets.QSplitter();outer.addWidget(split,1)
         left=QtWidgets.QWidget();left.setMinimumWidth(380);left_layout=QtWidgets.QVBoxLayout(left)
         left_layout.addWidget(QtWidgets.QLabel('任务与进度'))
@@ -330,7 +354,7 @@ class ManualWindow(QtWidgets.QMainWindow):
         self.notice=QtWidgets.QLabel('历史会话只读；Agent 不会因打开记录而恢复。');self.notice.setWordWrap(True);outer.addWidget(self.notice)
         controls=QtWidgets.QHBoxLayout();outer.addLayout(controls)
         self.buttons={}
-        for name,label in [('review','立即复核'),('arrived','人工确认（备用）'),('pause','暂停任务'),('resume','恢复'),('continue','继续'),('cancel','取消任务')]:
+        for name,label in [('review','立即复核'),('arrived','人工确认（备用）'),('skip','跳过当前子任务'),('pause','暂停任务'),('resume','恢复'),('continue','继续'),('cancel','取消任务')]:
             button=QtWidgets.QPushButton(label);button.clicked.connect(lambda _=False,n=name:self.send_command(n))
             controls.addWidget(button);self.buttons[name]=button
         self.message=QtWidgets.QLineEdit();self.message.setPlaceholderText('需要澄清时输入答复，或输入用于替换任务的新指令')
@@ -383,6 +407,7 @@ class ManualWindow(QtWidgets.QMainWindow):
                 self.notice.setText('上一会话仍在读取，请稍后重试。');return False
         self.session_path=Path(path);self.state=None;self.status=None;self.goals.clear();self.annotation_names={}
         self.goal_details.setPlainText('选择子任务查看完整要求')
+        self.clear_elevator_transient()
         self.context_tree.clear();self.current_tree.clear();self.operation_events.clear();self.timeline=ContextTimeline();self.timeline_items=[];self.active_tools=[]
         self.latest_request_seq=None;self.request_summary.setText('尚无模型请求');self.request_button.setEnabled(False)
         self.current_task.setText('当前任务：无')
@@ -401,24 +426,72 @@ class ManualWindow(QtWidgets.QMainWindow):
                 self.settings_toggle.setChecked(False)
                 self.notice.setText('只读历史会话；不会自动恢复或调用模型。')
 
+    def choose_reuse(self):
+        if self.process.state()!=QtCore.QProcess.NotRunning:return
+        path,_=QtWidgets.QFileDialog.getOpenFileName(self,'选择历史任务会话',str(ROOT/'outputs/decision/agent'),'SQLite (*.sqlite)')
+        if not path:return
+        from .core.reuse import load_registered_task
+        try:plan=load_registered_task(path)
+        except (ValueError,OSError) as error:
+            QtWidgets.QMessageBox.warning(self,'无法复用历史任务',str(error));return
+        details=['原任务：'+plan['instruction'],'起始楼层：'+str(plan['initial_floor']),'']
+        for i,requirement in enumerate(plan['goals'],1):
+            details.append(str(i)+'. '+goal_requirements(dict(requirement=requirement),{}))
+            details.append('完整登记：'+json.dumps(display_value(requirement),ensure_ascii=False,indent=2))
+        if plan['clarifications']:
+            details.append('\n登记时的澄清：')
+            for item in plan['clarifications']:
+                details.append('问题：'+str(item.get('question',''))+'\n答复：'+str(item.get('answer','')))
+        details.append('\n将从第一项重新执行。历史位置、路径和完成进度不会复用。开始时会核对当前地图和标注。')
+        dialog=QtWidgets.QDialog(self);dialog.setWindowTitle('预览历史任务');dialog.resize(760,650)
+        layout=QtWidgets.QVBoxLayout(dialog);preview=QtWidgets.QPlainTextEdit();preview.setReadOnly(True)
+        preview.setPlainText('\n'.join(details));layout.addWidget(preview)
+        buttons=QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok|QtWidgets.QDialogButtonBox.Cancel)
+        buttons.button(QtWidgets.QDialogButtonBox.Ok).setText('使用此任务')
+        buttons.button(QtWidgets.QDialogButtonBox.Cancel).setText('取消')
+        buttons.accepted.connect(dialog.accept);buttons.rejected.connect(dialog.reject);layout.addWidget(buttons)
+        if dialog.exec_()!=QtWidgets.QDialog.Accepted:return
+        self.reuse_path=str(Path(path).resolve());self.reuse_plan=plan
+        self.reuse_label.setText(Path(path).parent.name+' / '+Path(path).name)
+        self.instruction.setText(plan['instruction']);self.instruction.setReadOnly(True)
+        self.planning_thinking.setEnabled(False)
+        self.notice.setText('已选择历史登记；开始时从第一项执行，不再次分解任务。')
+
+    def clear_reuse(self):
+        self.reuse_path=self.reuse_plan=None
+        self.reuse_label.setText('未选择历史任务');self.instruction.setReadOnly(False)
+        self.planning_thinking.setEnabled(self.process.state()==QtCore.QProcess.NotRunning)
+
+    def load_reuse(self,path):
+        from .core.reuse import load_registered_task
+        plan=load_registered_task(path)
+        self.reuse_path=str(Path(path).resolve());self.reuse_plan=plan
+        self.reuse_label.setText(Path(path).parent.name+' / '+Path(path).name)
+        self.instruction.setText(plan['instruction']);self.instruction.setReadOnly(True)
+        self.planning_thinking.setEnabled(False)
+
     def start_task(self):
         if self.process.state()!=QtCore.QProcess.NotRunning:return
         socket=self.socket.text().strip();catalog=self.catalog.text().strip();instruction=self.instruction.text().strip()
-        if not socket or not Path(socket).exists() or not Path(catalog).is_file() or not instruction:
+        if not socket or (not Path(socket).exists() and not (self.replay and self.auto_follow)) or not Path(catalog).is_file() or not instruction:
             self.notice.setText('请提供存在的观察 socket、语义标注和非空任务。');return
         socket=str(Path(socket).resolve());catalog=str(Path(catalog).resolve())
         name=datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-        output=ROOT/'outputs/decision/agent'/('manual_ui_'+name)
+        output=ROOT/'outputs/decision/agent'/(('replay_ui_' if self.replay else 'manual_ui_')+name)
         if not self.set_reader(output/'session.sqlite'):return
-        self.buffer=b'';self.pending={};self.target=None
+        self.buffer=b'';self.pending={};self.target=None;self.last_error=''
         self.target_text.setText('等待 Agent 选择目标');self.target_image.clear()
-        args=['-B','-m','decision.agent','manual','--runtime-socket',socket,'--catalog',catalog,
+        args=['-B','-m','decision.agent','shadow' if self.replay else 'manual','--runtime-socket',socket,'--catalog',catalog,
               '--instruction',instruction,'--interactive','--gui-commands','--duration',str(self.duration.value()),
-              '--output',str(output)]
+              '--output',str(output),'--thinking-mode','planning','--planning-thinking-mode',self.planning_thinking.currentData()]
+        if self.reuse_plan is not None:args.extend(['--reuse-session',self.reuse_path,'--reuse-digest',self.reuse_plan['digest']])
         if self.cross_floor.isChecked():args.append('--cross-floor')
+        if not self.replay and self.record_bag.isChecked():args.append('--record-bag')
+        if self.replay:args.append('--require-bag')
+        if self.replay and self.auto_follow:args.append('--auto-follow')
         self.process.start(sys.executable,args)
         self.settings_toggle.setChecked(False)
-        self.notice.setText('正在启动人工 Agent；等待定位和会话初始化。')
+        self.notice.setText('正在启动 bag 影子 Agent；等待定位和会话初始化。' if self.replay else '正在启动人工 Agent；等待定位和会话初始化。')
         self.refresh_status()
 
     def read_stdout(self):
@@ -431,6 +504,10 @@ class ManualWindow(QtWidgets.QMainWindow):
             event=value.get('event')
             if event=='manual_status':
                 self.status=value;self.status_received=time.monotonic()
+            elif event=='elevator_transient':self.show_elevator_transient(value.get('data') or {})
+            elif event=='elevator_transient_clear':self.clear_elevator_transient()
+            elif event in ('replay_preparing','replay_auto_follow_started','replay_t2_failed'):
+                self.notice.setText(value.get('instruction','回放准备中'))
             elif event=='operator_command':
                 self.pending.pop(value.get('command_id'),None)
                 self.notice.setText('操作已接收' if value.get('accepted') else '操作未执行：'+str(value.get('reason')))
@@ -444,15 +521,22 @@ class ManualWindow(QtWidgets.QMainWindow):
                 self.socket.setText(str(value.get('runtime_socket') or ''))
                 self.notice.setText('已切换到目标楼层观察会话，Agent 将继续原任务。')
             elif event=='manual_rviz_unavailable':self.notice.setText('RViz Agent 标记不可用：'+str(value.get('reason')))
+            elif event=='agent_bag_recording' and value.get('status')=='failed':
+                self.notice.setText('自动录包失败：'+str(value.get('error') or '请检查录制日志'))
             elif 'event_rejected' in value:self.notice.setText('操作未执行：'+str(value['event_rejected']))
         self.refresh_status()
 
     def read_stderr(self):
         text=bytes(self.process.readAllStandardError()).decode('utf-8','replace').strip()
-        if text:self.notice.setText('Agent 进程提示：'+text[-1000:])
+        if text:
+            self.last_error=text.splitlines()[-1][:350]
+            self.notice.setText('Agent 进程提示：'+text[-1000:])
 
     def process_finished(self,code,_status):
-        self.status=None;self.pending.clear();self.notice.setText(f'Agent 进程已结束（退出码 {code}）；会话记录可继续查看。')
+        self.clear_elevator_transient()
+        self.status=None;self.pending.clear()
+        detail='；'+self.last_error if code and self.last_error else '；会话记录可继续查看。'
+        self.notice.setText(f'Agent 进程已结束（退出码 {code}）'+detail)
         self.refresh_status()
 
     def process_error(self,error):
@@ -557,6 +641,41 @@ class ManualWindow(QtWidgets.QMainWindow):
                 child.setData(0,QtCore.Qt.UserRole+2,image_index);item.addChild(child)
             if message['images']:item.setExpanded(True)
 
+    def show_elevator_transient(self,value):
+        kind=value.get('kind');call=value.get('call_id')
+        if kind=='request' and isinstance(value.get('request'),dict) and isinstance(call,str):
+            self.transient_seq-=1;seq=self.transient_seq
+            self.transient_requests[seq]=dict(request=value['request']);self.transient_calls[call]=seq
+            context=request_context(self.transient_requests[seq]);stamp=datetime.now().strftime('%H:%M:%S')
+            self.active_tools=context['tools'];self.show_current_request(dict(context=context,seq=seq),stamp)
+            item=QtWidgets.QTreeWidgetItem([stamp,'跨楼层临时请求',f"{len(context['messages'])} 条消息，{sum(len(m['images']) for m in context['messages'])} 张图片 · 双击查看"])
+            item.setData(0,QtCore.Qt.UserRole,seq);self.context_tree.addTopLevelItem(item);self.transient_items.append((seq,item))
+            while len(self.transient_items)>32:
+                old,entry=self.transient_items.pop(0);self.context_tree.takeTopLevelItem(self.context_tree.indexOfTopLevelItem(entry))
+                self.transient_requests.pop(old,None)
+                self.transient_calls={key:num for key,num in self.transient_calls.items() if num!=old}
+        elif kind=='response' and call in self.transient_calls:
+            seq=self.transient_calls[call];record=self.transient_requests.get(seq)
+            if record is None:return
+            record['response']=value.get('message')
+            for number,item in self.transient_items:
+                if number==seq:
+                    summary=json.dumps(display_value(value.get('message')),ensure_ascii=False)
+                    response=QtWidgets.QTreeWidgetItem(['','模型判断',summary[:300]])
+                    response.setData(0,QtCore.Qt.UserRole,seq);response.setData(0,QtCore.Qt.UserRole+5,'response')
+                    item.addChild(response);item.setExpanded(True);break
+
+    def clear_elevator_transient(self):
+        for dialog in self.transient_dialogs:dialog.close()
+        self.transient_dialogs.clear()
+        for _,item in self.transient_items:
+            index=self.context_tree.indexOfTopLevelItem(item)
+            if index>=0:self.context_tree.takeTopLevelItem(index)
+        self.transient_items.clear();self.transient_requests.clear();self.transient_calls.clear()
+        if self.latest_request_seq is not None and self.latest_request_seq<0:
+            self.latest_request_seq=None;self.current_tree.clear();self.request_button.setEnabled(False)
+            self.request_summary.setText('跨楼层临时请求已清除')
+
     def update_timeline(self,stamp,before):
         for message in self.timeline.entries[before:]:
             label,color=message_label(message)
@@ -611,6 +730,10 @@ class ManualWindow(QtWidgets.QMainWindow):
     def open_detail(self,item,_column):
         if self.session_path is None or self.detail_reader is not None:return
         seq=item.data(0,QtCore.Qt.UserRole)
+        if isinstance(seq,int) and seq<0:
+            self.show_transient_detail(seq,item.data(0,QtCore.Qt.UserRole+1),item.data(0,QtCore.Qt.UserRole+2),
+                                       response=item.data(0,QtCore.Qt.UserRole+5)=='response')
+            return
         self.detail_selection=(item.data(0,QtCore.Qt.UserRole+1),item.data(0,QtCore.Qt.UserRole+2))
         self.detail_reader=DetailReader(self.session_path,seq)
         self.detail_reader.ready.connect(self.show_detail)
@@ -619,11 +742,26 @@ class ManualWindow(QtWidgets.QMainWindow):
 
     def open_request_detail(self):
         if self.session_path is None or self.detail_reader is not None or self.latest_request_seq is None:return
+        if self.latest_request_seq<0:
+            self.show_transient_detail(self.latest_request_seq,None,None);return
         self.detail_selection=(None,None)
         self.detail_reader=DetailReader(self.session_path,self.latest_request_seq)
         self.detail_reader.ready.connect(self.show_detail)
         self.detail_reader.error.connect(lambda message:self.notice.setText('详情读取失败：'+message))
         self.detail_reader.finished.connect(self.detail_finished);self.detail_reader.start()
+
+    def show_transient_detail(self,seq,index,image_index,*,response=False):
+        record=self.transient_requests.get(seq)
+        if record is None:return
+        kind='api_response' if response else 'api_request'
+        value={'message':record.get('response')} if response else {'request':record['request']}
+        kind,value,images=format_event_detail(kind,value)
+        value,images,selected=select_detail(kind,value,images,index,image_index)
+        dialog=DetailDialog(kind,value,images,self,image_index=selected,message_only=index is not None)
+        self.transient_dialogs.append(dialog)
+        try:dialog.exec_()
+        finally:
+            if dialog in self.transient_dialogs:self.transient_dialogs.remove(dialog)
 
     def show_detail(self,kind,value,images):
         index,image_index=self.detail_selection or (None,None)
@@ -667,6 +805,7 @@ class ManualWindow(QtWidgets.QMainWindow):
         update_readonly_text(self.status_label,text)
 
     def refresh_status(self):
+        self.refresh_recording()
         running=self.process.state()==QtCore.QProcess.Running
         fresh=running and self.status is not None and time.monotonic()-self.status_received<3.
         if fresh and self.pending and any(time.monotonic()-value['sent']>5. for value in self.pending.values()):
@@ -690,7 +829,9 @@ class ManualWindow(QtWidgets.QMainWindow):
                  '不可用：'+str(preview_error) if preview_error else
                  '已生成' if preview.get('status')=='reference_ready' else
                  '未生成：'+str(preview.get('reason') or preview.get('status') or '等待目标'))
-            self.set_status_text(f"人工驾驶 ｜ 定位：{loc} ｜ 位姿：{pose} ｜ Agent：{task} ｜ "
+            if self.replay:ref='请查看 RViz 和运行记录'
+            mode='bag 影子回放' if self.replay else '人工驾驶'
+            self.set_status_text(f"{mode} ｜ 定位：{loc} ｜ 位姿：{pose} ｜ Agent：{task} ｜ "
                 f"静止估计：{stopped} ｜ 导航：{nav} ｜ 模型：{'请求中' if s.get('model_busy') else '空闲'}{route}"
                 f" ｜ 参考路径：{ref} ｜ 定位源时间：{s.get('source_stamp_s')}")
             distance=s.get('goal_distance_m');dwell=s.get('arrival_dwell_s');monitor=s.get('monitor') or {}
@@ -710,10 +851,37 @@ class ManualWindow(QtWidgets.QMainWindow):
                 '\n最近触发：'+('、'.join(MONITOR_TRIGGER_LABELS.get(x.get('kind'),str(x.get('kind','未知'))) for x in trigger) if trigger else '无')+
                 '\n模型判断：'+MONITOR_REVIEW_LABELS.get(review.get('result'),str(review.get('result') or '无'))+
                 ('\n判断依据：'+str(review['evidence']) if review.get('evidence') else ''))
+            conditional=monitor.get('conditional_review') or {}
+            if conditional:
+                region_name=self.annotation_names.get(conditional.get('region_id'),conditional.get('region_id'))
+                region_label={'inside':'区域内','outside':'区域外','unknown':'定位不可用'}.get(conditional.get('region_state'),'未知')
+                phase={'inactive':'未启用','pending':'等待复核','reviewing':'正在复核',
+                       'waiting_observation':'等待新观察'}.get(conditional.get('phase'),'未知')
+                if conditional.get('phase')=='reviewing' and s.get('model_busy'):phase='模型判断中'
+                summary+='\n复核区域：'+str(region_name)+' ｜ '+region_label+' ｜ '+phase
+                completion_region=s.get('completion_region_id')
+                summary+='\n完成时区域检查：'+(str(self.annotation_names.get(completion_region,completion_region)) if completion_region else '未登记')
+            if s.get('stage_type')=='follow' and not self.replay:
+                follow=s.get('follow_status') or {}
+                summary+='\n跟随状态：'+str(follow.get('status') or '尚未启动')
+                if follow.get('reason'):summary+='；原因：'+str(follow['reason'])
+            if self.replay:
+                follow=s.get('follow_status') or {}
+                summary+='\nT2 跟随：'+str(follow.get('status') or '尚未启动')
+                if follow.get('reason'):summary+='；原因：'+str(follow['reason'])
+                t2=s.get('t2_result') or {}
+                if t2:
+                    summary+='\n最近 T2：'+str(t2.get('event'))+' ｜ 选择：'+str(t2.get('selection') or '无')
+                    if t2.get('reason'):summary+=' ｜ '+str(t2['reason'])
+                    if t2.get('timing'):summary+='\n耗时：'+str(t2['timing'])
+                summary+='\n回放中的移动不代表跟随建议已执行。'
             if s.get('elevator_status'):
-                states={'awaiting_entry':'等待进入电梯','awaiting_exit':'等待离开电梯',
+                states={'monitoring_ride':'周期判断乘梯是否完成',
                         'awaiting_destination_localization':'已判断离开电梯，正在切换并定位目标楼层',
                         'completed':'目标楼层定位已建立'}
+                if s.get('elevator_standard_start'):
+                    states.update(monitoring_ride='周期判断是否到达标准起点',
+                                  awaiting_destination_localization='已判断到达标准起点，正在定位目标楼层')
                 handoff=s.get('floor_handoff') or {}
                 decision=s.get('elevator_decision') or {}
                 summary=('乘梯任务：'+str(s.get('goal_description') or '')+
@@ -725,7 +893,7 @@ class ManualWindow(QtWidgets.QMainWindow):
                     '\n乘梯图像与逐次判断仅在监测期间保留。')
             update_readonly_text(self.task_monitor,summary)
         else:
-            self.set_status_text('人工驾驶 ｜ '+('等待新状态或连接已失效' if running else '未连接；历史记录为只读'))
+            self.set_status_text(('bag 影子回放' if self.replay else '人工驾驶')+' ｜ '+('等待新状态或连接已失效' if running else '未连接；历史记录为只读'))
             update_readonly_text(self.task_monitor,'等待任务状态')
         busy=bool(self.pending);status=self.status.get('status') if fresh else None
         nav=self.status.get('navigation_status') if fresh else None
@@ -734,20 +902,50 @@ class ManualWindow(QtWidgets.QMainWindow):
             if name=='arrived':enabled=enabled and (self.status.get('manual_confirmation_available') or
                 nav=='running' and self.status.get('call_id') is not None)
             elif name=='review':enabled=enabled and self.status.get('goal_id') is not None and status in ('ready','waiting_navigation','waiting_observation','waiting_monitor')
+            elif name=='skip':enabled=enabled and self.status.get('goal_id') is not None and status not in ('stopping','succeeded','partial','failed','cancelled') and not self.status.get('elevator_status')
             elif name=='resume':enabled=enabled and status=='paused'
             elif name=='continue':enabled=enabled and status=='waiting_user'
             elif name=='answer':enabled=enabled and status=='needs_clarification'
-            elif name=='pause':enabled=enabled and status not in ('paused','stopping','succeeded','failed','cancelled')
-            elif name in ('cancel','replace'):enabled=enabled and status not in ('stopping','succeeded','failed','cancelled')
+            elif name=='pause':enabled=enabled and status not in ('paused','stopping','succeeded','partial','failed','cancelled')
+            elif name in ('cancel','replace'):enabled=enabled and status not in ('stopping','succeeded','partial','failed','cancelled')
             if name=='replace' and (self.status or {}).get('elevator_status'):enabled=False
+            if self.replay and name in ('arrived','skip'):enabled=False
             button.setEnabled(bool(enabled))
         self.start_button.setEnabled(self.process.state()==QtCore.QProcess.NotRunning)
         self.history_button.setEnabled(self.process.state()==QtCore.QProcess.NotRunning)
         editable=self.process.state()==QtCore.QProcess.NotRunning
-        for field in (self.socket,self.catalog,self.instruction,self.duration,self.floor,self.cross_floor,*self.browse_buttons):field.setEnabled(editable)
+        for field in (self.socket,self.catalog,self.instruction,self.duration,self.floor,self.cross_floor,self.record_bag,self.reuse_button,self.reuse_clear,*self.browse_buttons):field.setEnabled(editable)
+        self.planning_thinking.setEnabled(editable and self.reuse_plan is None)
+
+    def refresh_recording(self):
+        if self.replay:return
+        files=[] if self.session_path is None else list(self.session_path.parent.glob('bag_recording_*.json'))
+        if files:
+            path=max(files,key=lambda p:int(p.stem.rsplit('_',1)[-1]) if p.stem.rsplit('_',1)[-1].isdigit() else -1)
+            try:value=json.loads(path.read_text(encoding='utf-8'))
+            except (OSError,ValueError):value={}
+            labels={'preparing':'检查传感器','starting':'正在启动','recording':'录制中',
+                    'finalizing':'正在关闭与校验','saved':'已保存','needs_review':'已保存，需检查','failed':'失败'}
+            label=labels.get(value.get('status'),'准备中')
+            detail=value.get('bag') or value.get('error') or ''
+            text='自动录包：'+label+(' ｜ '+str(detail) if detail else '')
+        elif self.record_bag.isChecked() and self.process.state()!=QtCore.QProcess.NotRunning:
+            text='自动录包：等待任务登记完成'
+        else:text='自动录包：未启用'
+        self.recording_label.setText(text);self.recording_label.setToolTip(text)
 
     def send_command(self,name):
         if self.status is None or self.pending or time.monotonic()-self.status_received>=3.:return
+        if name=='skip':
+            identity=tuple(self.status.get(k) for k in ('task_id','revision','goal_id','call_id'))
+            goal=self.status.get('goal_description') or '当前子任务'
+            result=QtWidgets.QMessageBox.question(self,'跳过当前子任务',
+                '跳过“'+str(goal)+'”？该子任务会记录为未完成，活动参考目标将被取消。\n此操作不会让轮椅或手柄停车。',
+                QtWidgets.QMessageBox.Yes|QtWidgets.QMessageBox.No,QtWidgets.QMessageBox.No)
+            if result!=QtWidgets.QMessageBox.Yes:return
+            if (self.status is None or self.pending or time.monotonic()-self.status_received>=3. or
+                    identity!=tuple(self.status.get(k) for k in ('task_id','revision','goal_id','call_id'))):
+                self.notice.setText('任务状态已变化，请重新检查当前子任务。');return
         text=self.message.text().strip() if name in ('answer','replace') else None
         if name in ('answer','replace') and not text:self.notice.setText('请先输入答复或新任务。');return
         identity=uuid.uuid4().hex;s=self.status
@@ -780,17 +978,26 @@ def main():
     parser.add_argument('--duration',type=int,default=1200)
     parser.add_argument('--floor',choices=('floor1','floor2'),default='',help='选择本机一楼或二楼语义标注预设')
     parser.add_argument('--session',default='',help='只读打开已有 session.sqlite')
+    parser.add_argument('--replay',action='store_true',help='连接不执行运动的 bag 回放影子会话')
+    parser.add_argument('--reuse-session',default='',help='预载已登记的历史任务')
+    parser.add_argument('--auto-follow',action='store_true',help='定位就绪后自动启动历史任务的第一项跟随')
     args=parser.parse_args()
     if not 1<=args.duration<=86400:parser.error('duration 必须在 1 至 86400 秒之间')
     if args.session and not Path(args.session).is_file():parser.error('session 文件不存在')
+    if args.auto_follow and (not args.replay or not args.reuse_session or not args.runtime_socket or not args.catalog):
+        parser.error('--auto-follow 要求 --replay、--reuse-session、--runtime-socket 和 --catalog')
     app=QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
     if args.floor and (args.runtime_socket or args.catalog):parser.error('--floor 不能与 --runtime-socket 或 --catalog 同时使用')
-    window=ManualWindow(args.runtime_socket,args.catalog,args.duration,args.floor)
+    window=ManualWindow(args.runtime_socket,args.catalog,args.duration,args.floor,replay=args.replay,auto_follow=args.auto_follow)
+    if args.reuse_session:
+        try:window.load_reuse(args.reuse_session)
+        except (ValueError,OSError) as error:parser.error(str(error))
     if args.session:
         window.set_reader(args.session)
         window.settings_toggle.setChecked(False)
         window.notice.setText('只读历史会话；图片是当时发送的观察，不代表当前实时画面。')
     window.show()
+    if args.auto_follow:QtCore.QTimer.singleShot(0,window.start_task)
     return app.exec_()
 
 

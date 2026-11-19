@@ -61,6 +61,25 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(record['tool_calls'],native)
         self.assertEqual(self.session.task_goals.goals,[])
 
+    def test_model_registration_uses_only_advertised_contract(self):
+        requests=[]
+        legacy=reply('record_task',goals=[point_goal('elevator')]).message['tool_calls']
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(200,text=wire(legacy))
+        result=self.client(handler).decide(self.session.prompt())
+        self.assertIsNone(result.action)
+        self.assertEqual(result.argument_error['reason'],'invalid_tool_arguments')
+        self.assertEqual(len(requests),1)
+        self.assertEqual(self.session.task_goals.goals,[])
+
+    def test_model_accepts_new_registration_contract(self):
+        action=reply('record_task',goals=[dict(goal_id='g1',stage='point',
+            target=dict(id='elevator'),description='到电梯口')])
+        client=self.client(lambda _:httpx.Response(200,text=wire(action.message['tool_calls'])))
+        result=client.decide(self.session.prompt())
+        self.assertEqual(result.action['arguments']['goals'][0]['stage'],'point')
+
     def test_plain_text_is_visible_but_identified_as_unregistered(self):
         raw='建议按航点前往，并声称已经完成。'
         actor=AgentLoop(self.session,lambda *_:Reply.parse(dict(role='assistant',content=raw)))
@@ -77,8 +96,9 @@ class RegistrationTests(unittest.TestCase):
 
     def test_execution_handoff_keeps_plan_and_consumed_ids_only(self):
         lookup=reply('lookup_places',name='planning-only-query')
-        register=reply('record_task',goals=[dict(point_goal('elevator'),monitor={'interval_s':8.},
-                                                 execution_notes='到达后核对电梯入口')])
+        register=reply('record_task',goals=[dict(goal_id='goal-elevator',stage='point',
+            target={'id':'elevator'},description='到电梯口',monitor={'interval_s':8.},
+            execution_notes='到达后核对电梯入口')])
         self.session.conversation.commit(lookup,dict(status='planning-only-result'))
         self.session.state['clarifications']=[dict(question='哪一处？',answer='电梯入口')]
         requests=[]

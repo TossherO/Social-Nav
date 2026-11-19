@@ -141,7 +141,8 @@ class ControlLoop:
                             if self.follow is not None:
                                 with self.lock:self.follow.handle=copy.deepcopy(value['handle'])
                             if self.follow_decision is not None:
-                                self.follow_decision.begin(value['handle'],value['intent']['target_description'])
+                                self.follow_decision.begin(value['handle'],value['intent']['target_description'],
+                                    reference=value['intent']['reference'],crop=value['reference_crop'])
                             self.commands.agent_state.publish_follow(dict(status='starting',handle=value['handle'],reason=None))
                         elif kind=='follow_stop':
                             evidence=None if self.follow is None else copy.deepcopy(self.follow.last_evidence)
@@ -377,6 +378,8 @@ class ControlLoop:
             if outcome is not None:
                 result=outcome['result'];prepared=outcome['prepared']
                 self.record('reference',dict(event='follow_t2_result',request_binding=prepared['binding'],
+                    backend=result.get('backend','dspark'),
+                    transport_request_binding=result.get('transport_request_binding'),
                     source_stamp_s=prepared['source_stamp_s'],raw_content=result.get('raw_content'),
                     selection=result.get('selection'),
                     clock_domain=prepared['clock_domain'],scene_binding=prepared['scene_binding'],
@@ -393,8 +396,6 @@ class ControlLoop:
                         current_scene_stamp_s=None if self.scene is None else self.scene.record['as_of']))
                     worker.request_fresh()
                 if action is not None and action['operation']=='plan':
-                    proposal=outcome.get('reference_proposal')
-                    if proposal is not None:worker.adopt_reference(handle,proposal)
                     self.follow_pending=None;self.follow_search_anchor=self.follow_search_choice=None
                 elif action is not None and action['operation']=='continue':
                     worker.request_fresh();action=None
