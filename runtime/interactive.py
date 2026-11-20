@@ -520,11 +520,13 @@ def main(argv=None):
                 raise ValueError('Initial pose confirmation is only available before live initialization')
             if not initial_preview.ready(time.monotonic()):
                 raise ValueError('Select a pose and wait for a fresh LiDAR preview before confirming')
-            (output/'initial_pose.json').write_text(json.dumps(dict(source='confirmed_rviz_initialpose',
+            pending=output/'initial_pose.tmp'
+            pending.write_text(json.dumps(dict(source='confirmed_rviz_initialpose',
                 reference='rslidar', map=config['map'], pose_rpy_xyz=initial_preview.pose,
                 intent_stamp_s=initial_preview.intent_stamp, preview_scan_stamp_s=initial_preview.rendered[1],
-                height_seed=initial_preview.height_seed,
+                confirmed_monotonic_s=time.monotonic(),height_seed=initial_preview.height_seed,
                 registration_verified=False), indent=2))
+            pending.replace(output/'initial_pose.json')
             selection.append(list(initial_preview.pose))
             clear=Marker();clear.action=Marker.DELETEALL
             initial_marker_pub.publish(MarkerArray(markers=[clear]))

@@ -2,7 +2,6 @@
 from collections import deque
 from types import SimpleNamespace
 import threading
-import time
 import unittest
 from unittest.mock import patch
 
@@ -50,7 +49,7 @@ class LocalTaskTests(unittest.TestCase):
     def test_current_table_scan_through_model_selection_and_path_check(self):
         scene=bundle()
         geometry=VehicleGeometry([[-.15,-.15],[.2,-.15],[.2,.15],[-.15,.15]],np.eye(4),source='synthetic',assumed=False)
-        worker=SeatingWorker(geometry,load_config(),load_motion_config())
+        worker=SeatingWorker(geometry,load_config(),load_motion_config(),clock_rate=2.)
         worker.calibration=dict(matrix=[[0,-1,0,0],[0,0,-1,0],[1,0,0,0],[0,0,0,1]])
         rgb=np.full((96,128,3),170,np.uint8)
         obs=Observation.from_scene(scene,geometry=geometry,rgb=dict(pixels=rgb,stamp_s=10.,frame_id='camera'),
@@ -60,12 +59,13 @@ class LocalTaskTests(unittest.TestCase):
         camera=dict(K=[60.,0,64.,0,60.,48.,0,0,1],D=[0.]*5)
         selection=dict(selection_id='stage1',instruction='在桌前停靠',roi=[0.,0.,1.,.6],
                        observation_binding=obs.record['input_fingerprint'])
-        feedback_time=time.monotonic()
-        with patch('runtime.seating.time.monotonic',return_value=feedback_time), \
+        feedback_time=1_000_000.
+        with patch('runtime.seating.time.monotonic',return_value=feedback_time) as mono, \
              patch('decision.vlm.online.request_dspark',return_value=dict(status='complete',raw_content='{"p":1,"s":"v"}')) as infer:
             try:
-                worker.observe(scene,obs,rgb,scan,camera,time.monotonic())
-                worker.update_scene(scene,feedback_time)
+                clock=(10.,feedback_time)
+                worker.observe(scene,obs,rgb,scan,camera,clock)
+                worker.update_scene(scene,clock)
                 worker.select(selection)
                 worker.thread.join(6)
                 result=worker.snapshot()
@@ -79,8 +79,9 @@ class LocalTaskTests(unittest.TestCase):
                 next_scene=scene_at(10.1)
                 next_obs=Observation.from_scene(next_scene,geometry=geometry,rgb=dict(pixels=rgb,stamp_s=10.1,frame_id='camera'),
                     sensors=dict(camera=dict(view=dict(status='approximate_pinhole'))))
-                worker.update_scene(next_scene,feedback_time)
-                worker.observe(next_scene,next_obs,rgb,scan,camera,feedback_time)
+                clock=(10.1,feedback_time)
+                worker.update_scene(next_scene,clock)
+                worker.observe(next_scene,next_obs,rgb,scan,camera,clock)
                 worker.thread.join(6)
                 updated=worker.snapshot()
                 self.assertEqual(updated['status'],'selected',updated)
@@ -99,4 +100,17 @@ class LocalTaskTests(unittest.TestCase):
                 self.assertEqual(worker.snapshot()['status'],'cancelled')
                 with self.assertRaisesRegex(ValueError,'expired'):
                     worker.select(dict(selection,observation_binding='wrong-frame'))
+
+                def late_response(*_args,**_kwargs):
+                    mono.return_value=feedback_time+1.1  # 2.2 seconds on the source clock.
+                    return dict(status='complete',raw_content='{"p":1,"s":"v"}')
+                infer.side_effect=late_response
+                worker.select(selection)
+                worker.thread.join(6)
+                self.assertEqual(worker.snapshot()['reason'],'Decision response deadline exceeded')
+                infer.reset_mock()
+                worker.select(selection)
+                worker.thread.join(6)
+                self.assertEqual(worker.snapshot()['reason'],'Request observation is already expired')
+                infer.assert_not_called()
             finally:worker.close()

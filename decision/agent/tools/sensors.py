@@ -7,7 +7,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def sensor_context(geometry, camera_info=None, *, rgb_shape=None, rgb_frame=None, rgb_stamp=None):
+def sensor_context(geometry, camera_info=None, *, rgb_shape=None, rgb_frame=None, rgb_stamp=None, rgb_stamp_ns=None):
     result = dict(status='unavailable', reason='vehicle_geometry_unavailable', reference='base_link')
     if geometry is None or geometry.assumed:
         return result
@@ -39,10 +39,12 @@ def sensor_context(geometry, camera_info=None, *, rgb_shape=None, rgb_frame=None
     try:
         width, height = int(camera_info['width']), int(camera_info['height'])
         k = np.asarray(camera_info['K'], dtype=float).reshape(3,3)
-        stamp = camera_info['stamp_ns']*1e-9
+        camera_ns = camera_info['stamp_ns']
+        stamp = camera_ns / 1_000_000_000
+        future = stamp > rgb_stamp if rgb_stamp_ns is None else camera_ns > rgb_stamp_ns
         if (list(rgb_shape[:2]) != [height,width] or camera_info['frame_id'] != rgb_frame or
                 rgb_frame != camera['front_camera']['optical_frame'] or
-                not math.isfinite(stamp) or stamp > rgb_stamp or width <= 0 or height <= 0 or
+                not math.isfinite(stamp) or future or width <= 0 or height <= 0 or
                 not np.isfinite(k).all() or k[0,0] <= 0 or k[1,1] <= 0):
             return result
         # Pinhole rays through the horizontal image edges. Raw lens distortion

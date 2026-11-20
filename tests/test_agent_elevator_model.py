@@ -69,13 +69,16 @@ class ElevatorModelTests(unittest.TestCase):
             finally:store.close();budget.close()
             self.assertEqual(result.action['arguments']['judgment'],'not_completed')
             ride_tools={tool['function']['name'] for tool in captured[0]['tools']}
+            self.assertEqual(captured[0]['tool_choice'],'required')
             normal_tools={tool['function']['name'] for tool in captured[1]['tools']}
             self.assertIn('record_elevator_observation',ride_tools)
             self.assertNotIn('pause_map_localization',ride_tools)
             self.assertNotIn('restart_map_localization',ride_tools)
             self.assertIn('pause_map_localization',normal_tools)
-            self.assertIn('独立观察已启动',json.dumps(captured[0],ensure_ascii=False))
-            self.assertIn('标准起点参考',json.dumps(captured[0],ensure_ascii=False))
+            state=json.loads(captured[0]['messages'][-1]['content'][0]['text'])['state']
+            self.assertEqual(state['ride']['status'],'monitoring_ride')
+            self.assertEqual(state['ride']['standard_start']['floor_id'],'floor1')
+            self.assertFalse(state['visual_inputs']['maps']['available'])
             self.assertEqual(captured[0]['messages'][0],captured[1]['messages'][0])
             self.assertIn('data:image/jpeg;base64,',json.dumps(captured[0]))
             self.assertEqual([item['kind'] for item in visible],['request','response'])
@@ -114,7 +117,8 @@ class ElevatorModelTests(unittest.TestCase):
                 self.assertIn('restart_map_localization',offered)
                 self.assertNotIn('pause_map_localization',offered)
                 self.assertNotIn('record_elevator_observation',offered)
-                self.assertIn('正在准备目标楼层定位',json.dumps(captured[-1],ensure_ascii=False))
+                state=json.loads(captured[-1]['messages'][-1]['content'][0]['text'])['state']
+                self.assertEqual(state['ride']['status'],'awaiting_destination_localization')
                 response[:]=Reply.fixture(dict(tool='pause_map_localization',arguments=dict(goal_id='lift'))).message['tool_calls']
                 with self.assertRaises(ApiError):model.decide(payload)
                 payload['current_state']['ride']['status']='unknown'

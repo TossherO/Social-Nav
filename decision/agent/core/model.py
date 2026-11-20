@@ -36,10 +36,6 @@ ELEVATOR_TOOLS={
     'monitoring_ride':('record_elevator_observation','set_navigation_monitor','wait_for_event','ask_user'),
     'awaiting_destination_localization':('restart_map_localization','set_navigation_monitor','wait_for_event','ask_user'),
 }
-ELEVATOR_GUIDANCE={
-    'monitoring_ride':'来源楼层定位已暂停，独立传感器观察已经启动，无需再次暂停定位。请结合本轮观察调用 record_elevator_observation 判断整次乘梯是否完成。',
-    'awaiting_destination_localization':'乘梯已判断完成，正在准备目标楼层定位。请结合本轮扫描与目标地图调用 restart_map_localization 选择初值；失败时可依据反馈重新选择。',
-}
 
 
 def input_estimate(messages, tools):
@@ -305,12 +301,8 @@ class Model:
         state = copy.deepcopy(payload['current_state'])
         ride_inputs=payload.get('ride_inputs')
         phase=(state.get('ride') or {}).get('status') if ride_inputs else None
-        if ride_inputs:
-            if phase not in ELEVATOR_TOOLS:
-                raise ValueError('Unknown elevator phase for transient model request')
-            state['ride']['phase_guidance']=ELEVATOR_GUIDANCE[phase]
-            if state['ride'].get('standard_start') and phase=='monitoring_ride':
-                state['ride']['phase_guidance']='独立观察已启动。对比当前 RGB 和雷达图与历史标准起点参考，判断轮椅是否已抵达目标楼层标准起点并调整至参考朝向；确认后调用 record_elevator_observation 选择 completed，系统自动使用固定初值启动定位。不能确认时选择 unknown 或 not_completed。'
+        if ride_inputs and phase not in ELEVATOR_TOOLS:
+            raise ValueError('Unknown elevator phase for transient model request')
         state['visual_inputs'] = visual_inputs(state,observation,spatial_view,reference,
             payload.get('keyframes',{}),payload.get('input_status',{}))
         if ride_inputs:
@@ -393,7 +385,7 @@ class Model:
         return self.request(system,messages,observation_id=None if observation is None else observation.record['observation_id'],
                             tool_names=(ELEVATOR_TOOLS[phase] if ride_inputs else
                                         REGISTRATION_TOOLS if registration else EXECUTION_TOOLS),
-                            tool_choice='required' if registration and self.thinking_mode=='off' else 'auto',projection=projection,
+                            tool_choice='required' if self.thinking_mode=='off' else 'auto',projection=projection,
                             transient=bool(payload.get('ride_inputs')))
 
 

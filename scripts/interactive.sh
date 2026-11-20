@@ -66,7 +66,7 @@ case "$SOCIAL_NAV_LAUNCH_KIND" in
     SOCIAL_NAV_LAUNCH_MODE="${SOCIAL_NAV_MODE_ARG:---start}"
     case "$SOCIAL_NAV_LAUNCH_MODE" in
       --help)
-        printf '%s\n' '用法：bash scripts/interactive.sh observe [--dry-run] [--agent-observations] [--floor floor1|floor2] [--agent-follow-candidates] [--t2-raw-rgb] [--t2-backend dspark|hosted] [--t2-image-format jpeg|png] [--t2-jpeg-quality 1..95] [--agent-seating] [--initial-z 米]' \
+        printf '%s\n' '用法：bash scripts/interactive.sh observe [--dry-run] [--agent-observations] [--floor floor1|floor2] [--agent-follow-candidates] [--t2-raw-rgb] [--t2-backend dspark|hosted] [--t2-image-format jpeg|png] [--t2-jpeg-quality 1..95] [--agent-seating] [--trace-timing] [--initial-z 米]' \
           '先运行传感器入口。本入口打开 RViz 进行在线观察与规划，不连接底盘。'
         exit 0;;
       --start|--dry-run) ;;
@@ -86,7 +86,7 @@ case "$SOCIAL_NAV_LAUNCH_KIND" in
     SOCIAL_NAV_LAUNCH_MODE="${SOCIAL_NAV_MODE_ARG:---dry-run}"
     case "$SOCIAL_NAV_LAUNCH_MODE" in
       --help)
-        printf '%s\n' '用法：bash scripts/interactive.sh execute [--dry-run|--check|--execute] [--agent-observations] [--agent-follow-candidates] [--t2-backend dspark|hosted] [--t2-image-format jpeg|png] [--t2-jpeg-quality 1..95] [--agent-seating] [--agent-execution] [--initial-z 米]' \
+        printf '%s\n' '用法：bash scripts/interactive.sh execute [--dry-run|--check|--execute] [--agent-observations] [--agent-follow-candidates] [--t2-backend dspark|hosted] [--t2-image-format jpeg|png] [--t2-jpeg-quality 1..95] [--agent-seating] [--agent-execution] [--trace-timing] [--initial-z 米]' \
           '默认只打印命令；--check 只检查车辆档案；--execute 启动实机会话，仍需单独人工使能。' \
           '档案检查只验证字段和数值一致性，不验证实际制动或失联停车。'
         exit 0;;

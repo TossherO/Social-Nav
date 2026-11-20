@@ -26,9 +26,11 @@ from tests.navigation_fixtures import grid
 from tests.test_navigation_prediction import track
 
 
-def observation(stamp,generation=0):
+def observation(stamp,generation=0,*,stamp_ns=None):
     snapshot=grid(generation=generation);snapshot.metadata['stamp_s']=stamp
     row=person(stamp)
+    if stamp_ns is not None:
+        row['stamp_ns']=stamp_ns
     row.update(observation_id=str(round(stamp*1e9)),pose_health='valid',pose_source='localization',
         pose_stamp_s=stamp,timestamp_source='sensor_header',world_from_lidar=snapshot.metadata['world_from_lidar'],
         localization_binding=dict(session_id='test',generation=generation,frame_id='odom',source='fast_lio'))
@@ -41,7 +43,7 @@ def observation(stamp,generation=0):
         image_input=dict(raw_rgb_sha256=hashlib.sha256(arrays['rgb'].tobytes()).hexdigest(),
             rgb_stamp_ns=round((stamp-.02)*1e9),image_size=[64,48]),
         result=dict(status='complete',tracks={'a/g7':dict(status='matched',rgb_box=[20,5,35,40])}))
-    scene=assemble_scene(snapshot,clock_domain='synthetic',settings=environment_config()['scene'],people=row)
+    scene=assemble_scene(snapshot,clock_domain='synthetic',settings=environment_config()['scene'],people=row,stamp_ns=stamp_ns)
     return row,arrays,association,scene
 
 

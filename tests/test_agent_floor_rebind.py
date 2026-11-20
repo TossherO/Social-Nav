@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import httpx
 
 from decision.agent import CONFIG_DIR
+from decision.agent.core.completion import stage_evidence
 from decision.agent.core.elevator_transition import ElevatorTransition
 from decision.agent.core.session import AgentSession
 from decision.agent.core.store import Store,Budget
@@ -45,15 +46,18 @@ class FloorRebindTests(unittest.TestCase):
         original=Catalog.load(CONFIG_DIR/'simulation.json')
         a=copy.deepcopy(original.value);a['floor_id']='floor2'
         b=copy.deepcopy(original.value);b['floor_id']='floor1'
+        b['regions'][0]['region_id']='floor1_wait'
         b['places'].append(dict(place_id='floor1_only',name='一楼地点',pose=[1.,1.,0.],reference='base_link',status='simulation'))
         source,target=Catalog(a),Catalog(b)
         goals=TaskGoals(source,floor_catalogs={'floor2':source,'floor1':target})
         items=[dict(point_goal('elevator'),floor_id='floor2'),
-               dict(goal_id='lift',kind='skill',target_id='',description='乘电梯到一楼',stage_type='elevator',
-                    floor_id='floor2',to_floor='floor1'),
+               dict(goal_id='lift',stage='elevator',description='乘电梯到一楼等候区',
+                    floor_id='floor2',to_floor='floor1',conditions=dict(robot_inside_region_id='floor1_wait')),
                dict(goal_id='after',kind='point',target_id='floor1_only',description='到一楼地点',floor_id='floor1')]
         self.assertEqual(len(goals.record(items)),3)
         wrong=TaskGoals(source,floor_catalogs={'floor2':source,'floor1':target})
+        with self.assertRaisesRegex(ValueError,"'lobby_area'.*'floor1'"):
+            wrong.record([dict(items[1],conditions=dict(robot_inside_region_id='lobby_area'))])
         with self.assertRaisesRegex(ValueError,'current floor'):
             wrong.record([items[0],items[2]])
         single=TaskGoals(source)
@@ -64,16 +68,25 @@ class FloorRebindTests(unittest.TestCase):
         original=Catalog.load(CONFIG_DIR/'simulation.json')
         source_value=copy.deepcopy(original.value);source_value.update(floor_id='floor2',localization_map_id='old-map')
         target_value=copy.deepcopy(original.value);target_value.update(floor_id='floor1',localization_map_id='new-map')
+        target_value['regions'][0]['polygon']=[[0.,1.],[2.,1.],[2.,3.],[0.,3.]]
         source,target=Catalog(source_value),Catalog(target_value)
         nav=ScriptedFeedback();nav.scope='manual'
+        nav.state.update(origin_pose=[7.,4.,0.],origin_stamp_s=10.,origin_frame_id='sim_odom',
+                         map_binding=dict(valid=True,map_id='old-map',map_frame='sim_odom'))
         with tempfile.TemporaryDirectory() as root:
             store=Store(Path(root)/'session.sqlite')
             try:
                 session=AgentSession('先乘电梯再到指定地点',source,nav,store,
                                      floor_catalogs={'floor2':source,'floor1':target})
                 session.call('record_task',goals=[dict(goal_id='lift',kind='skill',target_id='',
-                    description='乘电梯',stage_type='elevator',floor_id='floor2',to_floor='floor1'),
+                    description='乘电梯到一楼大厅停靠区',stage_type='elevator',floor_id='floor2',to_floor='floor1',
+                    robot_inside_region_id='lobby_area'),
                     dict(point_goal('elevator'),floor_id='floor1')])
+                lift=session.task_goals.current('lift')
+                # Both floors use the same frame and region IDs. The source pose is inside only upstairs.
+                facts,_=stage_evidence(session,lift)
+                self.assertEqual(facts['completion_region'],dict(floor_id='floor1',region_id='lobby_area',
+                                                                  status='unknown',stamp_s=None))
                 transition=ElevatorTransition(task_id=session.state['task_id'],goal_id='lift',from_floor='floor2',
                                               to_floor='floor1',destination_map_id='new-map')
                 for seq,judgment in enumerate(('not_completed','completed')):
@@ -88,7 +101,7 @@ class FloorRebindTests(unittest.TestCase):
                 binding=dict(valid=True,map_id='new-map',map_frame='sim_odom',association_session='assoc',association_generation=3)
                 state=dict(scope='manual',source='runtime_manual_observer',clock_domain='runtime_live',stamp_s=12.,
                     session_id='s2',generation=2,frame_id='odom',localization_status='valid',input_stale=False,
-                    origin_pose=[1.,2.,0.],origin_frame_id='sim_odom',map_binding=binding)
+                    origin_pose=[1.,2.,0.],origin_stamp_s=12.,origin_frame_id='sim_odom',map_binding=binding,stopped=True)
                 next_nav=MagicMock();next_nav.scope='manual';next_nav.handle=None
                 next_nav.tick.return_value=next_nav.snapshot.return_value=state
                 next_nav.value=dict(control=dict(agent_mapped_pose=dict(source='current_localization_and_scene_association',
@@ -105,4 +118,15 @@ class FloorRebindTests(unittest.TestCase):
                 self.assertEqual(session.catalog.value['floor_id'],'floor1')
                 self.assertIsNone(session.spatial_view)
                 self.assertEqual(session.skill.context['local_identity'],['s2',2,'odom'])
+                facts,_=stage_evidence(session,lift)
+                self.assertEqual(facts['missing'],[])
+                self.assertEqual(facts['completion_region'],dict(floor_id='floor1',region_id='lobby_area',
+                                                                  status='inside',stamp_s=12.))
+                state['origin_pose']=[7.,4.,0.]
+                facts,_=stage_evidence(session,lift)
+                self.assertIn('completion_region_outside',facts['missing'])
+                binding['association_generation']+=1
+                facts,_=stage_evidence(session,lift)
+                self.assertIn('destination_map_association',facts['missing'])
+                self.assertEqual(facts['completion_region']['status'],'unknown')
             finally:store.close()

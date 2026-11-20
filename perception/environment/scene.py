@@ -5,6 +5,7 @@ import hashlib
 
 import numpy as np
 
+from interfaces.runtime import rgb_age_s, source_stamp_ns
 from perception.detection_tracking.inference.geometry import validate_transform
 from .context import fingerprint, layer_binding
 from .near_field import HISTORY_DTYPES,DYNAMIC_DTYPES,GROUND_DTYPES
@@ -116,7 +117,7 @@ class SceneInputs:
                 stream.write(data.tobytes())
 
 
-def assemble_scene(snapshot, *, clock_domain, rgb=None, people=None, settings):
+def assemble_scene(snapshot, *, clock_domain, rgb=None, people=None, settings, stamp_ns=None):
     """Cutoff is the grid's acquisition time, not callback time. Never extrapolate people."""
     meta = snapshot.metadata
     stamp = float(meta['stamp_s'])
@@ -134,7 +135,7 @@ def assemble_scene(snapshot, *, clock_domain, rgb=None, people=None, settings):
         geometry['navigation_fusion']=copy.deepcopy(meta['navigation_fusion'])
     rgb_status, pixels = unavailable('no_rgb_at_or_before_cutoff'),None
     if rgb is not None:
-        age = stamp-float(rgb['stamp_s'])
+        age = rgb_age_s(stamp,float(rgb['stamp_s']),stamp_ns,rgb.get('stamp_ns'))
         if not np.isfinite(age) or age < 0 or age > settings['max_rgb_age_s']:
             rgb_status = unavailable('future_or_stale_rgb')
         else:
@@ -147,6 +148,8 @@ def assemble_scene(snapshot, *, clock_domain, rgb=None, people=None, settings):
             rgb_status = dict(status='valid',stamp_s=rgb['stamp_s'],age_s=age,frame_id=rgb['frame_id'],
                 shape=list(values.shape),sha256=hashlib.sha256(pixels.tobytes()).hexdigest(),
                 reference=copy.deepcopy(rgb['reference']))
+            if rgb.get('stamp_ns') is not None:
+                rgb_status['stamp_ns'] = rgb['stamp_ns']
     people_status = unavailable('no_people_at_or_before_cutoff')
     if people is not None:
         age = stamp-float(people['stamp_s'])
@@ -193,6 +196,8 @@ def assemble_scene(snapshot, *, clock_domain, rgb=None, people=None, settings):
         geometry=geometry,rgb=rgb_status,people=people_status,prior=association,
         units=dict(position='metres',angle='radians',time='seconds'),
         scope='causal_scene_with_optional_static_prior',navigation_reachability_verified=False)
+    if stamp_ns is not None:
+        record['stamp_ns']=source_stamp_ns(stamp,stamp_ns)
     record['input_fingerprint'] = fingerprint(record)
     return SceneInputs(record,snapshot,pixels)
 

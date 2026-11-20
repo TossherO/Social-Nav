@@ -17,6 +17,9 @@ from decision.agent.adapters.manual import ManualNavigation
 from decision.agent.adapters.runtime import ManualRuntimeClient
 
 
+REGISTRATION_TIMEOUT_S = 30.
+
+
 def scan_alignment_preview(crop,bounds,base_pose,base_xy_dm):
     """Plot measured scan returns under a proposed pose, in the original metric crop."""
     from PIL import Image, ImageDraw
@@ -180,13 +183,17 @@ class ElevatorRide:
                 session.state.update(elevator_active=False,status='ready',reason=None)
                 session._save('destination_localization_available')
                 return
-            if result['status']!='failed' and time.monotonic()<self.attempt_deadline:
+            if result['status']!='failed':
                 return
-            self.last_attempt.update(result=result.get('error') or result.get('wait_reason') or 'association_wait_expired')
+            self.last_attempt['result']=result['error']
+            if result.get('wait_reason'):
+                self.last_attempt['wait_reason']=result['wait_reason']
             self.handoff.close()
             self.handoff=None
             if self.standard is not None:
-                self.wait_reason='standard_start_localization_failed: '+str(self.last_attempt['result'])
+                self.wait_reason=result['error']
+                if self.last_attempt['source']!='operator_rviz' or result.get('manual_pose_confirmed'):
+                    self.start_manual_selection(session)
                 return
         if session.state['status']!='waiting_monitor':
             return
@@ -213,6 +220,7 @@ class ElevatorRide:
             except (OSError,EOFError,ValueError,KeyError,TypeError) as error:
                 self.standard_attempted=True
                 self.wait_reason='standard_start_localization_failed: '+str(error)[:180]
+                self.start_manual_selection(session)
             return
         return sample
 
@@ -241,11 +249,8 @@ class ElevatorRide:
         seed=destination_seed(self.transition,pose,self.frame['scan_record'],session.navigation.geometry.base_from_lidar)
         points=self.frame.get('base_xy_dm')
         self.attempt_overlay=scan_alignment_preview(self.crop,self.bounds,pose,points) if points else None
-        target=session.task_goals.floor_catalogs[self.transition.to_floor]
-        self.handoff=FloorHandoff(session=session,transition=self.transition,target_catalog=target,
-            config_path=self.configs[self.transition.to_floor],seed=seed,output=self.output,source_socket=self.socket_path)
+        self.handoff=self._new_handoff(session,seed)
         self.last_attempt=dict(base_pose=pose,scan_stamp_s=seed['scan_stamp_s'],evidence=evidence)
-        self.attempt_deadline=time.monotonic()+90.
         return dict(status='waiting_destination_localization',attempt=self.handoff.run_dir.name)
 
     def restart_standard(self,session):
@@ -254,12 +259,33 @@ class ElevatorRide:
                 not self.frame.get('scan_record') or self.handoff is not None):
             raise ValueError('Standard start needs a fresh scan and no active localization attempt')
         seed=standard_destination_seed(self.transition,self.standard,self.frame['scan_record'])
-        target=session.task_goals.floor_catalogs[self.transition.to_floor]
-        self.handoff=FloorHandoff(session=session,transition=self.transition,target_catalog=target,
-            config_path=self.configs[self.transition.to_floor],seed=seed,output=self.output,source_socket=self.socket_path)
+        self.handoff=self._new_handoff(session,seed)
         self.last_attempt=dict(source='configured_standard_start',scan_stamp_s=seed['scan_stamp_s'])
         self.standard_attempted=True
-        self.attempt_deadline=time.monotonic()+90.
+
+    def start_manual_selection(self,session):
+        if not self.standard_attempted or self.handoff is not None:
+            raise ValueError('Manual selection requires a failed standard start')
+        self.last_attempt=dict(source='operator_rviz')
+        try:
+            self.handoff=self._new_handoff(session,seed=None)
+        except (OSError,EOFError,ValueError,KeyError,TypeError) as error:
+            self.wait_reason='manual_selection_unavailable: '+str(error)[:180]
+
+    def reopen_manual_selection(self,session):
+        if (self.last_attempt or {}).get('source')!='operator_rviz':
+            return
+        if self.handoff is not None:
+            if self.handoff.status!='waiting_manual_pose' or (self.handoff.run_dir/'initial_pose.json').exists():
+                return
+            self.handoff.close()
+            self.handoff=None
+        self.start_manual_selection(session)
+
+    def _new_handoff(self,session,seed):
+        floor=self.transition.to_floor
+        return FloorHandoff(session=session,transition=self.transition,target_catalog=session.task_goals.floor_catalogs[floor],
+            config_path=self.configs[floor],seed=seed,output=self.output,source_socket=self.socket_path)
 
     def attachments(self):
         history=self.retained[-2:] if self.standard_reference else self.retained
@@ -290,6 +316,7 @@ class ElevatorRide:
         self.standard_attempted=False
         self.attempt_overlay=None
         self.last_stamp=None
+        self.wait_reason=None
 
 
 class FloorHandoff:
@@ -305,8 +332,31 @@ class FloorHandoff:
                 target_catalog.value.get('floor_id')!=transition.to_floor or
                 target_catalog.value.get('localization_map_id')!=transition.destination_map_id):
             raise ValueError('Floor handoff does not match the active task and catalogs')
+        self.session,self.transition,self.target_catalog=session,transition,target_catalog
+        self.config=Path(config_path).resolve();self.output=Path(output).resolve()
+        self.output.mkdir(parents=True,exist_ok=True)
+        identity=uuid.uuid4().hex
+        self.seed_path=self.seed_stamp=self.deadline=None
+        if seed is not None:
+            self._validate_seed(seed)
+            self.seed_path=self.output/('floor_seed_'+identity+'.json')
+            self.seed_path.write_text(json.dumps(seed,ensure_ascii=False,allow_nan=False,indent=2))
+            self.seed_stamp=seed['scan_stamp_s']
+            self.deadline=time.monotonic()+REGISTRATION_TIMEOUT_S
+        self.run_dir=self.output/('floor_observation_'+identity)
+        self.log_path=self.output/('floor_observation_'+identity+'.log')
+        enabled=self.session.navigation.value.get('local_skills') or {}
+        self.follow_options=follow_runtime_options(source_socket) if enabled.get('follow') is True else []
+        self.owner_pid=observation_owner(source_socket,allow_missing=True)
+        self.process=None;self.log=None;self.status='stopping_source';self.error=None;self.wait_reason=None
+        if self.owner_pid is not None:
+            try:os.kill(self.owner_pid,signal.SIGINT)
+            except ProcessLookupError:self.owner_pid=None
+
+    def _validate_seed(self,seed):
+        transition=self.transition
         transform=seed.get('destination') or {}
-        if (seed.get('verified_localization') is not False or seed.get('floor_id')!=target_catalog.value.get('floor_id') or
+        if (seed.get('verified_localization') is not False or seed.get('floor_id')!=transition.to_floor or
                 seed.get('source') not in ('agent_destination_scan_and_map','standard_destination_start') or
                 (seed.get('task_id'),seed.get('goal_id'))!=(transition.task_id,transition.goal_id) or
                 seed.get('exit_stamp_s')!=transition.last_observation_stamp_s or
@@ -322,22 +372,6 @@ class FloorHandoff:
                     not np.allclose([pose[3],pose[4],pose[2]],xy_yaw,rtol=0,atol=1e-9) or
                     not isinstance(seed.get('scan_frame'),str) or seed['scan_frame'].lstrip('/')!='rslidar'):
                 raise ValueError('Invalid standard destination LiDAR seed')
-        self.session,self.transition,self.target_catalog=session,transition,target_catalog
-        self.config=Path(config_path).resolve();self.output=Path(output).resolve()
-        self.output.mkdir(parents=True,exist_ok=True)
-        identity=uuid.uuid4().hex
-        self.seed_path=self.output/('floor_seed_'+identity+'.json')
-        self.seed_stamp=seed.get('scan_stamp_s')
-        self.seed_path.write_text(json.dumps(seed,ensure_ascii=False,allow_nan=False,indent=2))
-        self.run_dir=self.output/('floor_observation_'+identity)
-        self.log_path=self.output/('floor_observation_'+identity+'.log')
-        enabled=self.session.navigation.value.get('local_skills') or {}
-        self.follow_options=follow_runtime_options(source_socket) if enabled.get('follow') is True else []
-        self.owner_pid=observation_owner(source_socket,allow_missing=True)
-        self.process=None;self.log=None;self.status='stopping_source';self.error=None;self.wait_reason=None
-        if self.owner_pid is not None:
-            try:os.kill(self.owner_pid,signal.SIGINT)
-            except ProcessLookupError:self.owner_pid=None
 
     def _source_stopped(self):
         if self.owner_pid is None:return True
@@ -349,12 +383,35 @@ class FloorHandoff:
         except (FileNotFoundError,StopIteration):return True
 
     def tick(self):
+        if self.status in ('complete','failed'):
+            return self.snapshot()
+        if self.status=='waiting_manual_pose':
+            path=self.run_dir/'initial_pose.json'
+            if path.exists():
+                try:
+                    pose=json.loads(path.read_text())
+                    stamp=pose['preview_scan_stamp_s']
+                    confirmed=pose['confirmed_monotonic_s']
+                    if (pose['source']!='confirmed_rviz_initialpose' or
+                            not np.isfinite(stamp) or stamp<=self.transition.last_observation_stamp_s or
+                            not np.isfinite(confirmed) or not 0<=confirmed<=time.monotonic()):
+                        raise ValueError('Invalid destination pose confirmation')
+                except (OSError,KeyError,TypeError,ValueError) as error:
+                    self.status='failed';self.error='invalid_manual_pose: '+str(error)[:180]
+                    return self.snapshot()
+                self.seed_stamp=stamp
+                self.deadline=confirmed+REGISTRATION_TIMEOUT_S
+                self.status='starting_destination'
+        if self.deadline is not None and time.monotonic()>=self.deadline:
+            self.status='failed';self.error='destination_registration_timeout'
+            return self.snapshot()
         if self.status=='stopping_source' and self._source_stopped():
             # All runtime arguments are passed positionally, not interpolated as shell text.
             args=[sys.executable,'-B','-m','runtime.interactive','--live','--config',str(self.config),
-                  '--output',str(self.run_dir),'--agent-observations','--handoff-seed',str(self.seed_path),
+                  '--output',str(self.run_dir),'--agent-observations',
                   '--vehicle-profile','configs/wheelchair_vehicle.yaml',
                   '--gpu',os.environ.get('GPU_ID','0')]
+            if self.seed_path is not None:args.extend(['--handoff-seed',str(self.seed_path)])
             enabled=self.session.navigation.value.get('local_skills') or {}
             if enabled.get('follow') is True:args.extend(['--agent-follow-candidates',*self.follow_options])
             if enabled.get('seating') is True:args.append('--agent-seating')
@@ -366,10 +423,11 @@ class FloorHandoff:
             except OSError as error:
                 self.status='failed';self.error='destination_start_failed: '+type(error).__name__
                 return self.snapshot()
-            self.status='starting_destination'
-        if self.status=='starting_destination':
+            self.status='waiting_manual_pose' if self.seed_path is None else 'starting_destination'
+        if self.status in ('waiting_manual_pose','starting_destination'):
             if self.process.poll() is not None:
                 self.status='failed';self.error='destination_observation_exited';return self.snapshot()
+            if self.status=='waiting_manual_pose':return self.snapshot()
             socket_path=self.run_dir/'run/commands.sock'
             if not socket_path.exists():return self.snapshot()
             try:
@@ -384,6 +442,7 @@ class FloorHandoff:
                     return self.snapshot()
                 association=dict(binding,local_session_id=state['session_id'],local_generation=state['generation'],
                                  local_frame=state['frame_id'],measurement_stamp_s=mapped.get('association_stamp_s'))
+                if self.seed_path is None:association['initial_pose_source']='operator_rviz'
                 candidate=copy.deepcopy(self.transition)
                 candidate.accept_localization(association=association,now_s=state['stamp_s'],max_age_s=1.,
                                               clock_domain=state['clock_domain'])
@@ -399,12 +458,14 @@ class FloorHandoff:
 
     def snapshot(self):
         return dict(status=self.status,error=self.error,wait_reason=self.wait_reason,
+                    manual_pose_confirmed=self.seed_path is None and self.seed_stamp is not None,
                     observation_dir=str(self.run_dir),log=str(self.log_path))
 
     def close(self):
         if self.process is not None and self.status!='complete' and self.process.poll() is None:
             self.process.send_signal(signal.SIGINT)
-            try:self.process.wait(timeout=3.)
+            # The interactive owner shuts down its runtime and RViz before a replacement can reuse ROS.
+            try:self.process.wait(timeout=26.)
             except subprocess.TimeoutExpired:
                 self.process.terminate()
                 try:self.process.wait(timeout=2.)

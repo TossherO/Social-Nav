@@ -300,10 +300,10 @@ class CompositionTests(unittest.TestCase):
                          'cancel_and_confirm_navigation_first')
         self.nav.state['chassis_status_fresh'] = True
         self.assertEqual(self.session.call('ask_user', question='跟随哪位？')['status'], 'waiting_user_answer')
-        self.session.event('answer', '穿红衣的人')
+        self.session.event('answer', '穿红衣的人，先等我通知')
         self.assertEqual(self.session.state['status'], 'ready')
         self.assertEqual(self.session.skill.record['status'], 'held')
-        self.assertEqual(self.session.call('wait_for_event', event='user_continue')['status'], 'waiting')
+        self.assertEqual(self.session.call('wait_for_event', event='user_continue',instruction_quote='先等我通知')['status'], 'waiting')
         self.session.event('continue')
         self.assertEqual(self.session.state['status'], 'ready')
 

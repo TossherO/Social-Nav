@@ -2,7 +2,6 @@
 import json
 import time
 from pathlib import Path
-from .. import ROOT
 from ..tools.places import Catalog
 from .interaction import Console
 from .common import emit, make_loop
@@ -12,6 +11,7 @@ from ..tools.observations import ObservationSet
 from ..adapters.runtime import RuntimeClient
 from ..core.store import Store, shared_budget
 from ..core.session import AgentSession
+from ..core.tasks import next_unfinished_goal
 
 
 def require_bag_session(path):
@@ -153,7 +153,7 @@ def run(args):
                                 choice=choice,raw_content=item.get('raw_content'),timing=item.get('timing'),reason=item.get('reason'))
                             session.store.event('t2_replay',last_t2)
                 feedback=navigation.snapshot()
-                current=next((g for g in session.task_goals.goals if g['status'] not in ('completed','skipped')),None)
+                current=next_unfinished_goal(session.task_goals.goals)
                 requirement={} if current is None else current['requirement']
                 record=session.skill.record
                 handle=record.get('handle') or {}

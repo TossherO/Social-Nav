@@ -30,9 +30,9 @@ class SceneExporter:
         self.error=None;self.dropped=0;self.written=0
         self.worker=threading.Thread(target=self._work,name='scene-export',daemon=True);self.worker.start()
 
-    def submit(self,snapshot,people,*,rgb=None,name=None):
+    def submit(self,snapshot,people,*,rgb=None,name=None,stamp_ns=None):
         if self.error:raise RuntimeError('Scene export failed: '+self.error)
-        item=(snapshot,copy.deepcopy(people),rgb,name or snapshot.owner)
+        item=(snapshot,copy.deepcopy(people),rgb,name or snapshot.owner,stamp_ns)
         try:self.queue.put_nowait(item);return True
         except queue.Full:self.dropped+=1;return False
 
@@ -46,11 +46,11 @@ class SceneExporter:
             while True:
                 item=self.queue.get()
                 if item is None:return
-                snapshot,people,rgb,name=item
+                snapshot,people,rgb,name,stamp_ns=item
                 if stream is None:stream=torch.cuda.Stream(device=next(iter(snapshot._layers.values())).device,priority=0)
                 with torch.cuda.stream(stream):
                     host=snapshot.materialize(consumer='explicit_scene_export',metrics=self.metrics)
-                bundle=assemble_scene(host,clock_domain=self.clock_domain,people=people,rgb=rgb,settings=self.settings)
+                bundle=assemble_scene(host,clock_domain=self.clock_domain,people=people,rgb=rgb,settings=self.settings,stamp_ns=stamp_ns)
                 if prior is not None:bundle=prior.attach(bundle,self.settings)
                 bundle.save(self.directory/name);self.written+=1
         except Exception as error:self.error=type(error).__name__+': '+str(error)

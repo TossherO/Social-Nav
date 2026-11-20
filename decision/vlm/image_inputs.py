@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import yaml
+from interfaces.runtime import rgb_age_s
 
 
 ROOT=Path(__file__).resolve().parents[2]
@@ -38,12 +39,11 @@ class ImagePreparer:
         from perception.detection_tracking.inference.rgb_recording import observation_record
         from .trajectory_inputs import local_scope
         matcher=ImageAssociator(self.policy);result=[]
-        past=[h['result'] for h in history]
         with torch.cuda.stream(self.stream):
             for entry in entries:
                 if entry['association'] is not None:result.append(entry);continue
                 arrays=read_arrays(entry['buffer']);row=entry['people'];image=entry['image_metadata']
-                pixels=arrays['rgb'];rgb_ns=image['rgb_stamp_ns'];rgb_stamp=rgb_ns/1e9
+                pixels=arrays['rgb'];rgb_ns=image['rgb_stamp_ns'];rgb_stamp=rgb_ns/1_000_000_000
                 if (str(image.get('rgb_frame') or '').lstrip('/')!=self.calibration['target_frame'].lstrip('/') or
                         row['detection_frame_id'].lstrip('/')!=self.calibration['source_frame'].lstrip('/')):
                     raise ValueError('VLM image calibration does not match the observed camera/LiDAR frames')
@@ -54,9 +54,11 @@ class ImagePreparer:
                         (camera.get('height'),camera.get('width')) != pixels.shape[:2]):
                     camera = None
                 detections,elapsed=self.detector.detect(pixels);self.calls+=1
+                past=[h['result'] for h in history if h['stamp_ns']<=rgb_ns]
                 people=causal_geometry(people_in_lidar(row),row,past,rgb_stamp,.05)
                 association=matcher.step(people,detections,self.transform,camera,
-                    row['stamp_s']-rgb_stamp,row['stamp_s'],local_scope(row),health=row['health'])
+                    rgb_age_s(row['stamp_s'],rgb_stamp,row.get('stamp_ns'),rgb_ns),
+                    row['stamp_s'],local_scope(row),health=row['health'])
                 record=observation_record(row,pixels=pixels,rgb_stamp_ns=rgb_ns,camera_info=camera,
                     calibration=self.calibration,detector=self.detector.metadata,detections=detections,
                     result=association,detector_s=elapsed)

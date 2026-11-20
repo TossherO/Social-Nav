@@ -59,7 +59,7 @@ class FloorHandoffTests(unittest.TestCase):
             'current_elevator_rgb','current_local_lidar','standard_start_reference_rgb','standard_start_reference_lidar'])
         self.assertEqual([x[1]['sequence'] for x in items[:2]],[2,3])
 
-    def test_standard_start_uses_fresh_scan_automatically_and_does_not_repeat_failure(self):
+    def test_standard_failure_opens_picker_and_picker_start_failure_allows_operator_retry(self):
         from decision.agent.core.elevator_transition import ElevatorTransition
         transition=ElevatorTransition(task_id='t',goal_id='lift',from_floor='floor2',to_floor='floor1',destination_map_id='m')
         transition.observe(camera_record=dict(source='ros_camera_independent_of_localization',clock_domain='ros_time',
@@ -79,10 +79,19 @@ class FloorHandoffTests(unittest.TestCase):
             self.assertEqual(seed['lidar_pose_rpy_xyz'],standard['pose_rpy_xyz'])
             self.assertEqual(seed['scan_stamp_s'],11.)
             self.assertEqual(seed['source'],'standard_destination_start')
-            ride.poll(session)
-            self.assertIn('registration_failed',ride.wait_reason)
-            ride.poll(session)
-            factory.assert_called_once()
+            self.assertIsNone(ride.poll(session))
+            self.assertEqual(ride.wait_reason,'registration_failed')
+            self.assertIsNone(factory.call_args.kwargs['seed'])
+            factory.return_value.tick.return_value=dict(status='failed',error='destination_observation_exited',
+                                                       manual_pose_confirmed=False)
+            self.assertIsNone(ride.poll(session))
+            self.assertIsNone(ride.poll(session))
+            self.assertEqual(factory.call_count,2)
+            self.assertIsNone(ride.handoff)
+            ride.reopen_manual_selection(session)
+            self.assertEqual(factory.call_count,3)
+            self.assertIsNone(factory.call_args.kwargs['seed'])
+            self.assertEqual(session.state['status'],'waiting_monitor')
 
     def test_floor_change_preserves_explicit_t2_configuration(self):
         with tempfile.TemporaryDirectory() as root:

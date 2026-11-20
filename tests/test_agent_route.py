@@ -332,6 +332,11 @@ class AgentRouteTests(unittest.TestCase):
         wrong=self.session.call('navigate_route',goal_id='visit',view_id=view,orientation_source='autonomous',
                                 waypoints=[points[1],points[0],points[2]],final_yaw=0.)
         self.assertEqual(wrong['reason'],'route_does_not_include_ordered_user_checkpoints')
+        extra=[points[0],[5.5,4.],points[1],[6.5,4.],[7.,4.],points[2]]
+        review=self.session.call('navigate_route',goal_id='visit',view_id=view,orientation_source='autonomous',
+                                 waypoints=extra,final_yaw=0.)
+        self.assertEqual(review['reason'],'route_waypoints_review_required')
+        self.assertIn('保留用户指定的全部检查点',review['explanation'])
         ack=self.session.call('navigate_route',goal_id='visit',view_id=view,orientation_source='autonomous',
                               waypoints=points,final_yaw=0.)
         self.assertEqual(ack['status'],'accepted')

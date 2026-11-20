@@ -102,9 +102,9 @@ def bag_observations(path,config,*,duration=None,image_topics=None,start=0.,mess
                     while imu and t-imu[0][0]>1.:imu.popleft()
                 if len(imu)>40000:raise RuntimeError('IMU backlog exceeds native input budget')
             elif name==rgb_topic:
-                images.append((msg.header.stamp.to_sec(),msg))
+                images.append((msg.header.stamp.to_nsec(),msg))
             elif name==info_topic:
-                intrinsics.append((msg.header.stamp.to_sec(),dict(K=list(msg.K),D=list(msg.D),width=msg.width,height=msg.height,
+                intrinsics.append((msg.header.stamp.to_nsec(),dict(K=list(msg.K),D=list(msg.D),width=msg.width,height=msg.height,
                     frame_id=msg.header.frame_id,stamp_ns=msg.header.stamp.to_nsec(),distortion_model=msg.distortion_model)))
             elif name==topic:
                 stamp=msg.header.stamp.to_sec()
@@ -120,10 +120,10 @@ def bag_observations(path,config,*,duration=None,image_topics=None,start=0.,mess
             while scans and last_imu>=scans[0][3]:
                 raw,points,begin,end,frame,stamp_ns=scans.popleft();samples=[]
                 while imu and imu[0][0]<=end:samples.append(imu.popleft())
-                image=max((r for r in images if 0<=end-r[0]<=.1),key=lambda r:r[0],default=None)
+                image=max((r for r in images if 0<=stamp_ns-r[0]<=100_000_000),key=lambda r:r[0],default=None)
                 camera=max((r for r in intrinsics if image is not None and r[0]<=image[0]),key=lambda r:r[0],default=None)
                 yield dict(raw=raw,points=points,begin=begin,end=end,sensor_frame=frame,stamp_ns=stamp_ns,
                     imu=np.asarray(samples,np.float64).reshape(-1,7),rgb=None if image is None else rgb_array(image[1]),
-                    rgb_stamp=None if image is None else image[0],rgb_frame=None if image is None else image[1].header.frame_id,
-                    rgb_stamp_ns=None if image is None else image[1].header.stamp.to_nsec(),
+                    rgb_stamp=None if image is None else image[1].header.stamp.to_sec(),rgb_frame=None if image is None else image[1].header.frame_id,
+                    rgb_stamp_ns=None if image is None else image[0],
                     camera_info=None if camera is None else camera[1])

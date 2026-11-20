@@ -17,7 +17,7 @@ KINDS=('conversation_exchange','conversation_trimmed','tool_intent','model_actio
        'model_result_discarded','manual_arrival_confirmation','manual_goal_evidence_wait_started',
        'manual_goal_evidence_wait_finished','manual_goal_evidence_refresh_failed','manual_goal_evidence_unproven','manual_route_progress',
        'manual_route_trace','manual_reference_status','manual_reference_region_conflict','operator_command','navigation_completed','navigation_ack','navigation_cancel_confirmed',
-       'navigation_context_lost','task_connection_lost','user_event','subtask_skipped','registered_task_imported','task_created','assistant_message','agent_run_finished',
+       'navigation_context_lost','task_connection_lost','user_event','subtask_skipped','registered_task_imported','task_created','assistant_message','model_action_missing','agent_run_finished',
        'route_repeated_refusal','reference_map_prepared','t2_replay','follow_target_confirmed','agent_bag_recording')
 
 _LONG_HEX = re.compile(r'(?<![0-9a-fA-F])[0-9a-fA-F]{32,}(?![0-9a-fA-F])')
@@ -43,11 +43,13 @@ def goal_requirements(goal,names):
     fields={'position':'指定坐标','required_yaw':'要求朝向（弧度）','facing':'面向',
             'position_rule':'位置规则','max_distance_m':'距离上限（米）','checkpoints':'依次经过',
             'semantic_conditions':'必须满足','visual_preferences':'视觉偏好','stage_type':'任务阶段',
-            'floor_id':'所在楼层','to_floor':'目标楼层','robot_inside_region_id':'完成时轮椅所在区域'}
+            'floor_id':'所在楼层','to_floor':'目标楼层','robot_inside_region_id':'完成时轮椅所在区域','wait_after':'完成后等待口令'}
     for key,label in fields.items():
         value=req.get(key)
         if value in (None,'',[]):continue
-        if key in ('facing','robot_inside_region_id'):value=names.get(value,value)
+        if key=='robot_inside_region_id' and req.get('to_floor'):
+            value=f"{req['to_floor']} · {value}"
+        elif key in ('facing','robot_inside_region_id'):value=names.get(value,value)
         elif key=='stage_type' and value=='elevator':value='乘坐电梯'
         elif key=='checkpoints':value=[names.get(item,item) for item in value]
         elif key=='position_rule' and value=='region_centroid':value='区域正中'
@@ -377,6 +379,8 @@ def event_summary(event):
                  'map_association_changed':'地图关联变化','target_changed':'目标身份变化','clock_regressed':'反馈时间回退'}
         return '到达证据失效：'+reasons.get(value.get('reason'),str(value.get('reason') or '未知原因'))
     if kind=='manual_arrival_recovered':return '已重新记录定位和停稳到达证据。'
+    if kind=='model_action_missing':
+        return '模型只返回文字，将依据当前证据重新决策一次。' if value.get('correction_requested') else '模型未提交执行动作，任务已请求暂停。'
     if kind=='elevator_monitor_started':return '开始周期观察乘梯过程。'
     if kind=='elevator_model_failed':return '乘梯观察不可用：'+str(value.get('reason') or '未知原因')
     if kind=='elevator_model_discarded':return '乘梯阶段已变化，未应用旧观察结果。'

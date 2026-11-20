@@ -98,7 +98,8 @@ class ControlLoop:
         names=CAPSULE_FIELDS if 'navigation_fusion' in self.device.metadata else ('occupancy','ground_support','coverage','last_observed','near_field_free')
         fields=[k for k in names if k in self.device._layers]
         grid=self.device.materialize(consumer='reference_search',fields=fields,metrics=self.metrics)
-        return assemble_scene(grid,clock_domain=scene.record['clock_domain'],people=people_observation(scene),settings=self.scene_settings)
+        return assemble_scene(grid,clock_domain=scene.record['clock_domain'],people=people_observation(scene),
+                              stamp_ns=scene.record.get('stamp_ns'),settings=self.scene_settings)
 
     def _work(self):
         try:

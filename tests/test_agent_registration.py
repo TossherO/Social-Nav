@@ -44,7 +44,8 @@ class RegistrationTests(unittest.TestCase):
         self.session.call('record_task',goals=[point_goal('elevator')])
         client.decide(self.session.prompt())
         second=requests[-1]
-        self.assertEqual(second['tool_choice'],'auto')
+        self.assertEqual(second['tool_choice'],'required')
+        self.assertFalse(second['parallel_tool_calls'])
         self.assertIn('navigate',{t['function']['name'] for t in second['tools']})
         execution={t['function']['name'] for t in second['tools']}
         self.assertIn('complete_subtask',execution)

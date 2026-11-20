@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 import tempfile
 import unittest
+from contextlib import closing
 from types import SimpleNamespace
 from unittest.mock import MagicMock,patch
 import numpy as np
@@ -171,6 +172,57 @@ class ManualTests(unittest.TestCase):
         self.assertIsNone(state['manual_confirmation'])
         self.assertEqual(state['manual_arrival_evidence']['source'],'automatic_localization_and_stop_estimate')
         self.update([5.5,4.,0.],10.9);self.assertFalse(self.nav.tick()['manual_arrival_observation'])
+
+    def test_arrival_advances_to_elevator_automatically(self):
+        self.check_elevator_entry(wait_for_user=False)
+
+    def test_arrival_waits_for_requested_signal_before_starting_elevator(self):
+        self.check_elevator_entry(wait_for_user=True)
+
+    def check_elevator_entry(self,*,wait_for_user):
+        self.nav.automatic_arrival=True
+        source=Catalog(dict(self.catalog.value,floor_id='floor2'))
+        target=Catalog(dict(self.catalog.value,floor_id='floor1',localization_map_id='map-1'))
+        pose=source.places['elevator']['pose']
+        grid=GridSnapshot(dict(frame_id='sim_odom',shape=[100,140],resolution=.1,origin_xy=[0.,0.],snapshot_id='unit-static'),
+                          dict(occupancy=np.zeros((100,140),np.int8)))
+        self.nav.spatial_inputs=lambda:dict(global_grid=grid,scene=None,stamp_s=self.control['stamp_s'],
+            clock_domain='runtime_live',pose=list(self.obs['map_base_pose']),geometry=self.nav.geometry)
+        clause='等我通知再乘梯'
+        instruction='到二楼电梯口，'+(clause if wait_for_user else '再乘梯')
+        with tempfile.TemporaryDirectory() as root, closing(Store(Path(root)/'session.sqlite')) as store:
+            session=AgentSession(instruction,source,self.nav,store,floor_catalogs={'floor2':source,'floor1':target})
+            session.elevator=MagicMock()
+            session.elevator.start.return_value=dict(status='accepted')
+            point=dict(goal_id='elevator',stage='point',floor_id='floor2',target=dict(id='elevator'),description='到电梯口')
+            if wait_for_user:point['conditions']=dict(wait_after=clause)
+            lift=dict(goal_id='lift',stage='elevator',description='乘梯',floor_id='floor2',to_floor='floor1')
+            self.assertEqual(session.call('record_task',goals=[point,lift])['status'],'recorded')
+            session.call('query_map')
+            result=session.call('navigate',goal_id='elevator',view_id=session.spatial_view.record['view_id'],
+                                pose=pose,orientation_source='autonomous')
+            self.assertEqual(result['status'],'accepted')
+            with patch.object(session,'prepare_reference'),patch.object(session,'prepare_current_images'):
+                self.update(pose,10.1,velocity=(.2,0.));session.tick()
+                self.assertTrue(session.prompt()['current_state']['completion_evidence']['missing'])
+                self.assertEqual(session.call('complete_subtask',_context=session.context(),goal_id='elevator',
+                                              evidence='刚到电梯口')['status'],'unproven')
+                session.call('wait_for_event',event='navigation')
+                self.update(pose,10.2);session.tick()
+                self.assertEqual(session.state['status'],'waiting_navigation')
+                for stamp in (10.5,10.8):
+                    self.update(pose,stamp);session.tick()
+                self.assertFalse(session.prompt()['current_state']['completion_evidence']['missing'])
+                result=session.call('complete_subtask',_context=session.context(),goal_id='elevator',evidence='定位与停稳反馈有效')
+            self.assertEqual(result['status'],'completed')
+            if wait_for_user:
+                self.assertEqual(session.state['status'],'waiting_user')
+                session.event('pause');session.event('resume');session.tick()
+                self.assertNotIn('entered',session.task_goals.goals[1])
+                session.elevator.start.assert_not_called()
+                session.event('continue')
+            session.tick()
+            session.elevator.start.assert_called_once_with(session,'lift')
 
     def test_automatic_arrival_restarts_dwell_after_stale_or_motion(self):
         self.nav.automatic_arrival=True

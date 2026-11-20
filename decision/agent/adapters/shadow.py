@@ -317,12 +317,6 @@ class RuntimeShadowNavigation:
         ack=self.client.exchange('follow_finish',dict(call_id=handle['call_id']))
         if ack.get('accepted') is not True:raise ValueError('Follow finish was not accepted')
 
-    def lose_follow(self, handle, reason):
-        if self.handle!=handle or not self.follow_active:raise ValueError('Wrong follow call')
-        self.cancel_requested=True
-        ack=self.client.exchange('follow_lost',dict(call_id=handle['call_id'],reason=reason))
-        if ack.get('accepted') is not True:raise ValueError('Follow loss was not accepted')
-
 
 class RuntimeLiveNavigation(RuntimeShadowNavigation):
     """Live intents with localization-derived arrival, never hardware certification."""

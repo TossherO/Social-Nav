@@ -16,6 +16,7 @@ class AgentLoop:
         self.requests, self.max_requests = 0, max_requests
         self.exit_reason = None
         self.refusals = {}
+        self.missing_action_for = None
         self.before_model = None
         self.before_request = None
 
@@ -27,6 +28,30 @@ class AgentLoop:
         self.session.event(name, text)
         self.model.invalidate()
         self.refusals.clear()
+        self.missing_action_for = None
+
+    def _decision_stage(self):
+        session = self.session
+        goal_id = next((g['requirement']['goal_id'] for g in session.task_goals.goals
+                        if g['status'] not in ('completed', 'skipped')), None)
+        ride_phase = session.elevator.transition.status if self.state.get('elevator_active') else None
+        return (self.state['task_id'], self.state['revision'], goal_id, ride_phase)
+
+    def _execution_text(self, reply, transient):
+        stage = self._decision_stage()
+        repeated = self.missing_action_for == stage
+        self.missing_action_for = stage
+        record = dict(correction_requested=not repeated)
+        if transient:
+            self.session.elevator.feedback = dict(status='refused', reason='native_tool_required',
+                                                  previous_text=reply.message.get('content'))
+        else:
+            record['message'] = reply.message
+        if repeated:
+            self.session.stop('paused', 'model_action_missing')
+        elif transient:
+            self.session.wait_for_event('monitor')
+        self.session._save('model_action_missing', record)
 
     def repeated_refusal(self, value, output):
         tool=value['tool']
@@ -169,6 +194,7 @@ class AgentLoop:
                     transient = bool(s.get('elevator_active'))
                     s['assistant_text'] = None if transient else reply.message.get('content')
                     if reply.argument_error is not None:
+                        self.missing_action_for = None
                         if transient:
                             self.session.elevator.feedback=reply.argument_error
                             self.session.conversation.consume_transient(reply)
@@ -178,17 +204,15 @@ class AgentLoop:
                         self.session._save('tool_arguments_rejected',reply.argument_error)
                         return s
                     if reply.action is None:
-                        if transient:
-                            self.session.elevator.feedback=dict(status='refused',reason='native_tool_required')
-                            self.session.wait_for_event('monitor')
+                        if self.session.task_goals.goals:
+                            self._execution_text(reply, transient)
                             return s
                         self.session.conversation.commit(reply)
-                        unregistered=not self.session.task_goals.goals
-                        reason='model_text_without_task_registration' if unregistered else s['assistant_text']
-                        self.session.stop('needs_clarification',reason)
+                        self.session.stop('needs_clarification','model_text_without_task_registration')
                         self.session._save('assistant_message',dict(message=reply.message,task_success=False,
-                            unregistered_task=unregistered,automatically_retried=False))
+                            unregistered_task=True,automatically_retried=False))
                         return s
+                    self.missing_action_for = None
                     value = reply.action
                     # Every proposed target is checked with current geometry,
                     # independently of how long the model took to respond.
@@ -226,9 +250,7 @@ class AgentLoop:
                     if ((value['tool'] in ('navigate', 'navigate_route','start_local_task') and output.get('status')=='accepted' or
                          value['tool'] in ('complete_subtask','finish_local_task') and output.get('status')=='stopping') and
                             self.session.skill.record['handle'] is not None):
-                        # Do not ask the model to restate that it is waiting:
-                        # a text-only reply has ambiguous intent and otherwise
-                        # triggers clarification and cancels the active goal.
+                        # The next decision needs feedback from the accepted action.
                         self.session.wait_for_event('navigation')
                         self.session._save('await_navigation_after_acceptance')
                 except (ValueError, KeyError, TypeError, jsonschema.ValidationError) as error:
@@ -249,6 +271,8 @@ class AgentLoop:
             self.session.spatial_view = None
             self.session._save('spatial_view_expired_before_request')
         payload = self.session.prompt()
+        if self.missing_action_for is not None and self.missing_action_for == self._decision_stage():
+            payload['current_state']['decision_feedback'] = '上一轮只返回了文字。请依据本轮证据选择并调用一个原生工具。'
         context = self.session.context()
         observation = copy.deepcopy(self.session.observation)
         spatial_view = copy.deepcopy(self.session.spatial_view)

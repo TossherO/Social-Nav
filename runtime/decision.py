@@ -9,6 +9,7 @@ from pathlib import Path
 import uuid
 
 from interfaces.shared import SharedArrayPool, BufferFull
+from interfaces.runtime import source_stamp_ns
 from decision.vlm.trajectory_inputs import local_scope, pose, HISTORY_S
 from .export import drain_worker
 
@@ -31,7 +32,8 @@ class DecisionBuffer:
         with self.lock:
             scope=local_scope(people);stamp=people['stamp_s']
             if not math.isfinite(stamp):raise ValueError('Finite decision observation time required')
-            if self.scope!=scope or pose(people) is None or (self.frames and stamp<=self.frames[-1]['people']['stamp_s']):
+            stamp_ns=source_stamp_ns(stamp,people.get('stamp_ns'))
+            if self.scope!=scope or pose(people) is None or (self.frames and stamp_ns<=self.frames[-1]['stamp_ns']):
                 self._clear();self.scope=scope
             if pose(people) is None:return False
             if 'raw' not in arrays:return False
@@ -43,11 +45,12 @@ class DecisionBuffer:
             if self.metrics:self.metrics.transfer('host_copy',sum(a.nbytes for a in values.values()),'decision_observation_history')
             record=None if scene is None else scene.record
             if record is not None and (abs(record['as_of']-stamp)>1e-6 or
+                    (record.get('stamp_ns') is not None and people.get('stamp_ns') is not None and record['stamp_ns']!=stamp_ns) or
                     record['clock_domain']!=people['clock_domain'] or
                     record.get('people',{}).get('data',{}).get('input_fingerprint')!=people['input_fingerprint']):
                 self.pool.release(ref,'history');raise ValueError('Decision scene is not this people observation')
             ident=f"{people['session_id']}:{people['generation']}:{people['observation_id']}"
-            self.frames.append(dict(id=ident,people=copy.deepcopy(people),association=copy.deepcopy(association),
+            self.frames.append(dict(id=ident,stamp_ns=stamp_ns,people=copy.deepcopy(people),association=copy.deepcopy(association),
                 image_metadata=copy.deepcopy(image_metadata),scene=copy.deepcopy(record),buffer=ref))
             return True
 
@@ -55,21 +58,21 @@ class DecisionBuffer:
         """One in-flight request; no queue of outdated observations."""
         with self.lock:
             if self.active is not None or not self.frames:return None
-            end=round(self.frames[-1]['people']['stamp_s']*1e9);selected=[]
+            end=self.frames[-1]['stamp_ns'];selected=[]
             for delta in (-1_000_000_000,-500_000_000,0):
-                past=[e for e in self.frames if round(e['people']['stamp_s']*1e9)<=end+delta]
-                if not past or end+delta-round(past[-1]['people']['stamp_s']*1e9)>150_000_000:return None
+                past=[e for e in self.frames if e['stamp_ns']<=end+delta]
+                if not past or end+delta-past[-1]['stamp_ns']>150_000_000:return None
                 entry=past[-1]
                 if 'rgb' not in dict(entry['buffer'].arrays):return None
                 image=(entry['association'].get('image_input') or {}) if entry['association'] is not None else (entry['image_metadata'] or {})
-                rgb_ns=image.get('rgb_stamp_ns');stamp_ns=round(entry['people']['stamp_s']*1e9)
-                if type(rgb_ns) is not int or not 0<=stamp_ns-rgb_ns<=150_000_000:return None
+                rgb_ns=image.get('rgb_stamp_ns')
+                if type(rgb_ns) is not int or not 0<=entry['stamp_ns']-rgb_ns<=150_000_000:return None
                 if entry['association'] is not None and not image.get('raw_rgb_sha256'):return None
                 selected.append(entry)
             if len({e['id'] for e in selected})!=3:return None
             token=uuid.uuid4().hex
             for entry in selected:self.pool.retain(entry['buffer'],token)
-            history=[dict(id=e['id'],stamp_ns=round(e['people']['stamp_s']*1e9),result=e['people']) for e in self.frames]
+            history=[dict(id=e['id'],stamp_ns=e['stamp_ns'],result=e['people']) for e in self.frames]
             self.active=token
             return dict(token=token,entries=tuple(selected),history=history)
 
@@ -123,7 +126,7 @@ class DecisionRecorder:
             while True:
                 lease=self.queue.get()
                 if lease is None:return
-                entry=lease['entries'][-1];name=str(round(entry['people']['stamp_s']*1e9))+'_'+lease['token'][:8]
+                entry=lease['entries'][-1];name=str(entry['stamp_ns'])+'_'+lease['token'][:8]
                 with self.buffer.consume(lease) as read:
                     entries=lease['entries'];preparation=None
                     if any(e['association'] is None for e in entries):

@@ -8,6 +8,7 @@ coordinates). The caller supplies the PID mapping used to render that input.
 import copy
 from collections import deque
 import numpy as np
+from interfaces.runtime import rgb_age_s
 from perception.environment.context import fingerprint
 from navigation.planning.people import PeopleModel,social_groups
 
@@ -40,7 +41,7 @@ class FollowTrackHistory:
                 key=stable_identity(data,raw)
                 if key in model.ids and raw.get('confirmed') and type(raw.get('lifecycle_generation')) is int:
                     tracks[key]=(raw['lifecycle_generation'],raw.get('state'),raw.get('last_observed_stamp_s'))
-        self.rows.append(dict(stamp_s=r['as_of'],clock_domain=r['clock_domain'],local_identity=identity(scene),
+        self.rows.append(dict(stamp_s=r['as_of'],stamp_ns=r.get('stamp_ns'),clock_domain=r['clock_domain'],local_identity=identity(scene),
             scene_binding=r['input_fingerprint'],people_fingerprint=model.source,people_stamp_s=model.origin,tracks=tracks))
         while self.rows and r['as_of']-self.rows[0]['stamp_s']>self.seconds:self.rows.popleft()
 
@@ -58,7 +59,8 @@ class FollowTrackHistory:
         if end is None or end<start:raise ValueError('follow_reference_history_unavailable')
         rows=rows[start:end+1];r=scene.record
         rgb=reference.get('rgb_stamp_s')
-        if type(rgb) not in (int,float) or not np.isfinite(rgb) or not 0<=rows[0]['stamp_s']-rgb<=.15:
+        if (type(rgb) not in (int,float) or not np.isfinite(rgb) or
+                not 0<=rgb_age_s(rows[0]['stamp_s'],rgb,rows[0]['stamp_ns'],reference.get('rgb_stamp_ns'))<=.15):
             raise ValueError('follow_reference_rgb_time_invalid')
         if (rows[0]['people_fingerprint']!=track.get('people_fingerprint') or
                 rows[0]['people_stamp_s']!=track.get('people_stamp_s')):

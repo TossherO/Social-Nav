@@ -1,5 +1,6 @@
 """Cross-floor workflow composition with mock camera, runtime and model."""
 import copy
+import json
 from pathlib import Path
 import tempfile
 import time
@@ -43,6 +44,12 @@ class Camera:
 
 class CrossFloorWorkflowTests(unittest.TestCase):
     def test_standard_ride_automatically_rebinds_after_real_association(self):
+        self.run_standard_ride(manual_retry=False)
+
+    def test_standard_timeout_and_manual_reselection_resume_only_after_fresh_association(self):
+        self.run_standard_ride(manual_retry=True)
+
+    def run_standard_ride(self, *, manual_retry):
         from decision.agent.core.loop import AgentLoop
         from decision.agent.core.session import AgentSession
         from decision.agent.core.store import Store
@@ -51,53 +58,114 @@ class CrossFloorWorkflowTests(unittest.TestCase):
         base=Catalog.load(CONFIG_DIR/'simulation.json');floors={}
         for floor in ('floor1','floor2'):
             value=copy.deepcopy(base.value);value.update(floor_id=floor,localization_map_id=floor+'-map')
+            if floor=='floor1':
+                value['regions'][0]['region_id']='floor1_arrival'
             for index in range(1,5):value['places'].append(dict(value['places'][0],place_id='p-01-'+str(index)))
             floors[floor]=Catalog(value)
         nav1=Navigation(floors['floor2'],'floor2-map','s1',10.)
         nav2=Navigation(floors['floor1'],'floor1-map','s2',100.)
+        nav2.state['origin_pose']=[7.,4.,0.]
         standard=dict(map_id='floor1-map',frame_id='map',reference='rslidar',pose_rpy_xyz=[0.,0.,.3,1.,2.,-.14])
-        meta=dict(rgb={},lidar={},lidar_in_map=[1.,2.,-.14,.3]);seeds=[];requests=[]
+        meta=dict(rgb={},lidar={},lidar_in_map=[1.,2.,-.14,.3]);commands=[];requests=[]
         class StandardCamera(Camera):
             def snapshot(self):
                 sample=super().snapshot();sample['scan_record']['frame_id']='rslidar';return sample
-        class Handoff:
-            def __init__(self,*,session,transition,target_catalog,seed,**kwargs):
-                self.session,self.transition,self.target=session,transition,target_catalog
-                self.run_dir=Path('/tmp/standard-mock-observation');seeds.append(seed)
-            def tick(self):
-                association=dict(nav2.binding,local_session_id='s2',local_generation=0,
-                                 local_frame='odom',measurement_stamp_s=100.)
-                self.transition.accept_localization(association=association,now_s=100.,max_age_s=1.,clock_domain='runtime_live')
-                self.session.rebind_manual_floor(self.target,nav2,self.transition)
-                return dict(status='complete')
-            def close(self):pass
+        def launch(command,**kwargs):
+            commands.append(command)
+            path=Path(command[command.index('--output')+1])
+            (path/'run').mkdir(parents=True)
+            if not manual_retry:(path/'run/commands.sock').touch()
+            process=MagicMock();process.poll.return_value=None
+            return process
         def work(payload,observation,spatial):
             state=payload['current_state'];requests.append(payload)
             if not state['requirements_registered']:
-                return Reply.fixture(dict(tool='record_task',arguments=dict(goals=[dict(goal_id='lift',kind='skill',
-                    stage_type='elevator',target_id='',description='乘电梯',floor_id='floor2',to_floor='floor1')])))
+                return Reply.fixture(dict(tool='record_task',arguments=dict(goals=[dict(goal_id='lift',stage='elevator',
+                    description='乘电梯到一楼指定区域',floor_id='floor2',to_floor='floor1',
+                    conditions=dict(robot_inside_region_id='floor1_arrival'))])))
             if state.get('ride'):
+                if not manual_retry and 'decision_feedback' not in state:
+                    return Reply.parse(dict(role='assistant',content='临时乘梯画面描述'))
                 return Reply.fixture(dict(tool='record_elevator_observation',arguments=dict(
                     judgment='completed',evidence='已经到达标准点',retain_observation=False)))
+            if manual_retry and 'decision_feedback' not in state:
+                return Reply.parse(dict(role='assistant',content='已取得一楼定位。'))
             return Reply.fixture(dict(tool='complete_subtask',arguments=dict(goal_id='lift',evidence='目标地图关联成立且已停稳')))
         with tempfile.TemporaryDirectory() as root,patch('decision.agent.workflows.floor_handoff.os.kill'), \
              patch('decision.agent.workflows.floor_handoff.observation_owner',return_value=123), \
              patch('decision.agent.workflows.floor_handoff.load_standard_start',return_value=(standard,(meta,b'jpg',b'png'))), \
              patch('decision.agent.adapters.elevator_camera.ElevatorCamera',StandardCamera), \
              patch('decision.agent.adapters.shadow.load_catalog_map'),patch('decision.agent.tools.spatial.render',return_value=b'crop'), \
+             patch('decision.agent.workflows.floor_handoff.FloorHandoff._source_stopped',return_value=True), \
+             patch('decision.agent.workflows.floor_handoff.subprocess.Popen',side_effect=launch), \
+             patch('decision.agent.workflows.floor_handoff.ManualNavigation',return_value=nav2), \
+             patch('decision.agent.workflows.floor_handoff.time') as clock, \
              patch('decision.agent.core.session.robot_context',return_value={}):
+            clock.monotonic.return_value=100.
             store=Store(Path(root)/'session.sqlite');session=AgentSession('下楼',floors['floor2'],nav1,store,floor_catalogs=floors)
             session.elevator=ElevatorRide({'floor1':'unused'},'source',root);actor=AgentLoop(session,work)
             try:
-                with patch.object(session,'prepare_reference'),patch('decision.agent.workflows.floor_handoff.FloorHandoff',Handoff):
+                def until(condition):
                     for _ in range(35):
                         actor.tick()
                         if actor.model.thread:actor.model.thread.join(1)
-                        if session.task_goals.goals and session.task_goals.goals[0]['status']=='completed':break
-                self.assertEqual(len(seeds),1)
-                self.assertEqual(seeds[0]['source'],'standard_destination_start')
-                self.assertEqual(seeds[0]['lidar_pose_rpy_xyz'],standard['pose_rpy_xyz'])
+                        if condition():return
+                    self.fail('Expected cross-floor state was never reached')
+                with patch.object(session,'prepare_reference'):
+                    if manual_retry:
+                        ride=session.elevator
+                        until(lambda: len(commands)==1)
+                        model_calls=actor.requests
+                        clock.monotonic.return_value=129.99
+                        actor.tick()
+                        self.assertEqual(len(commands),1)
+                        clock.monotonic.return_value=130.
+                        until(lambda: len(commands)==2)
+                        self.assertEqual(ride.wait_reason,'destination_registration_timeout')
+                        for attempt in (1,2):
+                            picker=ride.handoff
+                            self.assertEqual(picker.status,'waiting_manual_pose')
+                            clock.monotonic.return_value+=120.
+                            actor.tick()
+                            self.assertIs(ride.handoff,picker)
+                            self.assertEqual(picker.status,'waiting_manual_pose')
+                            (picker.run_dir/'initial_pose.json').write_text(json.dumps(dict(
+                                source='confirmed_rviz_initialpose',preview_scan_stamp_s=99.9,
+                                confirmed_monotonic_s=clock.monotonic.return_value)))
+                            (picker.run_dir/'run/commands.sock').touch()
+                            nav2.value['control']['agent_mapped_pose']['association_stamp_s']=99.8
+                            actor.tick()
+                            self.assertEqual(picker.wait_reason,'destination_localization_not_ready')
+                            self.assertEqual(session.state['status'],'waiting_monitor')
+                            self.assertIs(session.navigation,nav1)
+                            self.assertEqual(actor.requests,model_calls)
+                            if attempt==1:
+                                clock.monotonic.return_value+=30.
+                                until(lambda: len(commands)==3)
+                        nav2.value['control']['agent_mapped_pose']['association_stamp_s']=100.
+                    until(lambda: session.task_goals.goals and session.task_goals.goals[0]['status']=='completed')
+                self.assertEqual(len(commands),3 if manual_retry else 1)
+                seed=json.loads(Path(commands[0][commands[0].index('--handoff-seed')+1]).read_text())
+                self.assertEqual(seed['source'],'standard_destination_start')
+                self.assertEqual(seed['lidar_pose_rpy_xyz'],standard['pose_rpy_xyz'])
+                for command in commands[1:]:
+                    self.assertNotIn('--handoff-seed',command)
+                    self.assertNotIn('--execute',command)
+                if manual_retry:
+                    self.assertIn('decision_feedback',requests[-1]['current_state'])
+                    evidence=requests[-1]['current_state']['completion_evidence']
+                    self.assertEqual(evidence['destination_association']['initial_pose_source'],'operator_rviz')
+                else:
+                    ride_states=[p['current_state'] for p in requests if p['current_state'].get('ride')]
+                    self.assertEqual(len(ride_states),2)
+                    self.assertIn('decision_feedback',ride_states[1])
+                    self.assertGreater(ride_states[1]['navigation']['feedback']['stamp_s'],
+                                       ride_states[0]['navigation']['feedback']['stamp_s'])
+                    self.assertNotIn('临时乘梯画面描述',str(store.db.execute('SELECT value FROM events').fetchall()))
                 self.assertEqual(session.task_goals.goals[0]['status'],'completed')
+                checks=session.task_goals.goals[0]['completion']['checks']
+                self.assertEqual(checks['completion_region'],dict(floor_id='floor1',region_id='floor1_arrival',
+                                                                  status='inside',stamp_s=100.))
                 self.assertIs(session.navigation,nav2)
                 self.assertTrue(any(p['current_state'].get('ride',{}).get('standard_start') for p in requests))
             finally:actor.model.close();session.elevator.close();store.close()

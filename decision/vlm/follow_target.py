@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from perception.environment.context import fingerprint
+from interfaces.runtime import rgb_age_s
 
 
 def raw_candidates(scene, pixels, rgb_stamp_s, *, rgb_stamp_ns=None):
@@ -26,10 +27,9 @@ def candidates(scene, pixels, rgb_stamp_s, detections, association, *, detector,
     source = scene.record
     rgb = np.asarray(pixels)
     if (rgb.dtype != np.uint8 or rgb.ndim != 3 or rgb.shape[2] != 3 or
-            not math.isfinite(rgb_stamp_s) or not 0 <= source['as_of']-rgb_stamp_s <= .15):
+            not math.isfinite(rgb_stamp_s) or
+            not 0 <= rgb_age_s(source['as_of'],rgb_stamp_s,source.get('stamp_ns'),rgb_stamp_ns) <= .15):
         raise ValueError('Follow candidates require a causal RGB observation')
-    if rgb_stamp_ns is not None and (type(rgb_stamp_ns) is not int or abs(rgb_stamp_ns/1e9-rgb_stamp_s) > 1e-6):
-        raise ValueError('RGB nanoseconds do not match the source timestamp')
     bound_rgb = source.get('rgb') or {}
     pixel_hash = hashlib.sha256(rgb.tobytes()).hexdigest()
     if bound_rgb.get('status') == 'valid' and (bound_rgb.get('sha256') != pixel_hash or

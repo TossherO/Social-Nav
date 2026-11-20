@@ -2,7 +2,7 @@
 import copy
 import math
 
-from .tasks import angle_error
+from .tasks import angle_error, inside
 from ..tools.navigation import spatial_context
 
 
@@ -82,23 +82,7 @@ def stage_evidence(session, goal):
         missing.append('fresh_localization')
     if session.navigation.scope=='shadow':
         missing.append('execution_feedback_unavailable_in_shadow')
-    region_id=req.get('robot_inside_region_id')
-    if region_id:
-        from .tasks import inside
-        stamp=state.get('origin_stamp_s') if session.navigation.scope!='simulation' else state.get('stamp_s')
-        valid=(state.get('origin_frame_id')==session.catalog.value['frame_id'] if session.navigation.scope!='simulation'
-               else state.get('frame_id')==session.catalog.value['frame_id'])
-        valid=(valid and not state.get('input_stale') and state.get('localization_status','valid')=='valid' and
-               isinstance(pose,(tuple,list)) and len(pose)==3 and
-               all(type(v) in (int,float) and math.isfinite(v) for v in pose) and
-               type(stamp) in (int,float) and type(state.get('stamp_s')) in (int,float) and
-               0<=state['stamp_s']-stamp<=.5)
-        if session.navigation.scope!='simulation':
-            binding=state.get('map_binding') or {}
-            valid=valid and binding.get('valid') is True and binding.get('map_frame')==session.catalog.value['frame_id']
-        region_state='unknown' if not valid else 'inside' if inside(pose[:2],session.catalog.regions[region_id]['polygon']) else 'outside'
-        facts['completion_region']=dict(region_id=region_id,status=region_state,stamp_s=stamp if valid else None)
-        if region_state!='inside':missing.append('completion_region_'+region_state)
+    completion_catalog = session.catalog
     rgb = (session.observation.record if session.observation else {})
     view = (session.spatial_view.record if session.spatial_view else {})
     if stage in ('navigation','seating'):
@@ -153,11 +137,12 @@ def stage_evidence(session, goal):
         association = proof.get('association') or {}
         binding = state.get('map_binding') or {}
         facts['destination_association'] = association
-        if (not proof or not binding.get('valid') or
+        if (not proof or session.catalog.value.get('floor_id')!=req['to_floor'] or not binding.get('valid') or
                 any(association.get(k)!=binding.get(k) for k in ('map_id','association_session','association_generation')) or
                 [association.get(k) for k in ('local_session_id','local_generation','local_frame')]!=
                 [state.get(k) for k in ('session_id','generation','frame_id')]):
             missing.append('destination_map_association')
+            completion_catalog = None
         if not session._confirmed_manual_idle(state):
             missing.append('destination_stop')
     elif stage=='observation':
@@ -167,6 +152,24 @@ def stage_evidence(session, goal):
                      stopped=state.get('stopped'),physical_acceptance=False)
     else:
         missing.append('stage_skill_not_available')
+    region_id = req.get('robot_inside_region_id')
+    if region_id:
+        region = completion_catalog.regions.get(region_id) if completion_catalog is not None else None
+        stamp=facts['measurement_stamp_s']
+        frame=state.get('frame_id') if session.navigation.scope=='simulation' else state.get('origin_frame_id')
+        valid=(region is not None and frame==facts['frame_id'] and
+               not state.get('input_stale') and state.get('localization_status','valid')=='valid' and
+               isinstance(pose,(tuple,list)) and len(pose)==3 and
+               all(type(v) in (int,float) and math.isfinite(v) for v in pose) and
+               type(stamp) in (int,float) and type(state.get('stamp_s')) in (int,float) and
+               0<=state['stamp_s']-stamp<=.5)
+        if session.navigation.scope!='simulation':
+            binding=state.get('map_binding') or {}
+            valid=valid and binding.get('valid') is True and binding.get('map_frame')==facts['frame_id']
+        region_state='unknown' if not valid else 'inside' if inside(pose[:2],region['polygon']) else 'outside'
+        facts['completion_region']=dict(floor_id=req.get('to_floor',session.catalog.value.get('floor_id')),
+                                        region_id=region_id,status=region_state,stamp_s=stamp if valid else None)
+        if region_state!='inside':missing.append('completion_region_'+region_state)
     needs_rgb = stage in ('observation','follow','seating') or bool(req.get('semantic_conditions'))
     rgb_stamp = (rgb.get('rgb') or {}).get('stamp_s')
     if (rgb and rgb['rgb'].get('status')=='valid' and rgb['clock_domain']==state['clock_domain'] and

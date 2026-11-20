@@ -30,6 +30,23 @@ class ImuTimeTests(unittest.TestCase):
     def test_monotonic_measurements_are_accepted_without_new_scans(self):
         self.assertEqual(self.observe([1000000000,1000500000,1001000000]),[])
 
+    def test_camera_selection_preserves_sensor_nanoseconds(self):
+        scan_ns=1_760_000_000_100_000_001
+        def message(topic,ns):
+            msg=next(self.messages([ns]))[1]
+            msg.header.frame_id='sensor'
+            return topic,msg,None
+        rows=[message('/rgb',scan_ns+1),message('/rgb',scan_ns),message('/points',scan_ns),
+              message('/imu',scan_ns+1_000_000)]
+        config=dict(common=dict(lid_topic='/points',imu_topic='/imu'),preprocess={})
+        fields={k:np.zeros(1) for k in ('x','y','z','intensity','timestamp')}
+        with patch('perception.sensors.observations.pointcloud_fields',return_value=fields), \
+                patch('perception.sensors.observations.rs16_preprocess',side_effect=lambda f,c,t:(np.zeros((1,5)),t-.1,t)), \
+                patch('perception.sensors.observations.rgb_array',return_value=np.zeros((1,1,3),np.uint8)):
+            batch,=bag_observations(None,config,messages=rows,image_topics=dict(rgb='/rgb'))
+        self.assertEqual(batch['stamp_ns'],scan_ns)
+        self.assertEqual(batch['rgb_stamp_ns'],scan_ns)
+
     def test_interval_keeps_leading_imu_and_each_input_mode_camera_history(self):
         def header(t):
             return SimpleNamespace(stamp=SimpleNamespace(to_sec=lambda:t,to_nsec=lambda:round(t*1e9)),

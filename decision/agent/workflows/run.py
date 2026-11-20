@@ -1,7 +1,6 @@
 """Synthetic navigation workflow; no ROS or chassis output."""
 import json
 from pathlib import Path
-from .. import ROOT
 from ..core.session import AgentSession
 from ..core.store import Store, shared_budget
 from ..tools.places import Catalog

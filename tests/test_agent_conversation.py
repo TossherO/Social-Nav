@@ -14,7 +14,7 @@ from decision.agent.core.session import AgentSession
 from decision.agent.core.store import Budget, Store
 from decision.agent.tools.framework import Reply
 from decision.agent.tools.places import Catalog
-from tests.test_agent import ScriptedFeedback, action, point_goal, query_map, reply
+from tests.test_agent import ScriptedFeedback, action, navigate, point_goal, query_map, reply
 
 
 def wire(calls=None, text=None, fragments=None):
@@ -193,6 +193,50 @@ class ConversationTests(unittest.TestCase):
                 self.assertEqual(actor.requests,1)
             finally:actor.close()
             self.session.event('answer','继续检查')
+
+    def test_arrival_text_corrected_once_using_current_evidence(self):
+        self.assertEqual(navigate(self.session,'elevator')['status'],'accepted')
+        self.session.call('wait_for_event',event='navigation')
+        self.session.tick()
+        self.nav.arrive()
+        evidence=[]
+        def work(payload,*_):
+            state=payload['current_state']
+            evidence.append(state['completion_evidence'])
+            if len(evidence)==1:
+                return Reply.parse(dict(role='assistant',content='已经到达。'))
+            self.assertIn('原生工具',state['decision_feedback'])
+            return reply('complete_subtask',goal_id='elevator',evidence='到达电梯口且已停稳')
+        actor=AgentLoop(self.session,work)
+        try:
+            actor.tick();actor.model.thread.join(2);actor.tick()
+            self.assertEqual(self.session.state['status'],'ready')
+            self.nav.t+=.1
+            actor.tick();actor.model.thread.join(2);actor.tick()
+            self.assertEqual(self.session.state['status'],'succeeded')
+            self.assertEqual([row['missing'] for row in evidence],[[],[]])
+            self.assertGreater(evidence[1]['measurement_stamp_s'],evidence[0]['measurement_stamp_s'])
+            self.assertEqual(actor.requests,2)
+            self.assertFalse(self.session.state['clarifications'])
+        finally:actor.close()
+
+    def test_repeated_execution_text_pauses_without_parsing_or_requesting_clarification(self):
+        self.session.call('record_task',goals=[point_goal('elevator')])
+        raw=json.dumps(action('complete_subtask',goal_id='elevator',evidence='到达'))
+        actor=AgentLoop(self.session,lambda *_:Reply.parse(dict(role='assistant',content=raw)))
+        try:
+            for _ in range(8):
+                actor.tick()
+                if actor.model.thread:actor.model.thread.join(2)
+            self.assertEqual(actor.requests,2)
+            self.assertEqual(self.session.state['status'],'paused')
+            self.assertEqual(self.session.state['reason'],'model_action_missing')
+            self.assertEqual(self.session.task_goals.goals[0]['status'],'pending')
+            rows=self.store.db.execute("SELECT value FROM events WHERE kind='model_action_missing' ORDER BY seq")
+            logged=[json.loads(row[0]) for row in rows]
+            self.assertEqual([r['message']['content'] for r in logged],[raw,raw])
+            self.assertEqual([r['correction_requested'] for r in logged],[True,False])
+        finally:actor.close()
 
     def test_accepted_goal_waits_for_feedback_before_next_model_request(self):
         self.session.call('record_task',goals=[point_goal('elevator')])

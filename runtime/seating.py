@@ -14,8 +14,9 @@ from navigation.tasks import TaskPolicy
 
 
 class SeatingWorker:
-    def __init__(self, geometry, planning, motion):
+    def __init__(self, geometry, planning, motion, *, clock_rate=1.):
         self.geometry, self.planning, self.motion = geometry, planning, motion
+        self.clock_rate = clock_rate
         self.calibration = camera_calibration()
         self.frames = deque(maxlen=8)
         self.latest_geometry = None
@@ -28,11 +29,11 @@ class SeatingWorker:
         self.sequence = 0
         self.last_stamp = None
 
-    def observe(self, scene, observation, image, points, camera, received):
+    def observe(self, scene, observation, image, points, camera, clock):
         if points is None or camera is None:
             return
         with self.lock:
-            self.frames.append((scene, observation, image, points, camera, received))
+            self.frames.append((scene, observation, image, points, camera, clock))
             if (self.active is not None and (self.thread is None or not self.thread.is_alive()) and
                     self.last_stamp is not None and scene.record['as_of']>self.last_stamp):
                 value,original,original_edge,epoch=self.active
@@ -40,9 +41,13 @@ class SeatingWorker:
                     name='seating-t3',daemon=True)
                 self.thread.start()
 
-    def update_scene(self,scene,measured_mono):
+    def update_scene(self,scene,clock):
         with self.lock:
-            self.latest_geometry=None if scene is None else (scene,measured_mono)
+            self.latest_geometry=None if scene is None else (scene,clock)
+
+    def _source_now(self, clock):
+        source_s, source_mono = clock
+        return source_s + (time.monotonic() - source_mono) * self.clock_rate
 
     def select(self, value):
         if set(value)!={'selection_id','observation_binding','instruction','roi'}:
@@ -155,16 +160,16 @@ class SeatingWorker:
                 frame_id=r['frame_id'],clock_domain=r['clock_domain'],session_id=r['session_id'],generation=r['generation'],
                 revision=0,candidates=poses)
             decision=OnlineDecision(TaskPolicy(value['selection_id'],'seating',self.planning,self.geometry))
-            request=decision.seating(scene,candidates,observation=obs,now=r['as_of']+time.monotonic()-frame[-1])
+            request=decision.seating(scene,candidates,observation=obs,now=self._source_now(frame[-1]))
             response=decision.infer(request)
             result.update(raw_response=response.get('raw_content'),request_binding=request['request_binding'])
             if response['status']!='complete':raise ValueError(response.get('reason') or 'seating_model_unavailable')
             with self.lock:latest=self.latest_geometry
             if latest is None:raise ValueError('seating_current_geometry_unavailable')
-            current,measured_mono=latest
+            current,clock=latest
             if self._binding(current)!=binding:
                 raise ValueError('seating_selection_superseded')
-            now=current.record['as_of']+time.monotonic()-measured_mono
+            now=self._source_now(clock)
             action=decision.accept(request,response,scene=current,now=now)
             if action.get('operation')!='plan':
                 raise ValueError(action.get('reason') or 'seating_candidate_unavailable')

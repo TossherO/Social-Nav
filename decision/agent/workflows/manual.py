@@ -9,6 +9,7 @@ import time
 from ..adapters.manual import ManualNavigation
 from ..adapters.runtime import ManualRuntimeClient
 from ..core.session import AgentSession
+from ..core.tasks import next_unfinished_goal
 from ..core.store import Store, shared_budget
 from ..tools.places import Catalog
 from .common import emit, make_loop
@@ -214,7 +215,7 @@ def run(args):
                 except queue.Empty:break
                 if phase and value.get('phase')==phase:
                     emit(dict(event='elevator_transient',data={k:v for k,v in value.items() if k!='phase'}))
-            stage=next((g for g in session.task_goals.goals if g['status'] not in ('completed','skipped')),None)
+            stage=next_unfinished_goal(session.task_goals.goals)
             requirement=None if stage is None else stage['requirement']
             if session.navigation is not navigation:
                 navigation=session.navigation
@@ -232,10 +233,11 @@ def run(args):
                     last_status_at=time.monotonic()
                     emit(dict(event='manual_status',task_id=session.state['task_id'],revision=session.state['revision'],
                         goal_id=requirement['goal_id'],goal_description=requirement['description'],
-                        floor_id=requirement['floor_id'],call_id=None,status=session.state['status'],
+                        floor_id=requirement['floor_id'],call_id=None,status=session.state['status'],reason=session.state.get('reason'),
                         navigation_status='elevator',localization_status='unavailable',input_stale=True,
                         elevator_status=session.elevator.transition.status,model_busy=_actor.model.busy,
                         elevator_standard_start=session.elevator.standard is not None,
+                        elevator_manual_selection=(session.elevator.last_attempt or {}).get('source')=='operator_rviz',
                         elevator_decision=session.elevator.feedback,
                         error=session.elevator.wait_reason or (session.elevator.last_attempt or {}).get('result'),
                         floor_handoff=session.elevator.handoff.snapshot() if session.elevator.handoff else None))
@@ -267,7 +269,7 @@ def run(args):
             if getattr(args,'gui_commands',False) and time.monotonic()-last_status_at>=.5:
                 last_status_at=time.monotonic()
                 feedback=navigation.snapshot()
-                current=next((g for g in session.task_goals.goals if g['status'] not in ('completed','skipped')),None)
+                current=next_unfinished_goal(session.task_goals.goals)
                 selected=None if current is None else (current.get('selected') or {}).get('handle')
                 completed=record.get('completed') or []
                 recovery_confirmation=(handle is None and selected is not None and navigation.handle==selected and
@@ -371,7 +373,7 @@ def run(args):
                     except (ValueError,KeyError,TypeError,OSError):pass
             elif last is not None and (handle is None or record['status']!='running'):
                 display.send([]);last=None;last_progress=None
-            stage=next((g for g in session.task_goals.goals if g['status'] not in ('completed','skipped')),None)
+            stage=next_unfinished_goal(session.task_goals.goals)
             key=None if stage is None else (session.state['revision'],stage['requirement']['goal_id'])
             if stage is not None and stage['requirement'].get('stage_type')=='observation' and key!=last_observation:
                 last_observation=key

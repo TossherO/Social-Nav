@@ -74,6 +74,37 @@ class FollowT2ApplicationTests(unittest.TestCase):
             self.runner.apply_t2(self.handle,self.prepared,response(self.prepared,'P0'),self.window,self.scene,now=15.2)
         self.assertIsNone(self.runner.policy)
 
+    def test_sensor_nanoseconds_at_rgb_window_boundaries(self):
+        from decision.agent.adapters.runtime import follow_observation
+        base_ns=1_760_000_000_100_000_001
+        for age_ns,accepted in ((0,True),(-1,False),(150_000_000,True),(150_000_001,False)):
+            with self.subTest(age_ns=age_ns):
+                buffer=DecisionBuffer(max_frames=8,slot_bytes=32768)
+                try:
+                    for offset_ns in (0,500_000_000,1_000_000_000):
+                        scan_ns=base_ns+offset_ns
+                        sec,nsec=divmod(scan_ns,1_000_000_000)
+                        row,arrays,association,scene=observation(sec+nsec/1e9,stamp_ns=scan_ns)
+                        rgb_ns=scan_ns-age_ns
+                        association['image_input']['rgb_stamp_ns']=rgb_ns
+                        buffer.push(row,arrays,association,scene=scene)
+                    lease=buffer.acquire()
+                    self.assertEqual(lease is not None,accepted)
+                    if not accepted:continue
+                    with buffer.consume(lease) as read:
+                        record,images=render_window(lease['entries'],lease['history'],read,extent=[-4,4,-4,4],view_binding={})
+                    self.assertEqual(record['sources'][-1]['stamp_ns'],scan_ns)
+                    self.assertEqual(record['sources'][-1]['rgb_input']['rgb_stamp_ns'],rgb_ns)
+                    agent_obs=follow_observation(scene,arrays['rgb'],None,self.runner.geometry,None,
+                        image_metadata=dict(rgb_stamp_ns=rgb_ns,rgb_frame='camera'))
+                    self.assertEqual(agent_obs.record['rgb']['age_s'],age_ns/1e9)
+                    self.runner.clear()
+                    self.runner.observe(scene)
+                    prepared=request(record,images,self.handle)
+                    action=self.runner.apply_t2(self.handle,prepared,response(prepared,'P0'),record,scene,now=row['stamp_s'])
+                    self.assertEqual(action['operation'],'plan')
+                finally:buffer.close()
+
     def test_delayed_occlusion_does_not_interrupt_new_observation(self):
         self.runner.apply_t2(self.handle,self.prepared,response(self.prepared,'P0'),self.window,self.scene,now=11.1)
         covered,source,images=window(10.1,predicted=True);self.runner.observe(covered)

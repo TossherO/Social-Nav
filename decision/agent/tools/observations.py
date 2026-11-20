@@ -12,6 +12,7 @@ import zlib
 import numpy as np
 from PIL import Image
 from perception.environment.context import fingerprint
+from interfaces.runtime import rgb_age_s
 
 
 @dataclass(frozen=True)
@@ -27,11 +28,8 @@ class Observation:
         if rgb['status'] == 'valid':
             if self.image is None or hashlib.sha256(self.image).hexdigest() != rgb['encoded_sha256']:
                 raise ValueError('Agent RGB asset changed')
-            if not 0 <= r['stamp_s']-rgb['stamp_s'] <= .15:
+            if not 0 <= rgb_age_s(r['stamp_s'],rgb['stamp_s'],r.get('stamp_ns'),rgb.get('stamp_ns')) <= .15:
                 raise ValueError('Future or stale RGB')
-            if rgb.get('stamp_ns') is not None and (type(rgb['stamp_ns']) is not int or
-                    abs(rgb['stamp_ns']/1e9-rgb['stamp_s']) > 1e-6):
-                raise ValueError('RGB nanoseconds do not match the source timestamp')
         elif self.image is not None:
             raise ValueError('Unavailable RGB cannot carry an image')
         if 'follow_candidates' in r:
@@ -60,9 +58,10 @@ class Observation:
         image = None
         bound_rgb = dict(status='missing', reason='no_causal_rgb')
         if rgb is None and s['rgb']['status'] == 'valid':
-            rgb = dict(pixels=scene.rgb, stamp_s=s['rgb']['stamp_s'], frame_id=s['rgb']['frame_id'], source=s['rgb'].get('reference'))
+            rgb = dict(pixels=scene.rgb, stamp_s=s['rgb']['stamp_s'], stamp_ns=s['rgb'].get('stamp_ns'),
+                       frame_id=s['rgb']['frame_id'], source=s['rgb'].get('reference'))
         if rgb is not None:
-            age = s['as_of']-rgb['stamp_s']
+            age = rgb_age_s(s['as_of'],rgb['stamp_s'],s.get('stamp_ns'),rgb.get('stamp_ns'))
             pixels = np.asarray(rgb['pixels'])
             if not 0 <= age <= .15 or pixels.dtype != np.uint8 or pixels.ndim != 3 or pixels.shape[2] != 3:
                 raise ValueError('RGB must be causal uint8 pixels from this observation')
@@ -73,8 +72,6 @@ class Observation:
                              pixel_sha256=hashlib.sha256(pixels.tobytes()).hexdigest(), shape=list(pixels.shape),
                              encoded_sha256=hashlib.sha256(image).hexdigest(), source=rgb.get('source'))
             if rgb.get('stamp_ns') is not None:
-                if type(rgb['stamp_ns']) is not int or abs(rgb['stamp_ns']/1e9-rgb['stamp_s']) > 1e-6:
-                    raise ValueError('RGB nanoseconds do not match the source timestamp')
                 bound_rgb['stamp_ns'] = rgb['stamp_ns']
         cells = scene.geometry.layers['occupancy']
         r = dict(observation_id=s['observation_id'], stamp_s=s['as_of'], clock_domain=s['clock_domain'],
@@ -87,6 +84,8 @@ class Observation:
                                unknown_cells=int(np.count_nonzero(cells == -1))),
                  people=dict(status=s['people']['status'], count=(len(s['people']['data']['tracks']) if s['people']['status'] == 'valid' else None)),
                  rgb=bound_rgb, source=copy.deepcopy(source), scope='observed_input_not_execution_feedback')
+        if s.get('stamp_ns') is not None:
+            r['stamp_ns'] = s['stamp_ns']
         if sensors is not None:
             r['sensors'] = copy.deepcopy(sensors)
         if follow_candidates is not None:

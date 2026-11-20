@@ -3,6 +3,7 @@ import queue
 import json
 import sys
 import threading
+from ..core.tasks import next_unfinished_goal
 
 
 class Console:
@@ -50,7 +51,7 @@ def dispatch_structured(command, actor, consumed):
     consumed.add(command_id)
     session=actor.session
     state=session.state
-    current=next((g for g in session.task_goals.goals if g['status'] not in ('completed','skipped')),None)
+    current=next_unfinished_goal(session.task_goals.goals)
     goal_id=None if current is None else current['requirement']['goal_id']
     handle=session.skill.record.get('handle') or {}
     if value['name']=='arrived' and not handle and current is not None:

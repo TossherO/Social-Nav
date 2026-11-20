@@ -63,11 +63,29 @@ class RegistrationContractTests(unittest.TestCase):
             task.record([goal])
         self.assertEqual(task.goals,[])
 
+    def test_wait_clause_must_come_from_user_and_is_preserved_in_execution_plan(self):
+        task=TaskGoals(self.catalog)
+        goal=dict(goal_id='g',stage='point',description='到电梯口',target=dict(id='elevator'),
+                  conditions=dict(wait_after='等我通知再乘梯'))
+        with self.assertRaisesRegex(ValueError,'wait_after'):
+            task.record([goal],user_messages=['到电梯口，再乘梯'])
+        self.assertFalse(task.goals)
+        task.record([goal],user_messages=['到电梯口，等我通知再乘梯'])
+        self.assertEqual(task.execution_plan()[0]['wait_after'],'等我通知再乘梯')
+
     def test_legacy_fixture_remains_readable(self):
         goal=dict(goal_id='old',kind='point',target_id='elevator',description='到电梯')
         validate_call(dict(tool='record_task',arguments=dict(goals=[goal])))
         task=TaskGoals(self.catalog);task.record([goal])
         self.assertEqual(task.goals[0]['requirement'],goal)
+
+    def test_local_task_plan_includes_required_follow_selection_only_for_follow(self):
+        task=TaskGoals(self.catalog)
+        task.record([dict(goal_id='f',stage='follow',description='跟随指定人物'),
+                     dict(goal_id='s',stage='seating',description='到桌边停靠')])
+        follow,seating=task.execution_plan()
+        self.assertEqual(follow['execution_tools'],['select_follow_target','start_local_task','complete_subtask'])
+        self.assertEqual(seating['execution_tools'],['start_local_task','complete_subtask'])
 
 
 if __name__=='__main__':

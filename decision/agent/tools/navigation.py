@@ -191,18 +191,6 @@ class NavigationSkill:
             self.emit('navigation_stop_unconfirmed', dict(error_type=type(error).__name__, automatically_retried=False))
         return dict(status='stopping', handle=copy.deepcopy(r['handle']), execution_completed=False)
 
-    def lose_follow(self, reason):
-        r=self.record
-        if r['handle'] is None:return dict(status='idle',execution_completed=False)
-        if not callable(getattr(self.navigation,'lose_follow',None)):
-            return self.cancel(reason=reason)
-        r.update(status='stopping',reason=reason,pending_completion=None)
-        self._emit('follow_loss_intent')
-        try:self.navigation.lose_follow(r['handle'],reason)
-        except (OSError,EOFError,ValueError) as error:
-            self.emit('navigation_stop_unconfirmed',dict(error_type=type(error).__name__,automatically_retried=False))
-        return dict(status='stopping',handle=copy.deepcopy(r['handle']),execution_completed=False)
-
     def tick(self):
         r = self.record
         try:

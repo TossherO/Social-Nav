@@ -4,10 +4,15 @@ import math
 import numpy as np
 from navigation.control.tracking import load_config
 from perception.environment.context import fingerprint
-from ..tools.framework import GOAL_VALIDATOR, REGISTRATION_GOAL
-from jsonschema import Draft202012Validator
+from ..tools.framework import GOAL_VALIDATOR, REGISTRATION_GOAL_VALIDATOR
 
-REGISTRATION_VALIDATOR = Draft202012Validator(REGISTRATION_GOAL)
+
+def user_quoted(quote, messages):
+    return bool(quote and quote.strip()) and any(quote in message for message in messages)
+
+
+def next_unfinished_goal(goals):
+    return next((goal for goal in goals if goal['status'] not in ('completed','skipped')), None)
 
 
 def normalize_registration(goal):
@@ -18,7 +23,7 @@ def normalize_registration(goal):
     """
     if 'stage' not in goal:
         return copy.deepcopy(goal)
-    REGISTRATION_VALIDATOR.validate(goal)
+    REGISTRATION_GOAL_VALIDATOR.validate(goal)
     stage=goal['stage']
     navigation=stage in ('point','region','reference','route','sequence')
     target=goal.get('target',{})
@@ -44,7 +49,7 @@ def normalize_registration(goal):
     for key in ('floor_id','to_floor','monitor','execution_notes'):
         if key in goal:result[key]=copy.deepcopy(goal[key])
     conditions=goal.get('conditions',{})
-    for key in ('required_yaw','facing','position_rule','max_distance_m','robot_inside_region_id'):
+    for key in ('required_yaw','facing','position_rule','max_distance_m','robot_inside_region_id','wait_after'):
         if key in conditions:result[key]=copy.deepcopy(conditions[key])
     for item in conditions.get('visual',[]):
         key='semantic_conditions' if item['priority']=='required' else 'visual_preferences'
@@ -114,6 +119,8 @@ class TaskGoals:
                 tools=['record_elevator_observation','restart_map_localization']
             elif stage=='observation':
                 tools=['observe_scene']
+            elif stage=='follow':
+                tools=['select_follow_target','start_local_task']
             else:
                 tools=['start_local_task']
             tools.append('complete_subtask')
@@ -133,7 +140,7 @@ class TaskGoals:
         # navigation controller keeps its own independent arrival tolerance.
         self.settings['goal_position_tolerance_m'] = .20
 
-    def record(self, goals):
+    def record(self, goals, *, user_messages=()):
         self.catalog.require_complete()
         if self.goals:
             raise ValueError('Task requirements already recorded; replace the instruction before changing them')
@@ -149,6 +156,8 @@ class TaskGoals:
         for index,goal in enumerate(normalized):
             try:
                 active_floor=self._validate_requirement(goal,active_floor,ids)
+                if 'wait_after' in goal and not user_quoted(goal['wait_after'],user_messages):
+                    raise ValueError('wait_after must quote an explicit wait instruction from the user')
             except ValueError as error:
                 raise ValueError(f'goals[{index}]: {error}') from error
         self.goals = [dict(requirement=copy.deepcopy(g), binding=fingerprint(g), status='pending',
@@ -175,8 +184,6 @@ class TaskGoals:
             raise ValueError('Continuous regional review requires both continuous_region_id and review_mode')
         if monitor.get('continuous_region_id') is not None and monitor['continuous_region_id'] not in catalog.regions:
             raise ValueError('Continuous review requires a region on the current floor')
-        if goal.get('robot_inside_region_id') is not None and goal['robot_inside_region_id'] not in catalog.regions:
-            raise ValueError('Completion region must exist on the current floor')
         if goal.get('stage_type')=='elevator' and set(goal.get('monitor',{}))-{'focus','interval_s'}:
             raise ValueError('Elevator monitoring supports independent frame events and interval_s while localization is paused')
         target = goal['target_id']
@@ -193,7 +200,6 @@ class TaskGoals:
                     raise ValueError('Elevator transition requires a different registered destination floor')
                 if goal.get('semantic_conditions') or goal.get('visual_preferences'):
                     raise ValueError('Record additional visual requirements as a separate task stage')
-                active_floor=destination
             elif 'to_floor' in goal:
                 raise ValueError('Only an elevator stage may name a destination floor')
         elif goal['kind'] == 'region':
@@ -241,14 +247,18 @@ class TaskGoals:
             raise ValueError('Facing condition needs a bound annotated point or region')
         if goal['kind']!='skill' and 'to_floor' in goal:
             raise ValueError('Only an elevator stage may name a destination floor')
+        completion_floor = goal.get('to_floor', floor)
+        region_id = goal.get('robot_inside_region_id')
+        if region_id is not None and region_id not in self.floor_catalogs[completion_floor].regions:
+            raise ValueError(f'Completion region {region_id!r} does not exist on floor {completion_floor!r}')
         values = [*goal.get('position', []), *([goal['required_yaw']] if 'required_yaw' in goal else []),
                   *([goal['max_distance_m']] if 'max_distance_m' in goal else [])]
         if not all(math.isfinite(v) for v in values):
             raise ValueError('Requirements must be finite')
-        return active_floor
+        return completion_floor
 
     def current(self, goal_id):
-        current = next((g for g in self.goals if g['status'] not in ('completed','skipped')), None)
+        current = next_unfinished_goal(self.goals)
         if current is None or current['requirement']['goal_id'] != goal_id:
             raise ValueError('Only the next uncompleted task goal can be selected or checked')
         floor=current['requirement'].get('floor_id')

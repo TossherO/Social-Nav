@@ -15,6 +15,13 @@ from decision.agent.workflows.interaction import dispatch_structured
 
 
 class ManualUiTests(unittest.TestCase):
+    def test_elevator_completion_region_is_identified_on_destination_floor(self):
+        from decision.agent.ui_data import goal_requirements
+        goal=dict(requirement=dict(kind='skill',stage_type='elevator',floor_id='floor2',to_floor='floor1',
+                                   robot_inside_region_id='waiting_area'))
+        text=goal_requirements(goal,{'waiting_area':'二楼候梯区'})
+        self.assertIn('完成时轮椅所在区域：floor1 · waiting_area',text)
+
     def setUp(self):
         self.calls=[]
         self.session=SimpleNamespace(state=dict(task_id='task',revision=2),
@@ -488,6 +495,28 @@ class ManualUiTests(unittest.TestCase):
             value=window.task_monitor.toPlainText()
             for expected in ('floor1','到停靠点','0.10 m','连续停稳','朝向偏差','关注入口','中转等候区','区域内','模型判断中','running','完成时区域检查：未登记'):
                 self.assertIn(expected,value)
+        finally:
+            window.close();app.processEvents()
+
+    def test_manual_pose_picker_offers_reopen_only_before_confirmation(self):
+        import os
+        os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
+        from PyQt5 import QtCore,QtWidgets
+        from decision.agent.manual_ui import ManualWindow
+        app=QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        window=ManualWindow()
+        try:
+            window.status=dict(status='waiting_monitor',goal_id='lift',elevator_standard_start=True,
+                elevator_status='awaiting_destination_localization',elevator_manual_selection=True)
+            window.status_received=time.monotonic()
+            with patch.object(window.process,'state',return_value=QtCore.QProcess.Running):
+                for phase,can_reopen in ((None,True),('waiting_manual_pose',True),('starting_destination',False)):
+                    window.status['floor_handoff']=dict(status=phase)
+                    window.refresh_status()
+                    self.assertEqual(window.buttons['review'].text(),'重开选点窗口')
+                    self.assertEqual(window.buttons['review'].isEnabled(),can_reopen)
+                    if phase=='waiting_manual_pose':
+                        self.assertIn('Confirm Initial Pose',window.task_monitor.toPlainText())
         finally:
             window.close();app.processEvents()
 

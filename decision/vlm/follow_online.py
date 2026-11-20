@@ -9,6 +9,7 @@ import math
 
 import numpy as np
 from PIL import Image, ImageDraw
+from interfaces.runtime import rgb_age_s
 
 from perception.environment.context import fingerprint
 from .annotation.rules import digest
@@ -160,7 +161,7 @@ def prepare(window, images, description, search, *, reference_image=None, refere
                 reference.get('description')!=description.strip() or
                 reference.get('clock_domain')!=window['clock_domain'] or
                 type(reference.get('rgb_stamp_s')) not in (int,float) or
-                reference['rgb_stamp_s']>window['stamp_s']):
+                rgb_age_s(window['stamp_s'],reference['rgb_stamp_s'],source.get('stamp_ns'),reference.get('rgb_stamp_ns'))<0):
             raise ValueError('Reference image does not match its causal metadata')
         content.extend([dict(type='text',text='Fixed target reference'),_image(reference_image,jpeg_quality=jpeg_quality)])
     images=list(images)
@@ -244,14 +245,15 @@ def selected_reference(prepared, result, window, *, task_id, revision, goal_id):
     scene=window['scene'];people=scene['people']['data']
     from navigation.planning.people import stable_identity
     track=next((t for t in people['tracks'] if list(stable_identity(people,t))==choice['identity']),None)
-    rgb=window['sources'][-1]['rgb_input']['rgb_stamp_ns']/1e9
+    rgb_ns=window['sources'][-1]['rgb_input']['rgb_stamp_ns']
+    rgb=rgb_ns/1_000_000_000
     if (track is None or track['state']!='observed' or not track['confirmed'] or
             track['lifecycle_generation']!=choice['lifecycle_generation'] or
             track['last_observed_stamp_s']!=people['stamp_s'] or
-            not 0<=scene['as_of']-rgb<=.15):
+            not 0<=rgb_age_s(scene['as_of'],rgb,scene.get('stamp_ns'),rgb_ns)<=.15):
         raise ValueError('T2 person lacks same-source observation')
     ref=dict(task_id=task_id,task_revision=revision,goal_id=goal_id,
-        scene_binding=scene['input_fingerprint'],stamp_s=scene['as_of'],rgb_stamp_s=rgb,
+        scene_binding=scene['input_fingerprint'],stamp_s=scene['as_of'],rgb_stamp_s=rgb,rgb_stamp_ns=rgb_ns,
         clock_domain=scene['clock_domain'],
         local_identity=[scene[k] for k in ('session_id','generation','frame_id')],
         track=dict(identity=choice['identity'],lifecycle_generation=choice['lifecycle_generation'],

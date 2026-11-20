@@ -7,6 +7,7 @@ import threading
 import numpy as np
 from runtime.export import drain_worker
 from runtime.transport import exchange_request
+from interfaces.runtime import rgb_age_s
 from ..tools.observations import Observation
 
 
@@ -16,7 +17,7 @@ def follow_observation(scene,pixels,association,geometry,camera_info,*,image_met
     from ..tools.sensors import sensor_context
     image=association['image_input'] if association is not None else image_metadata
     stamp_ns=image['rgb_stamp_ns']
-    stamp=stamp_ns/1e9
+    stamp=stamp_ns/1_000_000_000
     frame=image.get('camera_frame',image.get('rgb_frame'))
     people=scene.record['people'].get('data') or {}
     if association is None:
@@ -30,7 +31,7 @@ def follow_observation(scene,pixels,association,geometry,camera_info,*,image_met
             raise ValueError('T2 associations do not refer to these RGB pixels')
     return Observation.from_scene(scene,geometry=geometry,
         rgb=dict(pixels=pixels,stamp_s=stamp,stamp_ns=stamp_ns,frame_id=frame,source=dict(kind='t2_window_current_rgb')),
-        sensors=sensor_context(geometry,camera_info,rgb_shape=pixels.shape,rgb_frame=frame,rgb_stamp=stamp),
+        sensors=sensor_context(geometry,camera_info,rgb_shape=pixels.shape,rgb_frame=frame,rgb_stamp=stamp,rgb_stamp_ns=stamp_ns),
         include_local_grid=True,follow_candidates=detected)
 
 
@@ -46,12 +47,13 @@ class ObservationWorker:
         self.thread = threading.Thread(target=self._work, name='agent-observation', daemon=True)
         self.thread.start()
 
-    def submit(self, scene, pixels, rgb_stamp, rgb_frame, camera_info=None, rgb_stamp_ns=None, *, points=None,measured_mono=None):
+    def submit(self, scene, pixels, rgb_stamp, rgb_frame, camera_info=None, rgb_stamp_ns=None, *, points=None,clock=None):
         identity = [scene.record[k] for k in ('session_id', 'generation', 'frame_id')]
         stamp = scene.record['as_of']
         if self.error or self.closed or self.queue.full() or identity == self.identity and stamp < self.next_stamp:
             return False
-        if pixels is None or rgb_stamp is None or not 0 <= stamp-rgb_stamp <= .15:
+        if (pixels is None or rgb_stamp is None or
+                not 0 <= rgb_age_s(stamp,rgb_stamp,scene.record.get('stamp_ns'),rgb_stamp_ns) <= .15):
             return False
         # Producer slots are released after submit. Keep RGB and, for seating,
         # the corresponding scan. The sealed scene retains its CPU safety grid.
@@ -60,7 +62,7 @@ class ObservationWorker:
             self.metrics.transfer('host_copy', image.nbytes, 'agent_rgb_observation')
         scan=np.array(points[:,:3],copy=True) if self.seating is not None and points is not None else None
         if scan is not None and self.metrics:self.metrics.transfer('host_copy',scan.nbytes,'seating_observation')
-        self.queue.put_nowait((scene, image, rgb_stamp, rgb_frame, copy.deepcopy(camera_info), rgb_stamp_ns,scan,measured_mono))
+        self.queue.put_nowait((scene, image, rgb_stamp, rgb_frame, copy.deepcopy(camera_info), rgb_stamp_ns,scan,clock))
         self.next_stamp, self.identity = stamp+1., identity
         return True
 
@@ -70,14 +72,14 @@ class ObservationWorker:
                 item = self.queue.get()
                 if item is None:
                     return
-                scene, image, stamp, frame, camera_info, stamp_ns,scan,received = item
+                scene, image, stamp, frame, camera_info, stamp_ns,scan,clock = item
                 from ..tools.sensors import sensor_context
-                sensors = sensor_context(self.geometry,camera_info,rgb_shape=image.shape,rgb_frame=frame,rgb_stamp=stamp)
+                sensors = sensor_context(self.geometry,camera_info,rgb_shape=image.shape,rgb_frame=frame,rgb_stamp=stamp,rgb_stamp_ns=stamp_ns)
                 observation = Observation.from_scene(scene, geometry=self.geometry, rgb=dict(pixels=image, stamp_s=stamp, stamp_ns=stamp_ns, frame_id=frame,
                     source=dict(kind='runtime_shared_host_rgb_copy', observation_id=scene.record['observation_id'])), sensors=sensors,
                     include_local_grid=True)
                 if self.seating is not None:
-                    self.seating.observe(scene,observation,image,scan,camera_info,received)
+                    self.seating.observe(scene,observation,image,scan,camera_info,clock)
                 self.publish(observation.record, observation.image)
         except Exception as error:
             self.error = type(error).__name__

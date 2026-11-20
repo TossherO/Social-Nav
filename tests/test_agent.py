@@ -195,15 +195,35 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(self.tools.state['status'], 'cancelled')
 
     def test_user_continue_is_real_event_and_answer_keeps_instruction(self):
-        self.tools.call('wait_for_event', event='user_continue')
+        old = self.tools.state['instruction']
+        self.assertEqual(self.tools.call('wait_for_event',event='user_continue')['status'],'refused')
+        self.assertEqual(self.tools.call('wait_for_event',event='user_continue',instruction_quote='等我的口令')['status'],'refused')
+        self.tools.call('ask_user',question='何时出发？')
+        self.tools.event('answer','等我的口令')
+        self.tools.call('wait_for_event', event='user_continue',instruction_quote='等我的口令')
         self.tools.tick()
         self.assertEqual(self.tools.state['status'], 'waiting_user')
         self.tools.event('continue')
         self.tools.call('ask_user', question='哪一个入口？')
-        old = self.tools.state['instruction']
         self.tools.event('answer', '大厅玻璃门内侧')
         self.assertEqual(self.tools.state['instruction'], old)
-        self.assertEqual(self.tools.prompt()['current_state']['clarifications'][0]['answer'], '大厅玻璃门内侧')
+        self.assertEqual(self.tools.prompt()['current_state']['clarifications'][-1]['answer'], '大厅玻璃门内侧')
+
+    def test_final_stage_waits_for_the_registered_signal_before_finishing(self):
+        self.tools.call('ask_user',question='到达后有什么安排？')
+        self.tools.event('answer','到了等我通知')
+        result=self.tools.call('record_task',goals=[dict(point_goal('elevator'),wait_after='等我通知')])
+        self.assertEqual(result['status'],'recorded')
+        navigate(self.tools,'elevator')
+        self.nav.arrive();self.tools.tick()
+        self.assertFalse(self.tools.prompt()['current_state']['completion_evidence']['missing'])
+        result=self.tools.call('complete_subtask',_context=self.tools.context(),goal_id='elevator',evidence='已在目标停稳')
+        self.assertEqual(result['task_status'],'waiting_user')
+        self.tools.tick()
+        self.assertFalse(self.tools.state['completed_revisions'])
+        self.tools.event('continue')
+        self.assertEqual(self.tools.state['status'],'succeeded')
+        self.assertEqual(self.tools.state['completed_revisions'],[1])
 
     def test_failed_or_unknown_goal_is_not_erased_by_earlier_success(self):
         self.tools.call('record_task',goals=[point_goal('elevator'),point_goal('lobby_entrance')])

@@ -28,7 +28,7 @@ OPERATION_EVENTS={'manual_goal_evidence_wait_started':'等待到达证据',
     'manual_reference_status':'参考路径预览','manual_reference_region_conflict':'绕行路径冲突','manual_route_progress':'路线进度',
     'api_input_rejected':'模型输入超过估算限制',
     'operator_command':'操作结果','subtask_skipped':'子任务已跳过','registered_task_imported':'复用历史登记','task_monitor_event':'任务复核触发','navigation_context_lost':'定位或地图变化',
-    'task_connection_lost':'连接中断','model_failed':'模型错误',
+    'task_connection_lost':'连接中断','model_failed':'模型错误','model_action_missing':'模型未提交执行动作',
     'model_protocol_rejected':'模型格式错误','conversation_trimmed':'上下文裁剪','route_repeated_refusal':'路线重复被拒绝',
     'navigation_repeated_refusal':'导航目标重复被拒绝',
     'agent_run_finished':'会话结束'}
@@ -820,6 +820,10 @@ class ManualWindow(QtWidgets.QMainWindow):
             stopped='是' if s.get('stopped') is True else '否' if s.get('stopped') is False else '未知'
             if s.get('reason')=='model_text_without_task_registration':
                 task='模型只返回文字，任务尚未登记；请查看输出并答复或替换任务'
+            elif s.get('reason')=='model_action_missing':
+                task='模型未提交执行动作（'+str(task)+'）'
+            elif s.get('status')=='waiting_user' and s.get('reason'):
+                task='等待用户继续（'+s['reason']+'）'
             preview=s.get('reference_preview') or {}
             index=s.get('route_index') if s.get('route_index') is not None else 0
             expected=str(s.get('call_id'))+':'+str(index)
@@ -883,12 +887,25 @@ class ManualWindow(QtWidgets.QMainWindow):
                     states.update(monitoring_ride='周期判断是否到达标准起点',
                                   awaiting_destination_localization='已判断到达标准起点，正在定位目标楼层')
                 handoff=s.get('floor_handoff') or {}
+                if s.get('elevator_manual_selection'):
+                    manual_hint={
+                        'stopping_source':'正在切换到目标楼层的人工选点窗口',
+                        'waiting_manual_pose':'在目标楼层 RViz 用 Ground Pose Estimate 选点，核对雷达叠图后点击 Confirm Initial Pose。窗口已关闭时可点“重开选点窗口”。',
+                        'starting_destination':'已确认人工起点，正在等待目标楼层地图配准',
+                    }
+                    states['awaiting_destination_localization']=manual_hint.get(handoff.get('status'),
+                        '人工选点窗口未启动，排查下方原因后点“重开选点窗口”')
                 decision=s.get('elevator_decision') or {}
+                hint=s.get('error')
+                if hint=='destination_registration_timeout':
+                    hint='上一次配准超时，未取得有效的目标楼层定位。'
+                elif hint=='destination_observation_exited':
+                    hint='目标楼层观察进程已退出。'
                 summary=('乘梯任务：'+str(s.get('goal_description') or '')+
                     '\n阶段：'+states.get(s['elevator_status'],str(s['elevator_status']))+
                     '\n地图切换：'+str(handoff.get('status') or '尚未开始')+
                     ('（'+str(handoff['wait_reason'])+'）' if handoff.get('wait_reason') else '')+
-                    ('\n需要处理：'+str(s['error']) if s.get('error') else '')+
+                    ('\n最近提示：'+str(hint) if hint else '')+
                     ('\n最近判断：'+str(decision.get('judgment'))+'；'+str(decision.get('evidence')) if decision else '')+
                     '\n乘梯图像与逐次判断仅在监测期间保留。')
             update_readonly_text(self.task_monitor,summary)
@@ -901,8 +918,15 @@ class ManualWindow(QtWidgets.QMainWindow):
             enabled=fresh and not busy
             if name=='arrived':enabled=enabled and (self.status.get('manual_confirmation_available') or
                 nav=='running' and self.status.get('call_id') is not None)
-            elif name=='review':enabled=enabled and self.status.get('goal_id') is not None and status in ('ready','waiting_navigation','waiting_observation','waiting_monitor')
-            elif name=='skip':enabled=enabled and self.status.get('goal_id') is not None and status not in ('stopping','succeeded','partial','failed','cancelled') and not self.status.get('elevator_status')
+            elif name=='review':
+                manual_picker=fresh and self.status.get('elevator_manual_selection') is True
+                button.setText('重开选点窗口' if manual_picker else '立即复核')
+                if fresh and self.status.get('elevator_standard_start') and self.status.get('elevator_status')=='awaiting_destination_localization':
+                    handoff_status=(self.status.get('floor_handoff') or {}).get('status')
+                    enabled=enabled and manual_picker and status=='waiting_monitor' and handoff_status in (None,'waiting_manual_pose')
+                else:
+                    enabled=enabled and self.status.get('goal_id') is not None and status in ('ready','waiting_navigation','waiting_observation','waiting_monitor')
+            elif name=='skip':enabled=enabled and self.status.get('goal_id') is not None and status not in ('waiting_user','stopping','succeeded','partial','failed','cancelled') and not self.status.get('elevator_status')
             elif name=='resume':enabled=enabled and status=='paused'
             elif name=='continue':enabled=enabled and status=='waiting_user'
             elif name=='answer':enabled=enabled and status=='needs_clarification'

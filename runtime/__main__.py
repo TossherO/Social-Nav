@@ -311,7 +311,7 @@ def _run(args, resources, handles):
         commands.agent_state.enable_goal_observations()
         if args.agent_seating:
             from .seating import SeatingWorker
-            commands.agent_state.seating=resources['seating']=SeatingWorker(geometry,planning,motion)
+            commands.agent_state.seating=resources['seating']=SeatingWorker(geometry,planning,motion,clock_rate=args.rate)
         agent_observer = resources['agent_observations'] = ObservationWorker(commands.agent_state.publish_observation,
             metrics=metrics,geometry=geometry,seating=commands.agent_state.seating)
     if args.agent_follow_candidates:
@@ -371,7 +371,8 @@ def _run(args, resources, handles):
                     from perception.environment.device import DeviceGridSnapshot
                     capsule=safety_capsule(finalize(capsule))
                     grid=DeviceGridSnapshot.seal(capsule.metadata,grid.consume())
-                current=assemble_scene(capsule,clock_domain=clock_domain,people=job['options']['people'],settings=env_config['scene'])
+                current=assemble_scene(capsule,clock_domain=clock_domain,people=job['options']['people'],
+                                       stamp_ns=job['stamp_ns'],settings=env_config['scene'])
             metrics.trace('map_ready',measurement_stamp_s=job['stamp'],scene_binding=current.record['input_fingerprint'])
             return current,grid
     def publish_map(result):
@@ -469,6 +470,7 @@ def _run(args, resources, handles):
                     metrics.trace('detector_start',measurement_stamp_s=stamp)
                     with metrics.span('detector_tracking'):people=pipeline.step(frame)
                     metrics.trace('detector_done',measurement_stamp_s=stamp)
+                    people['stamp_ns']=row['stamp_ns']
                     people['localization_binding']=dict(session_id=row['session_id'],generation=row['generation'],frame_id=row['frame_id'],source=row['source'])
                     record('people',people)
                     if map_worker is not None:
@@ -479,7 +481,7 @@ def _run(args, resources, handles):
                         else:map_worker.invalidate()
                         scene=None;last_device=None
                     elif (scan_inbox is None or scan_inbox.current(packet)) and 'deskewed' in arrays and stamp>=next_env-1e-6:
-                        job=dict(points=arrays['deskewed'][:,:3],pose=pose,stamp=stamp,identity=(row['session_id'],row['generation']),
+                        job=dict(points=arrays['deskewed'][:,:3],pose=pose,stamp=stamp,stamp_ns=row['stamp_ns'],identity=(row['session_id'],row['generation']),
                             options=dict(frame=row['frame_id'],association=associations.select(packet['association']),scan_duration=packet['scan_duration_s'],
                                 ray_origins=arrays.get('ray_origins'),people=people,clock_domain=clock_domain,
                                 localization_source=row['source'],sensor_frame=packet['sensor_frame']))
@@ -504,23 +506,23 @@ def _run(args, resources, handles):
                         while next_env<=stamp+1e-6:next_env+=1/env_config['update_hz']
                         if args.record_views and stamp>=next_export-1e-6:
                             rgb=None if 'rgb' not in arrays else dict(pixels=arrays['rgb'].copy(),stamp_s=packet['rgb_stamp'],
-                                frame_id=packet['rgb_frame'],
+                                frame_id=packet['rgb_frame'],stamp_ns=packet['rgb_stamp_ns'],
                                 reference=dict(source='live' if args.live else 'bag',bag=None if bag is None else str(bag),stamp_s=packet['rgb_stamp']))
-                            exporter.submit(last_device,people,rgb=rgb,name=packet['observation_id'])
+                            exporter.submit(last_device,people,rgb=rgb,name=packet['observation_id'],stamp_ns=row['stamp_ns'])
                             next_export=stamp+1/settings['scene_export_hz']
-                    if agent_observer is not None and scene is not None and abs(scene.record['as_of']-stamp)<1e-6:
-                        agent_observer.submit(scene,arrays.get('rgb'),packet['rgb_stamp'],packet['rgb_frame'],packet['camera_info'],
+                    clock=(packet['source_clock_s'],packet['source_mono'])
+                    current_scene=scene if scene is not None and scene.record['stamp_ns']==row['stamp_ns'] else None
+                    if agent_observer is not None and current_scene is not None:
+                        agent_observer.submit(current_scene,arrays.get('rgb'),packet['rgb_stamp'],packet['rgb_frame'],packet['camera_info'],
                                               packet['rgb_stamp_ns'],points=arrays.get('deskewed'),
-                                              measured_mono=packet['source_mono']+stamp-packet['source_clock_s'])
-                    if commands.agent_state.seating is not None and (scene is None or abs(scene.record['as_of']-stamp)<1e-6):
-                        commands.agent_state.seating.update_scene(scene,packet['source_mono']+stamp-packet['source_clock_s'])
+                                              clock=clock)
+                    if commands.agent_state.seating is not None and (scene is None or current_scene is not None):
+                        commands.agent_state.seating.update_scene(current_scene,clock)
                     if follow_decision is not None:
-                        current_scene=scene if scene is not None and abs(scene.record['as_of']-stamp)<1e-6 else None
                         follow_decision.submit(people,arrays,scene=current_scene,context=control_loop.follow_context(),
                             image_metadata=dict(rgb_stamp_ns=packet['rgb_stamp_ns'],rgb_frame=packet['rgb_frame'],
                                                 camera_info=packet['camera_info']))
                     if decision_recorder is not None:
-                        current_scene=scene if scene is not None and abs(scene.record['as_of']-stamp)<1e-6 else None
                         decision_recorder.submit(people,arrays,scene=current_scene,
                             image_metadata=dict(rgb_stamp_ns=packet['rgb_stamp_ns'],
                                 rgb_frame=packet['rgb_frame'],camera_info=packet['camera_info']))
@@ -541,7 +543,8 @@ def _run(args, resources, handles):
                 scene,last_device=(None,None) if latest is None else latest
             if last_device is not None:
                 final=last_device.materialize(consumer='final_review',metrics=metrics)
-                final_scene=assemble_scene(final,clock_domain=clock_domain,people=None if scene is None else people_observation(scene),settings=env_config['scene'])
+                final_scene=assemble_scene(final,clock_domain=clock_domain,people=None if scene is None else people_observation(scene),
+                    stamp_ns=None if scene is None else scene.record.get('stamp_ns'),settings=env_config['scene'])
                 final_scene.save(output/'final_scene')
     except (Exception,KeyboardInterrupt) as error:
         failure=type(error).__name__+': '+str(error);raise
