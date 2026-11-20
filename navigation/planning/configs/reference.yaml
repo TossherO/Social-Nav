@@ -1,6 +1,10 @@
 # A single asynchronous spatial-reference worker; local control has no job queue.
 # 参考路径请求的最短重试间隔，单位为秒。
 retry_s: 1.0
+# 连续跟随请求当前目标的最短重算间隔，单位为秒。
+follow_retry_s: 0.25
+# 同一跟随对象的新旧目标允许共用已有路径的最大距离，单位为米。
+follow_goal_delta_m: 0.8
 # 参考路径失败后的重试等待时间，单位为秒。
 failure_retry_s: 3.0
 # 参考路径重新验证的时间间隔，单位为秒。

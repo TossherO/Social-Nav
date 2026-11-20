@@ -211,7 +211,8 @@ def _run(args, resources, handles):
     from perception.detection_tracking.inference.detector import SimpleDet3dDetector
     from perception.detection_tracking.inference.pipeline import PerceptionPipeline,Frame
     from perception.environment.layers import LocalEnvironmentMap
-    from perception.environment.occupancy import OccupancyTree
+    from perception.environment.occupancy import OccupancyTree,VoxelBudgetExceeded
+    from .environment import EnvironmentFault,LatestMapWorker
     from perception.environment.scene import assemble_scene,people_observation
     from perception.environment.storage import StaticEnvironmentMap
     from perception.mapping_localization.context import pose_matrix
@@ -350,38 +351,63 @@ def _run(args, resources, handles):
         initial_goal=dict(request_id='runtime-goal',task_id='runtime-shadow',goal_revision=0,mode='mapped' if args.goal_frame=='map' else 'local',
             goal=args.goal,frame_id=args.goal_frame,target_reference='base_link',algorithm='hybrid_astar',goal_behavior='stop',motion_intent='forward_preferred')
         if asset is not None:initial_goal['map_snapshot_id']=asset.manifest['snapshot_id']
-    counts=dict(scans=0,maps=0,controls=0,safety=0);source_metrics=None;last_device=None;failure=None;run_start=None;cpu_start=None
+    counts=dict(scans=0,maps=0,controls=0,safety=0,map_faults=0);source_metrics=None;last_device=None;failure=None;run_start=None;cpu_start=None
+    last_environment_fault=None;recovering_environment=False
     def reset_map():
         environment.reset();navigation_support.reset()
     def compute_map(job):
-        nonlocal map_stream
+        nonlocal map_stream,recovering_environment
         metrics.trace('map_start',measurement_stamp_s=job['stamp'])
         torch.cuda.set_device(0)
         if map_stream is None:map_stream=torch.cuda.Stream()
         with torch.cuda.stream(map_stream):
             with metrics.span('environment_device'):
-                grid=environment.update(job['points'],job['pose'],job['stamp'],job['identity'],**job['options'],device=device,metrics=metrics)
+                try:
+                    grid=environment.update(job['points'],job['pose'],job['stamp'],job['identity'],**job['options'],device=device,metrics=metrics)
+                except VoxelBudgetExceeded:
+                    # An explicitly requested scan archive must remain complete.
+                    if journal is not None:raise
+                    reset_map()
+                    recovering_environment=True
+                    return EnvironmentFault(job['stamp_ns'],job['options']['frame'],job['identity'],
+                                            env_config['max_voxels'],len(job['points']))
+                if recovering_environment and grid.metadata['geometry_status']!='OBSERVED':
+                    return None
                 if support_enabled:
                     grid=navigation_support.apply(grid,asset,observation=environment.support_observation,metrics=metrics)
             metrics.trace('map_device_done',measurement_stamp_s=job['stamp'])
             with metrics.span('safety_capsule_materialize'):
                 fields=CAPSULE_FIELDS if support_enabled else ('occupancy','person_background_free')
+                reference_fields=('last_observed','near_field_free') if asset is not None else ()
+                fields+=reference_fields
                 capsule=grid.materialize(consumer='safety_capsule',fields=[k for k in fields if k in grid._layers],metrics=metrics)
                 if support_enabled:
                     from perception.environment.device import DeviceGridSnapshot
-                    capsule=safety_capsule(finalize(capsule))
+                    capsule=safety_capsule(finalize(capsule),extra_fields=reference_fields)
                     grid=DeviceGridSnapshot.seal(capsule.metadata,grid.consume())
                 current=assemble_scene(capsule,clock_domain=clock_domain,people=job['options']['people'],
                                        stamp_ns=job['stamp_ns'],settings=env_config['scene'])
             metrics.trace('map_ready',measurement_stamp_s=job['stamp'],scene_binding=current.record['input_fingerprint'])
+            recovering_environment=False
             return current,grid
     def publish_map(result):
+        nonlocal last_environment_fault
+        if isinstance(result,EnvironmentFault):
+            counts['map_faults']+=1
+            last_environment_fault=dict(reason=result.reason,stamp_ns=result.stamp_ns,frame_id=result.frame,
+                                        limit=result.max_voxels,input_points=result.input_points)
+            metrics.trace('environment_fault',**last_environment_fault)
+            safety.invalidate_scene(result.reason)
+            control_loop.invalidate_environment(result)
+            if display is not None:display.clear_environment(result.frame,result.stamp_ns/1e9)
+            return
         if result is None:control_loop.offer(None,None);return
         current,grid=result
         metrics.trace('map_publish_start',measurement_stamp_s=current.record['as_of'],scene_binding=current.record['input_fingerprint'])
         safety.scene(current)
         metrics.trace('map_safety_sent',measurement_stamp_s=current.record['as_of'],scene_binding=current.record['input_fingerprint'])
         control_loop.offer(current,grid);counts['maps']+=1
+        if display is not None:display.environment(grid)
     previous_interrupt=None;stop_requested=False
     try:
         with tempfile.TemporaryDirectory(prefix='social-nav-runtime-') as tmp:
@@ -396,7 +422,6 @@ def _run(args, resources, handles):
             # inputs. Normal navigation bounds map work independently of the
             # detector; the native tree has exactly one owning worker.
             if not (journal or exporter or decision_recorder or agent_observer):
-                from .environment import LatestMapWorker
                 map_worker = resources['map_worker'] = LatestMapWorker(compute_map,publish_map,reset_map)
             cfg=Path(tmp)/'algorithm.yaml';cfg.write_text(yaml.safe_dump(config))
             command=[settings['input_python'],'-B','-m','runtime.input_worker','--socket-fd',str(child.fileno()),'--pose-fd',str(state_input.fileno()),
@@ -487,7 +512,8 @@ def _run(args, resources, handles):
                                 localization_source=row['source'],sensor_frame=packet['sensor_frame']))
                         if map_worker is None:
                             metrics.trace('map_submit',measurement_stamp_s=stamp)
-                            scene,last_device=compute_map(job);publish_map((scene,last_device))
+                            result=compute_map(job);publish_map(result)
+                            scene,last_device=result if isinstance(result,tuple) else (None,None)
                         else:
                             import copy
                             # Own bounded input storage before releasing the
@@ -504,7 +530,7 @@ def _run(args, resources, handles):
                                 arrays.get('ray_origins'),arrays['deskewed'][:,4]):raise RuntimeError('Scan journal failed: '+str(journal.summary()))
                         next_env=stamp if not np.isfinite(next_env) else next_env
                         while next_env<=stamp+1e-6:next_env+=1/env_config['update_hz']
-                        if args.record_views and stamp>=next_export-1e-6:
+                        if args.record_views and last_device is not None and stamp>=next_export-1e-6:
                             rgb=None if 'rgb' not in arrays else dict(pixels=arrays['rgb'].copy(),stamp_s=packet['rgb_stamp'],
                                 frame_id=packet['rgb_frame'],stamp_ns=packet['rgb_stamp_ns'],
                                 reference=dict(source='live' if args.live else 'bag',bag=None if bag is None else str(bag),stamp_s=packet['rgb_stamp']))
@@ -527,7 +553,7 @@ def _run(args, resources, handles):
                             image_metadata=dict(rgb_stamp_ns=packet['rgb_stamp_ns'],
                                 rgb_frame=packet['rgb_frame'],camera_info=packet['camera_info']))
                     if display is not None:
-                        display.submit(arrays['raw'],row,people,rgb=arrays.get('rgb'),rgb_frame=packet['rgb_frame'],grid=None if scene is None else last_device)
+                        display.submit(arrays['raw'],row,people,rgb=arrays.get('rgb'),rgb_frame=packet['rgb_frame'])
                     now=packet['source_clock_s']+(time.monotonic()-packet['source_mono'])*args.rate
                     metrics.add('sensor_ready_to_compute_complete',time.monotonic()-packet['source_mono'])
                     metrics.add('source_observation_age',max(0.,now-stamp))
@@ -577,6 +603,7 @@ def _run(args, resources, handles):
             main_process_cpu_s=process_cpu_s,run_wall_s=run_wall_s,cleanup_errors=cleanup_errors)
         report['route_replay']=None if route_replay is None else route_replay.summary()
         report['agent_observations']=reports.get('agent_observations')
+        report['last_environment_fault']=last_environment_fault
         report['termination']='user_stop' if stop_requested else 'source_end'
         (output/'summary.json').write_text(json.dumps(report,allow_nan=False,indent=2)+'\n')
         manifest=dict(success=failure is None,source='live' if args.live else 'bag',clock_domain=clock_domain,backend='native_roll_fast_lio',mode=mode,bag=None if bag is None else str(bag),imu_time_calibration=timing,

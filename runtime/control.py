@@ -65,9 +65,11 @@ class ControlLoop:
         self.session=session;self.session_epoch=0;self.preview_token=None
         self.manual_preview_key=None
         self.lock=threading.Lock();self.pending=(None,None);self.rows=deque(maxlen=256)
+        self.environment_epoch=0;self.environment_fault=None
         self.device=None;self.scene=None;self.done=threading.Event();self.error=None;self.count=0;self.clock=None
         self.cancelled_request=None
         self.follow_pending=None;self.follow=None
+        self.follow_target=None
         self.manual_follow=False
         self.follow_decision=follow_decision
         self.follow_search_anchor=None;self.follow_search_choice=None
@@ -84,8 +86,26 @@ class ControlLoop:
                 try:self.follow.observe(scene)
                 except (ValueError,KeyError,TypeError):self.follow.history.rows.clear()
             self.pending=(scene,device);self.offered_mono=time.monotonic()
+            if scene is not None:self.environment_fault=None
             self.metrics.trace('control_scene_offer',scene_binding=None if scene is None else scene.record['input_fingerprint'],
                 measurement_stamp_s=None if scene is None else scene.record['as_of'],offered_mono=self.offered_mono)
+
+    def invalidate_environment(self,fault):
+        with self.lock:
+            self.environment_epoch+=1;self.environment_fault=fault.reason
+            self.pending=(None,None);self.offered_mono=time.monotonic()
+            if self.follow is not None:self.follow.history.rows.clear()
+            self.commands.agent_state.invalidate_environment(fault,self.environment_epoch)
+
+    def _take_environment(self, previous_epoch):
+        with self.lock:
+            self.scene,self.device=self.pending
+            epoch,fault,offered=self.environment_epoch,self.environment_fault,self.offered_mono
+        if epoch!=previous_epoch:
+            self.reference.invalidate('environment_voxel_budget_exceeded')
+            self.controller.controller.clear()
+            self.preview_token=None
+        return epoch,fault,offered
 
     def _search_scene(self,scene):
         from perception.environment.scene import assemble_scene,people_observation
@@ -106,6 +126,7 @@ class ControlLoop:
             import torch
             torch.cuda.set_device(0);stream=torch.cuda.Stream(priority=-1)
             next_tick=time.monotonic();last_tick=None;last_state=None
+            previous_environment_epoch=0
             with torch.cuda.stream(stream):
                 while not self.done.is_set():
                     while True:
@@ -130,6 +151,7 @@ class ControlLoop:
                             with self.lock:self.follow.clear();self.follow.history.rows.clear()
                             if self.follow_decision is not None:self.follow_decision.stop()
                             self.follow_pending=None
+                            self.follow_target=None
                             self.follow_search_anchor=self.follow_search_choice=None
                         if self.request is not None:
                             self.safety.command('cancel',{k:self.request[k] for k in ('task_id','goal_revision')})
@@ -137,6 +159,7 @@ class ControlLoop:
                     for kind,value in self.commands.drain():
                         if kind=='follow_start':
                             self.follow_pending=value
+                            self.follow_target=None
                             self.manual_follow=value.get('manual',False)
                             self.follow_search_anchor=self.follow_search_choice=None
                             if self.follow is not None:
@@ -146,6 +169,7 @@ class ControlLoop:
                                     reference=value['intent']['reference'],crop=value['reference_crop'])
                             self.commands.agent_state.publish_follow(dict(status='starting',handle=value['handle'],reason=None))
                         elif kind=='follow_stop':
+                            self.follow_target=None
                             evidence=None if self.follow is None else copy.deepcopy(self.follow.last_evidence)
                             if self.follow is not None:
                                 with self.lock:self.follow.clear()
@@ -165,6 +189,7 @@ class ControlLoop:
                                 with self.lock:self.follow.clear()
                                 if self.follow_decision is not None:self.follow_decision.stop()
                                 self.follow_pending=None
+                                self.follow_target=None
                                 self.follow_search_anchor=self.follow_search_choice=None
                                 self.commands.agent_state.publish_follow(dict(status='preempted',handle=old.get('handle'),reason='operator_goal'))
                             self.request=value;self.reference.invalidate('goal_changed');self.controller.controller.clear()
@@ -174,7 +199,7 @@ class ControlLoop:
                             self.request=None;self.controller.controller.clear();self.cancelled_request=value
                     if self.session is not None and (self.session.pause_requested or self.session.paused):
                         if self.session.paused and self.rows:
-                            with self.lock:self.scene,self.device=self.pending
+                            previous_environment_epoch,_,_=self._take_environment(previous_environment_epoch)
                             self.session.publish_observation(self.scene,self.rows[-1],goal_intent=self.request)
                             token=self.session.command_generation
                             if self.request is not None and token!=self.preview_token:
@@ -209,11 +234,14 @@ class ControlLoop:
                     # unavailable proposals when the sensor pipeline stalls.
                     next_tick=mono+max(period,self.controller.motion['state_max_age_s'])
                     previous=self.scene
-                    with self.lock:self.scene,self.device=self.pending;offered_mono=self.offered_mono
+                    environment_epoch,environment_fault,offered_mono=self._take_environment(previous_environment_epoch)
                     if self.session is not None:self.session.publish_observation(self.scene,self.rows[-1],goal_intent=self.request)
-                    if previous is not None and self.scene is None:self.reference.invalidate('localization_invalid')
+                    if environment_epoch==previous_environment_epoch and previous is not None and self.scene is None:
+                        self.reference.invalidate('localization_invalid')
+                    previous_environment_epoch=environment_epoch
                     now=self.clock['clock_s']+(mono-self.clock['clock_mono'])*self.clock['clock_rate']
-                    if self.follow is not None:
+                    self.reference.observe(self.scene,self.asset,now=now)
+                    if self.follow is not None and environment_fault is None:
                         self._update_follow(now)
                     self.metrics.add('feedback_age_at_control',max(0.,now-self.rows[-1]['stamp_s']))
                     if self.route_replay is not None:
@@ -237,21 +265,35 @@ class ControlLoop:
                         self.batch.bind(self.device)
                     preview=self.commands.manual_preview_snapshot() if self.session is not None else None
                     preview_request=None if preview is None or self.request is not None else preview['request']
-                    preview_key=None if preview_request is None else (preview['owner'],preview_request['request_id'],preview_request['goal_revision'])
+                    planning_request=self.request if self.request is not None else preview_request
+                    target=getattr(self,'follow_target',None)
+                    follow_key=(target if target is not None and planning_request is not None and
+                                planning_request['request_id']==target[0] and
+                                planning_request.get('completion_policy')=='continuous' else None)
+                    preview_key=None if preview_request is None else (preview['owner'],preview_request['request_id'],
+                        preview_request['goal_revision'] if follow_key is None else follow_key)
                     if self.request is None and preview_key!=self.manual_preview_key:
                         self.reference.invalidate('manual_preview_changed')
                     self.manual_preview_key=preview_key
-                    planning_request=self.request if self.request is not None else preview_request
                     status=None
                     if planning_request is not None and self.scene is not None:
-                        self.reference.update(planning_request,self.scene,None,self.asset,now=now,clock_rate=self.clock['clock_rate'])
+                        self.reference.update(planning_request,self.scene,None,self.asset,now=now,
+                                              clock_rate=self.clock['clock_rate'],follow_key=follow_key)
                         with self.metrics.span('reference_tick'):status=self.reference.tick(now=now,clock_domain=self.clock_domain)
                         self.record('reference',dict(event='status',as_of=now,reason=status['reason'],blocked=self.reference.blocked,
                             waiting=status['waiting'],start_evidence=status['start_evidence']))
-                    control_reference = status['result'] if status is not None and self.request is not None else None
+                    ready_request=None if status is None else status.get('request')
+                    display_request=ready_request or planning_request
+                    control_request=self.request
+                    if follow_key is not None and control_request is not None:
+                        control_request=ready_request
+                        if control_request is not None and not self.commands.follow_goal(self.follow.handle,control_request):
+                            self.reference.invalidate('follow_owner_lost_before_handover')
+                            control_request=None
+                    control_reference = status['result'] if status is not None and control_request is not None else None
                     with self.metrics.span('dwa_control'):
-                        packet=self.controller.step(self.request,self.scene,list(self.rows),control_reference,
-                            now=now,clock_domain=self.clock_domain,dt=dt)
+                        packet=self.controller.step(control_request,self.scene,list(self.rows),control_reference,
+                            now=now,clock_domain=self.clock_domain,dt=dt,reason=environment_fault)
                     self.reference.note_control(packet,monotonic_s=mono)
                     self.safety.packet(packet);self.record('control',packet);self.count+=1
                     if self.metrics.trace_path is not None:
@@ -293,22 +335,23 @@ class ControlLoop:
                             status=('blocked_by_observation_goal' if self.request is not None else
                                     'waiting_for_observation' if status is None else status['status']),
                             reason=('another_goal_active' if self.request is not None else
-                                    'observation_unavailable' if status is None else status.get('reason')),
+                                    environment_fault or 'observation_unavailable' if status is None else status.get('reason')),
                             reference_stamp_s=None if self.reference.current is None or self.request is not None
                                               else self.reference.current['as_of'],executable=False)
                         if self.request is None:
                             preview_status['goal']=preview['request']['goal']
-                            preview_status['reference_path']=manual_preview_path(self.reference.current,preview['request'])
+                            preview_status['reference_path']=manual_preview_path(self.reference.current,display_request)
                             preview_status['reference_frame']=preview['request']['frame_id']
                     mapped_pose=agent_mapped_pose(self.scene,self.rows[-1],self.controller.geometry,now,
                         self.scene_settings['max_association_age_s'],self.clock_domain) if self.commands.agent_state.goal_evidence is not None else None
                     self.commands.agent_state.publish_control(packet,self.rows[-1],map_binding=binding,
                         cancelled_request=self.cancelled_request,idle_feedback=idle_feedback,manual_preview=preview_status,
-                        agent_mapped_pose=mapped_pose)
+                        agent_mapped_pose=mapped_pose,environment_epoch=environment_epoch,environment_fault=environment_fault)
                     if self.display is not None:
-                        self.display.navigation(self.controller.controller.result,self.reference.current,planning_request,self.scene,
+                        self.display.navigation(self.controller.controller.result,self.reference.current,display_request,self.scene,
                             self.rows[-1],packet,self.reference.reason,now=now,clock_domain=self.clock_domain,
-                            clock_rate=self.clock['clock_rate'],clock_mono=mono,grid=None if self.scene is None else self.device)
+                            clock_rate=self.clock['clock_rate'],clock_mono=mono,grid=None if self.scene is None else self.device,
+                            goal_hint=planning_request if follow_key is not None else None)
                     for event in self.reference.drain_events():self.record('reference',event)
         except Exception as error:self.error=type(error).__name__+': '+str(error)
 
@@ -331,6 +374,7 @@ class ControlLoop:
             pose=geometry.pose(transform@local))
 
     def _pause_follow(self, handle):
+        self.follow_target=None
         target=self.commands.pause_follow(handle)
         self.follow.revision_floor=max(self.follow.revision_floor,target['goal_revision'])
         if self.request is not None and self.request.get('request_id')==handle['call_id']:
@@ -338,27 +382,33 @@ class ControlLoop:
         self.cancelled_request=target
 
     def _follow_search_request(self, handle, choice, binding, now, valid_until):
-        from navigation.search import check_pose
+        from navigation.search import check_pose,current_search_pose
         if choice.get('kind')=='wait' or now>valid_until:return None
         inputs=self._follow_inputs(self.scene)
         if self.follow_search_anchor is None:
             self.follow_search_anchor=list(inputs['pose'][:2])
-        check=check_pose(inputs,choice.get('pose'),now=now,clock_domain=self.clock_domain,
+        target=current_search_pose(choice,inputs['pose'])
+        check=check_pose(inputs,target,now=now,clock_domain=self.clock_domain,
                          anchor=self.follow_search_anchor,margin=self.reference.planning['safety_margin_m'])
         if not check['valid']:return None
         self.follow.revision_floor+=1
         map_id=self.asset.manifest['snapshot_id']
         return dict(task_id='follow:'+handle['call_id'],request_id=handle['call_id'],
             goal_revision=self.follow.revision_floor,mode='mapped',frame_id=self.asset.snapshot.metadata['frame_id'],
-            target_reference='base_link',goal=copy.deepcopy(choice['pose']),goal_behavior='stop',
+            target_reference='base_link',goal=target,goal_behavior='stop',
             completion_policy='goal',clock_domain=self.clock_domain,
             valid_until_s=valid_until,
             local_identity=[self.scene.record[k] for k in ('session_id','generation','frame_id')],
             search_bounds=dict(anchor_xy_m=copy.deepcopy(self.follow_search_anchor),radius_m=1.5,
                                map_snapshot_id=map_id,loss_binding=binding),map_snapshot_id=map_id)
 
+    def _follow_rotation_ready(self, now):
+        from navigation.control.shadow import observed_feedback
+        if self.scene is None:return False
+        feedback=observed_feedback(list(self.rows),self.scene,self.controller.geometry,self.controller.motion,now=now)
+        return feedback['status']=='valid' and 'stationary_evidence' in feedback
+
     def _update_follow(self, now):
-        from navigation.planning.continuity import goal_binding
         from decision.vlm.project_config import load_config
         worker=getattr(self,'follow_decision',None)
         pending=self.follow_pending
@@ -392,10 +442,15 @@ class ControlLoop:
                     with self.lock:
                         action=self.follow.apply_t2(handle,prepared,result,outcome['window'],self.scene,now=now)
                 except ValueError as error:
+                    self.metrics.trace('t2_result_applied',measurement_stamp_s=prepared['source_stamp_s'],
+                                       apply_stamp_s=now,accepted=False,reason=str(error))
                     self.record('reference',dict(event='follow_t2_rejected',reason=str(error),
                         request_binding=prepared['binding'],source_stamp_s=prepared['source_stamp_s'],apply_stamp_s=now,
                         current_scene_stamp_s=None if self.scene is None else self.scene.record['as_of']))
                     worker.request_fresh()
+                else:
+                    self.metrics.trace('t2_result_applied',measurement_stamp_s=prepared['source_stamp_s'],
+                                       apply_stamp_s=now,accepted=True)
                 if action is not None and action['operation']=='plan':
                     self.follow_pending=None;self.follow_search_anchor=self.follow_search_choice=None
                 elif action is not None and action['operation']=='continue':
@@ -420,36 +475,49 @@ class ControlLoop:
                     self.follow_search_choice=None;worker.request_fresh();action=None
             if action is not None and action['operation']=='plan':
                 request=action['request']
+                target=(handle['call_id'],tuple(action['target_identity']),action.get('target_generation'))
+                old_target=getattr(self,'follow_target',None)
+                if old_target is not None and target!=old_target:
+                    self._pause_follow(handle)
+                self.follow_target=target
                 if getattr(self,'manual_follow',False):
                     self._publish_follow_preview(handle,request)
                     self.commands.agent_state.publish_follow(dict(status='running',handle=handle,
                         target_identity=action['target_identity'],target_generation=action.get('target_generation'),reason=None))
                     return
-                if not self.commands.follow_goal(handle,request):raise ValueError('follow_owner_arming_or_agent_heartbeat_lost')
-                if self.request is None or goal_binding(request)!=goal_binding(self.request):
-                    self.reference.invalidate('follow_goal_changed');self.controller.controller.clear()
                 self.request=request
                 self.commands.agent_state.publish_follow(dict(status='running',handle=handle,
                     target_identity=action['target_identity'],target_generation=action.get('target_generation'),reason=None))
                 return
+            search_reason=None
             if self.follow.policy is None and self.follow_search_choice is not None:
-                choice,binding,valid_until=self.follow_search_choice;self.follow_search_choice=None
-                try:request=self._follow_search_request(handle,choice,binding,now,valid_until)
-                except (ValueError,KeyError,TypeError) as error:
-                    request=None;self.record('reference',dict(event='follow_search_rejected',reason=str(error)))
-                if request is not None:
-                    if getattr(self,'manual_follow',False):
-                        self._publish_follow_preview(handle,request)
-                    else:
-                        if not self.commands.follow_goal(handle,request):raise ValueError('follow_owner_arming_or_agent_heartbeat_lost')
-                        self.request=request;self.reference.invalidate('follow_search_goal');self.controller.controller.clear()
+                choice,binding,valid_until=self.follow_search_choice
+                if now>valid_until:
+                    self.follow_search_choice=None
+                    self.record('reference',dict(event='follow_search_rejected',reason='search_observation_expired'))
+                elif choice.get('kind')=='rotate' and not self._follow_rotation_ready(now):
+                    search_reason='follow_search_waiting_for_stationary'
+                    if action is not None and action['operation']=='search':
+                        self.record('reference',dict(event='follow_search_deferred',reason=search_reason,as_of=now))
+                else:
+                    self.follow_search_choice=None
+                    try:request=self._follow_search_request(handle,choice,binding,now,valid_until)
+                    except (ValueError,KeyError,TypeError) as error:
+                        request=None;self.record('reference',dict(event='follow_search_rejected',reason=str(error)))
+                    if request is not None:
+                        if getattr(self,'manual_follow',False):
+                            self._publish_follow_preview(handle,request)
+                        else:
+                            if not self.commands.follow_goal(handle,request):raise ValueError('follow_owner_arming_or_agent_heartbeat_lost')
+                            self.request=request;self.reference.invalidate('follow_search_goal');self.controller.controller.clear()
             if self.follow.policy is None and self.request is not None and self.request.get('request_id')==handle['call_id']:
                 if not self.commands.follow_goal(handle,self.request):
                     raise ValueError('follow_owner_arming_or_agent_heartbeat_lost')
             status='starting' if pending is not None else 'searching'
-            self.commands.agent_state.publish_follow(dict(status=status,handle=handle,reason=None,
+            self.commands.agent_state.publish_follow(dict(status=status,handle=handle,reason=search_reason,
                 last_evidence=copy.deepcopy(self.follow.last_evidence)))
         except (ValueError,KeyError,TypeError) as error:
+            self.follow_target=None
             reason=str(error)
             stop=self.commands.follow_failed(handle,recoverable=True)
             target=None if stop is None else stop['target']

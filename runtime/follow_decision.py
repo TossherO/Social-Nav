@@ -65,11 +65,13 @@ class FollowDecisionWorker:
                  jpeg_quality=None,raw_rgb=False,preview_requested=None):
         self.search_factory=search_factory
         self.buffer=buffer or DecisionBuffer(metrics=metrics)
+        self.metrics=metrics
         self.extent,self.view=perception_view()
         if image_preparer_factory is None:
             from decision.vlm.image_inputs import ImagePreparer
             image_preparer_factory=lambda:ImagePreparer(image_policy,camera_calibration)
         self.preparer_factory=image_preparer_factory;self.preparer=None
+        self.warmup_attempted=False
         if backend not in ('dspark','hosted'):raise ValueError('Unknown T2 backend')
         if jpeg_quality is not None and (type(jpeg_quality) is not int or not 1<=jpeg_quality<=95):
             raise ValueError('T2 JPEG quality must be an integer in 1..95')
@@ -112,11 +114,12 @@ class FollowDecisionWorker:
         return None
 
     def submit(self, people, arrays, *, scene, image_metadata, context=None, association=None):
-        if self.closed or not isinstance(people,dict) or scene is None:return False
+        if self.closed or not isinstance(people,dict):return False
         with self.lock:
             if self.task is None and self.publish_agent_frame is None:return False
         previous=self.buffer.scope
-        pushed=self.buffer.push(people,arrays,association,scene=scene,image_metadata=image_metadata)
+        pushed=self.buffer.push(people,arrays,association,scene=scene,image_metadata=image_metadata,
+                                keep_association_history=True)
         stamp=people['stamp_s']
         with self.lock:
             preview=self.task is None
@@ -125,6 +128,12 @@ class FollowDecisionWorker:
             if (not pushed or scene is None or self.error is not None or self.inflight or
                     self.result is not None):
                 return False
+            if (preview and association is None and self.preparer is None and
+                    not self.warmup_attempted and scene.record['localization']['status']=='valid'):
+                self.warmup_attempted=True
+                self.inflight=True
+                self.queue.put_nowait(dict(warmup=True))
+                return True
             if preview and self.next_preview_stamp is not None and stamp<self.next_preview_stamp:return False
             lease=self.buffer.acquire()
             if lease is None:return False
@@ -149,6 +158,15 @@ class FollowDecisionWorker:
         while True:
             item=self.queue.get()
             if item is None:return
+            if item.get('warmup'):
+                error=None
+                if self.metrics is not None:self.metrics.trace('t2_yolo_warmup_start')
+                try:self.preparer=self.preparer_factory()
+                except Exception as caught:error=type(caught).__name__
+                if self.metrics is not None:self.metrics.trace('t2_yolo_warmup_done',error=error)
+                with self.lock:
+                    self.inflight=False;self.agent_frame_error=error
+                continue
             lease=item['lease'];outcome=None;stage='initialization'
             if item['preview']:
                 error=None
@@ -157,7 +175,7 @@ class FollowDecisionWorker:
                         entry=lease['entries'][-1]
                         if entry['association'] is None:
                             if self.preparer is None:self.preparer=self.preparer_factory()
-                            entry=self.preparer.prepare([entry],lease['history'],read)[0]
+                            entry=self.preparer.prepare([entry],lease['association_history'],read)[0]
                         with self.lock:active=item['epoch']==self.epoch and self.task is None
                         if active:
                             args=(None,item['scene'],read(entry['buffer'])['rgb'],entry['association'],
@@ -171,14 +189,26 @@ class FollowDecisionWorker:
             try:
                 with self.buffer.consume(lease) as read:
                     entries=lease['entries']
+                    stamp=entries[-1]['people']['stamp_s']
+                    if self.metrics is not None:self.metrics.trace('t2_prepare_start',measurement_stamp_s=stamp)
                     if not self.raw_rgb and any(e['association'] is None for e in entries):
                         if self.preparer is None:self.preparer=self.preparer_factory()
                         stage='input'
-                        entries=self.preparer.prepare(entries,lease['history'],read)
+                        entries=self.preparer.prepare(entries,lease['association_history'],read)
+                        if self.metrics is not None and self.metrics.trace_path is not None:
+                            association=entries[-1]['association']
+                            result=association['result']
+                            self.metrics.trace('t2_rgb_association',measurement_stamp_s=stamp,
+                                rgb_stamp_ns=association['image_input']['rgb_stamp_ns'],
+                                detections=len(association['detections']),matches=result['matches'],
+                                tracks={identity:{key:track[key] for key in
+                                         ('status','compensation','geometry_stamp_s','pose_age_s') if key in track}
+                                        for identity,track in result['tracks'].items()})
                     stage='input'
                     window,images=render_window(entries,lease['history'],read,extent=self.extent,
                         view_binding=self.view,image_preparation=None if self.preparer is None else self.preparer.metadata,
-                        include_predicted=True,raw_rgb=self.raw_rgb)
+                        include_predicted=True,raw_rgb=self.raw_rgb,in_memory=True)
+                    if self.metrics is not None:self.metrics.trace('t2_render_done',measurement_stamp_s=stamp)
                     search=self.search_factory(item['scene'],item['context'])
                     prepared=prepare(window,images,item['task']['description'],search,
                         reference_image=item['crop'],reference=item['reference'],task=item['task']['handle'],
@@ -203,7 +233,10 @@ class FollowDecisionWorker:
                     else:transport_body=prepared['body']
                     self.recorder.submit(prepared['binding'],'request',dict(backend=self.backend,
                         prepared=prepared,transport_body=transport_body))
-                request=FollowRequest(prepared);result=self.inference(request)
+                request=FollowRequest(prepared)
+                if self.metrics is not None:self.metrics.trace('t2_request_start',measurement_stamp_s=stamp)
+                result=self.inference(request)
+                if self.metrics is not None:self.metrics.trace('t2_request_done',measurement_stamp_s=stamp)
                 if self.recorder is not None:self.recorder.submit(prepared['binding'],'result',result)
                 if result.get('status')=='complete':
                     request.accept(result)

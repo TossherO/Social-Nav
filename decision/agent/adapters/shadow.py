@@ -37,6 +37,7 @@ def apply_runtime_mapped_pose(state, control, catalog):
     state['origin_pose']=copy.deepcopy(mapped['pose']) if valid else None
     state['origin_stamp_s']=stamp if valid else None
     state['origin_frame_id']=binding.get('map_frame') if valid else None
+    state['association_measurement_stamp_s']=mapped.get('association_stamp_s') if valid else None
     return state
 
 
@@ -237,6 +238,7 @@ class RuntimeShadowNavigation:
                     follow_status=copy.deepcopy(follow) if follow_match else None,
                     execution_feedback=False, executable=False, proposal_cancelled=cancelled,
                     localization_status='valid' if loc.get('health') == 0 else 'invalid',
+                    environment_fault=p.get('environment_fault'),environment_epoch=p.get('environment_epoch',0),
                     input_stale=not self.connected or self.value.get('received_age_s') is None or self.value['received_age_s'] > 1., **spatial)
 
     def tick(self):

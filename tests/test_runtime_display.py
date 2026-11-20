@@ -39,6 +39,15 @@ class RuntimeDisplayTests(unittest.TestCase):
         accepted=[buffer.offer('scan',i,lambda:i,now=t) for i,t in enumerate([0]+[i*.1-.0001 for i in range(1,20)])]
         self.assertGreaterEqual(sum(accepted),18)
 
+    def test_environment_clear_supersedes_a_queued_map_without_waiting_for_display_rate(self):
+        buffer=DisplayBuffer(self.settings)
+        self.assertTrue(buffer.offer('map','old',lambda:'old',now=1.))
+        buffer.clear_environment('odom',10.)
+        self.assertEqual(buffer.take(),('map',('odom',10.)))
+        self.assertFalse(buffer.offer('map','new',lambda:'new',now=1.01))
+        self.assertTrue(buffer.offer('map','new',lambda:'new',now=2.))
+        self.assertEqual(buffer.take(),('map','new'))
+
     def test_pending_points_and_images_are_owned_before_source_release(self):
         display=object.__new__(RuntimeDisplay);display.buffer=DisplayBuffer(self.settings)
         display.navigation_lock=threading.Lock();display.navigation_result=None;display.submit_ms=deque()

@@ -135,6 +135,7 @@ class FollowTargetTests(unittest.TestCase):
     def test_agent_model_input_receives_numbered_image_and_candidate_binding(self):
         from decision.agent.core.model import Model
         model=Model.__new__(Model)
+        model.thinking_mode='off'
         captured={}
         def request(system,messages,**kwargs):
             captured['messages']=messages

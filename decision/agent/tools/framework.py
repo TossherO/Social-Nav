@@ -26,7 +26,8 @@ GOAL = parameters({
     'to_floor': dict(TEXT,description='仅乘梯阶段填写目标楼层身份；由用户的跨楼层任务确定。'),
     'required_yaw': dict(type='number',description='仅用户硬性指定的地图yaw弧度；自主选择的朝向不填这里。'),
     'facing': dict(type='string',description='仅用户要求面向时填写一个已标注点或区域的正式ID字符串，不是ID数组；依据位置、通道和观察自主判断朝向，不强制指向几何中心。硬性视觉条件使用semantic_conditions，尽力满足的视觉偏好使用visual_preferences。'),
-    'position_rule': dict(type='string',enum=['region_centroid'],description='仅区域目标使用；用户要求区域正中时使用面积质心，普通进入区域不填写。'),
+    # Read the old internal shape for recorded tool replay. The model schema below omits this field.
+    'position_rule': dict(type='string',enum=['region_centroid']),
     'max_distance_m': dict(type='number',exclusiveMinimum=0,maximum=50,description='仅用户明确指定参考对象的距离上限时填写，单位为米。'),
     'checkpoints': dict(type='array',items=TEXT,minItems=2,maxItems=16,description='仅sequence使用；按用户要求的顺序填写正式点或区域ID，不含Agent自主添加的途经点。'),
     'semantic_conditions': dict(type='array',items=TEXT,maxItems=8,
@@ -85,7 +86,6 @@ REGISTRATION_CONDITIONS = parameters({
     'wait_after': GOAL['properties']['wait_after'],
     'required_yaw': GOAL['properties']['required_yaw'],
     'facing': dict(type='string',description='用户要求面向的正式点或区域 ID；结合连通关系判断朝向，不强制指向几何中心。'),
-    'position_rule': GOAL['properties']['position_rule'],
     'max_distance_m': GOAL['properties']['max_distance_m'],
     'robot_inside_region_id': GOAL['properties']['robot_inside_region_id'],
     'visual': dict(type='array', items=VISUAL_CONDITION, maxItems=16,
@@ -96,7 +96,7 @@ REGISTRATION_GOAL = parameters({
     'stage': dict(type='string', enum=['point','region','reference','route','sequence',
                                       'follow','observation','seating','elevator'],
                   description='导航目标类型或独立技能类型；无需额外填写 kind 或 stage_type。'),
-    'description': GOAL['properties']['description'],
+    'description': dict(TEXT,description='保留子任务原意，包括“区域中央”“靠某侧”等选点要求，供执行阶段结合地图和观察选点。'),
     'target': dict(REGISTRATION_TARGET, description='point 只填 id 或 position，region 只填 id，sequence 只填 checkpoints。reference、route 有标注对象时填 id。独立技能省略 target。'),
     'conditions': dict(REGISTRATION_CONDITIONS, description='用户明确提出的约束；无约束时省略。'),
     'floor_id': GOAL['properties']['floor_id'],
@@ -154,15 +154,15 @@ TOOL_SPECS = {
                                   'reason':dict(TEXT,description='简短说明要保留的可见线索及未来用途，不把过去图像写成当前执行证明。')}, ['observation_id','reason'])),
     'read_keyframe': ('根据当前keyframes索引重读过去RGB；最多两张历史图保留在上下文，裁剪不删除已保存记录。不会取得新观察或刷新源时间。',
                       parameters({'keyframe_id':dict(TEXT,description='本任务当前修订已经保存的keyframe_id，不能使用其他任务、其他修订或未来观察。')}, ['keyframe_id'])),
-    'navigate': ('point、region、reference 的单目标导航。提交 pose，或一起提交 point_id 和 yaw。用当前 view_id，按 selected_goal.allowed_orientation_sources 选朝向来源。accepted 表示已接收目标。',
+    'navigate': ('point、region、reference 的单目标导航。普通目标只提交 point_id 或 pose=[x,y]。selected_goal.heading_required 为 true 时，额外提供 yaw 或使用 pose=[x,y,yaw]，并填写 orientation_source。accepted 表示已接收目标。',
                  parameters({'goal_id':dict(TEXT,description='当前next_goal_id，必须先登记要求。'),
-                             'pose':dict(POSE,description='自主选择的地图[x,y,yaw]，参考base_link；须满足已登记的点、区域和朝向要求。'),
-                             'point_id':dict(TEXT,description='明确选择的已标注点的正式place_id；与yaw一起使用，不得与pose同时填写。'),
+                             'pose':dict(POSE,minItems=2,description='以 base_link 为参考的地图 [x,y] 或 [x,y,yaw]。区域目标在标注范围内选可停车的位置。匿名指定坐标时使用用户给出的 x、y。'),
+                             'point_id':dict(TEXT,description='明确导航到的标注点的正式 place_id。采用该点的标注坐标。'),
                              'yaw':dict(type='number',description='使用point_id时模型明确选择的地图yaw弧度，不自动采用标注朝向。'),
                              'view_id':dict(TEXT,description='原样填写本轮visual_inputs.maps/current_spatial_view给出的短view_id，不是reference_map_id或图片编号。'),
                              'orientation_source': dict(type='string',enum=['user','semantic','autonomous'],
-                                description='只从selected_goal.allowed_orientation_sources选择；user须有已登记required_yaw，否则用semantic或autonomous，不把资产旧yaw当用户要求。')},
-                            ['goal_id', 'view_id', 'orientation_source'])),
+                                description='仅提供 yaw 时填写，从 selected_goal.allowed_orientation_sources 选择。')},
+                            ['goal_id', 'view_id'])),
     'navigate_route': ('route、sequence 的多点导航，仅仿真和人工驾驶支持。按顺序一次提交途经点，点间路径由导航器规划。某点被拒时查看 diagnostics.waypoints 中的 index、位置与占据原因。',
                        parameters({'goal_id':dict(TEXT,description='当前next_goal_id。'),
                                    'view_id':dict(TEXT,description='当前地图view_id。'),
@@ -225,6 +225,14 @@ SCRIPTED_REGISTRATION_VALIDATOR = jsonschema.Draft202012Validator(parameters({
 REGISTRATION_GOAL_VALIDATOR = jsonschema.Draft202012Validator(REGISTRATION_GOAL)
 SCRIPTED_TOOLS={'check_goal','finish_local_task','finish_task'}
 EXECUTION_TOOLS=tuple(name for name in TOOL_SPECS if name!='record_task' and name not in SCRIPTED_TOOLS)
+FOLLOW_RESTART_TOOLS=frozenset(('select_follow_target','start_local_task','cancel_navigation','fail_task'))
+
+
+def follow_supervision_active(navigation):
+    """The local skill owns recovery for a healthy, active follow call."""
+    return (navigation.get('stage_type')=='follow' and navigation.get('handle') is not None and
+            navigation.get('status') in ('submitting','shadow_proposed','running','blocked') and
+            navigation.get('connected',True) and not navigation.get('context_lost'))
 
 
 def unique_fields(pairs):
@@ -254,9 +262,11 @@ def validate_call(value, *, model_schema=False):
         TOOL_VALIDATORS[value['tool']].validate(value['arguments'])
     if value['tool']=='navigate':
         args=value['arguments']
-        if not (('pose' in args and 'point_id' not in args and 'yaw' not in args) or
-                ('pose' not in args and 'point_id' in args and 'yaw' in args)):
-            raise jsonschema.ValidationError('navigate requires pose or point_id and yaw, exclusively')
+        if ('pose' in args)==('point_id' in args) or ('pose' in args and 'yaw' in args):
+            raise jsonschema.ValidationError('navigate requires either pose or point_id with optional yaw')
+        has_heading='yaw' in args or len(args.get('pose',()))==3
+        if has_heading != ('orientation_source' in args):
+            raise jsonschema.ValidationError('orientation_source is required exactly when a heading is provided')
     return value
 
 

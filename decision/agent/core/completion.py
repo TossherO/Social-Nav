@@ -45,7 +45,7 @@ def navigation_facts(session, goal, state, selected, proofs):
     if goal['requirement']['kind']=='reference':
         import numpy as np
         actual=np.asarray(measured_pose,float);chosen=np.asarray(selected.get('pose'),float)
-        checks['selected_position_met']=bool(actual.shape==(3,) and chosen.shape==(3,) and
+        checks['selected_position_met']=bool(actual.shape==(3,) and chosen.shape in ((2,),(3,)) and
             np.isfinite(actual).all() and np.isfinite(chosen).all() and
             np.linalg.norm(actual[:2]-chosen[:2])<=session.task_goals.settings['goal_position_tolerance_m'])
     if any(value is False for value in checks.values()):
@@ -90,8 +90,10 @@ def stage_evidence(session, goal):
         proof = arrival.pop('proof',{})
         facts.update(arrival)
         if selected.get('pose') and pose:
-            facts.update(distance_to_selected_m=math.dist(pose[:2],selected['pose'][:2]),
-                         yaw_error_rad=angle_error(pose[2],selected['pose'][2]))
+            target=selected['pose']
+            facts['distance_to_selected_m']=math.dist(pose[:2],target[:2])
+            if len(target)==3:
+                facts['yaw_error_rad']=angle_error(pose[2],target[2])
             if req['kind'] in ('route','sequence') and facts['distance_to_selected_m']>settings['goal_position_tolerance_m']:
                 missing.append('route_endpoint')
         if arrival['status']!='available':

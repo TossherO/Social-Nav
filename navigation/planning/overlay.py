@@ -1,11 +1,11 @@
-"""Current local evidence in a temporary global reference grid, without a ledger."""
+"""Project local evidence onto the static raster used for reference planning."""
 import numpy as np
 
 from perception.environment.context import fingerprint
 from perception.environment.layers import GridSnapshot
 
 
-def overlap_states(points, rotation, target_resolution, local, raw):
+def overlap_states(points, rotation, target_resolution, local, raw, *, after=None, observed=None):
     """A target cell is free only when all positive-area local overlaps are free.
 
     Only raw local FREE can supply missing prior evidence. Derived static support
@@ -27,8 +27,126 @@ def overlap_states(points, rotation, target_resolution, local, raw):
             free[overlap&~inside]=False
             rows=np.flatnonzero(overlap&inside);x,y=ij[rows].T
             free[rows]&=(cells[y,x]==0)&(raw[y,x]==0)
+            if after is not None:
+                free[rows]&=observed[y,x]>after[rows]
             hit[rows]|=cells[y,x]==100
     return free&~hit,hit
+
+
+def projection(prior, local, transform):
+    """Bound target cells to the projected local window."""
+    m,pm=local.metadata,prior.metadata
+    origin=np.asarray(m['origin_xy']);size=np.asarray(m['shape'])[::-1]*m['resolution']
+    corners=origin+np.array([[0,0],[1,0],[1,1],[0,1]])*size
+    rotation=transform[:2,:2]
+    mapped=(corners-transform[:2,2])@rotation
+    lo=np.maximum(0,np.floor((mapped.min(0)-pm['origin_xy'])/pm['resolution']).astype(int))
+    hi=np.minimum(np.asarray(pm['shape'])[::-1],np.ceil((mapped.max(0)-pm['origin_xy'])/pm['resolution']).astype(int))
+    y,x=np.mgrid[lo[1]:max(lo[1],hi[1]),lo[0]:max(lo[0],hi[0])]
+    x=x.ravel();y=y.ravel()
+    xy=np.c_[x+.5,y+.5]*pm['resolution']+pm['origin_xy']
+    return y,x,xy@rotation.T+transform[:2,2]
+
+
+class ReferenceObstacles:
+    """Keep observed obstructions on static free cells for one map association."""
+    def __init__(self):
+        self.version=0
+        self.key=None
+        self.reset()
+
+    def reset(self):
+        if self.key is not None:
+            self.version+=1
+        self.key=None
+        self.last=None
+        self.hits=None
+        self.blocked=()
+
+    def update(self, scene, prior, transform, key):
+        stamp=scene.record['as_of']
+        if self.key!=key:
+            self.reset()
+            self.key=key
+            self.hits=np.full(prior.layers['occupancy'].shape,-np.inf)
+        if self.last is not None and stamp<=self.last:return False
+        local=scene.geometry
+        layers=local.layers
+        occupied=layers['occupancy']==100
+        if 'navigation_source' in layers:
+            occupied|=layers['navigation_source']==10
+        if 'person_background_free' in layers:
+            occupied&=~layers['person_background_free']
+        if not occupied.any() and not self.blocked:
+            self.last=stamp
+            return False
+        y,x,points=projection(prior,local,transform)
+        selected=prior.layers['occupancy'][y,x]==0
+        y,x,points=y[selected],x[selected],points[selected]
+        if not len(x):
+            self.last=stamp
+            return False
+        # A target square with any overlapping local hit remains blocked.
+        cells=np.where(occupied,100,layers['occupancy'])
+        cells[(cells==100)&~occupied]=-1
+        physical=GridSnapshot(local.metadata,dict(occupancy=cells))
+        rotation=transform[:2,:2].T
+        hit=np.zeros(len(x),bool)
+        rows=near_hits(points,transform[:2,:2],prior.metadata['resolution'],local.metadata,occupied)
+        if len(rows):
+            _,hit[rows]=overlap_states(points[rows],rotation,prior.metadata['resolution'],physical,cells)
+        previous=self.hits[y,x]
+        added=hit&~np.isfinite(previous)
+        # Every overlapping cell must be locally free and have a newer source
+        # timestamp. Near-field restores cannot clear a hit.
+        cleared=np.zeros(len(x),bool)
+        observed=layers.get('last_observed')
+        if observed is not None:
+            recent=np.where(np.isfinite(observed)&(observed<=stamp+1e-6),observed,-np.inf)
+            if 'near_field_free' in layers:
+                recent[layers['near_field_free']]=-np.inf
+            rows=np.flatnonzero(np.isfinite(previous)&~hit)
+            if len(rows):
+                cleared[rows],_=overlap_states(points[rows],rotation,prior.metadata['resolution'],
+                    physical,cells,after=previous[rows],observed=recent)
+        self.hits[y[hit],x[hit]]=stamp
+        self.hits[y[cleared],x[cleared]]=-np.inf
+        self.last=stamp
+        if added.any() or cleared.any():
+            self.version+=1
+            self.blocked=tuple(np.flatnonzero(np.isfinite(self.hits)).tolist())
+        return bool(added.any())
+
+
+def retain_obstacles(prior, blocked):
+    if not blocked:return prior
+    cells=prior.layers['occupancy'].copy()
+    layers=dict(prior.layers,occupancy=cells)
+    indices=np.asarray(blocked)
+    if indices.dtype.kind not in 'iu' or indices.ndim!=1 or len(indices)>cells.size or (
+            (indices<0)|(indices>=cells.size)).any():
+        raise ValueError('Invalid retained reference obstacles')
+    cells.flat[indices]=100
+    cells.flags.writeable=False
+    conditional=layers.get('conditional_obstacle')
+    if conditional is not None:
+        conditional=conditional.copy();conditional.flat[indices]=False;conditional.flags.writeable=False
+        layers['conditional_obstacle']=conditional
+    return GridSnapshot(dict(prior.metadata,
+        snapshot_id='reference_obstacles:'+fingerprint([prior.metadata['snapshot_id'],blocked])),layers)
+
+
+def near_hits(points, rotation, resolution, metadata, occupied):
+    """Find potential occupied overlaps before testing exact intersections."""
+    from scipy.ndimage import maximum_filter
+    r=metadata['resolution']
+    radius=np.ceil((resolution/2*np.abs(rotation).sum(axis=1)+r/2)/r).astype(int)+1
+    near=maximum_filter(occupied,size=(int(2*radius[1]+1),int(2*radius[0]+1)),mode='constant')
+    ij=np.floor((points-metadata['origin_xy'])/r).astype(int)
+    shape=np.asarray(occupied.shape)[::-1]
+    possible=((ij>=-radius)&(ij<shape+radius)).all(axis=1)
+    clipped=np.clip(ij,0,shape-1)
+    return np.flatnonzero(possible&near[clipped[:,1],clipped[:,0]])
 
 
 def reference_overlay(prior, local, raw, local_from_map, scene):
@@ -44,28 +162,12 @@ def reference_overlay(prior, local, raw, local_from_map, scene):
     if np.arccos(np.clip(association[2,2],-1.,1.))>.15:
         return prior,dict(report,status='unavailable',reason='map_local_tilt_exceeds_planar_limit')
     # Map only the bounded local raster. No additional device download is needed.
-    origin=np.asarray(m['origin_xy']);size=np.asarray(m['shape'])[::-1]*m['resolution']
-    corners=origin+np.array([[0,0],[1,0],[1,1],[0,1]])*size
     rotation=transform[:2,:2]
-    mapped=(corners-transform[:2,2])@rotation
-    lo=np.maximum(0,np.floor((mapped.min(0)-pm['origin_xy'])/pm['resolution']).astype(int))
-    hi=np.minimum(np.asarray(pm['shape'])[::-1],np.ceil((mapped.max(0)-pm['origin_xy'])/pm['resolution']).astype(int))
-    if (hi<=lo).any():return prior,dict(report,status='outside_prior')
-    y,x=np.mgrid[lo[1]:hi[1],lo[0]:hi[0]];x=x.ravel();y=y.ravel()
-    xy=np.c_[x+.5,y+.5]*pm['resolution']+pm['origin_xy']
-    points=xy@rotation.T+transform[:2,2]
-    # Cheap conservative neighbourhood filter before exact polygon overlaps.
-    # Include centres just outside the local raster: their cells can overlap it.
-    from scipy.ndimage import maximum_filter
-    radius=np.ceil((pm['resolution']/2*np.abs(rotation).sum(axis=1)+m['resolution']/2)/m['resolution']).astype(int)+1
-    occupied=local.layers['occupancy']==100
-    near=maximum_filter(occupied,size=(int(2*radius[1]+1),int(2*radius[0]+1)),mode='constant')
+    y,x,points=projection(prior,local,transform)
+    if not len(x):return prior,dict(report,status='outside_prior')
+    rows=near_hits(points,rotation,pm['resolution'],m,local.layers['occupancy']==100)
     ij=np.floor((points-m['origin_xy'])/m['resolution']).astype(int)
     shape=np.asarray(m['shape'])[::-1]
-    possible=((ij>=-radius)&(ij<shape+radius)).all(axis=1)
-    clipped=np.clip(ij,0,shape-1)
-    possible &= near[clipped[:,1],clipped[:,0]]
-    rows=np.flatnonzero(possible)
     hit=np.zeros(len(x),bool)
     if len(rows):
         _,hit[rows]=overlap_states(points[rows],rotation.T,pm['resolution'],local,raw)

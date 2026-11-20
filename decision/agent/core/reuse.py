@@ -126,7 +126,8 @@ def import_registered_task(session, plan, assets, source_path):
     result=session.record_task(copy.deepcopy(plan['goals']))
     if result.get('status')!='recorded':raise ValueError('历史任务重新登记失败')
     session._save('registered_task_imported',dict(task_id=session.state['task_id'],revision=session.state['revision'],
-        instruction=plan['instruction'],goals=copy.deepcopy(plan['goals']),clarifications=copy.deepcopy(plan['clarifications']),
+        instruction=plan['instruction'],goals=[copy.deepcopy(goal['requirement']) for goal in result['goals']],
+        clarifications=copy.deepcopy(plan['clarifications']),
         assets=assets,source_session=str(Path(source_path).resolve()),source_task_id=plan['source_task_id'],
         source_revision=plan['source_revision'],source_event_seq=plan['source_event_seq'],source_digest=plan['digest'],
         registration_map_binding=copy.deepcopy(session.navigation.snapshot().get('map_binding'))))

@@ -26,6 +26,9 @@ class AgentState:
         self.follow_candidates_requested_mono = None
         self.seating=None
         self.follow_enabled=False
+        self.environment_epoch=0
+        self.environment_fault=None
+        self.environment_cutoff=None
 
     def enable_goal_observations(self):
         with self.lock:
@@ -39,8 +42,31 @@ class AgentState:
                 source=copy.deepcopy(geometry.source),assumed=geometry.assumed,
                 motion={k:copy.deepcopy(motion.get(k)) for k in keys})
 
+    def invalidate_environment(self, fault, epoch):
+        with self.lock:
+            self.environment_epoch=epoch
+            self.environment_fault=fault.reason
+            self.environment_cutoff=([*fault.identity,fault.frame],fault.stamp_ns)
+            self.observation=self.image=self.follow_observation=None
+            self.follow_candidate_history.clear()
+            if self.goal_evidence is not None:
+                self.goal_evidence.key=self.goal_evidence.since=self.goal_evidence.last=None
+            if self.control is not None:
+                self.control.update(map_binding=None,scene_binding=None,agent_mapped_pose=None,
+                    goal_observation=None,idle_feedback=None,manual_preview=None,feedback={},
+                    reason=fault.reason,planning_status='unavailable',planning_reason=fault.reason,
+                    reference_accepted=False,environment_epoch=epoch,environment_fault=fault.reason)
+
+    def _environment_observation_current(self, record):
+        if self.environment_fault is not None:return False
+        if self.environment_cutoff is None:return True
+        identity,cutoff=self.environment_cutoff
+        if record.get('local_identity')!=identity:return True
+        stamp=record.get('stamp_ns')
+        return stamp>cutoff if type(stamp) is int else record.get('stamp_s',-float('inf'))>cutoff/1e9
+
     def publish_control(self, packet, localization=None, *, map_binding=None, cancelled_request=None, idle_feedback=None,
-                        manual_preview=None, agent_mapped_pose=None):
+                        manual_preview=None, agent_mapped_pose=None, environment_epoch=0, environment_fault=None):
         value = dict(request=copy.deepcopy(packet.get('request')), stamp_s=packet['stamp_s'], clock_domain=packet['clock_domain'],
             scene_binding=packet.get('scene_binding'), feedback=copy.deepcopy(packet.get('feedback') or {}),
             reason=packet.get('reason'), reference_accepted=packet.get('result_accepted', False),
@@ -51,12 +77,17 @@ class AgentState:
         value['idle_feedback'] = copy.deepcopy(idle_feedback)
         value['manual_preview'] = copy.deepcopy(manual_preview)
         value['agent_mapped_pose'] = copy.deepcopy(agent_mapped_pose)
+        value.update(environment_epoch=environment_epoch,environment_fault=environment_fault)
         proposal=packet.get('proposal') or {}
         value['planning_status']=proposal.get('status')
         value['planning_reason']=proposal.get('reason')
         value['localization'] = None if localization is None else {k: copy.deepcopy(localization.get(k)) for k in
             ('stamp_s', 'session_id', 'generation', 'frame_id', 'health', 'source', 'position', 'quaternion_xyzw')}
         with self.lock:
+            if environment_epoch!=self.environment_epoch:return
+            self.environment_fault=environment_fault
+            if environment_fault is not None:
+                value.update(planning_status='unavailable',planning_reason=environment_fault)
             if self.goal_evidence is not None:
                 value['goal_observation'] = self.goal_evidence.update(packet,map_binding)
             self.control, self.updated_mono = value, time.monotonic()
@@ -66,6 +97,7 @@ class AgentState:
         if encoded is not None and len(encoded) > 1500000:
             raise ValueError('Agent observation exceeds IPC budget')
         with self.lock:
+            if not self._environment_observation_current(record):return
             if follow_handle is None:
                 self.observation, self.image = copy.deepcopy(record), encoded
             elif (self.follow and self.follow.get('handle')==follow_handle and
@@ -75,7 +107,9 @@ class AgentState:
     def publish_follow_candidate(self,record,image):
         encoded=None if image is None else base64.b64encode(image).decode()
         if encoded is None or len(encoded)>1500000:raise ValueError('Agent candidate image unavailable or too large')
-        with self.lock:self.follow_candidate_history.append((copy.deepcopy(record),encoded))
+        with self.lock:
+            if self._environment_observation_current(record):
+                self.follow_candidate_history.append((copy.deepcopy(record),encoded))
 
     def follow_candidate(self,observation_id,candidate_binding):
         with self.lock:

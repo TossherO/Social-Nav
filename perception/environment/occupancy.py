@@ -5,6 +5,10 @@ from pathlib import Path
 import numpy as np
 
 
+class VoxelBudgetExceeded(RuntimeError):
+    """The native occupancy backend discarded its voxel evidence."""
+
+
 class OccupancyTree:
     def __init__(self, resolution, library=None, *, backend='cpu', device=0):
         if backend not in ('cpu','cuda'):
@@ -90,7 +94,10 @@ class OccupancyTree:
             n = self.lib.sn_occupancy_update_masked(*arguments, mask.ctypes.data_as(C.POINTER(C.c_uint8)),
                                                    transient_ttl, int(omit_transient))
         if n < 0:
-            raise RuntimeError(self.lib.sn_occupancy_error().decode())
+            reason = self.lib.sn_occupancy_error().decode()
+            if reason == 'Occupancy voxel budget exceeded; map was reset to unknown':
+                raise VoxelBudgetExceeded(reason)
+            raise RuntimeError(reason)
         return self.snapshot(stamp) if read else n
 
     def snapshot(self, stamp):

@@ -21,7 +21,7 @@
   <arg name="allow_local_only" default="false"/>
   <arg name="environment_config" default="$(dirname)/../../environment/configs/environment.yaml"/>
   <arg name="environment_backend" default=""/>
-  <arg name="lidar_imu_calibration" default="$(dirname)/../../sensors/calibration/lidar_imu.yaml"/>
+  <arg name="lidar_imu_parameters"/>
   <arg name="rviz_config" default="$(eval 'odometry.rviz' if arg('mode') == 'odometry' else 'roll.rviz')"/>
   <rosparam command="load" file="$(dirname)/../configs/fast_lio.yaml"/>
   <rosparam command="load" file="$(dirname)/../configs/roll.yaml"/>
@@ -29,7 +29,8 @@
   <!-- Match the direct reader's zero default rather than reuse a prior master's offset. -->
   <param name="common/imu_time_offset" value="0.0"/>
   <param name="common/time_sync_en" value="false"/>
-  <rosparam command="load" file="$(arg lidar_imu_calibration)"/>
+  <!-- Keep clock applicability and provenance in the source YAML. -->
+  <rosparam command="load" file="$(arg lidar_imu_parameters)"/>
   <!-- CUDA numerics belong to the direct runtime; this diagnostic stays CPU. -->
   <param name="matching_backend" value="cpu"/>
   <param name="deskew_backend" value="cpu"/>

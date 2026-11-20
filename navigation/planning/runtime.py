@@ -27,7 +27,8 @@ class ReferenceQuery:
         if job['epoch']!=self.epoch:
             self.planner.reset();self.epoch=job['epoch']
         result=self.planner.query(job['request'],scene=scene,asset=asset,
-            now=query_time(job),clock_domain=scene.record['clock_domain'])
+            now=query_time(job),clock_domain=scene.record['clock_domain'],
+            reference_obstacles=job.get('reference_obstacles',()))
         return reference_envelope(result,job['request'],scene,asset)
 
     def release_scene(self):

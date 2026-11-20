@@ -73,6 +73,7 @@ def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,mot
                                 from perception.environment.scene import people_observation
                                 people=people_observation(scene)
                                 if people is not None:engine.push_people(people)
+                            elif message['kind']=='invalidate_scene':engine.invalidate_scene(message['reason'])
                             elif message['kind']=='packet':engine.push_packet(message['packet'])
                             elif message['kind']=='command':
                                 _apply_command(engine,arm,chassis,message['command'],message['value'])
@@ -104,7 +105,8 @@ def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,mot
                 except (BlockingIOError,BrokenPipeError,ConnectionResetError):dropped+=1
             if chassis is not None:
                 with engine.lock:
-                    packet=chassis_authorization(result,arm=arm,emergency=engine.emergency,
+                    current=result if result is not None and result.get('scene_epoch')==engine.scene_epoch else None
+                    packet=chassis_authorization(current,arm=arm,emergency=engine.emergency,
                         manual=engine.manual,active_goal=engine.active_goal,clock_domain=clock_domain)
                     try:chassis.send(json.dumps(packet,allow_nan=False).encode())
                     except BlockingIOError:pass
@@ -188,6 +190,7 @@ class SafetyProcess:
     def scene(self,scene):
         self._poll_control();description=self.scenes.publish(scene,'safety');self.pending[description['frame']]=description
         self._send(dict(kind='scene',shared_scene=description))
+    def invalidate_scene(self,reason):self._send(dict(kind='invalidate_scene',reason=reason))
     def packet(self,packet):self._send(dict(kind='packet',packet=packet))
     def command(self,kind,value):self._send(dict(kind='command',command=kind,value=value))
     def close(self):

@@ -83,6 +83,32 @@ class DecisionRuntimeTests(unittest.TestCase):
             with buffer.consume(fresh):pass
         finally:buffer.close()
 
+    def test_pose_only_scan_restores_causal_rgb_compensation(self):
+        from perception.detection_tracking.inference.rgb_association import causal_geometry,people_in_lidar
+        buffer=DecisionBuffer(max_frames=16,slot_bytes=32768)
+        try:
+            for i in range(13):
+                row,arrays,association,scene=observation(round(10+i*.1,1))
+                published=buffer.push(row,arrays,association,scene=scene if i%2==0 else None,
+                                      keep_association_history=True)
+                self.assertEqual(published,i%2==0)
+            lease=buffer.acquire()
+            with buffer.consume(lease):
+                self.assertEqual(len(lease['history']),7)
+                self.assertEqual(len(lease['association_history']),13)
+                rgb_stamp=11.13
+                current=people_in_lidar(row)
+                sparse=causal_geometry(current,row,[r['result'] for r in lease['history']],rgb_stamp,.05)
+                dense=causal_geometry(current,row,[r['result'] for r in lease['association_history']],rgb_stamp,.05)
+                self.assertNotIn('compensation',sparse[0])
+                self.assertEqual(dense[0]['compensation'],'causal_track_prediction')
+                self.assertEqual(dense[0]['geometry_stamp_s'],11.1)
+            restarted,*_=observation(12.,generation=1)
+            self.assertFalse(buffer.push(restarted,{},None,keep_association_history=True))
+            self.assertIsNone(buffer.acquire())
+            self.assertEqual(len(buffer.association_history),1)
+        finally:buffer.close()
+
     def test_real_renderer_and_pid_map_freeze_without_annotation_or_model(self):
         buffer=DecisionBuffer(max_frames=16,slot_bytes=32768)
         try:

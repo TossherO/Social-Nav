@@ -207,8 +207,11 @@ class TaskArgumentsTests(unittest.TestCase):
         calibration = self.root / 'calibration.yaml'
         calibration.write_text('common: {imu_time_offset: -0.04}\n')
         args = self.parse('odometry', extra=['--lidar-imu-calibration', str(calibration)])
-        command = algorithm_command(args, self.root / 'new_run', None, True)
-        self.assertIn('lidar_imu_calibration:=' + str(calibration.resolve()), command)
+        self.assertEqual(args.lidar_imu_calibration, str(calibration.resolve()))
+        frozen = self.root / 'lidar_imu_parameters.yaml'
+        command = algorithm_command(args, self.root / 'new_run', None, True, calibration_path=frozen)
+        self.assertIn('lidar_imu_parameters:=' + str(frozen), command)
+        self.assertNotIn(str(calibration), ' '.join(command))
         self.rejected('odometry', extra=['--lidar-imu-calibration', str(self.root / 'missing.yaml')])
         self.rejected('mapping', extra=['--backend', 'pin_slam', '--backend-python', '/usr/bin/python3',
                                        '--lidar-imu-calibration', str(calibration)])

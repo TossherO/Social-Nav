@@ -45,6 +45,9 @@ def check_pose(inputs, target, *, now, clock_domain, anchor, margin=.05, radius_
             not np.isfinite(anchor).all() or np.linalg.norm(target[:2]-anchor)>radius_m+1e-9 or
             np.linalg.norm(pose[:2]-anchor)>radius_m+1e-9 or np.linalg.norm(target[:2]-pose[:2])>.8+1e-9):
         raise ValueError('search_pose_outside_budget')
+    delta=target[:2]-pose[:2]
+    if np.linalg.norm(delta)>1e-8 and delta@np.array([math.cos(pose[2]),math.sin(pose[2])])<=0:
+        raise ValueError('search_approach_not_ahead')
     inverse=np.linalg.inv(transform);yaw=math.atan2(transform[1,0],transform[0,0])
     def local_pose(p):
         xy=inverse@np.array([p[0],p[1],1.])
@@ -56,6 +59,31 @@ def check_pose(inputs, target, *, now, clock_domain, anchor, margin=.05, radius_
                 static_status=static['status'],local_status=observed['status'],
                 source_stamp_s=inputs['stamp_s'],clock_domain=clock_domain,
                 scope='current_swept_geometry_not_dynamic_or_path_proof')
+
+
+def current_search_pose(choice, pose):
+    """Refresh a selected search action from the current vehicle pose."""
+    target=np.asarray(choice.get('pose'),dtype=float)
+    pose=np.asarray(pose,dtype=float)
+    if target.shape!=(3,) or pose.shape!=(3,) or not np.isfinite(target).all() or not np.isfinite(pose).all():
+        raise ValueError('search_candidate_pose_invalid')
+    if choice['kind']=='rotate':
+        return [*pose[:2].tolist(),float(target[2])]
+    if choice['kind']!='approach':
+        raise ValueError('search_candidate_kind_invalid')
+    front=np.array([math.cos(pose[2]),math.sin(pose[2])])
+    if (target[:2]-pose[:2])@front<=0:
+        raise ValueError('search_approach_already_passed')
+    destination=np.asarray(choice.get('last_observed_pose',target),dtype=float)
+    if destination.shape!=(3,) or not np.isfinite(destination).all():
+        raise ValueError('search_last_observation_pose_invalid')
+    delta=destination[:2]-pose[:2]
+    distance=float(np.linalg.norm(delta))
+    if distance<.2 or delta@front<=0:
+        raise ValueError('search_destination_not_ahead')
+    endpoint=pose[:2]+delta*(min(distance,.8)/distance)
+    yaw=destination[2] if distance<=.8 else math.atan2(delta[1],delta[0])
+    return [*endpoint.tolist(),float(yaw)]
 
 
 def candidates(inputs, last, *, now, clock_domain, local_identity, anchor, margin=.05):

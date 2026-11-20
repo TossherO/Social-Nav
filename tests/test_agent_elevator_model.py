@@ -5,10 +5,11 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import httpx
 import numpy as np
-from decision.agent.core.model import ApiError,Model
+from decision.agent.core.model import ApiError,ModelTemporarilyUnavailable,Model,retry_after_seconds
 from decision.agent.core.store import Budget,Store
 from decision.agent.tools.framework import Reply
 from decision.agent.workflows.elevator_camera import image_record
@@ -16,6 +17,37 @@ from tests.test_agent_conversation import wire
 
 
 class ElevatorModelTests(unittest.TestCase):
+    def test_temporary_network_errors_are_classified_for_all_agent_requests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            config=root/'private.json'
+            config.write_text(json.dumps(dict(base_url='https://unit.invalid/v1',api_key='fixture')))
+            store=Store(root/'session.sqlite')
+            budget=Budget(root/'budget.sqlite')
+            def timeout(request):
+                raise httpx.ConnectTimeout('test timeout',request=request)
+            try:
+                model=Model(config,budget,store,transport=httpx.MockTransport(timeout))
+                for transient in (False,True):
+                    with self.assertRaises(ModelTemporarilyUnavailable):
+                        model.request('test',[],transient=transient)
+                model.transport=httpx.MockTransport(lambda request:httpx.Response(429,headers={'Retry-After':'75'}))
+                with self.assertRaises(ModelTemporarilyUnavailable) as temporary:
+                    model.request('test',[])
+                self.assertEqual(temporary.exception.retry_after_s,75.)
+                model.transport=httpx.MockTransport(lambda request:httpx.Response(401))
+                with self.assertRaises(ApiError) as failure:
+                    model.request('test',[],transient=True)
+                self.assertNotIsInstance(failure.exception,ModelTemporarilyUnavailable)
+            finally:
+                store.close()
+                budget.close()
+
+    def test_retry_after_http_date_and_malformed_header(self):
+        with patch('decision.agent.core.model.time.time',return_value=784111770.):
+            self.assertEqual(retry_after_seconds('Sun, 06 Nov 1994 08:49:37 GMT'),7.)
+            self.assertIsNone(retry_after_seconds('invalid'))
+
     def test_standard_reference_images_and_prompt_are_in_the_actual_request(self):
         from PIL import Image
         with tempfile.TemporaryDirectory() as root:

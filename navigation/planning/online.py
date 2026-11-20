@@ -136,6 +136,7 @@ class PlanningBridge:
                 reason='localization_lifecycle_mismatch'
             elif not 0<=now-latest['stamp_s']<=self.motion['max_result_age_s']:reason='localization_future_or_stale'
             if reason:self._invalidate(reason)
+        self.runtime.observe(self.scene,self.asset,now=now)
         if self.request is not None and self.scene is not None:
             key=(fingerprint(self.request),self.scene.record['input_fingerprint'])
             if key!=self.last_submission:

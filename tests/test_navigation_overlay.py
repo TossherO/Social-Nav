@@ -171,6 +171,131 @@ class ReferenceOverlayTests(unittest.TestCase):
             runtime.note_control(stop,monotonic_s=5.);self.assertTrue(runtime.need_replan)
             runtime.note_control(turn,monotonic_s=5.1);self.assertIsNone(runtime.control_blocked_since)
 
+    def test_reference_remembers_hit_until_new_local_free_even_without_an_active_goal(self):
+        from navigation.planning.reference import ReferenceRuntime
+        from navigation.planning.motion import load_motion_config
+        from perception.environment.scene import assemble_scene
+        from perception.environment.layers import load_config as environment_config
+        from tests.navigation_fixtures import FakeWorker
+
+        geometry=VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],np.eye(4),source='synthetic')
+        source=asset()
+        target=(25,25)
+        index=np.ravel_multi_index(target,(60,60))
+        def observation(stamp,value,measured,*,restored=False,generation=0):
+            local=bundle(generation=generation).geometry
+            local.metadata['stamp_s']=stamp
+            local.metadata['association'].update(stamp_s=stamp,measurement_stamp_s=stamp-.05)
+            local.layers['occupancy'][target]=value
+            local.layers['last_observed']=np.full((60,60),measured)
+            local.layers['near_field_free']=np.zeros((60,60),bool)
+            local.layers['near_field_free'][target]=restored
+            return assemble_scene(local,clock_domain='synthetic',settings=environment_config()['scene'])
+
+        with ReferenceRuntime(load_config(),load_motion_config(),geometry,worker_factory=FakeWorker) as runtime:
+            for tick,value,measured,restored,blocked in [
+                (10.,100,10.,False,True), (13.,-1,13.,False,True),
+                (14.,0,9.,False,True), (15.,0,15.,True,True),
+                (16.,0,16.,False,False), (17.,-1,17.,False,False),
+                (18.,100,18.,False,True)]:
+                runtime.observe(observation(tick,value,measured,restored=restored),source,now=tick)
+                self.assertEqual(index in runtime.obstacles.blocked,blocked)
+            hidden=observation(18.5,-1,18.5)
+            runtime.observe(hidden,source,now=18.5)
+            self.assertTrue(runtime.update(request('mapped'),hidden,None,source,now=18.5))
+            runtime.tick(now=18.5,clock_domain='synthetic')
+            self.assertIn(index,runtime.worker.job['reference_obstacles'])
+            runtime.observe(observation(19.,-1,19.,generation=1),source,now=19.)
+            self.assertFalse(runtime.obstacles.blocked)
+            self.assertEqual(source.snapshot.layers['occupancy'][target],0)
+
+    @unittest.skipUnless(POSE_LIBRARY.is_file(),'Native pose search library not built')
+    def test_follow_reference_uses_static_free_beyond_local_observation(self):
+        cfg=load_config()
+        cfg['algorithm']='hybrid_astar'
+        cfg['pose_search']['native_library']='outputs/runtime/build/planning/libsocial_nav_pose_search.so'
+        geometry=VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],np.eye(4),source='synthetic')
+        cells=np.zeros((60,60),np.int8)
+        cells[:,35:]=-1
+        scene=bundle(cells)
+        source=asset()
+        req=request('local',goal=[4.5,2.],completion_policy='continuous')
+        planner=Planner(cfg,geometry)
+        result=planner.query(req,scene=scene,asset=source,now=10.,clock_domain='synthetic')
+        self.assertEqual(result['status'],'path_found',result)
+        self.assertEqual(result['frame_id'],'odom')
+        self.assertEqual(result['reference_search_frame'],'map')
+        np.testing.assert_allclose(result['path'][-1][:2],req['goal'])
+        self.assertEqual(result['local_check']['status'],'unknown')
+        self.assertFalse(result['current_path_valid'])
+        blocked=np.ravel_multi_index((20,45),(60,60))
+        result=planner.query(req,scene=scene,asset=source,now=10.,clock_domain='synthetic',
+                             reference_obstacles=[int(blocked)])
+        self.assertEqual(result['status'],'path_found',result)
+        self.assertEqual(result['reference_overlay']['retained_occupied_cells'],1)
+        self.assertEqual(result['request'],req)
+        self.assertEqual(result['goal'],req['goal'])
+        adjusted=result['follow_goal_adjustment']['selected_goal']
+        self.assertNotEqual(adjusted,req['goal'])
+        np.testing.assert_allclose(result['path'][-1][:2],adjusted)
+        self.assertLessEqual(np.linalg.norm(np.asarray(adjusted)-req['goal']),.8)
+
+    @unittest.skipUnless(POSE_LIBRARY.is_file(),'Native pose search library not built')
+    def test_continuous_follow_keeps_inflight_and_adopts_exact_origin_goal(self):
+        from navigation.planning.continuity import reference_envelope
+        from navigation.planning.reference import ReferenceRuntime
+        from navigation.planning.motion import load_motion_config
+        from tests.navigation_fixtures import FakeWorker,scene_at
+
+        cfg=load_config()
+        cfg['pose_search']['native_library']=str(POSE_LIBRARY)
+        geometry=VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],np.eye(4),source='synthetic')
+        person=('call',('tracker',7,'a'),1)
+        initial=request('local',goal=[4.,2.],goal_revision=1,completion_policy='continuous',valid_until_s=10.3)
+        latest=dict(initial,goal=[4.4,2.],goal_revision=3,valid_until_s=10.9)
+        first,second=scene_at(10.),scene_at(10.4)
+        with ReferenceRuntime(cfg,load_motion_config(),geometry,worker_factory=FakeWorker) as owner:
+            planner=Planner(owner.planning,geometry)
+            owner.update(initial,first,None,now=10.,follow_key=person)
+            owner.tick(now=10.,clock_domain='synthetic')
+            owner.update(latest,second,None,now=10.4,follow_key=person)
+            self.assertEqual(owner.worker.restarts,0)
+            self.assertEqual(owner.worker.job['request'],initial)
+            path=planner.query(initial,scene=first,now=10.,clock_domain='synthetic')
+            self.assertEqual(path['status'],'path_found',path['reason'])
+            owner.worker.reply(reference_envelope(path,initial,first,None))
+            owner.last_sent=-np.inf
+            status=owner.tick(now=10.4,clock_domain='synthetic')
+            self.assertEqual(status['request'],dict(initial,valid_until_s=10.9))
+            self.assertEqual(status['result']['result']['request'],initial)
+            self.assertEqual(status['result']['as_of'],10.)
+            self.assertEqual(owner.worker.job['request'],latest)
+            status=owner.tick(now=10.4,clock_domain='synthetic')
+            self.assertEqual(status['request']['goal_revision'],1)
+            path=planner.query(latest,scene=second,now=10.4,clock_domain='synthetic')
+            from perception.environment.context import fingerprint
+            negative=dict(path,status='no_path',reason='goal_occupied',path=[])
+            negative.pop('result_binding')
+            negative['result_binding']=fingerprint(negative)
+            owner.worker.reply(reference_envelope(negative,latest,second,None))
+            status=owner.tick(now=10.4,clock_domain='synthetic')
+            self.assertEqual(status['request']['goal_revision'],1)
+            owner.next_retry=owner.last_sent=-np.inf
+            owner.tick(now=10.4,clock_domain='synthetic')
+            owner.worker.reply(reference_envelope(path,latest,second,None))
+            status=owner.tick(now=10.4,clock_domain='synthetic')
+            self.assertEqual(status['request'],latest)
+            self.assertEqual(status['result']['as_of'],10.4)
+
+            turned=dict(latest,goal=[1.9,2.],goal_revision=4)
+            owner.update(turned,second,None,now=10.4,follow_key=person)
+            self.assertIsNone(owner.tick(now=10.4,clock_domain='synthetic')['result'])
+            owner.update(dict(latest,goal_revision=5),second,None,now=10.4,
+                         follow_key=('call',('tracker',8,'b'),1))
+            self.assertIsNone(owner.reference)
+            owner.cancel()
+            self.assertIsNone(owner.tick(now=10.4,clock_domain='synthetic')['request'])
+
     @unittest.skipUnless(POSE_LIBRARY.is_file(),'Native pose search library not built')
     def test_no_path_withdraws_previous_reference(self):
         from navigation.planning.reference import ReferenceRuntime

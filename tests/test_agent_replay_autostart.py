@@ -3,10 +3,30 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from decision.agent.workflows.shadow import wait_for_bag_navigation,hold_after_t2_failure
+from decision.agent.workflows.shadow import wait_for_bag_navigation,hold_after_t2_failure,start_unique_bag_follow
 
 
 class ReplayAutostartTests(unittest.TestCase):
+    def test_local_start_requires_one_associated_candidate_and_uses_current_observation(self):
+        candidates=[]
+        observation=SimpleNamespace(record=dict(observation_id='frame',follow_candidates=dict(candidates=candidates)))
+        navigation=SimpleNamespace(snapshot=lambda:dict(localization_status='valid',map_binding=dict(valid=True)),
+                                   observe=lambda:observation)
+        session=SimpleNamespace(navigation=navigation,observation=observation,context=lambda:'context',
+            call=Mock(side_effect=[{'status':'available'},{'status':'selected','reference_id':'ref'},{'status':'accepted'}]),
+            wait_for_event=Mock(),_save=Mock())
+        self.assertFalse(start_unique_bag_follow(session,'g'))
+        candidates.extend([dict(id=0,track={}),dict(id=1,track={})])
+        self.assertFalse(start_unique_bag_follow(session,'g'))
+        session.call.assert_not_called()
+        candidates[1]['track']=None
+        self.assertTrue(start_unique_bag_follow(session,'g'))
+        self.assertEqual([c.args[0] for c in session.call.call_args_list],
+                         ['observe_scene','select_follow_target','start_local_task'])
+        self.assertEqual(session.call.call_args_list[1].kwargs['candidate_id'],0)
+        self.assertEqual(session.call.call_args_list[1].kwargs['_context'],'context')
+        session.wait_for_event.assert_called_once_with('navigation')
+
     def test_wait_requires_nonexecuting_bag_and_fresh_mapped_pose(self):
         catalog=SimpleNamespace(value={'frame_id':'map'})
         invalid=dict(input_stale=True,localization_status='valid',origin_pose=[0,0,0],
@@ -37,8 +57,9 @@ class ReplayAutostartTests(unittest.TestCase):
         state={'status':'ready','reason':None}
         def stop(target,reason):state.update(status=target,reason=reason)
         session=SimpleNamespace(state=state,tick=lambda:state,stop=stop,_save=Mock(),
+            navigation=SimpleNamespace(snapshot=lambda:{}),
             skill=SimpleNamespace(record={'stage_type':'follow','status':'failed','connected':True,
-                'context_lost':False,'reason':'follow_t2_hosted_WriteTimeout'}))
+                'context_lost':False,'association_waiting':False,'reason':'follow_t2_hosted_WriteTimeout'}))
         actor=AgentLoop(session,Mock())
         actor.before_model=lambda a:hold_after_t2_failure(session,a)
         try:

@@ -1,6 +1,17 @@
 """One map owner with at most one pending observation; source times stay intact."""
+from dataclasses import dataclass
 import threading
 import time
+
+
+@dataclass(frozen=True)
+class EnvironmentFault:
+    stamp_ns: int
+    frame: str
+    identity: tuple
+    max_voxels: int
+    input_points: int
+    reason = 'environment_voxel_budget_exceeded'
 
 
 class LatestMapWorker:
@@ -8,7 +19,7 @@ class LatestMapWorker:
         self.process,self.publish,self.reset=process,publish,reset
         self.condition=threading.Condition();self.pending=None;self.result=None
         self.token=0;self.identity=None;self.active=False;self.stopping=False;self.error=None
-        self.counts=dict(submitted=0,replaced=0,published=0,invalidated=0,discarded=0)
+        self.counts=dict(submitted=0,replaced=0,published=0,invalidated=0,discarded=0,faults=0)
         self.thread=threading.Thread(target=self._run,name='runtime-environment',daemon=True)
         self.thread.start()
 
@@ -54,7 +65,11 @@ class LatestMapWorker:
                 result=self.process(observation)
                 with self.condition:
                     if token==self.token:
-                        self.publish(result);self.result=result;self.counts['published']+=1
+                        self.publish(result)
+                        if isinstance(result, EnvironmentFault):
+                            self.result=None;self.counts['faults']+=1
+                        elif result is not None:
+                            self.result=result;self.counts['published']+=1
                     else:self.counts['discarded']+=1
                     self.active=False;self.condition.notify_all()
         except Exception as error:

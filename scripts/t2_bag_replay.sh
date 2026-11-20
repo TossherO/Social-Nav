@@ -3,14 +3,15 @@
 set -euo pipefail
 cd "$(dirname -- "${BASH_SOURCE[0]}")/.."
 usage() {
-  printf '%s\n' '用法: bash scripts/t2_bag_replay.sh --bag 文件 [--floor floor1|floor2] [--start 秒] [--rate 倍率] [--initial-z 米] [--pose-file 文件] [--reuse-session 文件 --auto-follow] [--ros-port 端口] [--t2-backend hosted|dspark] [--t2-image-format jpeg|png] [--t2-jpeg-quality 1..95]' \
+  printf '%s\n' '用法: bash scripts/t2_bag_replay.sh --bag 文件 [--floor floor1|floor2] [--start 秒] [--rate 倍率] [--initial-z 米] [--pose-file 文件] [--reuse-session 文件 --auto-follow [--auto-follow-single-person]] [--ros-port 端口] [--t2-backend hosted|dspark] [--t2-image-format jpeg|png] [--t2-jpeg-quality 1..95]' \
     '启动独立 ROS、RViz 和 Agent 界面；不会连接底盘。默认二楼、1 倍速和 hosted。'
 }
-bag='' floor=floor2 start=0 rate=1 pose_file='' initial_z='' reuse_session='' auto_follow=0 port=11329 backend=hosted image_format=auto jpeg_quality=70
+bag='' floor=floor2 start=0 rate=1 pose_file='' initial_z='' reuse_session='' auto_follow=0 auto_follow_single_person=0 port=11329 backend=hosted image_format=auto jpeg_quality=70
 while (($#)); do
   case "$1" in
     --help|-h) usage; exit 0;;
     --auto-follow) auto_follow=1; shift;;
+    --auto-follow-single-person) auto_follow_single_person=1; shift;;
     --bag|--floor|--start|--rate|--pose-file|--initial-z|--reuse-session|--ros-port|--t2-backend|--t2-image-format|--t2-jpeg-quality)
       if (($# < 2)); then usage >&2; exit 2; fi
       case "$1" in
@@ -31,6 +32,7 @@ if [[ "$image_format" == auto ]]; then
   if [[ "$backend" == hosted ]]; then image_format=jpeg; else image_format=png; fi
 fi
 if [[ "$auto_follow" == 1 && ! -f "$reuse_session" ]]; then echo '--auto-follow 需要用 --reuse-session 指定已登记任务的 session.sqlite。' >&2; exit 2; fi
+if [[ "$auto_follow_single_person" == 1 && "$auto_follow" != 1 ]]; then echo '--auto-follow-single-person 需要同时启用 --auto-follow。' >&2; exit 2; fi
 if [[ -n "$reuse_session" && "$auto_follow" != 1 ]]; then echo '--reuse-session 需与 --auto-follow 一起使用；也可在窗口中手动选择历史任务。' >&2; exit 2; fi
 [[ "$port" =~ ^[0-9]+$ ]] && ((port>=1024 && port<=65535)) || { echo 'ROS 端口需在 1024 至 65535 之间。' >&2; exit 2; }
 [[ -f outputs/runtime/environment/activate.sh ]] || { echo '缺少本机运行环境 activate.sh。' >&2; exit 1; }
@@ -71,13 +73,18 @@ while True:
 PY
 ui_args=(--replay --runtime-socket "$session/interactive/run/commands.sock" --catalog "$catalog")
 if [[ "$auto_follow" == 1 ]]; then ui_args+=(--reuse-session "$reuse_session" --auto-follow); fi
+if [[ "$auto_follow_single_person" == 1 ]]; then ui_args+=(--auto-follow-single-person); fi
 python -B -m decision.agent.manual_ui "${ui_args[@]}" & ui_pid=$!
 args=(--bag "$bag" --config "$config" --output "$session/interactive" --start "$start" --rate "$rate"
       --agent-observations --agent-follow-candidates --t2-backend "$backend" --record-t2-requests)
-if [[ -n "$pose_file" ]]; then args+=(--pose-file "$pose_file"); fi
+pose_note='在 RViz 选择 bag 起始位置与方向；定位就绪后可开始任务。'
+if [[ -n "$pose_file" ]]; then
+  args+=(--pose-file "$pose_file")
+  pose_note='已指定初值文件。等待地图关联就绪，并在 RViz 核对扫描是否对齐。'
+fi
 if [[ -n "$initial_z" ]]; then args+=(--initial-z "$initial_z"); fi
 if [[ "$image_format" == jpeg ]]; then args+=(--t2-jpeg-quality "$jpeg_quality"); fi
-printf '%s\n' "回放记录：$session" '未指定 pose-file 时，在 RViz 选择 bag 起始位置与方向；定位就绪后可开始任务。' \
+printf '%s\n' "回放记录：$session" "$pose_note" \
   '终端输入 p 暂停、r 继续、q 退出。暂停期间不会产生新的观测；结束后需重新启动。' \
   "T2 图像格式：$image_format；模型请求会发送 bag 图像及相关观察至所选服务。"
 python -B -m runtime.interactive "${args[@]}"

@@ -9,6 +9,21 @@ ROOT=Path(__file__).resolve().parents[2]
 DEFAULT_CALIBRATION=ROOT/'perception/sensors/calibration/lidar_imu.yaml'
 
 
+def ros_calibration(path):
+    """Select the LiDAR/IMU parameters consumed by the ROS frontend."""
+    calibration = yaml.safe_load(Path(path).read_text())
+    parameters = {}
+    for section, fields in (
+        ('common', ('imu_time_offset', 'time_sync_en')),
+        ('mapping', ('extrinsic_est_en', 'extrinsic_R', 'extrinsic_T')),
+    ):
+        values = calibration.get(section, {})
+        selected = {name: values[name] for name in fields if name in values}
+        if selected:
+            parameters[section] = selected
+    return parameters
+
+
 def merge_config(base, override):
     """ROS-style YAML overlays add keys as well as override existing values."""
     result=copy.deepcopy(base)

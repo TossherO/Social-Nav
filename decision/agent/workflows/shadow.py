@@ -67,12 +67,47 @@ def hold_after_t2_failure(session, actor):
     return True
 
 
+def start_unique_bag_follow(session, goal_id):
+    """Start from a unique current 2D/3D candidate, using normal Agent evidence tools."""
+    feedback=session.navigation.snapshot()
+    if (feedback.get('input_stale') or feedback.get('localization_status')!='valid' or
+            (feedback.get('map_binding') or {}).get('valid') is not True):
+        return False
+    observation=session.navigation.observe()
+    if observation is None:
+        return False
+    group=observation.record.get('follow_candidates') or {}
+    candidates=[item for item in group.get('candidates',[]) if item.get('track') is not None]
+    if len(candidates)!=1:
+        return False
+    if session.call('observe_scene').get('status')!='available':
+        return False
+    observation_id=observation.record['observation_id']
+    if session.observation.record['observation_id']!=observation_id:
+        return False
+    selected=session.call('select_follow_target',goal_id=goal_id,observation_id=observation_id,
+        candidate_id=candidates[0]['id'],target_description='The person in the fixed reference',
+        _context=session.context())
+    if selected.get('status')!='selected':
+        return False
+    result=session.call('start_local_task',goal_id=goal_id,task_type='follow',reference_id=selected['reference_id'])
+    if result.get('status') not in ('accepted','uncertain'):
+        return False
+    session.wait_for_event('navigation')
+    session._save('replay_local_follow_started',dict(goal_id=goal_id,source='unique_current_associated_candidate',
+                                                   status=result['status']))
+    return True
+
+
 def run(args):
     if args.duration <= 0 or args.interactive and args.observations:
         raise ValueError('Positive duration required; interactive input is for runtime shadow')
     catalog = Catalog.load(args.catalog,condition=args.map_condition)
     reuse_path=getattr(args,'reuse_session',None)
     auto_follow=bool(getattr(args,'auto_follow',False))
+    local_follow=bool(getattr(args,'auto_follow_single_person',False))
+    if local_follow and not auto_follow:
+        raise ValueError('Local follow startup requires --auto-follow')
     if (reuse_path or auto_follow) and (not getattr(args,'require_bag',False) or args.observations):
         raise ValueError('Task reuse and automatic follow require a nonexecuting bag runtime')
     if auto_follow and not reuse_path:raise ValueError('Automatic follow requires a registered task session')
@@ -115,13 +150,23 @@ def run(args):
             from ..core.reuse import import_registered_task
             import_registered_task(session,plan,assets,reuse_path)
         if auto_follow:
-            emit(dict(event='replay_auto_follow_started',instruction='任务登记已载入；Agent 将观察并确认本次的跟随人物。'))
+            instruction=('任务已进入跟随阶段，等待当前帧出现唯一可靠关联行人。' if local_follow else
+                         '任务登记已载入；Agent 将观察并确认本次的跟随人物。')
+            emit(dict(event='replay_auto_follow_started',instruction=instruction))
         actor = make_loop(args, session, output/'session.sqlite')
         if auto_follow:
             def before_model(actor):
                 if hold_after_t2_failure(session,actor):
                     emit(dict(event='replay_t2_failed',instruction='T2 请求失败，已暂停自动推进；请检查失败原因后手动决定如何继续。'))
             actor.before_model=before_model
+        if local_follow:
+            initial_goal=plan['goals'][0]['goal_id']
+            def start_before_model(actor):
+                if start_unique_bag_follow(session,initial_goal):
+                    actor.before_request=None
+                    emit(dict(event='replay_auto_follow_started',instruction='已用当前 bag 观察确认行人，开始影子跟随。'))
+                return False
+            actor.before_request=start_before_model
         console = Console(structured=getattr(args,'gui_commands',False)) if args.interactive else None
         seen, previous = [], None
         last_status=0.

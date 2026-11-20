@@ -65,6 +65,23 @@ class ShadowTests(unittest.TestCase):
         self.safety.push_packet(packet,mono=0.);r=self.safety.tick(10.,mono=0.)
         self.assertEqual(r['feedback']['velocity'],[0.,0.]);self.assertEqual(r['state'],'allowed')
 
+    def test_map_fault_rejects_current_and_delayed_proposals_using_old_geometry(self):
+        self.assertEqual(self.safety.tick(10.,mono=0.)['state'],'allowed')
+        fault='environment_voxel_budget_exceeded'
+        self.safety.invalidate_scene(fault)
+        stopped=self.safety.tick(10.01,mono=.01)
+        self.assertEqual((stopped['reason'],stopped['velocity']),(fault,[0.,0.]))
+        self.assertEqual(stopped['scene_epoch'],1)
+        self.assertEqual(self.safety.active_goal,self.req)
+        newer=grid();newer.metadata.update(snapshot_id='after-reset',stamp_s=10.01)
+        self.safety.push_grid(newer,mono=.01)
+        late=copy.deepcopy(self.packet);late['sequence_id']+=1
+        late['packet_binding']=fingerprint({k:v for k,v in late.items() if k!='packet_binding'})
+        self.safety.push_packet(late,mono=.01)
+        stopped=self.safety.tick(10.02,mono=.02)
+        self.assertEqual(stopped['reason'],'waiting_for_bound_observation')
+        self.assertEqual(stopped['velocity'],[0.,0.])
+
     def test_pause_uses_wall_clock_and_no_packet_watchdog_is_independent(self):
         self.safety.tick(10.,mono=0.)
         self.assertEqual(self.safety.tick(10.,mono=.31)['reason'],'clock_stalled')

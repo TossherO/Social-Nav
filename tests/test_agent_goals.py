@@ -69,7 +69,7 @@ class IndoorGoalTests(unittest.TestCase):
 
     def test_region_accepts_continuous_pose_without_candidates_or_snapping(self):
         pose = [6.837,4.173,.037]
-        result = self.select(dict(goal_id='r',kind='region',target_id='lobby_area',description='Choose a place inside'),pose)
+        result = self.select(dict(goal_id='r',stage='region',target=dict(id='lobby_area'),description='到大厅中央'),pose)
         self.assertEqual(result['status'],'accepted')
         self.assertEqual(self.nav.target_pose,pose)
         self.assertEqual(self.session.task_goals.goals[0]['selected']['pose'],pose)
@@ -117,11 +117,21 @@ class IndoorGoalTests(unittest.TestCase):
     def test_explicit_point_id_and_yaw_resolve_without_borrowing_annotation_yaw(self):
         self.session.call('record_task',goals=[point_goal('elevator')])
         view_id=query_map(self.session)
+        refused=self.session.call('navigate',goal_id='elevator',pose=[5.1,4,.71],
+            view_id=view_id,orientation_source='autonomous')
+        self.assertEqual(refused['reason'],'use_registered_annotation_point')
         result=self.session.call('navigate',goal_id='elevator',point_id='elevator',yaw=.71,
             view_id=view_id,orientation_source='autonomous')
         self.assertEqual(result['status'],'accepted')
         self.assertEqual(self.nav.target_pose,[5,4,.71])
         self.assertEqual(self.session.task_goals.goals[0]['selected']['selected_point_id'],'elevator')
+
+    def test_named_point_without_yaw_keeps_exact_annotated_xy(self):
+        self.session.call('record_task',goals=[point_goal('elevator')])
+        result=self.session.call('navigate',goal_id='elevator',point_id='elevator',
+                                 view_id=query_map(self.session))
+        self.assertEqual(result['status'],'accepted')
+        self.assertEqual(self.nav.target_pose,[5,4])
 
     def test_navigate_rejects_ambiguous_pose_forms(self):
         from decision.agent.tools.framework import validate_call
@@ -134,7 +144,11 @@ class IndoorGoalTests(unittest.TestCase):
 
     def test_required_yaw_is_checked_and_never_repaired(self):
         goal = dict(point_goal('elevator'),required_yaw=.4)
-        result = self.select(goal,[5,4,1.4])
+        self.session.call('record_task',goals=[goal])
+        view_id=query_map(self.session)
+        missing=self.session.call('navigate',goal_id='elevator',point_id='elevator',view_id=view_id)
+        self.assertEqual(missing['reason'],'heading_required_for_current_goal')
+        result=self.session.call('navigate',goal_id='elevator',pose=[5,4,1.4],view_id=view_id,orientation_source='user')
         self.assertEqual(result['status'],'refused')
         self.assertFalse(result['checks']['required_yaw_met'])
         self.assertIsNone(self.session.skill.record['handle'])

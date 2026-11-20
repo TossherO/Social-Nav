@@ -36,7 +36,9 @@ def goal_binding(request):
 
 def context_binding(request,scene,asset):
     r=scene.record;a=r['prior']
-    lineage=None if request['mode']=='local' else {k:a.get(k) for k in (
+    uses_association=request['mode']!='local' or (
+        asset is not None and request.get('completion_policy')=='continuous')
+    lineage=None if not uses_association else {k:a.get(k) for k in (
         'valid','map_id','asset_fingerprint','map_frame','association_session',
         'association_generation','map_revision','coverage_fingerprint')}
     static=None if asset is None else {k:asset.manifest[k] for k in ('snapshot_id','layers_sha256')}

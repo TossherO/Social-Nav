@@ -4,11 +4,12 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import httpx
 from decision.agent import CONFIG_DIR
 from decision.agent.core.conversation import Conversation
 from decision.agent.core.loop import AgentLoop
-from decision.agent.core.model import ApiError, Model, cache_messages, cache_usage
+from decision.agent.core.model import ApiError, Model, ModelTemporarilyUnavailable, cache_messages, cache_usage
 from decision.agent.core.model_projection import ModelProjection
 from decision.agent.core.session import AgentSession
 from decision.agent.core.store import Budget, Store
@@ -43,6 +44,71 @@ class ConversationTests(unittest.TestCase):
 
     def client(self, handler):
         return Model(self.config,self.budget,self.store,transport=httpx.MockTransport(handler))
+
+    def test_registration_retry_waits_and_rebuilds_request(self):
+        requests=[]
+        def work(payload, _observation, _view):
+            requests.append(payload)
+            if len(requests)==1:
+                raise ModelTemporarilyUnavailable()
+            return reply('record_task',goals=[point_goal('elevator')])
+        actor=AgentLoop(self.session,work)
+        with patch('decision.agent.core.loop.time') as clock:
+            clock.monotonic.return_value=100.
+            actor.tick()
+            actor.model.thread.join(1)
+            actor.tick()
+            self.assertEqual(actor.state['reason'],'model_temporarily_unavailable')
+            clock.monotonic.return_value=104.9
+            actor.tick()
+            self.assertEqual(len(requests),1)
+            clock.monotonic.return_value=105.
+            actor.tick()
+            actor.model.thread.join(1)
+            actor.tick()
+            self.assertIsNone(actor.state['reason'])
+            self.assertEqual(self.session.task_goals.goals[0]['requirement']['target_id'],'elevator')
+            self.assertIsNot(requests[0],requests[1])
+        actor.close()
+
+    def test_cancel_during_network_retry_wait_prevents_another_request(self):
+        def work(*_args):
+            raise ModelTemporarilyUnavailable()
+        actor=AgentLoop(self.session,work)
+        with patch('decision.agent.core.loop.time') as clock:
+            clock.monotonic.return_value=100.
+            actor.tick()
+            actor.model.thread.join(1)
+            actor.tick()
+            self.assertEqual(actor.state['reason'],'model_temporarily_unavailable')
+            actor.event('cancel')
+            clock.monotonic.return_value=106.
+            actor.tick()
+            self.assertEqual(actor.state['status'],'cancelled')
+            self.assertEqual(actor.requests,1)
+        actor.close()
+
+    def test_network_retry_backs_off_and_obeys_longer_service_delay(self):
+        failures=iter([None,None,None,None,None,75.,None])
+        def work(*_args):
+            raise ModelTemporarilyUnavailable(retry_after_s=next(failures))
+        actor=AgentLoop(self.session,work)
+        with patch('decision.agent.core.loop.time') as clock:
+            now=100.
+            clock.monotonic.return_value=now
+            actor.tick()
+            for count,delay in enumerate((5.,10.,20.,40.,60.,75.,60.),start=1):
+                actor.model.thread.join(1)
+                actor.tick()
+                self.assertEqual(actor.model_retry_at,now+delay)
+                clock.monotonic.return_value=now+delay-.1
+                actor.tick()
+                self.assertEqual(actor.requests,count)
+                now+=delay
+                clock.monotonic.return_value=now
+                if count<7:
+                    actor.tick()
+        actor.close()
 
     def test_default_history_retains_more_then_trims_old_complete_groups(self):
         events=[]

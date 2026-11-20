@@ -4,9 +4,14 @@ import math
 import time
 import jsonschema
 from .async_model import AsyncModel
+from .model import ModelTemporarilyUnavailable
 from .session import TERMINAL
 from ..tools.framework import Reply
 from perception.environment.context import fingerprint
+
+MODEL_RETRY_DELAY_S = 5.
+MODEL_RETRY_MAX_LOCAL_DELAY_S = 60.
+MODEL_RETRY_REASON = 'model_temporarily_unavailable'
 
 
 class AgentLoop:
@@ -19,6 +24,8 @@ class AgentLoop:
         self.missing_action_for = None
         self.before_model = None
         self.before_request = None
+        self.model_retry_at = None
+        self.model_retry_delay = MODEL_RETRY_DELAY_S
 
     @property
     def state(self):
@@ -99,7 +106,8 @@ class AgentLoop:
                 if on_tick is not None:
                     on_tick(self)
                 state = self.state
-                key = (state['status'], state['revision'], self.session.skill.record['status'],state.get('assistant_text'))
+                key = (state['status'], state['revision'], self.session.skill.record['status'],
+                       state.get('assistant_text'),state.get('reason'))
                 if key != previous:
                     emit(dict(status=key[0], revision=key[1], navigation=key[2], reason=state['reason'],assistant_text=key[3]))
                     previous = key
@@ -156,9 +164,14 @@ class AgentLoop:
     def tick(self):
         s = self.session.tick()
         if self.before_model is not None:self.before_model(self)
+        if not s.get('elevator_active') and (self.session.skill.record['association_waiting'] or
+                self.session.navigation.snapshot().get('environment_fault')):
+            return s
         result = self.model.poll()
         if result is not None:
             valid = not result['stale'] and self.session.valid_context(result['context'])
+            if result['ok']:
+                self.model_retry_delay=MODEL_RETRY_DELAY_S
             if not valid:
                 self.session.store.event('model_result_discarded', dict(context=result['context'], reason='cancelled_or_superseded'))
                 if (result['context'].get('conditional_review_cycle') and s['status']=='ready' and
@@ -183,9 +196,27 @@ class AgentLoop:
                     self.session.spatial_view = None
                     self.session._save('spatial_view_expired')
             elif not result['ok']:
-                self.session.stop('needs_clarification', 'model_'+result['error_type'])
-                self.session._save('model_failed', dict(automatically_retried=False))
+                if result['error_type']==ModelTemporarilyUnavailable.__name__ and self.requests<self.max_requests:
+                    elevator=s.get('elevator_active')
+                    if elevator:
+                        self.session.wait_for_event('monitor')
+                    retry_after_s=result.get('retry_after_s')
+                    delay=max(self.model_retry_delay,retry_after_s or 0.)
+                    self.model_retry_at=time.monotonic()+delay
+                    self.model_retry_delay=min(self.model_retry_delay*2,MODEL_RETRY_MAX_LOCAL_DELAY_S)
+                    s['reason']=MODEL_RETRY_REASON
+                    self.session._save('model_retry_scheduled',dict(
+                        delay_s=delay,retry_after_s=retry_after_s,
+                        trigger='elevator_observation' if elevator else 'timer'))
+                    return s
+                else:
+                    reason=('model_request_limit' if result['error_type']==ModelTemporarilyUnavailable.__name__
+                            else 'model_'+result['error_type'])
+                    self.session.stop('needs_clarification',reason)
+                    self.session._save('model_failed', dict(automatically_retried=False))
             else:
+                if s.get('reason')==MODEL_RETRY_REASON:
+                    s['reason']=None
                 reply = result['value']
                 try:
                     if not isinstance(reply,Reply):
@@ -258,6 +289,12 @@ class AgentLoop:
                     self.session._save('model_protocol_rejected', dict(error_type=type(error).__name__))
         if self.model.busy or s['status'] != 'ready' or self.session.skill.record['context_lost'] or not self.session.skill.record['connected']:
             return s
+        if self.model_retry_at is not None:
+            if time.monotonic()<self.model_retry_at:
+                if s.get('elevator_active'):
+                    self.session.wait_for_event('monitor')
+                return s
+            self.model_retry_at=None
         if self.requests >= self.max_requests:
             self.session.stop('needs_clarification', 'model_request_limit')
             return s

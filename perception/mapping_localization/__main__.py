@@ -414,7 +414,7 @@ def arguments(argv=None):
     return args
 
 
-def algorithm_command(args, output, map_path, use_sim_time, *, coverage_path=None):
+def algorithm_command(args, output, map_path, use_sim_time, *, coverage_path=None, calibration_path=None):
     """One launch contract shared by replay and live sessions."""
     pin = args.backend == 'pin_slam'
     command = ['roslaunch', str(ROOT / 'perception/mapping_localization/launch' /
@@ -438,8 +438,8 @@ def algorithm_command(args, output, map_path, use_sim_time, *, coverage_path=Non
                     'wait_for_initial_pose:=' + str(manual).lower()]
         if args.loop_closure is not None:
             command += ['loop_closure:=' + str(args.loop_closure == 'on').lower()]
-        if args.lidar_imu_calibration:
-            command += ['lidar_imu_calibration:=' + str(project_path(args.lidar_imu_calibration))]
+        if calibration_path is not None:
+            command += ['lidar_imu_parameters:=' + str(calibration_path)]
         if args.environment:
             command += ['environment:=true','allow_local_only:='+str(args.allow_local_only).lower()]
             if args.environment_config:
@@ -553,6 +553,13 @@ def main():
     receipt = {'count': 0, 'stamp_ns': None}
     master = algorithm = frontend = people = image_node = playback = view = display = None
     with tempfile.TemporaryDirectory(prefix='social-nav-ros-replay-') as temporary:
+        frozen_calibration = None
+        if not pin:
+            import yaml
+            from perception.mapping_localization.configuration import ros_calibration
+            frozen_calibration = Path(temporary) / 'lidar_imu_parameters.yaml'
+            ros_parameters = ros_calibration(project_path(args.lidar_imu_calibration))
+            frozen_calibration.write_text(yaml.safe_dump(ros_parameters, sort_keys=False))
         frozen_coverage = None
         if 'association_coverage_record' in settings:
             import yaml
@@ -694,7 +701,8 @@ def main():
                 if any(topic == '/localization/state' for topic, _ in existing):
                     raise RuntimeError('Another localization publisher is active; stop it before starting this session')
             algorithm = launch(algorithm_command(args, output, map_path, use_sim_time,
-                                                 coverage_path=frozen_coverage), 'algorithm.log')
+                                                 coverage_path=frozen_coverage,
+                                                 calibration_path=frozen_calibration), 'algorithm.log')
             rospy.wait_for_service('/pin_slam/status' if pin else
                                    '/fast_lio/status' if args.mode == 'odometry' else '/roll/save_map',
                                    timeout=90 if pin else 30)

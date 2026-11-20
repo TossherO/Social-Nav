@@ -44,6 +44,21 @@ class DwaTests(unittest.TestCase):
         again=self.controller.command(self.req,self.scene,self.feedback,self.reference,now=10.,clock_domain='synthetic')
         self.assertLessEqual(again['velocity'][0],self.motion['max_acceleration_mps2']*.1+1e-9)
 
+    def test_follow_adjustment_is_used_for_control_without_changing_requested_goal(self):
+        cells=np.zeros((60,60),np.int8)
+        cells[20,40]=100
+        scene=bundle(cells)
+        req=dict(self.req,goal=[4.,2.],completion_policy='continuous')
+        result=Planner(self.cfg,self.geometry).query(req,scene=scene,now=10.,clock_domain='synthetic')
+        self.assertEqual(result['status'],'path_found',result['reason'])
+        adjusted=result['follow_goal_adjustment']['selected_goal']
+        ref=reference_envelope(result,req,scene,None)
+        proposal=self.controller.command(req,scene,self.feedback,ref,now=10.,clock_domain='synthetic')
+        self.assertEqual(proposal['status'],'candidate',proposal)
+        self.assertEqual(self.controller.result['request'],req)
+        self.assertFalse(self.controller.result['local_goal']['actual_goal'])
+        np.testing.assert_allclose(self.controller.result['local_goal']['pose'],adjusted)
+
     def test_vehicle_minimum_command_is_predicted_and_independently_checked(self):
         from navigation.safety.guard import LocalSafety
         motion=dict(self.motion,minimum_command_speeds=dict(forward_mps=.1,reverse_mps=.1,angular_rps=.2))

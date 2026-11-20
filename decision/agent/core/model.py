@@ -8,6 +8,7 @@ import time
 import base64
 import math
 import hashlib
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 import httpx
 import jsonschema
@@ -18,11 +19,35 @@ from .async_model import request_cancelled
 from .context import project_dialogue, view_context, visual_inputs
 from .model_projection import ModelProjection
 from perception.environment.context import fingerprint
-from ..tools.framework import Reply, EXECUTION_TOOLS, native_tools
+from ..tools.framework import Reply, EXECUTION_TOOLS, FOLLOW_RESTART_TOOLS, follow_supervision_active, native_tools
 
 
 class ApiError(RuntimeError):
     pass
+
+
+class ModelTemporarilyUnavailable(ApiError):
+    """A transport or service failure that permits another model request."""
+
+    def __init__(self, message='Agent model API temporarily unavailable', *, retry_after_s=None):
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
+
+
+def retry_after_seconds(value):
+    if value is None:
+        return None
+    value=value.strip()
+    if value.isascii() and value.isdecimal():
+        seconds=float(value)
+        return seconds if math.isfinite(seconds) else None
+    try:
+        date=parsedate_to_datetime(value)
+        if date.tzinfo is not None:
+            return max(0.,date.timestamp()-time.time())
+    except (ValueError,TypeError,OverflowError,OSError):
+        pass
+    return None
 
 
 class InputEstimateExceeded(ValueError):
@@ -156,7 +181,8 @@ class Model:
         self._url = url if url.endswith('/chat/completions') else url+'/chat/completions'
         self.budget, self.store, self.transport = budget, store, transport
 
-    def request(self, system, messages, *, observation_id=None, max_tokens=2048, tool_names=None, tool_choice='auto', projection=None, transient=False):
+    def request(self, system, messages, *, observation_id=None, max_tokens=2048, tool_names=None, tool_choice='auto', projection=None, transient=False,
+                supervised_follow=False):
         if tool_choice not in ('auto','required'):
             raise ValueError('Unsupported tool choice')
         tools = native_tools(tool_names)
@@ -188,6 +214,7 @@ class Model:
         began = time.perf_counter()
         settled=False
         first = usage = returned_model = finish_reason = status = None
+        retry_after_s = None
         chunks,text_parts,reason_parts,calls = [],[],[],{}
         try:
             if request_cancelled():
@@ -199,6 +226,7 @@ class Model:
                 with client.stream('POST',self._url,headers={'Authorization':'Bearer '+self._key},json=body) as response:
                     status = response.status_code
                     if status != 200:
+                        retry_after_s=retry_after_seconds(response.headers.get('Retry-After'))
                         detail = response.read()[:16384].decode('utf-8',errors='replace')
                         for secret in (self._key,self._url,self._private['base_url']):
                             detail = detail.replace(secret,'[private]')
@@ -273,6 +301,9 @@ class Model:
             if transient and self.transient_sink is not None:
                 self.transient_sink(dict(kind='response',call_id=call_id,message=copy.deepcopy(message)))
             if calls and message['tool_calls'][0]['function']['name'] not in offered:
+                name=message['tool_calls'][0]['function']['name']
+                if supervised_follow and name in FOLLOW_RESTART_TOOLS:
+                    return Reply(reply.message,None,dict(status='refused',reason='local_follow_owns_recovery',tool=name))
                 raise ValueError('Model called a tool not offered for this phase')
             if reply.action is not None and projection is not None:
                 from ..tools.framework import validate_call
@@ -289,7 +320,12 @@ class Model:
                 self.budget.finish(call_id,dict(requested_model=self.model,thinking_mode=self.thinking_mode,
                     usage=usage,full_return_s=time.perf_counter()-began,first_token_s=first))
             self.store.event('api_failure',dict(call_id=call_id,error_type=type(error).__name__,http_status=status,
-                full_return_s=time.perf_counter()-began,partial_chunks=[] if transient else chunks,automatically_retried=False))
+                retry_after_s=retry_after_s,full_return_s=time.perf_counter()-began,
+                partial_chunks=[] if transient else chunks,automatically_retried=False))
+            transport_failed=(status in (None,200) and
+                              isinstance(error,(httpx.TimeoutException,httpx.NetworkError,httpx.RemoteProtocolError)))
+            if not request_cancelled() and (transport_failed or status in (408,429,500,502,503,504)):
+                raise ModelTemporarilyUnavailable(retry_after_s=retry_after_s) from None
             raise ApiError('Native tool request failed or response rejected; see session events, no retry performed') from None
 
     def decide(self, payload, *, observation=None, spatial_view=None):
@@ -382,11 +418,15 @@ class Model:
         messages.append(dict(role='user',content=content))
         projection=ModelProjection()
         messages=projection.messages(messages,protected_indices=(1 if reference is not None else 0,))
+        execution_tools=EXECUTION_TOOLS
+        supervised_follow=not (ride_inputs or registration) and follow_supervision_active(state.get('navigation',{}))
+        if supervised_follow:
+            execution_tools=tuple(name for name in execution_tools if name not in FOLLOW_RESTART_TOOLS)
         return self.request(system,messages,observation_id=None if observation is None else observation.record['observation_id'],
                             tool_names=(ELEVATOR_TOOLS[phase] if ride_inputs else
-                                        REGISTRATION_TOOLS if registration else EXECUTION_TOOLS),
+                                        REGISTRATION_TOOLS if registration else execution_tools),
                             tool_choice='required' if self.thinking_mode=='off' else 'auto',projection=projection,
-                            transient=bool(payload.get('ride_inputs')))
+                            transient=bool(payload.get('ride_inputs')),supervised_follow=supervised_follow)
 
 
 def api_work(config, session, payload, observation=None, spatial_view=None, *, cache_mode='implicit', thinking_mode='off',transient_sink=None):

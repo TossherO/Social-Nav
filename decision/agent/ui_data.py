@@ -9,7 +9,7 @@ from difflib import SequenceMatcher
 
 
 KINDS=('conversation_exchange','conversation_trimmed','tool_intent','model_action_applied',
-       'api_request','api_response','api_failure','api_input_rejected','model_failed','model_protocol_rejected',
+       'api_request','api_response','api_failure','api_input_rejected','model_failed','model_protocol_rejected','model_retry_scheduled',
        'navigation_repeated_refusal',
        'manual_arrival_invalidated','manual_arrival_recovered',
        'elevator_monitor_started','elevator_model_failed','elevator_model_discarded',
@@ -17,7 +17,8 @@ KINDS=('conversation_exchange','conversation_trimmed','tool_intent','model_actio
        'model_result_discarded','manual_arrival_confirmation','manual_goal_evidence_wait_started',
        'manual_goal_evidence_wait_finished','manual_goal_evidence_refresh_failed','manual_goal_evidence_unproven','manual_route_progress',
        'manual_route_trace','manual_reference_status','manual_reference_region_conflict','operator_command','navigation_completed','navigation_ack','navigation_cancel_confirmed',
-       'navigation_context_lost','task_connection_lost','user_event','subtask_skipped','registered_task_imported','task_created','assistant_message','model_action_missing','agent_run_finished',
+       'navigation_context_lost','navigation_association_waiting','navigation_association_recovered',
+       'task_connection_lost','user_event','subtask_skipped','registered_task_imported','task_created','assistant_message','model_action_missing','agent_run_finished',
        'route_repeated_refusal','reference_map_prepared','t2_replay','follow_target_confirmed','agent_bag_recording')
 
 _LONG_HEX = re.compile(r'(?<![0-9a-fA-F])[0-9a-fA-F]{32,}(?![0-9a-fA-F])')
@@ -41,7 +42,7 @@ def goal_requirements(goal,names):
             origin='用户指定' if selected.get('direction_source')=='user' else 'Agent 选择'
             lines.append('执行方案方向：'+directions.get(selected['direction'],selected['direction'])+'（'+origin+'）')
     fields={'position':'指定坐标','required_yaw':'要求朝向（弧度）','facing':'面向',
-            'position_rule':'位置规则','max_distance_m':'距离上限（米）','checkpoints':'依次经过',
+            'max_distance_m':'距离上限（米）','checkpoints':'依次经过',
             'semantic_conditions':'必须满足','visual_preferences':'视觉偏好','stage_type':'任务阶段',
             'floor_id':'所在楼层','to_floor':'目标楼层','robot_inside_region_id':'完成时轮椅所在区域','wait_after':'完成后等待口令'}
     for key,label in fields.items():
@@ -52,7 +53,6 @@ def goal_requirements(goal,names):
         elif key in ('facing','robot_inside_region_id'):value=names.get(value,value)
         elif key=='stage_type' and value=='elevator':value='乘坐电梯'
         elif key=='checkpoints':value=[names.get(item,item) for item in value]
-        elif key=='position_rule' and value=='region_centroid':value='区域正中'
         lines.append(label+'：'+('、'.join(map(str,value)) if isinstance(value,list) and key!='position' else str(value)))
     monitored=(req.get('monitor') or {}).get('continuous_region_id')
     if monitored:
@@ -381,6 +381,13 @@ def event_summary(event):
     if kind=='manual_arrival_recovered':return '已重新记录定位和停稳到达证据。'
     if kind=='model_action_missing':
         return '模型只返回文字，将依据当前证据重新决策一次。' if value.get('correction_requested') else '模型未提交执行动作，任务已请求暂停。'
+    if kind=='model_retry_scheduled':
+        delay=value.get('delay_s')
+        if value.get('trigger')=='elevator_observation':
+            wait=f'至少等待 {delay:g} 秒并取得新观测后重试。' if delay is not None else '取得新观测后重试。'
+        else:
+            wait=f'等待 {delay:g} 秒后重试。' if delay is not None else '等待自动重试。'
+        return '模型服务暂时不可用，'+wait
     if kind=='elevator_monitor_started':return '开始周期观察乘梯过程。'
     if kind=='elevator_model_failed':return '乘梯观察不可用：'+str(value.get('reason') or '未知原因')
     if kind=='elevator_model_discarded':return '乘梯阶段已变化，未应用旧观察结果。'

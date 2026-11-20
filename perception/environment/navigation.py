@@ -198,10 +198,10 @@ def _background_geometry(scene, *, now=None, asset=None, check_asset=False, _lay
         snapshot_id=raw.metadata['snapshot_id']+':navigation'), dict(occupancy=raw.layers['navigation_occupancy']))
 
 
-def safety_capsule(snapshot):
+def safety_capsule(snapshot, *, extra_fields=()):
     """Keep the current consumer fields in a separate metadata envelope."""
     return GridSnapshot(copy.deepcopy(snapshot.metadata),
-        {k:v for k,v in snapshot.layers.items() if k in CAPSULE_FIELDS})
+        {k:v for k,v in snapshot.layers.items() if k in CAPSULE_FIELDS or k in extra_fields})
 
 
 def _navigation_geometry(scene, *, now=None, asset=None, check_asset=False):

@@ -14,28 +14,48 @@ from decision.vlm.trajectory_inputs import local_scope, pose, HISTORY_S
 from .export import drain_worker
 
 
+ASSOCIATION_POSE_FIELDS = ('sequence_id','session_id','generation','clock_domain','frame_id','pose_source',
+                           'localization_binding','health','pose_health','stamp_s','pose_stamp_s','world_from_lidar')
+ASSOCIATION_TRACK_FIELDS = ('track_id','lifecycle_generation','confirmed','box','velocity_xyz_mps')
+
+
 class DecisionBuffer:
     def __init__(self,*,max_frames=48,slot_bytes=4*1024*1024,metrics=None):
         self.pool=SharedArrayPool(max_frames+3,slot_bytes);self.reader=self.pool.reader()
         self.frames=deque();self.lock=threading.RLock();self.scope=None;self.metrics=metrics
         self.max_frames=max_frames;self.active=None;self.dropped=0
+        self.association_history=deque(maxlen=max_frames)
 
     def _clear(self):
         while self.frames:self.pool.release(self.frames.popleft()['buffer'],'history')
+        self.association_history.clear()
 
     def reset(self):
         """Discard indexed history while existing consumer leases remain valid."""
         with self.lock:
             self._clear();self.scope=None
 
-    def push(self,people,arrays,association,*,scene=None,image_metadata=None):
+    def push(self,people,arrays,association,*,scene=None,image_metadata=None,keep_association_history=False):
         with self.lock:
             scope=local_scope(people);stamp=people['stamp_s']
             if not math.isfinite(stamp):raise ValueError('Finite decision observation time required')
             stamp_ns=source_stamp_ns(stamp,people.get('stamp_ns'))
-            if self.scope!=scope or pose(people) is None or (self.frames and stamp_ns<=self.frames[-1]['stamp_ns']):
+            valid_pose=pose(people) is not None
+            latest=self.association_history if self.association_history else self.frames
+            if self.scope!=scope or not valid_pose or (latest and stamp_ns<=latest[-1]['stamp_ns']):
                 self._clear();self.scope=scope
-            if pose(people) is None:return False
+            if not valid_pose:return False
+            if keep_association_history:
+                while (self.association_history and
+                        stamp-self.association_history[0]['result']['stamp_s']>HISTORY_S+1.15):
+                    self.association_history.popleft()
+                compact={key:people.get(key) for key in ASSOCIATION_POSE_FIELDS}
+                compact['tracks']=[{key:track.get(key) for key in ASSOCIATION_TRACK_FIELDS}
+                                   for track in people.get('tracks',[])]
+                self.association_history.append(dict(stamp_ns=stamp_ns,result=copy.deepcopy(compact)))
+                # A scan without a same-source environment scene supplies pose
+                # history only. Never copy its RGB or point cloud into T2.
+                if scene is None:return False
             if 'raw' not in arrays:return False
             while self.frames and (stamp-self.frames[0]['people']['stamp_s']>HISTORY_S+1.15 or len(self.frames)>=self.max_frames):
                 self.pool.release(self.frames.popleft()['buffer'],'history')
@@ -74,7 +94,8 @@ class DecisionBuffer:
             for entry in selected:self.pool.retain(entry['buffer'],token)
             history=[dict(id=e['id'],stamp_ns=e['stamp_ns'],result=e['people']) for e in self.frames]
             self.active=token
-            return dict(token=token,entries=tuple(selected),history=history)
+            return dict(token=token,entries=tuple(selected),history=history,
+                        association_history=tuple(self.association_history))
 
     @contextmanager
     def consume(self,lease):

@@ -65,6 +65,7 @@ class PlanningRecorder:
                     if job is not None and job['job_id'] not in self.jobs:
                         name=self._save_scene(job['scene'])
                         fields={k:job[k] for k in ('job_id','epoch','request','now','clock_rate','sent_mono')}
+                        fields['reference_obstacles']=job.get('reference_obstacles',())
                         self._json(self.directory/'queries'/(str(job['job_id'])+'.json'),dict(fields,scene_binding=name))
                         self.jobs.add(job['job_id'])
                     if reply is not None and reply[0]['job_id'] not in self.replies:

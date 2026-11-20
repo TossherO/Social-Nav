@@ -11,10 +11,11 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
+from xmlrpc.client import dumps
 import yaml
 
 from perception.sensors.clock_session import record_bag_session, session_path, time_calibration_report, check_time_calibration
-from perception.mapping_localization.configuration import algorithm_config, ROOT
+from perception.mapping_localization.configuration import algorithm_config, ros_calibration, ROOT
 
 
 class ClockSessionTests(unittest.TestCase):
@@ -234,12 +235,21 @@ class ClockSessionTests(unittest.TestCase):
         launch = ET.parse(ROOT/'perception/mapping_localization/launch/native.launch').getroot()
         items = list(launch)
         reset = next(i for i, x in enumerate(items) if x.tag == 'param' and x.get('name') == 'common/imu_time_offset')
-        selected = next(i for i, x in enumerate(items) if x.tag == 'rosparam' and x.get('file') == '$(arg lidar_imu_calibration)')
+        selected = next(i for i, x in enumerate(items) if x.tag == 'rosparam' and
+                        x.get('file') == '$(arg lidar_imu_parameters)')
         self.assertLess(reset, selected)
         self.assertEqual(float(items[reset].get('value')), 0.)
         sync = next(i for i, x in enumerate(items) if x.tag == 'param' and x.get('name') == 'common/time_sync_en')
         self.assertLess(sync, selected)
         self.assertEqual(items[sync].get('value'), 'false')
+
+    def test_ros_calibration_leaves_optional_clock_metadata_in_source(self):
+        source = ROOT/'perception/sensors/calibration/lidar_imu.yaml'
+        calibration = yaml.safe_load(source.read_text())
+        self.assertIsNone(calibration['calibration']['deployment_clock_group'])
+        parameters = ros_calibration(source)
+        self.assertEqual(parameters, {key: calibration[key] for key in ('common', 'mapping')})
+        self.assertIn('extrinsic_R', dumps((parameters,)))
 
 
 if __name__ == '__main__':

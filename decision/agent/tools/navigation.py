@@ -23,7 +23,9 @@ class NavigationSkill:
         self.context = spatial_context(self.initial)
         self.record = dict(status='idle', handle=None, place_id=None, reason=None, context_lost=False,
                            connected=True, completed=[], attempts=[], goal_revision=0, goal_id=None, selected_pose=None,
-                           pending_completion=None, stage_type='navigation',follow_ready=False,search_deadline_s=None)
+                           pending_completion=None, stage_type='navigation',follow_ready=False,search_deadline_s=None,
+                           association_waiting=False,association_epoch=0)
+        self.association_wait_stamp=None
         self.last_stamp = None
         self.blocked_since = None
         self.blocked_notified = False
@@ -191,11 +193,71 @@ class NavigationSkill:
             self.emit('navigation_stop_unconfirmed', dict(error_type=type(error).__name__, automatically_retried=False))
         return dict(status='stopping', handle=copy.deepcopy(r['handle']), execution_completed=False)
 
+    def _wait_for_manual_association(self, feedback, current):
+        """Wait only for a map association in the same healthy local session."""
+        r=self.record
+        if self.navigation.scope!='manual' or not callable(getattr(self.navigation,'suspend_for_association',None)):
+            return None
+        previous=self.context.get('map_binding') or {}
+        incoming=current['map_binding'] or {}
+        same_local=(feedback.get('scope')=='manual' and feedback.get('localization_status')=='valid' and not feedback.get('input_stale') and
+                    feedback.get('source')==self.initial.get('source') and
+                    all(current[k]==self.context[k] for k in ('local_identity','clock_domain')))
+        stable_fields=('map_id','map_frame','map_revision','association_session')
+        anchored=(previous.get('valid') is True and all(previous.get(k) is not None for k in stable_fields) and
+                  all(previous.get(k) for k in ('map_id','map_frame','association_session')) and
+                  type(previous.get('association_generation')) is int)
+        same_map=(incoming.get('valid') is True and all(incoming.get(k)==previous[k] for k in stable_fields)
+                  and type(incoming.get('association_generation')) is int
+                  and incoming['association_generation']>=previous['association_generation']) if anchored else False
+        missing_map=(incoming.get('valid') is not True and
+                     incoming.get('map_id') in (None,'',previous.get('map_id')))
+        now=feedback.get('stamp_s')
+        if (r['context_lost'] or r['stage_type']=='follow' or feedback.get('status')=='preempted'
+                or not same_local or not anchored or not (missing_map or same_map)
+                or type(now) not in (float,int) or not math.isfinite(now)):
+            if r['association_waiting']:
+                r['association_waiting']=False;self.navigation.waiting_for_association=False
+            return None
+        if not r['association_waiting']:
+            if current==self.context or r['status']=='stopping' or feedback.get('environment_fault'):
+                return None
+            handle=self.navigation.suspend_for_association()
+            self.association_wait_stamp=now
+            r['association_waiting']=True;r['association_epoch']+=1
+            if handle is not None and r['status']=='succeeded' and r['handle'] is None:
+                # The adapter still owns an arrived target awaiting Agent review.
+                r.update(status='running',handle=handle)
+                self._mark_attempt(handle,'active')
+            self.last_stamp=None
+            self._emit('navigation_association_waiting')
+            return False
+        if r['status']=='stopping' and feedback.get('proposal_cancelled') is True and feedback.get('status')=='stopped':
+            self._mark_attempt(r['handle'],'cancelled')
+            r.update(status='cancelled',handle=None,pending_completion=None)
+            self._emit('navigation_cancel_confirmed')
+            return True
+        stamps=(feedback.get('origin_stamp_s'),feedback.get('association_measurement_stamp_s'),
+                feedback.get('stop_measurement_stamp_s'))
+        if (not same_map or incoming['association_generation']<=previous['association_generation']
+                or feedback.get('environment_fault') or feedback.get('stopped') is not True or
+                feedback.get('origin_pose') is None or feedback.get('origin_frame_id')!=incoming.get('map_frame') or
+                any(type(t) not in (int,float) or not math.isfinite(t) or not self.association_wait_stamp<t<=now for t in stamps)
+                or now-stamps[0]>.5 or now-stamps[1]>.5 or now-stamps[2]>.5):
+            return False
+        self.context=current
+        self.navigation.waiting_for_association=False
+        r['association_waiting']=False
+        self._emit('navigation_association_recovered')
+        return True
+
     def tick(self):
         r = self.record
         try:
             feedback = self.navigation.tick()
         except (OSError, EOFError, ValueError) as error:
+            if r['association_waiting']:
+                r['association_waiting']=False;self.navigation.waiting_for_association=False
             if r['connected']:
                 r['connected'] = False
                 if r['handle'] is not None and r['status'] != 'stopping':
@@ -216,6 +278,14 @@ class NavigationSkill:
                 self.cancel(reason=r['reason'])
             self._emit('navigation_interrupted')
         current = spatial_context(feedback)
+        association=self._wait_for_manual_association(feedback,current)
+        if association is not None:return association
+        if (feedback.get('environment_fault') and not r['context_lost'] and not feedback.get('input_stale')
+                and feedback.get('localization_status')=='valid'
+                and current['local_identity']==self.context['local_identity']
+                and current['clock_domain']==self.context['clock_domain']):
+            # Compare the map identity when real geometry is available again.
+            return False
         if current != self.context and not r['context_lost']:
             r['context_lost'] = True
             if r['handle'] is not None and r['status'] != 'stopping':

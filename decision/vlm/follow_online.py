@@ -35,19 +35,23 @@ LABELS = string.ascii_uppercase + string.ascii_lowercase
 
 
 def _image(payload, *, jpeg_quality=None):
-    if not isinstance(payload, bytes):
-        raise ValueError('Expected immutable PNG bytes')
+    if not isinstance(payload,(bytes,Image.Image)):
+        raise ValueError('Expected a PNG or an RGB canvas')
     if jpeg_quality is not None:
         if type(jpeg_quality) is not int or not 1<=jpeg_quality<=95:
             raise ValueError('JPEG quality must be an integer between 1 and 95')
-        image=Image.open(io.BytesIO(payload)).convert('RGB')
+        image=payload if isinstance(payload,Image.Image) else Image.open(io.BytesIO(payload)).convert('RGB')
         out=io.BytesIO();image.save(out,format='JPEG',quality=jpeg_quality,subsampling=0,optimize=True)
+        payload=out.getvalue()
+    elif isinstance(payload,Image.Image):
+        out=io.BytesIO()
+        payload.save(out,format='PNG')
         payload=out.getvalue()
     mime='image/png' if jpeg_quality is None else 'image/jpeg'
     return dict(type='image_url', image_url=dict(
         url='data:'+mime+';base64,' + base64.b64encode(payload).decode('ascii')))
 
-def _draw_search(image, window, choices):
+def _draw_search(image, window, choices, *, return_canvas=False):
     from .scene_inputs import bev_xy, BEV_RECT, BEV_SIZE, font
     scene=window.get('scene') or {}
     world=np.asarray((scene.get('localization') or {}).get('world_from_lidar'),dtype=float)
@@ -63,7 +67,7 @@ def _draw_search(image, window, choices):
         inverse=np.array([[c,s],[-s,c]])
         origin=transform[:2,3]
     extent=window['fields']['e']
-    canvas=Image.open(io.BytesIO(image)).convert('RGB')
+    canvas=image.copy() if isinstance(image,Image.Image) else Image.open(io.BytesIO(image)).convert('RGB')
     separate=window.get('image_mode')=='raw_rgb_with_separate_bev'
     if separate and canvas.size!=BEV_SIZE:raise ValueError('Separate BEV size is invalid')
     def image_xy(x,y):
@@ -94,6 +98,7 @@ def _draw_search(image, window, choices):
             draw.line((px,py,*tip),fill='#ffe474',width=3)
             draw.ellipse((tip[0]-3,tip[1]-3,tip[0]+3,tip[1]+3),fill='#ffe474')
         if outside:draw.text((px+10,py-10),'out',fill='#b02a28',font=font(14))
+    if return_canvas:return canvas
     out=io.BytesIO();canvas.save(out,format='PNG');return out.getvalue()
 
 
@@ -112,7 +117,12 @@ def prepare(window, images, description, search, *, reference_image=None, refere
             not isinstance(images,(tuple,list)) or len(images)!=image_count or len(window.get('images',[]))!=image_count):
         raise ValueError('T2 requires a description and three causal images')
     for image,spec in zip(images,window['images']):
-        if not isinstance(image,bytes) or hashlib.sha256(image).hexdigest()!=spec.get('sha256'):
+        if spec.get('encoding')=='rgb_pixels':
+            pixels=(image.tobytes() if isinstance(image,Image.Image) and image.mode=='RGB' and
+                    list(image.size)==spec.get('size') else None)
+        else:
+            pixels=image if isinstance(image,bytes) else None
+        if pixels is None or hashlib.sha256(pixels).hexdigest()!=spec.get('sha256'):
             raise ValueError('Image differs from source window')
     if (not isinstance(search,dict) or search.get('binding') !=
             fingerprint({k:v for k,v in search.items() if k!='binding'}) or
@@ -165,7 +175,7 @@ def prepare(window, images, description, search, *, reference_image=None, refere
             raise ValueError('Reference image does not match its causal metadata')
         content.extend([dict(type='text',text='Fixed target reference'),_image(reference_image,jpeg_quality=jpeg_quality)])
     images=list(images)
-    images[-1]=_draw_search(images[-1],window,choices)
+    images[-1]=_draw_search(images[-1],window,choices,return_canvas=True)
     for i,image in enumerate(images):
         label=('Observation '+str(i//2)+(' raw RGB' if i%2==0 else ' independent LiDAR BEV')) if raw else 'Observation '+str(i)
         content.extend([dict(type='text',text=label),_image(image,jpeg_quality=jpeg_quality)])

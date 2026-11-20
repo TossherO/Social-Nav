@@ -37,7 +37,8 @@ class AsyncModel:
                     outcome = dict(ok=True, value=work())
                 except Exception as error:
                     # HTTP and model clients persist their own redacted detail.
-                    outcome = dict(ok=False, error_type=type(error).__name__)
+                    outcome = dict(ok=False, error_type=type(error).__name__,
+                                   retry_after_s=getattr(error,'retry_after_s',None))
                 with self.lock:
                     self.result = dict(outcome, purpose=purpose, context=context, epoch=epoch)
 

@@ -25,6 +25,40 @@ def transform_poses(poses, transform):
     return result
 
 
+def goal_cell_issue(grid,geometry,goal,margin):
+    x,y=cell_of(grid,goal[:2]);height,width=grid.layers['occupancy'].shape
+    if not (0<=x<width and 0<=y<height):return 'goal_outside'
+    value=grid.layers['occupancy'][y,x]
+    if value!=0:return 'goal_unknown' if value==-1 else 'goal_occupied'
+    obstruction=goal_obstruction(grid,geometry,goal,margin) if len(goal)==2 else None
+    return None if obstruction is None else 'goal_footprint_'+obstruction
+
+
+def follow_goal_alternatives(grid,geometry,start,goal,margin):
+    """Nearby endpoints on the vehicle side of the desired following point."""
+    delta=goal-start[:2];distance=np.linalg.norm(delta)
+    if distance<=.25:return []
+    direction=delta/distance
+    lateral=np.array([-direction[1],direction[0]])
+    offsets=sorted(((back,side) for back in (0.,.2,.4,.6,.8) for side in (0.,.2,-.2,.4,-.4,.6,-.6,.8,-.8)
+                    if 0<np.hypot(back,side)<=.8 and distance-back>=.25),
+                   key=lambda offset:np.hypot(*offset))
+    choices=[]
+    for back,side in offsets:
+        point=goal-back*direction+side*lateral
+        if goal_cell_issue(grid,geometry,point,margin):continue
+        dx,dy=point-start[:2]
+        yaw=np.arctan2(dy,dx)
+        if any(footprint_status(grid,geometry,[*point,yaw+offset],margin)=='free'
+               for offset in (0.,-.35,.35)):
+            # Evaluate spatially distinct alternatives rather than adjacent
+            # cells with essentially the same approach.
+            if all(np.linalg.norm(point-other)>=.24 for other in choices):
+                choices.append(point)
+                if len(choices)==3:break
+    return choices
+
+
 class Planner:
     def __init__(self, config, geometry, backend=None, *, require_actual_start=False):
         self.config, self.geometry = copy.deepcopy(config), geometry
@@ -55,7 +89,7 @@ class Planner:
         return self._prior_revisions.apply(asset.snapshot,scene.geometry,scene.record['prior'],
             scene_binding=scene.record['input_fingerprint'],bounds=bounds,overlay_current=False,geometry_only=geometry_only)
 
-    def query(self, request, *, scene=None, asset=None, now=None, clock_domain=None):
+    def query(self, request, *, scene=None, asset=None, now=None, clock_domain=None, reference_obstacles=()):
         begin = time.perf_counter()
         request = copy.deepcopy(request)
         result = dict(status='invalid_input', reason=None, executable=False, current_path_valid=False,
@@ -71,7 +105,7 @@ class Planner:
                 local_generation=scene.record['generation'], association=scene.record['prior'])
         result['input_binding'] = binding
         try:
-            self._query(request, scene, asset, now, clock_domain, result)
+            self._query(request, scene, asset, now, clock_domain, result, reference_obstacles)
         except (ValueError, KeyError, TypeError) as error:
             result.update(status='invalid_input', reason=str(error), path=[], current_path_valid=False)
         except (OSError, RuntimeError) as error:
@@ -91,7 +125,7 @@ class Planner:
                 verified_as_of=result['input_binding']['as_of'])
         return result
 
-    def _query(self, r, scene, asset, now, clock, out):
+    def _query(self, r, scene, asset, now, clock, out, reference_obstacles):
         prepare_begin=time.perf_counter()
         if scene is not None: scene.verify()
         for key in ('request_id', 'task_id', 'frame_id'):
@@ -99,6 +133,7 @@ class Planner:
         if type(r['goal_revision']) is not int or r['goal_revision'] < 0: raise ValueError('Invalid goal_revision')
         if r.get('target_reference') != 'base_link': raise ValueError('Goal reference must explicitly be base_link')
         mode = r['mode']
+        mapped_local=False
         if mode not in ('static', 'mapped', 'local'): raise ValueError('Unknown planning mode')
         goal = np.asarray(r['goal'], dtype=float)
         if goal.shape not in [(2,), (3,)] or not np.isfinite(goal).all(): raise ValueError('Invalid goal')
@@ -136,22 +171,31 @@ class Planner:
             out['local_start_evidence']=footprint_details(contact_grid,self.geometry,local_pose,self.config['safety_margin_m'])
             if 'start' in r: raise ValueError('Scene start is derived from localization, not overridden')
             out['start_source'] = 'observation_localization_and_vehicle_reference'
-            if mode == 'mapped':
+            mapped_local=(mode=='local' and r.get('completion_policy')=='continuous' and
+                          asset is not None and not association_status(scene,asset,self.config))
+            if mode == 'mapped' or mapped_local:
                 reason = association_status(scene, asset, self.config)
                 if reason:
                     out.update(status='unavailable', reason=reason, goal_state='paused'); return
                 grid = asset.snapshot
                 transform = np.asarray(scene.record['prior']['map_from_local'])
                 start = self.geometry.pose(transform @ np.asarray(scene.record['localization']['world_from_lidar']))
+                if mapped_local:
+                    map_from_local=se2(start)@np.linalg.inv(se2(local_pose))
+                    goal=transform_poses([[*goal[:2],goal[2] if len(goal)==3 else 0.]],map_from_local)[0,:len(goal)]
+                    mode='mapped'
             else:
                 grid = local_grid; start = local_pose
         validate_grid(grid)
         if mode=='mapped':
             grid=self.observe(scene,asset,now=now,clock_domain=clock,geometry_only=True)
             out['prior_revision']=grid.metadata['prior_revision']
-            from .overlay import reference_overlay
+            from .overlay import reference_overlay,retain_obstacles
             local_from_map=se2(local_pose)@np.linalg.inv(se2(start))
+            grid=retain_obstacles(grid,reference_obstacles)
             grid,out['reference_overlay']=reference_overlay(grid,contact_grid,scene.geometry.layers['occupancy'],local_from_map,scene)
+            out['reference_overlay']['retained_occupied_cells']=len(reference_obstacles)
+            out['reference_search_frame']=grid.metadata['frame_id']
         measured_grid=grid
         if mode in ('static','mapped'):
             grid=reference_grid(grid,geometry_only=True)
@@ -165,12 +209,15 @@ class Planner:
                                         out['manual_free_present'])
         out['reference_policy']=grid.metadata.get('reference_policy',
             'unobserved_cells_assumed_free' if out['unobserved_free_assumed'] else 'observed_free_only')
-        if r['frame_id'] != grid.metadata['frame_id']: raise ValueError('Goal frame does not match planning frame')
-        if mode in ('static', 'mapped') and r.get('map_snapshot_id') != asset.manifest['snapshot_id']:
+        if r['frame_id'] != (scene.record['frame_id'] if mapped_local else grid.metadata['frame_id']):
+            raise ValueError('Goal frame does not match planning frame')
+        if mode in ('static', 'mapped') and not mapped_local and r.get('map_snapshot_id') != asset.manifest['snapshot_id']:
             raise ValueError('Goal static map identity mismatch')
         out.update(start=start.tolist(), goal=goal.tolist(), frame_id=grid.metadata['frame_id'],
                    grid_snapshot_id=grid.metadata['snapshot_id'], conservative_radius_m=self.geometry.radius,
                    safety_margin_m=self.config['safety_margin_m'])
+        if mapped_local:
+            out.update(start=local_pose.tolist(),goal=r['goal'],frame_id=r['frame_id'])
         out['timing_ms']['input_and_prior']=(time.perf_counter()-prepare_begin)*1000
         costs_begin = time.perf_counter()
         endpoints=[('start',start)]
@@ -180,19 +227,21 @@ class Planner:
             if status != 'free':
                 out.update(status='unavailable' if status=='unknown' else 'no_path',
                            reason=label+'_footprint_'+status,needs_observation=status=='unknown'); return
-        goal_cell=cell_of(grid,goal[:2]);height,width=grid.layers['occupancy'].shape
-        if (goal_cell<0).any() or goal_cell[0]>=width or goal_cell[1]>=height:
-            out.update(status='no_path',reason='goal_outside');return
-        value=grid.layers['occupancy'][goal_cell[1],goal_cell[0]]
-        if value!=0:
-            out.update(status='unavailable' if value==-1 else 'no_path',
-                       reason='goal_unknown' if value==-1 else 'goal_occupied',needs_observation=bool(value==-1));return
-        obstruction=goal_obstruction(grid,self.geometry,goal,self.config['safety_margin_m']) if len(goal)==2 else None
-        if obstruction is not None:
-            out.update(status='unavailable' if obstruction=='unknown' else 'no_path',
-                reason='goal_footprint_'+obstruction,needs_observation=obstruction=='unknown',
-                goal_evidence=dict(method='full_pose' if len(goal)==3 else 'orientation_invariant_inner_disk',status=obstruction))
-            return
+        issue=goal_cell_issue(grid,self.geometry,goal,self.config['safety_margin_m'])
+        alternatives=[]
+        if issue:
+            if issue.startswith('goal_footprint_'):
+                out['goal_evidence']=dict(method='orientation_invariant_inner_disk',status=issue[len('goal_footprint_'):])
+            if (algorithm=='hybrid_astar' and self.config['search_geometry']=='footprint' and len(goal)==2 and
+                    r.get('completion_policy')=='continuous' and issue in ('goal_occupied','goal_footprint_occupied')):
+                alternatives=follow_goal_alternatives(grid,self.geometry,start,goal,self.config['safety_margin_m'])
+                out['follow_goal_adjustment']=dict(original_blockage=issue,candidate_count=len(alternatives))
+            if not alternatives:
+                unknown=issue.endswith('unknown')
+                out.update(status='unavailable' if unknown else 'no_path',reason=issue)
+                if issue!='goal_outside':out['needs_observation']=unknown
+                return
+            goal=alternatives[0]
         cost_binding = (grid.metadata['snapshot_id'], fingerprint(grid.metadata),
                        out['input_binding']['scene'] if mode == 'local' else fingerprint(out['input_binding']['static_map']))
         if mode=='mapped':
@@ -218,7 +267,11 @@ class Planner:
         if scene is not None and previous is not None and self.config['local_replanning']['reuse_free_reference']:
             from .continuity import context_binding
             if previous['context']==context_binding(r,scene,asset) and previous['verified_as_of']<=scene.record['as_of']:
-                for candidate in reference_tails(previous['path'],start,self.config['motion_constraints']):
+                previous_path=previous['path']
+                if mapped_local:previous_path=transform_poses(previous_path,map_from_local)
+                tails=reference_tails(previous_path,start,self.config['motion_constraints']) if (
+                    np.linalg.norm(np.asarray(previous_path[-1])[:2]-goal[:2])<=1e-6) else ()
+                for candidate in tails:
                     actual_start=bool(np.linalg.norm(candidate[0,:2]-start[:2])<1e-6 and abs(wrap(candidate[0,2]-start[2]))<1e-6)
                     if self.require_actual_start and not actual_start:continue
                     if swept_check(grid,self.geometry,candidate,self.config['safety_margin_m']+.002,
@@ -264,16 +317,24 @@ class Planner:
                 self._pose_grid=PoseGrid(grid,self.geometry,self.config,costs=costs,clearance=self._clearance,
                     local=mode=='local',backend=self._pose_backend)
                 self._pose_binding=pose_binding
-            poses,detail=self._pose_grid.search(start,goal,guide=poses,max_search_s=search_budget)
-            detail['geometry_cache_reused']=reused
+            limit=min(.18,self.config['pose_search']['max_search_s']) if alternatives else search_budget
+            began_check=0.
+            for endpoint in alternatives or [goal]:
+                candidate,detail=self._pose_grid.search(start,endpoint,guide=poses,max_search_s=limit)
+                detail['geometry_cache_reused']=reused
+                attempts.append(dict(backend='bounded_curvature_hybrid_astar',**detail))
+                goal=endpoint
+                poses=candidate
+                check_begin=time.perf_counter()
+                check=(swept_check(grid,self.geometry,poses,self.config['safety_margin_m'],self.config['max_path_samples'],prefix=False)
+                       if poses is not None else dict(status='search_budget_exceeded' if '_budget' in str(detail.get('reason'))
+                           else 'no_curvature_route'))
+                began_check+=time.perf_counter()-check_begin
+                if not alternatives or check['status']=='free':break
+                poses=None
             out['timing_ms']['footprint_state_search']=(time.perf_counter()-began)*1000
-            attempts.append(dict(backend='bounded_curvature_hybrid_astar',**detail))
             out['search_backend']='bounded_curvature_hybrid_astar'
-            check_begin=time.perf_counter()
-            check=(swept_check(grid,self.geometry,poses,self.config['safety_margin_m'],self.config['max_path_samples'],prefix=False)
-                   if poses is not None else dict(status='search_budget_exceeded' if '_budget' in str(detail.get('reason'))
-                       else 'no_curvature_route'))
-            footprint_ms+=(time.perf_counter()-check_begin)*1000
+            footprint_ms+=began_check*1000
         out['search_attempts']=attempts
         out['footprint_check'] = check
         out['timing_ms']['footprint'] = footprint_ms
@@ -283,6 +344,9 @@ class Planner:
                        reason='returned_path_'+check['status']); return
         out.update(status='path_found', reason=None, path=poses.tolist(), current_path_valid=True,
                    path_length_m=float(np.linalg.norm(np.diff(poses[:,:2],axis=0),axis=1).sum()))
+        if alternatives:
+            endpoint=(transform_poses([[*goal,0.]],local_from_map)[0,:2] if mapped_local else goal)
+            out['follow_goal_adjustment']['selected_goal']=endpoint.tolist()
         if mode=='static' and out['unobserved_free_assumed']:
             out.update(current_path_valid=False,global_reference_only=True,needs_observation=True)
         if selection is not None and selection['max_path_length_m'] is not None and out['path_length_m']>selection['max_path_length_m']:
@@ -302,6 +366,7 @@ class Planner:
             # No cross-grid interpolation or 3D motion feasibility is implied.
             local_from_map = se2(local_pose) @ np.linalg.inv(se2(start))
             local_poses = transform_poses(poses, local_from_map)
+            if mapped_local:out['path']=local_poses.tolist()
             local_check = swept_check(local_grid, self.geometry, local_poses,
                 self.config['safety_margin_m'], self.config['max_path_samples'])
             out['local_check'] = local_check

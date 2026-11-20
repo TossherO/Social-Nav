@@ -62,6 +62,22 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(record['tool_calls'],native)
         self.assertEqual(self.session.task_goals.goals,[])
 
+    def test_active_follow_omits_restart_tools_and_handles_an_unoffered_cancel(self):
+        self.session.call('record_task',goals=[point_goal('elevator')])
+        payload=self.session.prompt()
+        payload['current_state']['navigation'].update(stage_type='follow',status='shadow_proposed',
+                                                      handle={'call_id':'running-follow'},follow_phase='searching')
+        requests=[]
+        def handler(request):
+            requests.append(json.loads(request.content))
+            return httpx.Response(200,text=wire(reply('cancel_navigation').message['tool_calls']))
+        result=self.client(handler).decide(payload)
+        self.assertIsNone(result.action)
+        self.assertEqual(result.argument_error['reason'],'local_follow_owns_recovery')
+        offered={entry['function']['name'] for entry in requests[0]['tools']}
+        self.assertTrue({'cancel_navigation','fail_task','select_follow_target','start_local_task'}.isdisjoint(offered))
+        self.assertTrue({'wait_for_event','complete_subtask'}.issubset(offered))
+
     def test_model_registration_uses_only_advertised_contract(self):
         requests=[]
         legacy=reply('record_task',goals=[point_goal('elevator')]).message['tool_calls']

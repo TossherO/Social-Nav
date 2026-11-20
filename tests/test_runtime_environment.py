@@ -2,7 +2,7 @@
 import threading
 import unittest
 
-from runtime.environment import LatestMapWorker
+from runtime.environment import EnvironmentFault, LatestMapWorker
 
 
 class LatestMapTests(unittest.TestCase):
@@ -47,3 +47,36 @@ class LatestMapTests(unittest.TestCase):
         worker=self.setup_worker(fail);worker.submit(1,identity='a')
         with self.assertRaisesRegex(RuntimeError,'bad map input'):worker.flush(3)
         with self.assertRaisesRegex(RuntimeError,'bad map input'):worker.close()
+
+    def test_budget_fault_unpublishes_the_old_map_and_worker_recovers(self):
+        fault=EnvironmentFault(2,'odom',('a',0),1,2)
+        worker=self.setup_worker(lambda job: {1:'old',2:fault,3:None,4:'new'}[job])
+        try:
+            for job, latest in ((1,'old'),(2,None),(3,None),(4,'new')):
+                worker.submit(job,identity='a');worker.flush(3)
+                self.assertEqual(worker.latest(),latest)
+            self.assertEqual(self.published,['old',fault,None,'new'])
+            self.assertEqual(worker.counts['faults'],1)
+            self.assertEqual(worker.counts['published'],2)
+        finally:worker.close()
+
+    def test_reset_blocks_late_agent_observations_from_the_old_map(self):
+        from runtime.command import AgentState
+        state=AgentState()
+        packet=dict(stamp_s=1.,clock_domain='runtime_live')
+        control=dict(session_id='a',generation=0,frame_id='odom',health=0)
+        old=dict(local_identity=['a',0,'odom'],stamp_ns=1_000_000_000)
+        fault=EnvironmentFault(2_000_000_000,'odom',('a',0),1,2)
+        state.publish_control(packet,control,manual_preview=dict(reference_path=[[0,0],[1,0]]))
+        state.publish_observation(old,b'old')
+        state.invalidate_environment(fault,1)
+        state.publish_control(packet,control)
+        value=state.snapshot(with_image=True)
+        self.assertEqual(value['control']['environment_fault'],fault.reason)
+        self.assertIsNone(value['control']['manual_preview'])
+        self.assertIsNone(value['observation'])
+        state.publish_control(dict(packet,stamp_s=3.),control,environment_epoch=1)
+        state.publish_observation(old,b'late')
+        self.assertIsNone(state.snapshot()['observation'])
+        state.publish_observation(dict(old,stamp_ns=3_000_000_000),b'fresh')
+        self.assertEqual(state.snapshot()['observation']['stamp_ns'],3_000_000_000)

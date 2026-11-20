@@ -13,7 +13,6 @@ from decision.agent.core.route import record_route_visit,validate_route_progress
 from decision.agent.core.loop import AgentLoop
 from decision.agent.core.session import AgentSession
 from decision.agent.core.store import Store
-from decision.agent.core.tasks import centroid
 from decision.agent.tools.places import Catalog
 from tests.test_agent import ScriptedFeedback,query_map,reply
 
@@ -65,7 +64,7 @@ class AgentRouteTests(unittest.TestCase):
         self.store.close();self.temp.cleanup()
 
     def points(self,direction='clockwise'):
-        polygon=self.catalog.regions['lobby_area']['polygon'];center=centroid(polygon)
+        polygon=self.catalog.regions['lobby_area']['polygon'];center=np.mean(polygon,axis=0)
         radius=max(np.linalg.norm(np.asarray(v)-center) for v in polygon)+2
         sign=-1 if direction=='clockwise' else 1
         return [[float(center[0]+radius*math.cos(sign*2*math.pi*i/8)),

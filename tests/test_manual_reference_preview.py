@@ -24,6 +24,7 @@ class ManualReferenceTests(unittest.TestCase):
         inbox=object.__new__(CommandInbox)
         inbox.session=SimpleNamespace(live=live,execute=execute)
         inbox.lock=threading.Lock();inbox.manual_preview_owner=None
+        inbox.agent_owner=None
         inbox.safety=SimpleNamespace(command=lambda *_:self.fail('preview entered safety command'))
         return inbox
 
@@ -83,6 +84,12 @@ class ManualReferenceTests(unittest.TestCase):
             finally:inbox.close()
 
     def test_control_tick_plans_preview_but_keeps_controller_idle(self):
+        self._check_control_preview()
+
+    def test_recovered_map_replans_even_if_the_clear_was_between_control_ticks(self):
+        self._check_control_preview(recovered=True)
+
+    def _check_control_preview(self, *, recovered=False):
         from runtime.control import ControlLoop
         loop=object.__new__(ControlLoop);loop.done=threading.Event();loop.error=None
         loop.pose_socket=SimpleNamespace(recv=MagicMock(side_effect=BlockingIOError))
@@ -90,16 +97,22 @@ class ManualReferenceTests(unittest.TestCase):
         loop.rows=[dict(stamp_s=10.,session_id='s',generation=0,frame_id='odom')]
         scene=SimpleNamespace(record=dict(prior=dict(valid=True,map_id='map'),as_of=10.))
         loop.scene=None;loop.pending=(scene,object());loop.lock=threading.Lock();loop.offered_mono=None
+        loop.environment_epoch=int(recovered);loop.environment_fault=None
         loop.session=SimpleNamespace(epoch=0,pause_requested=False,paused=False,publish_observation=lambda *a,**k:None)
         loop.session_epoch=0;loop.follow=None;loop.route_replay=None;loop.request=None;loop.manual_preview_key=None
+        loop.scene_settings={'max_association_age_s':.5}
         loop.settings=dict(control_period_s=.1);loop.metrics=SimpleNamespace(trace_path=None,add=lambda *a:None,span=lambda *_:nullcontext())
-        loop.reference=SimpleNamespace(invalidate=MagicMock(),update=MagicMock(),tick=MagicMock(return_value=dict(
+        loop.reference=SimpleNamespace(observe=MagicMock(),invalidate=MagicMock(),update=MagicMock(),tick=MagicMock(return_value=dict(
             status='reference_ready',reason=None,waiting={},start_evidence=None)),current=dict(as_of=9.9),
             reference=object(),reason=None,blocked=False,note_control=MagicMock(),drain_events=lambda:[])
         packet=dict(request=None,stamp_s=10.,clock_domain='runtime_live',feedback={},sequence_id=1,reason='no_active_goal')
         controller=SimpleNamespace(result=None,clear=lambda:None)
         loop.controller=SimpleNamespace(controller=controller,geometry=object(),motion={'state_max_age_s':.1},step=MagicMock(return_value=packet))
         preview=dict(owner='call',request=goal(),expires_mono=time.monotonic()+3.)
+        if recovered:loop.manual_preview_key=(preview['owner'],preview['request']['request_id'],0)
+        order=MagicMock()
+        order.attach_mock(loop.reference.invalidate,'invalidate')
+        order.attach_mock(loop.reference.update,'update')
         state=SimpleNamespace(goal_evidence=object(),publish_control=MagicMock())
         loop.commands=SimpleNamespace(drain=lambda:[],manual_preview_snapshot=lambda:preview,agent_state=state)
         loop.safety=SimpleNamespace(packet=MagicMock());loop.record=lambda *a:None
@@ -112,6 +125,9 @@ class ManualReferenceTests(unittest.TestCase):
         with patch.dict('sys.modules',{'torch':fake_torch}),patch('navigation.control.shadow.observed_feedback',return_value=idle):
             loop._work()
         self.assertIsNone(loop.error)
+        if recovered:
+            self.assertEqual(order.mock_calls[0].args,('environment_voxel_budget_exceeded',))
+            self.assertEqual(order.mock_calls[1][0],'update')
         self.assertEqual(loop.reference.update.call_args.args[0],preview['request'])
         self.assertIsNone(loop.controller.step.call_args.args[0])
         self.assertIsNone(loop.controller.step.call_args.args[3])

@@ -17,8 +17,7 @@ from decision.agent.core.session import AgentSession
 from decision.agent.core.store import Store
 from decision.agent.tools.places import Catalog
 from perception.environment.layers import GridSnapshot
-from tests.test_agent import point_goal
-from decision.agent.core.tasks import centroid
+from tests.test_agent import navigate, point_goal
 from decision.agent.workflows.manual import RouteDisplay,display_final_yaw,display_points
 from runtime.control import agent_mapped_pose
 
@@ -135,6 +134,139 @@ class ManualTests(unittest.TestCase):
         for kind in ('goal','cancel','hold','arm'):
             with self.assertRaisesRegex(ValueError,'read-only'):
                 client.exchange(kind,{})
+
+    def _association_navigation(self, store):
+        self.nav.automatic_arrival=True
+        self.binding.update(map_revision=4,association_session='roll-s',association_generation=0)
+        grid=GridSnapshot(dict(frame_id='sim_odom',shape=[100,140],resolution=.1,origin_xy=[0.,0.],snapshot_id='unit-static'),
+                          dict(occupancy=np.zeros((100,140),np.int8)))
+        self.nav.spatial_inputs=lambda:dict(global_grid=grid,scene=None,stamp_s=self.control['stamp_s'],
+            clock_domain='runtime_live',pose=self.nav.snapshot()['origin_pose'],geometry=self.nav.geometry)
+        session=AgentSession('到电梯',self.catalog,self.nav,store)
+        result=navigate(session,'elevator')
+        self.assertEqual(result['status'],'accepted',result)
+        return session,result['handle'],session.catalog.places['elevator']['pose']
+
+    def _association_feedback(self, pose, stamp, binding, *, measured=None, velocity=(0.,0.)):
+        self.update(pose,stamp,velocity)
+        self.control['map_binding']=binding
+        self.obs['map_binding']=binding
+        self.control['agent_mapped_pose']=(None if binding is None else dict(
+            pose=list(pose),stamp_s=stamp,map_binding=binding,clock_domain='runtime_live',
+            local_identity=['s',0,'odom'],association_stamp_s=stamp if measured is None else measured))
+
+    def test_same_map_recovers_arrived_target_and_requires_new_stop_and_completion_evidence(self):
+        with tempfile.TemporaryDirectory() as root, closing(Store(Path(root)/'session.sqlite')) as store:
+            session,handle,target=self._association_navigation(store)
+            for stamp in (10.1,10.4,10.7):
+                self._association_feedback(target,stamp,self.binding);session.tick()
+            self.assertEqual(session.skill.record['status'],'succeeded')
+            previous=session.context()
+            self._association_feedback(target,10.8,None);session.tick()
+            self.assertTrue(session.skill.record['association_waiting'])
+            self.assertEqual(session.skill.record['handle'],handle)
+            self.assertFalse(session.skill.record['context_lost'])
+            self.assertFalse(session.valid_context(previous))
+            self.assertEqual(session.call('check_goal',goal_id='elevator')['reason'],'waiting_for_map_association')
+            new_binding=dict(self.binding,association_generation=1)
+            for stamp, measured, velocity in ((10.9,10.7,(0.,0.)),(11.0,11.0,(.2,0.))):
+                self._association_feedback(target,stamp,new_binding,measured=measured,velocity=velocity)
+                session.tick()
+                self.assertTrue(session.skill.record['association_waiting'])
+            self._association_feedback(target,11.2,new_binding);session.tick()
+            self.assertFalse(session.skill.record['association_waiting'])
+            self.assertEqual(session.skill.record['handle'],handle)
+            self.assertFalse(self.nav.snapshot()['manual_arrival_observation'])
+            for stamp in (11.3,11.6,11.9):
+                self._association_feedback(target,stamp,new_binding);session.tick()
+            self.assertEqual(session.skill.record['status'],'succeeded')
+            self.assertEqual(session.skill.record['completed'][-1]['context']['map_binding'],new_binding)
+            self.assertEqual(session.call('check_goal',goal_id='elevator')['status'],'completed')
+            self.assertFalse(session.valid_context(previous))
+
+    def test_changed_map_revision_or_local_session_is_not_a_same_map_recovery(self):
+        for change in ('map','revision','local_generation'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as root, closing(Store(Path(root)/'session.sqlite')) as store:
+                self.setUp()
+                session,_,target=self._association_navigation(store)
+                self._association_feedback(target,10.5,None);session.tick()
+                self.assertTrue(session.skill.record['association_waiting'])
+                new_binding=dict(self.binding,association_generation=1)
+                if change=='map':new_binding['map_id']='other'
+                if change=='revision':new_binding['map_revision']+=1
+                self._association_feedback(target,10.7,new_binding)
+                if change=='local_generation':self.control['localization']['generation']=1
+                session.tick()
+                self.assertFalse(session.skill.record['association_waiting'])
+                self.assertTrue(session.skill.record['context_lost'])
+                self.assertNotEqual(session.task_goals.current('elevator')['status'],'completed')
+
+    def test_operator_cancel_remains_available_during_association_wait(self):
+        with tempfile.TemporaryDirectory() as root, closing(Store(Path(root)/'session.sqlite')) as store:
+            session,_,target=self._association_navigation(store)
+            self._association_feedback(target,10.5,None);session.tick()
+            self.assertTrue(session.skill.record['association_waiting'])
+            session.event('cancel')
+            session.tick()
+            self.assertEqual(session.state['status'],'cancelled')
+            self.assertIsNone(session.skill.record['handle'])
+
+    def test_association_recovery_does_not_consume_user_continue(self):
+        with tempfile.TemporaryDirectory() as root, closing(Store(Path(root)/'session.sqlite')) as store:
+            session,handle,target=self._association_navigation(store)
+            self.nav.release_target(handle)
+            session.skill.record.update(status='succeeded',handle=None)
+            session._wait_for_continue('等我通知')
+            self._association_feedback(target,10.5,None);session.tick()
+            self.assertTrue(session.skill.record['association_waiting'])
+            self._association_feedback(target,10.7,dict(self.binding,association_generation=1));session.tick()
+            self.assertFalse(session.skill.record['association_waiting'])
+            self.assertEqual(session.state['status'],'waiting_user')
+            self.assertEqual(session.state['pending_continue']['instruction_quote'],'等我通知')
+            self.assertIsNone(session.skill.record['handle'])
+
+    def test_association_wait_does_not_hide_a_runtime_disconnect(self):
+        with tempfile.TemporaryDirectory() as root, closing(Store(Path(root)/'session.sqlite')) as store:
+            session,_,target=self._association_navigation(store)
+            self._association_feedback(target,10.5,None);session.tick()
+            self.assertTrue(session.skill.record['association_waiting'])
+            self.client.snapshot=MagicMock(side_effect=EOFError)
+            session.tick()
+            self.assertFalse(session.skill.record['association_waiting'])
+            self.assertFalse(session.skill.record['connected'])
+            self.assertEqual(session.skill.record['status'],'stopping')
+
+    def test_environment_reset_preserves_task_but_retires_arrival_and_model_evidence(self):
+        self.nav.automatic_arrival=True
+        with tempfile.TemporaryDirectory() as root, closing(Store(Path(root)/'session.sqlite')) as store:
+            session=AgentSession('到电梯',self.catalog,self.nav,store)
+            session.call('record_task',goals=[point_goal('elevator')])
+            target=self.catalog.places['elevator']['pose']
+            handle=dict(task_id='task',call_id='call',goal_revision=1)
+            self.nav.start(dict(place_id='elevator',pose=target),handle)
+            session.skill.record.update(handle=handle,status='running')
+            for stamp in (10.1,10.4,10.7):
+                self.update(target,stamp);self.nav.tick()
+            self.assertTrue(self.nav.snapshot()['manual_arrival_observation'])
+            old_context=session.context()
+            old_status=session.state['status']
+            self.control.update(environment_epoch=1,environment_fault='environment_voxel_budget_exceeded',
+                                map_binding=None,agent_mapped_pose=None)
+            self.state['observation']=None
+            self.update(target,10.8);session.tick()
+            self.assertFalse(session.skill.record['context_lost'])
+            self.assertEqual(session.skill.record['handle'],handle)
+            self.assertEqual(session.state['status'],old_status)
+            self.assertFalse(session.valid_context(old_context))
+            self.assertFalse(self.nav.snapshot()['manual_arrival_observation'])
+            self.control.update(environment_fault=None,map_binding=self.binding)
+            self.control.pop('agent_mapped_pose')
+            self.state['observation']=self.obs
+            self.update(target,10.9);session.tick()
+            self.assertFalse(self.nav.snapshot()['manual_arrival_observation'])
+            self.assertFalse(session.skill.record['context_lost'])
+            self.assertEqual(session.skill.record['handle'],handle)
+            self.assertFalse(session.valid_context(old_context))
 
     def test_follow_waits_for_matching_status_and_current_measured_stop(self):
         self.client.exchange = MagicMock(return_value=dict(accepted=True))
@@ -319,9 +451,10 @@ class ManualTests(unittest.TestCase):
             try:
                 session=AgentSession('到电梯',self.catalog,self.nav,store)
                 session.call('record_task',goals=[point_goal('elevator')]);session.call('query_map')
-                pose=self.catalog.places['elevator']['pose']
-                result=session.call('navigate',goal_id='elevator',pose=pose,
-                    view_id=session.spatial_view.record['view_id'],orientation_source='autonomous')
+                xy=self.catalog.places['elevator']['pose'][:2]
+                pose=[*xy,1.5]
+                result=session.call('navigate',goal_id='elevator',pose=xy,
+                    view_id=session.spatial_view.record['view_id'])
                 self.assertEqual(result['status'],'accepted')
                 self.update(pose,10.2);session.tick()
                 self.update(pose,10.5);session.tick()
@@ -484,6 +617,7 @@ class ManualTests(unittest.TestCase):
         single=[1.,2.,math.pi/2]
         route=dict(waypoints=[[1.,2.],[3.,4.]],final_yaw=-math.pi/2)
         self.assertEqual(display_final_yaw(single,None),math.pi/2)
+        self.assertIsNone(display_final_yaw(single[:2],None))
         self.assertEqual(display_final_yaw(single,route),-math.pi/2)
         self.assertIsNone(display_final_yaw(single,dict(route,final_yaw=None)))
         display=RouteDisplay('map');display.process=MagicMock()
@@ -676,7 +810,7 @@ class ManualTests(unittest.TestCase):
                           dict(occupancy=np.zeros((200,200),np.int8)))
         self.nav.spatial_inputs=lambda:dict(global_grid=grid,scene=None,stamp_s=self.control['stamp_s'],
             clock_domain='runtime_live',pose=list(self.obs['map_base_pose']),geometry=self.nav.geometry)
-        polygon=self.catalog.regions['lobby_area']['polygon'];center=centroid(polygon)
+        polygon=self.catalog.regions['lobby_area']['polygon'];center=np.mean(polygon,axis=0)
         radius=max(np.linalg.norm(np.asarray(v)-center) for v in polygon)+1
         points=[[float(center[0]+radius*math.cos(-2*math.pi*i/8)),
                  float(center[1]+radius*math.sin(-2*math.pi*i/8))] for i in range(9)]
@@ -712,7 +846,7 @@ class ManualTests(unittest.TestCase):
                           dict(occupancy=np.zeros((200,200),np.int8)))
         self.nav.spatial_inputs=lambda:dict(global_grid=grid,scene=None,stamp_s=self.control['stamp_s'],
             clock_domain='runtime_live',pose=list(self.obs['map_base_pose']),geometry=self.nav.geometry)
-        polygon=self.catalog.regions['lobby_area']['polygon'];center=centroid(polygon)
+        polygon=self.catalog.regions['lobby_area']['polygon'];center=np.mean(polygon,axis=0)
         radius=max(np.linalg.norm(np.asarray(v)-center) for v in polygon)+1
         points=[[float(center[0]+radius*math.cos(-2*math.pi*i/8)),
                  float(center[1]+radius*math.sin(-2*math.pi*i/8))] for i in range(9)]
@@ -802,7 +936,7 @@ class ManualTests(unittest.TestCase):
                           dict(occupancy=np.zeros((200,200),np.int8)))
         self.nav.spatial_inputs=lambda:dict(global_grid=grid,scene=None,stamp_s=self.control['stamp_s'],
             clock_domain='runtime_live',pose=list(self.obs['map_base_pose']),geometry=self.nav.geometry)
-        polygon=self.catalog.regions['lobby_area']['polygon'];center=centroid(polygon)
+        polygon=self.catalog.regions['lobby_area']['polygon'];center=np.mean(polygon,axis=0)
         radius=max(np.linalg.norm(np.asarray(v)-center) for v in polygon)+1
         points=[[float(center[0]+radius*math.cos(-2*math.pi*i/8)),
                  float(center[1]+radius*math.sin(-2*math.pi*i/8))] for i in range(9)]

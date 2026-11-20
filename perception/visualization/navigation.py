@@ -16,12 +16,12 @@ from .surface import DisplaySurface,sample_ground,sample_poses,complete_display_
 IDENTITY=('session_id','generation','frame_id')
 
 
-def display_packet(result,reference,request,scene,row,control,reason,*,now,clock_domain,clock_rate,clock_mono=None):
+def display_packet(result,reference,request,scene,row,control,reason,*,now,clock_domain,clock_rate,clock_mono=None,goal_hint=None):
     """Copy only small metadata; finalized results remain immutable shared objects."""
     clock_mono=time.monotonic() if clock_mono is None else clock_mono
     record=None if scene is None else copy.deepcopy({k:scene.record[k] for k in (
         *IDENTITY,'as_of','clock_domain','localization','geometry','prior','input_fingerprint')})
-    return dict(result=result,reference=reference,request=copy.deepcopy(request),scene=record,
+    return dict(result=result,reference=reference,request=copy.deepcopy(request),goal_hint=copy.deepcopy(goal_hint),scene=record,
         row=copy.deepcopy(row),proposal=copy.deepcopy(control.get('proposal')),reason=control.get('reason'),
         reference_reason=reason,now_s=now,clock_domain=clock_domain,clock_rate=clock_rate,mono=clock_mono)
 
@@ -74,7 +74,10 @@ class NavigationView:
             try:
                 # Display packets carry source metadata, not a collision map.
                 common=scene_status(scene,now,packet['clock_domain'],self.planning,check_navigation=False) or request_status(request,scene,now,packet['clock_domain'])
-                if common is None:out['goal']=local_goal(request,scene,self.geometry,self.asset,self.planning)
+                if common is None:
+                    hint=packet.get('goal_hint')
+                    goal=hint if hint is not None and not request_status(hint,scene,now,packet['clock_domain']) else request
+                    out['goal']=local_goal(goal,scene,self.geometry,self.asset,self.planning)
             except ValueError as error:common=str(error)
             except (KeyError,TypeError):common='display_context_invalid'
         reference=packet['reference']

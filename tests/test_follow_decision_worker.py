@@ -104,6 +104,26 @@ class FollowDecisionWorkerTests(unittest.TestCase):
             self.assertIsNone(worker.poll())
         finally:worker.close()
 
+    def test_yolo_warms_before_a_three_frame_window_and_reuses_worker(self):
+        warmed=threading.Event()
+        created=[]
+        detector=object()
+        def factory():
+            created.append(detector)
+            warmed.set()
+            return detector
+        worker=FollowDecisionWorker(search,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),
+            image_preparer_factory=factory,publish_agent_frame=lambda *_:None,
+            inference=lambda _:self.fail('warmup must not call the model'))
+        try:
+            row,arrays,association,scene=observation(10.)
+            self.assertTrue(worker.submit(row,arrays,scene=scene,association=None,
+                image_metadata=dict(rgb_stamp_ns=association['image_input']['rgb_stamp_ns'])))
+            self.assertTrue(warmed.wait(3.))
+            self.assertEqual(created,[detector])
+            self.assertIsNone(worker.poll())
+        finally:worker.close()
+
     def test_recorded_request_matches_input_and_result(self):
         with tempfile.TemporaryDirectory() as directory:
             worker=FollowDecisionWorker(search,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),

@@ -22,7 +22,10 @@ def normalize_registration(goal):
     This is a field mapping, not a repair of malformed model arguments.
     """
     if 'stage' not in goal:
-        return copy.deepcopy(goal)
+        result = copy.deepcopy(goal)
+        if result.get('kind') == 'region' and result.get('position_rule') == 'region_centroid':
+            del result['position_rule']
+        return result
     REGISTRATION_GOAL_VALIDATOR.validate(goal)
     stage=goal['stage']
     navigation=stage in ('point','region','reference','route','sequence')
@@ -49,7 +52,7 @@ def normalize_registration(goal):
     for key in ('floor_id','to_floor','monitor','execution_notes'):
         if key in goal:result[key]=copy.deepcopy(goal[key])
     conditions=goal.get('conditions',{})
-    for key in ('required_yaw','facing','position_rule','max_distance_m','robot_inside_region_id','wait_after'):
+    for key in ('required_yaw','facing','max_distance_m','robot_inside_region_id','wait_after'):
         if key in conditions:result[key]=copy.deepcopy(conditions[key])
     for item in conditions.get('visual',[]):
         key='semantic_conditions' if item['priority']=='required' else 'visual_preferences'
@@ -77,14 +80,9 @@ def angle_error(a, b):
     return abs(math.atan2(math.sin(a-b), math.cos(a-b)))
 
 
-def centroid(polygon):
-    vertices = np.asarray(polygon,dtype=float)
-    following = np.roll(vertices,-1,axis=0)
-    cross = vertices[:,0]*following[:,1]-following[:,0]*vertices[:,1]
-    area6 = 3*cross.sum()
-    if abs(area6) < 1e-10:
-        raise ValueError('Region has no area centroid')
-    return ((vertices+following)*cross[:,None]).sum(axis=0)/area6
+def goal_requires_heading(requirement):
+    return (requirement.get('stage_type')=='seating' or 'required_yaw' in requirement or
+            any(requirement.get(key) for key in ('facing','semantic_conditions','visual_preferences')))
 
 
 def distance_to_region(point, polygon):
@@ -191,7 +189,7 @@ class TaskGoals:
             raise ValueError('Non-navigation stage types require kind=skill')
         if goal['kind'] == 'skill':
             if (target or goal.get('stage_type') not in ('follow', 'observation', 'seating','elevator') or
-                    any(key in goal for key in ('position', 'required_yaw', 'facing', 'position_rule',
+                    any(key in goal for key in ('position', 'required_yaw', 'facing',
                                                 'max_distance_m', 'checkpoints'))):
                 raise ValueError('A skill stage requires its stage_type and an empty target, without navigation geometry')
             if goal.get('stage_type')=='elevator':
@@ -205,8 +203,6 @@ class TaskGoals:
         elif goal['kind'] == 'region':
             if target not in catalog.regions or 'position' in goal:
                 raise ValueError('Region requirements use an annotated region, not a selected position')
-            if goal.get('position_rule') == 'region_centroid' and not inside(centroid(catalog.regions[target]['polygon']),catalog.regions[target]['polygon']):
-                raise ValueError('Region area centroid lies outside the region; clarify the intended center')
         elif goal['kind'] == 'route':
             if 'circuit' in goal and target not in catalog.regions:
                 raise ValueError('A circuit needs the annotated region it surrounds')
@@ -236,8 +232,8 @@ class TaskGoals:
                 raise ValueError('Explicit position contradicts the named point')
         elif 'position' not in goal:
             raise ValueError('An unnamed point requires a user-specified position')
-        if goal.get('position_rule') and goal['kind'] != 'region':
-            raise ValueError('Position rule applies only to regions')
+        if 'position_rule' in goal:
+            raise ValueError('The legacy position rule only applies to recorded region goals')
         if goal.get('checkpoints') and goal['kind'] != 'sequence':
             raise ValueError('Checkpoints apply only to sequences')
         if 'max_distance_m' in goal and goal['kind'] != 'reference':
@@ -269,8 +265,8 @@ class TaskGoals:
         return current
 
     def geometry(self, requirement, pose):
-        if np.shape(pose) != (3,) or not np.isfinite(pose).all():
-            raise ValueError('Expected a finite base_link XY/yaw pose')
+        if np.shape(pose) not in ((2,),(3,)) or not np.isfinite(pose).all():
+            raise ValueError('Expected a finite base_link XY or XY/yaw goal')
         if requirement['kind'] == 'point':
             point = requirement.get('position')
             if point is None:
@@ -278,9 +274,6 @@ class TaskGoals:
             position_met = float(np.linalg.norm(np.asarray(pose[:2])-point)) <= self.settings['goal_position_tolerance_m']
         elif requirement['kind']=='region':
             position_met = inside(pose[:2], self.catalog.regions[requirement['target_id']]['polygon'])
-            if requirement.get('position_rule') == 'region_centroid':
-                position_met = position_met and np.linalg.norm(np.asarray(pose[:2])-centroid(
-                    self.catalog.regions[requirement['target_id']]['polygon'])) <= self.settings['goal_position_tolerance_m']
         elif requirement['kind']=='route':
             position_met = True
         elif requirement['kind']=='sequence':
@@ -294,7 +287,8 @@ class TaskGoals:
                 distance = (distance_to_region(pose[:2],self.catalog.regions[target]['polygon']) if target in self.catalog.regions else
                             float(np.linalg.norm(np.asarray(pose[:2])-self.catalog.places[target]['pose'][:2])))
                 position_met = distance <= requirement['max_distance_m']
-        yaw_met = 'required_yaw' not in requirement or angle_error(pose[2], requirement['required_yaw']) <= self.settings['goal_yaw_tolerance_rad']
+        yaw_met = ('required_yaw' not in requirement or
+                   (len(pose)==3 and angle_error(pose[2],requirement['required_yaw'])<=self.settings['goal_yaw_tolerance_rad']))
         # A named object or area can be behind a wall. Its center alone does
         # not define the direction the user means at this particular pose.
         facing_met = None if requirement.get('facing') else True
@@ -315,7 +309,7 @@ class TaskGoals:
         if any(value is False for value in checks.values()):
             return dict(status='refused', reason='selected_pose_violates_task_requirement', checks=checks)
         allowed = self.orientation_sources(current['requirement'])
-        if orientation_source not in allowed:
+        if len(pose)==3 and orientation_source not in allowed:
             return dict(status='refused',reason='orientation_source_disagrees_with_registered_requirement',
                         allowed_orientation_sources=allowed)
         selected = dict(goal_id=goal_id, task_goal_binding=current['binding'],

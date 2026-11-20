@@ -32,6 +32,8 @@ class ControlT2Tests(unittest.TestCase):
         ref,_,crop=reference(obs,0,'red jacket',task_id='mission',revision=1,goal_id='g')
         self.worker.begin(self.handle,'red jacket',reference=ref,crop=crop)
         control=object.__new__(ControlLoop);self.control=control
+        from runtime.metrics import Metrics
+        control.metrics=Metrics()
         control.lock=threading.Lock();control.follow=FollowRunner(load_config(),self.geometry)
         control.follow.handle=copy.deepcopy(self.handle)
         control.follow_pending=dict(handle=self.handle,intent=dict(target_description='red jacket'))
@@ -72,10 +74,11 @@ class ControlT2Tests(unittest.TestCase):
         self.feed(0,12);self.drain(11.1)
         self.assertEqual(self.follow_states[-1]['status'],'running')
         self.assertEqual(self.follow_states[-1]['target_identity'],['tracker_session',7,'a'])
-        self.assertEqual(self.goals[-1]['request_id'],'call')
+        self.assertEqual(self.control.request['request_id'],'call')
+        self.assertFalse(self.goals)
 
         self.assertTrue(self.worker.snapshot()['reference_fixed'])
-        first_revision=self.goals[-1]['goal_revision']
+        first_revision=self.control.request['goal_revision']
         self.choice='A'
         self.feed(12,34);self.drain(13.3)
         self.assertIn(self.follow_states[-1]['status'],('running','searching'))
@@ -88,8 +91,8 @@ class ControlT2Tests(unittest.TestCase):
         if self.follow_states[-1]['status']!='running':
             self.feed(105,118);self.drain(21.7)
         self.assertEqual(self.follow_states[-1]['status'],'running')
-        self.assertGreater(self.goals[-1]['goal_revision'],first_revision)
-        self.assertEqual(self.goals[-1]['request_id'],'call')
+        self.assertGreater(self.control.request['goal_revision'],first_revision)
+        self.assertEqual(self.control.request['request_id'],'call')
 
     def test_raw_rgb_selection_can_start_bound_3d_track(self):
         self.worker.raw_rgb=True
@@ -122,6 +125,26 @@ class ControlT2Tests(unittest.TestCase):
         self.control.scene=assemble_scene(changed,clock_domain='synthetic',settings=env_config()['scene'])
         self.assertIsNone(self.control._follow_search_request(self.handle,choice,'source',10.,12.))
         self.assertIsNone(self.control._follow_search_request(self.handle,choice,'source',13.,12.))
+
+    def test_pending_rotation_waits_for_stationary_evidence_then_uses_current_position(self):
+        from unittest.mock import patch
+        from tests.navigation_fixtures import asset,bundle
+        self.control.asset=asset();self.control.scene=bundle()
+        self.control.rows=[]
+        self.control.controller.geometry=self.geometry
+        self.control.controller.motion={}
+        self.control.follow_pending=None
+        self.control.follow_search_choice=(dict(kind='rotate',pose=[1.5,2.,.5]),'source',10.4)
+        with patch('navigation.control.shadow.observed_feedback',return_value={'status':'valid'}):
+            self.control._update_follow(10.)
+        self.assertIsNotNone(self.control.follow_search_choice)
+        self.assertFalse(self.goals)
+        self.assertEqual(self.follow_states[-1]['reason'],'follow_search_waiting_for_stationary')
+        with patch('navigation.control.shadow.observed_feedback',
+                   return_value={'status':'valid','stationary_evidence':{}}):
+            self.control._update_follow(10.)
+        self.assertIsNone(self.control.follow_search_choice)
+        self.assertEqual(self.goals[-1]['goal'],[2.,2.,.5])
 
     def test_waiting_owner_loss_stops_worker(self):
         self.control.commands.follow_owner_valid=lambda _:False

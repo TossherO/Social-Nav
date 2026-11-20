@@ -42,8 +42,8 @@ def frame(entry, arrays, *, include_predicted=False, raw_rgb=False):
 
 
 def render_window(entries, history, read_arrays, *, extent, view_binding, image_preparation=None,
-                  include_predicted=False, raw_rgb=False):
-    """Render a leased window in memory; returned PNG bytes own their storage."""
+                  include_predicted=False, raw_rgb=False, in_memory=False):
+    """Return owned RGB canvases for online requests or PNG bytes for freezing."""
     rows=[];assets={}
     for entry in entries:
         arrays=read_arrays(entry['buffer'])
@@ -57,19 +57,26 @@ def render_window(entries, history, read_arrays, *, extent, view_binding, image_
     images=[];payloads=[]
     by_id={r['id']:r for r in rows}
     for index,ident in enumerate(window['frames']):
-        arrays=assets[ident];rgb=io.BytesIO();Image.fromarray(arrays['rgb']).save(rgb,format='PNG')
-        image=render_observation(by_id[ident],rgb.getvalue(),window['mapping'],window['fields']['dt'][index],extent,
+        arrays=assets[ident];rgb=Image.fromarray(arrays['rgb']).convert('RGB')
+        image=render_observation(by_id[ident],rgb,window['mapping'],window['fields']['dt'][index],extent,
             trajectories[ident],bev_background=pointcloud_background(arrays['raw'],extent),
             distinguish_predictions=include_predicted)
         if raw_rgb:
             from .scene_inputs import BEV_RECT
-            enc=io.BytesIO();image.crop(BEV_RECT).save(enc,format='PNG')
-            output=((f'frame_{index}_rgb.png',rgb.getvalue()),(f'frame_{index}_bev.png',enc.getvalue()))
+            output=((f'frame_{index}_rgb',rgb),(f'frame_{index}_bev',image.crop(BEV_RECT)))
         else:
-            encoded=io.BytesIO();image.save(encoded,format='PNG')
-            output=((f'frame_{index}.png',encoded.getvalue()),)
-        for name,payload in output:
-            payloads.append(payload);images.append(dict(path=name,sha256=hashlib.sha256(payload).hexdigest()))
+            output=((f'frame_{index}',image),)
+        for name,canvas in output:
+            if in_memory:
+                payloads.append(canvas)
+                images.append(dict(path=name,encoding='rgb_pixels',size=list(canvas.size),
+                                   sha256=hashlib.sha256(canvas.tobytes()).hexdigest()))
+            else:
+                encoded=io.BytesIO()
+                canvas.save(encoded,format='PNG')
+                payload=encoded.getvalue()
+                payloads.append(payload)
+                images.append(dict(path=name+'.png',sha256=hashlib.sha256(payload).hexdigest()))
     record=dict(kind='runtime_task_window',fields=window['fields'],mapping=window['mapping'],pid_to_track=identities,
         observation_id=current['observation_id'],stamp_s=current['stamp_s'],clock_domain=current['clock_domain'],
         localization_binding=current['localization_binding'],scene=copy.deepcopy(entries[-1].get('scene')),

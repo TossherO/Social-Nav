@@ -94,6 +94,8 @@ class ImageAssociator:
         self.scope, self.stamp = scope, stamp_s
         records = {p['key']:dict(status='unmatched',rgb_box=None,compensation=p.get('compensation','uncompensated'))
                    for p in people}
+        for person in people:
+            records[person['key']].update({key:person[key] for key in ('geometry_stamp_s','pose_age_s') if key in person})
         result = dict(status='complete',tracks=records,delta_s=delta_s,matches=0)
         reason = ('pose_unavailable' if health != 'valid' else 'no_rgb' if delta_s is None else 'no_camera' if camera is None
                   else 'time_skew' if not math.isfinite(delta_s) or not 0 <= delta_s <= c['max_time_delta_s'] else None)

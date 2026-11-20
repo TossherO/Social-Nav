@@ -300,7 +300,7 @@ def render_observation(frame, rgb, mapping, elapsed, extent, trajectory=None, *,
     if frame is None or rgb is None:
         draw.text((25, 30), 'MISSING OBSERVATION', fill='#a32323', font=font(24))
         return canvas
-    image = Image.open(io.BytesIO(rgb)).convert('RGB')
+    image = rgb if isinstance(rgb,Image.Image) else Image.open(io.BytesIO(rgb)).convert('RGB')
     _, ox, oy, w, h = rgb_geometry(image.size)
     canvas.paste(image.resize((w, h)), (ox, oy))
     draw_rgb_people(canvas,frame,mapping)

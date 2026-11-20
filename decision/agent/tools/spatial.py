@@ -412,14 +412,18 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
                     draw.line([pixel(camera_xy),pixel(target)],fill='#b427b5',width=max(1,round(ratio)))
             cx,cy = pixel(camera_xy)
             draw.ellipse((cx-3*ratio,cy-3*ratio,cx+3*ratio,cy+3*ratio),fill='#b427b5')
-        if geometry is not None:
+        if geometry is not None and len(candidate)==3:
             polygon=geometry.polygon(candidate)
             draw.line([pixel(p) for p in [*polygon,polygon[0]]],fill='#b427b5',width=max(2,round(3*ratio)))
         x,y=pixel(candidate)
-        direction=np.array([math.cos(candidate[2]),-math.sin(candidate[2])])
-        tip=np.array([x,y])+max(.6*scale,20*ratio)*direction
-        draw.line([(x,y),tuple(tip)],fill='#b427b5',width=max(2,round(3*ratio)))
-        label(candidate,'CANDIDATE','#8c168e',below=math.sin(candidate[2])>=0)
+        if len(candidate)==3:
+            direction=np.array([math.cos(candidate[2]),-math.sin(candidate[2])])
+            tip=np.array([x,y])+max(.6*scale,20*ratio)*direction
+            draw.line([(x,y),tuple(tip)],fill='#b427b5',width=max(2,round(3*ratio)))
+        else:
+            r=4*ratio
+            draw.ellipse((x-r,y-r,x+r,y+r),fill='#b427b5')
+        label(candidate,'CANDIDATE','#8c168e',below=len(candidate)==2 or math.sin(candidate[2])>=0)
     if local_view and route_preview is not None:
         points=route_preview['waypoints']
         diagnostics=route_preview['diagnostics']

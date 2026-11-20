@@ -62,13 +62,16 @@ class ObservationInbox:
         table[key]=value
         while len(table)>self.limit:table.popitem(last=False)
 
+    def clear(self):
+        self.grids.clear();self.records.clear();self.people.clear()
+        self.latest=self.cached=self.current_key=self.current_scene=None
+
     def push_grid(self,snapshot):
         m=snapshot.metadata
         if self.latest is not None:
             old=self.latest.metadata
             if ([m[k] for k in ('session_id','generation','frame_id')]!=[old[k] for k in ('session_id','generation','frame_id')] or m['stamp_s']<old['stamp_s']):
-                self.grids.clear();self.records.clear();self.cached=None
-                self.current_key=self.current_scene=None;self.people.clear()
+                self.clear()
         self.latest=snapshot;self._put(self.grids,m['snapshot_id'],snapshot)
 
     def push_record(self,record):
@@ -109,6 +112,7 @@ class ShadowSafety:
         self.lock=threading.RLock();self.inbox=ObservationInbox(self.settings['inbox_size']);self.rows=deque(maxlen=256)
         self.packet=None;self.packet_received=self.grid_received=None;self.active_goal=None;self.cancelled={}
         self.manual=False;self.emergency=False;self.sequence=0;self.last_packet=None;self.barrier=None
+        self.scene_epoch=0;self.scene_fault=None
         self.wake=threading.Event()
         self.clock=ClockWatch(self.settings['clock_stall_s'])
         self.asset=asset
@@ -120,6 +124,14 @@ class ShadowSafety:
     def push_grid(self,snapshot,*,mono=None):
         with self.lock:
             self.inbox.push_grid(snapshot);self.grid_received=time.monotonic() if mono is None else mono
+            self.scene_fault=None
+
+    def invalidate_scene(self,reason):
+        with self.lock:
+            self.scene_epoch+=1;self.scene_fault=reason
+            self.inbox.clear()
+            self.packet=self.packet_received=self.grid_received=None
+            self.wake.set()
 
     def push_record(self,record):
         with self.lock:self.inbox.push_record(record)
@@ -213,6 +225,7 @@ class ShadowSafety:
             executable=False,task_completed=False,execution_feedback=False,timing_ms={})
         try:
             with self.lock:
+                out['scene_epoch']=self.scene_epoch
                 reason=self.clock.update(now,mono)
                 if reason=='clock_reversed':self.active_goal=None;self.packet=None;self.last_packet=None;self.rows.clear()
                 if reason:raise ValueError(reason)
@@ -220,6 +233,7 @@ class ShadowSafety:
                     reason=self.barrier;self.barrier=None;raise ValueError(reason)
                 if self.emergency:raise ValueError('emergency_stop')
                 if self.manual:raise ValueError('manual_override')
+                if self.scene_fault:raise ValueError(self.scene_fault)
                 if self.active_goal is None:raise ValueError('no_active_goal')
                 if self.packet is None or mono-self.packet_received>self.settings['packet_timeout_s']:raise ValueError('proposal_timeout')
                 packet=self.packet
@@ -266,6 +280,7 @@ class ShadowSafety:
                     motion_uncertainty_margin_m=gate.get('motion_uncertainty_margin_m'),motion_sweep=gate.get('motion_sweep'),
                     velocity_filter=gate.get('velocity_filter'),dynamic_geometry=gate.get('dynamic_geometry'))
                 with self.lock:
+                    if out['scene_epoch']!=self.scene_epoch:raise ValueError('scene_invalidated_during_gate')
                     if self.emergency:raise ValueError('emergency_stop')
                     if self.manual:raise ValueError('manual_override')
                     if self.active_goal is None or fingerprint(self.active_goal)!=fingerprint(request):raise ValueError('goal_changed_during_gate')

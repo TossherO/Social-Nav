@@ -28,6 +28,7 @@ OPERATION_EVENTS={'manual_goal_evidence_wait_started':'等待到达证据',
     'manual_reference_status':'参考路径预览','manual_reference_region_conflict':'绕行路径冲突','manual_route_progress':'路线进度',
     'api_input_rejected':'模型输入超过估算限制',
     'operator_command':'操作结果','subtask_skipped':'子任务已跳过','registered_task_imported':'复用历史登记','task_monitor_event':'任务复核触发','navigation_context_lost':'定位或地图变化',
+    'navigation_association_waiting':'等待同图重新关联','navigation_association_recovered':'同图关联已恢复',
     'task_connection_lost':'连接中断','model_failed':'模型错误','model_action_missing':'模型未提交执行动作',
     'model_protocol_rejected':'模型格式错误','conversation_trimmed':'上下文裁剪','route_repeated_refusal':'路线重复被拒绝',
     'navigation_repeated_refusal':'导航目标重复被拒绝',
@@ -196,10 +197,12 @@ class DetailDialog(QtWidgets.QDialog):
 
 
 class ManualWindow(QtWidgets.QMainWindow):
-    def __init__(self, socket='', catalog='', duration=1200, floor='', replay=False, auto_follow=False):
+    def __init__(self, socket='', catalog='', duration=1200, floor='', replay=False, auto_follow=False,
+                 auto_follow_single_person=False):
         super().__init__();self.setWindowTitle('Social-Nav · Agent 人工调试');self.resize(1380,900)
         self.replay=replay
         self.auto_follow=auto_follow
+        self.auto_follow_single_person=auto_follow_single_person
         self.process=QtCore.QProcess(self);self.process.setWorkingDirectory(str(ROOT))
         self.process.readyReadStandardOutput.connect(self.read_stdout)
         self.process.readyReadStandardError.connect(self.read_stderr)
@@ -489,6 +492,7 @@ class ManualWindow(QtWidgets.QMainWindow):
         if not self.replay and self.record_bag.isChecked():args.append('--record-bag')
         if self.replay:args.append('--require-bag')
         if self.replay and self.auto_follow:args.append('--auto-follow')
+        if self.replay and self.auto_follow_single_person:args.append('--auto-follow-single-person')
         self.process.start(sys.executable,args)
         self.settings_toggle.setChecked(False)
         self.notice.setText('正在启动 bag 影子 Agent；等待定位和会话初始化。' if self.replay else '正在启动人工 Agent；等待定位和会话初始化。')
@@ -775,7 +779,7 @@ class ManualWindow(QtWidgets.QMainWindow):
         self.target=value
         self.target_pixmap=None;self.target_image.clear();self.target_zoom.setEnabled(False)
         heading=('必须满足，容差 '+str(value.get('yaw_tolerance_degrees'))+'°' if value.get('yaw_required')
-                 else '仅供参考，任务未要求对齐')
+                 else '仅供参考' if len(value.get('target_map_xy_yaw') or ())==3 else '未指定')
         route=value.get('route_waypoints')
         route_text=(f'共 {len(route)} 个点，顺序见 RViz 和示意图' if route else '单目标')
         missing=value.get('rviz_missing_height_indices') or []
@@ -822,6 +826,8 @@ class ManualWindow(QtWidgets.QMainWindow):
                 task='模型只返回文字，任务尚未登记；请查看输出并答复或替换任务'
             elif s.get('reason')=='model_action_missing':
                 task='模型未提交执行动作（'+str(task)+'）'
+            elif s.get('reason')=='model_temporarily_unavailable':
+                task='模型服务暂时不可用，等待自动重试'
             elif s.get('status')=='waiting_user' and s.get('reason'):
                 task='等待用户继续（'+s['reason']+'）'
             preview=s.get('reference_preview') or {}
@@ -834,6 +840,8 @@ class ManualWindow(QtWidgets.QMainWindow):
                  '已生成' if preview.get('status')=='reference_ready' else
                  '未生成：'+str(preview.get('reason') or preview.get('status') or '等待目标'))
             if self.replay:ref='请查看 RViz 和运行记录'
+            if s.get('environment_fault'):ref='局部环境图体素超限，正在等待重建'
+            if s.get('association_waiting'):ref='等待同一地图重新关联，并取得新停稳证据'
             mode='bag 影子回放' if self.replay else '人工驾驶'
             self.set_status_text(f"{mode} ｜ 定位：{loc} ｜ 位姿：{pose} ｜ Agent：{task} ｜ "
                 f"静止估计：{stopped} ｜ 导航：{nav} ｜ 模型：{'请求中' if s.get('model_busy') else '空闲'}{route}"
@@ -901,6 +909,8 @@ class ManualWindow(QtWidgets.QMainWindow):
                     hint='上一次配准超时，未取得有效的目标楼层定位。'
                 elif hint=='destination_observation_exited':
                     hint='目标楼层观察进程已退出。'
+                elif hint=='model_temporarily_unavailable':
+                    hint='模型服务暂时不可用。将按监控周期使用新观测重试。'
                 summary=('乘梯任务：'+str(s.get('goal_description') or '')+
                     '\n阶段：'+states.get(s['elevator_status'],str(s['elevator_status']))+
                     '\n地图切换：'+str(handoff.get('status') or '尚未开始')+
@@ -1005,14 +1015,18 @@ def main():
     parser.add_argument('--replay',action='store_true',help='连接不执行运动的 bag 回放影子会话')
     parser.add_argument('--reuse-session',default='',help='预载已登记的历史任务')
     parser.add_argument('--auto-follow',action='store_true',help='定位就绪后自动启动历史任务的第一项跟随')
+    parser.add_argument('--auto-follow-single-person',action='store_true',help='使用当前唯一可靠关联行人跳过启动时的模型选人')
     args=parser.parse_args()
     if not 1<=args.duration<=86400:parser.error('duration 必须在 1 至 86400 秒之间')
     if args.session and not Path(args.session).is_file():parser.error('session 文件不存在')
     if args.auto_follow and (not args.replay or not args.reuse_session or not args.runtime_socket or not args.catalog):
         parser.error('--auto-follow 要求 --replay、--reuse-session、--runtime-socket 和 --catalog')
+    if args.auto_follow_single_person and not args.auto_follow:
+        parser.error('--auto-follow-single-person 要求 --auto-follow')
     app=QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
     if args.floor and (args.runtime_socket or args.catalog):parser.error('--floor 不能与 --runtime-socket 或 --catalog 同时使用')
-    window=ManualWindow(args.runtime_socket,args.catalog,args.duration,args.floor,replay=args.replay,auto_follow=args.auto_follow)
+    window=ManualWindow(args.runtime_socket,args.catalog,args.duration,args.floor,replay=args.replay,
+                        auto_follow=args.auto_follow,auto_follow_single_person=args.auto_follow_single_person)
     if args.reuse_session:
         try:window.load_reuse(args.reuse_session)
         except (ValueError,OSError) as error:parser.error(str(error))

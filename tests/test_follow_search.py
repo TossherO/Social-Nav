@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 
 from navigation.planning.footprint import VehicleGeometry
-from navigation.search import candidates,check_pose,bounds_status,follow_candidates
+from navigation.search import candidates,check_pose,bounds_status,current_search_pose,follow_candidates
 from perception.environment.context import fingerprint
 from tests.navigation_fixtures import asset,bundle
 
@@ -41,6 +41,18 @@ class FollowSearchGeometryTests(unittest.TestCase):
         self.assertNotIn('approach',[x['kind'] for x in result])
         with self.assertRaisesRegex(ValueError,'budget'):
             check_pose(self.inputs,[4.,2.,0.],now=10.,clock_domain='synthetic',anchor=[2.,2.])
+
+    def test_search_is_rebased_and_passed_approach_is_rejected(self):
+        approach=dict(kind='approach',pose=[2.8,2.,0.],last_observed_pose=[4.,2.,0.])
+        np.testing.assert_allclose(current_search_pose(approach,[2.4,2.,0.]),[3.2,2.,0.])
+        with self.assertRaisesRegex(ValueError,'search_approach_already_passed'):
+            current_search_pose(approach,[3.,2.,0.])
+        self.assertEqual(current_search_pose(dict(kind='rotate',pose=[2.,2.,.5]),[3.,2.,0.]),[3.,2.,.5])
+        behind=dict(self.last,position_xy_m=[1.,2.])
+        behind['binding']=fingerprint({k:v for k,v in behind.items() if k!='binding'})
+        options=candidates(self.inputs,behind,now=10.,clock_domain='synthetic',
+                           local_identity=['test',0,'odom'],anchor=[2.,2.])
+        self.assertNotIn('approach',[option['kind'] for option in options])
 
     def test_t2_always_gets_wait_and_map_bound_choices_when_available(self):
         unknown=follow_candidates(self.inputs['scene'],None,self.geometry,self.last)

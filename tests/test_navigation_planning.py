@@ -185,14 +185,38 @@ class PlanningTests(unittest.TestCase):
         np.testing.assert_allclose(compact_poses(original),original[[0,2,3,4]])
 
     @unittest.skipUnless(Path(load_config()['native_library']).is_file(), 'Native bridge absent')
+    def test_reference_already_avoiding_local_obstacle_needs_no_local_replan(self):
+        cells=np.zeros((60,60),np.int8);cells[18:23,35:38]=100
+        scene=bundle(cells)
+        req=request('mapped',goal=[5.2,2.])
+        result=self.query(req,scene=scene,asset=asset(),now=10.,clock_domain='synthetic')
+        self.assertEqual(result['reference_overlay']['current_occupied_added'],15)
+        self.assertEqual(result['local_check']['status'],'free')
+        self.assertTrue(result['current_path_valid'])
+        self.assertNotIn('local_replan',result)
+        self.assertEqual(swept_check(scene.geometry,self.geometry,result['path'],
+                                     self.config['safety_margin_m'],10000)['status'],'free')
+
+    @unittest.skipUnless(Path(load_config()['native_library']).is_file(), 'Native bridge absent')
     def test_local_replanning_keeps_global_goal_and_refuses_an_unknown_barrier(self):
+        def tilted_scene(cells):
+            # Rotate about the start so only the global occupancy overlay is gated.
+            snapshot=bundle(cells).geometry
+            cos,sin=np.cos(.2),np.sin(.2)
+            snapshot.metadata['association']['map_from_local']=[
+                [1,0,0,0],[0,cos,-sin,2*(1-cos)],[0,sin,cos,-2*sin],[0,0,0,1]]
+            return assemble_scene(snapshot,clock_domain='synthetic',settings=environment_config()['scene'])
+
         cells=np.zeros((60,60),np.int8);cells[18:23,35:38]=100
         self.planner.config['local_replanning']['lookahead_m']=4.
         req=request('mapped',goal=[5.2,2.])
-        scene=bundle(cells)
+        scene=tilted_scene(cells)
         result=self.query(req,scene=scene,asset=asset(),now=10.,clock_domain='synthetic')
         self.assertEqual(result['status'],'path_found',result)
+        self.assertEqual(result['reference_overlay']['reason'],'map_local_tilt_exceeds_planar_limit')
         self.assertEqual(result['local_check']['status'],'occupied')
+        self.assertEqual(swept_check(scene.geometry,self.geometry,result['path'],
+                                     self.config['safety_margin_m'],10000)['status'],'occupied')
         self.assertEqual(result['local_replan']['status'],'path_found',result)
         self.assertEqual(len(result['local_replan']['request']['goal']),2)
         self.assertEqual(result['request']['goal'],req['goal'])
@@ -205,11 +229,13 @@ class PlanningTests(unittest.TestCase):
                                                now=10.,clock_domain='synthetic')
         self.assertEqual(len(hard['local_replan']['request']['goal']),3)
         self.assertAlmostEqual(hard['local_replan']['request']['goal'][2],0.)
-        cells[:,30]=-1
-        scene=bundle(cells)
+        cells=np.zeros_like(cells);cells[:,30]=-1
+        scene=tilted_scene(cells)
         blocked=self.query(req,scene=scene,asset=asset(),now=10.,clock_domain='synthetic')
-        self.assertNotEqual(blocked['local_replan']['status'],'path_found')
+        self.assertEqual(blocked['local_check']['status'],'unknown')
+        self.assertEqual(blocked['local_replan']['status'],'no_path')
         self.assertEqual(blocked['current_local_path']['source'],'static_reference_prefix')
+        self.assertFalse(blocked['current_path_valid'])
 
     @unittest.skipUnless(Path(load_config()['native_library']).is_file(), 'Native bridge absent')
     def test_full_footprint_search_recovers_narrow_routes_without_clearing_unknown(self):

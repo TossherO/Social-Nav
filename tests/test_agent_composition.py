@@ -105,6 +105,21 @@ class CompositionTests(unittest.TestCase):
         self.assertEqual(sent[0]['target_description'],'背对相机、穿红衣的人')
         self.assertEqual(sent[0]['reference']['reference_id'],ref)
 
+    def test_model_cannot_restart_active_follow_during_search_or_after_recovery(self):
+        self.session.call('record_task',goals=[follow_goal('person')])
+        ref=self.select_follow()
+        started=self.session.call('start_local_task',goal_id='person',task_type='follow',reference_id=ref)
+        for phase in ('searching','running'):
+            self.session.skill.follow_phase=phase
+            self.assertEqual(self.session.navigation_summary()['follow_phase'],phase)
+            result=self.session.call('cancel_navigation',_context=self.session.context())
+            self.assertEqual(result['reason'],'local_follow_owns_recovery')
+            result=self.session.call('start_local_task',_context=self.session.context(),
+                                     goal_id='person',task_type='follow',reference_id=ref)
+            self.assertEqual(result['reason'],'local_follow_owns_recovery')
+            self.assertEqual(self.session.skill.record['handle'],started['handle'])
+        self.assertEqual(self.session.call('cancel_navigation')['status'],'stopping')
+
     def test_follow_rejects_wrong_or_modified_reference(self):
         self.session.call('record_task',goals=[follow_goal('person')])
         ref=self.select_follow()

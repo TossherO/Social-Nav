@@ -138,6 +138,8 @@ class DwaController:
             if request['mode']=='mapped':
                 world=np.asarray(scene.record['localization']['world_from_lidar'])
                 path=transform_poses(path,se2(self.geometry.pose(world))@np.linalg.inv(se2(self.geometry.pose(np.asarray(scene.record['prior']['map_from_local'])@world))))
+            adjusted=(reference['result'].get('follow_goal_adjustment') or {}).get('selected_goal') is not None
+            terminal=path[-1,:2].copy() if adjusted else None
             path=path[np.r_[True,(np.linalg.norm(np.diff(path[:,:2],axis=0),axis=1)>1e-7)|
                 (abs(wrap(np.diff(path[:,2])))>1e-7)]]
             if len(path)<2:raise ValueError('empty_reference')
@@ -177,7 +179,7 @@ class DwaController:
             if rotation_mode:out['reference_motion']['rotation']=True
             prepared=segments(path)
             if not rotation_mode and not len(prepared[2]):raise ValueError('empty_reference')
-            goal=local_goal(request,scene,self.geometry,self.asset,self.planning)
+            goal=terminal if adjusted else local_goal(request,scene,self.geometry,self.asset,self.planning)
             stop=request.get('goal_behavior','pass_through')=='stop'
             minimum=self.motion.get('minimum_command_speeds')
             braking_time=max(max(abs(initial[0]),abs(raw_velocity[0]))/self.motion['max_acceleration_mps2'],
@@ -388,7 +390,7 @@ class DwaController:
                 configuration_binding=self.configuration_binding,context_binding=context_binding(request,scene,self.asset),
                 input_binding=dict(scene=scene.record['input_fingerprint'],as_of=feedback['stamp_s'],geometry_as_of=scene.record['as_of'],
                     frame_id=scene.record['frame_id'],clock_domain=clock_domain,feedback_source_binding=feedback.get('source_binding',fingerprint(feedback))),
-                local_goal=dict(pose=goal.tolist(),actual_goal=True,goal_behavior=request.get('goal_behavior','pass_through')),
+                local_goal=dict(pose=goal.tolist(),actual_goal=not adjusted,goal_behavior=request.get('goal_behavior','pass_through')),
                 trajectory=dict(points=points.tolist(),frame_id=scene.record['frame_id'],initialization='dwa',people_check=prediction,
                     candidate_velocity=dict(linear_x_mps=float(desired[0]),angular_z_rps=float(desired[1]),executable=False)),
                 reference_binding=reference['binding'],

@@ -77,7 +77,8 @@ def display_points(grid, points):
 
 def display_final_yaw(pose, route):
     """Show a selected single-goal heading or an explicitly selected route heading."""
-    return float(pose[2]) if route is None else route.get('final_yaw')
+    if route is not None:return route.get('final_yaw')
+    return float(pose[2]) if len(pose)==3 else None
 
 
 def floor_files(floor):
@@ -239,14 +240,16 @@ def run(args):
                         elevator_standard_start=session.elevator.standard is not None,
                         elevator_manual_selection=(session.elevator.last_attempt or {}).get('source')=='operator_rviz',
                         elevator_decision=session.elevator.feedback,
-                        error=session.elevator.wait_reason or (session.elevator.last_attempt or {}).get('result'),
+                        error=(session.elevator.wait_reason or (session.elevator.last_attempt or {}).get('result')
+                               or session.state.get('reason')),
                         floor_handoff=session.elevator.handoff.snapshot() if session.elevator.handoff else None))
                 return
             display.check()
             record=session.skill.record
             handle=record.get('handle')
             following=record['stage_type']=='follow'
-            if record['status']=='running' and handle is not None and not following:
+            association_waiting=record['association_waiting']
+            if record['status']=='running' and handle is not None and not following and not association_waiting:
                 request=reference_request(handle,record['selected_pose'],navigation.route,
                                           navigation.route_index,session.catalog,
                                           require_yaw=navigation.request['require_yaw'])
@@ -296,11 +299,14 @@ def run(args):
                     monitor=session.monitor.snapshot(),
                     call_id=None if handle is None else handle['call_id'],status=session.state['status'],
                     confirmation_call_id=None if confirmation_handle is None else confirmation_handle['call_id'],
-                    manual_confirmation_available=bool(not following and confirmation_handle is not None and navigation.status=='running'),
+                    manual_confirmation_available=bool(not association_waiting and not following and
+                        confirmation_handle is not None and navigation.status=='running'),
                     reason=session.state.get('reason'),navigation_status=record['status'],
                     stage_type=record['stage_type'],follow_status=copy.deepcopy(feedback.get('follow_status')),
                     model_busy=_actor.model.busy,localization_status=feedback.get('localization_status'),
                     input_stale=feedback.get('input_stale'),origin_pose=feedback.get('origin_pose'),
+                    environment_fault=feedback.get('environment_fault'),
+                    association_waiting=association_waiting,
                     source_stamp_s=feedback.get('origin_stamp_s'),stopped=feedback.get('stopped'),
                     route_index=feedback.get('route_index'),route_count=feedback.get('route_count'),
                     reference_preview={k:v for k,v in ((navigation.value.get('control') or {}).get('manual_preview') or {}).items()
@@ -308,6 +314,10 @@ def run(args):
                     reference_preview_error=reference.status()))
             if last is not None and navigation.route is not None:
                 save_trace(force=handle is None or record['status']!='running')
+            if association_waiting:
+                if last is not None:display.send([])
+                last=last_progress=None
+                return
             if following and handle is not None:
                 current_preview=(navigation.value.get('control') or {}).get('manual_preview') or {}
                 target=current_preview.get('goal') if current_preview.get('owner')==handle['call_id'] else None
@@ -344,7 +354,7 @@ def run(args):
                 except (ValueError,KeyError,TypeError,OSError):
                     preview=None
                 emit(dict(event='manual_target',goal_id=record['goal_id'],place_id=record['place_id'],
-                    target_map_xy_yaw=pose,yaw_degrees=round(math.degrees(pose[2]),1),
+                    target_map_xy_yaw=pose,yaw_degrees=(round(math.degrees(pose[2]),1) if len(pose)==3 else None),
                     route_waypoints=points if route else None,
                     rviz_missing_height_indices=missing_heights,
                     rviz_approximate_height_indices=approximate_heights,

@@ -38,6 +38,13 @@ class DisplayBuffer:
             group=next(iter(self.pending))
             return group,self.pending.pop(group)
 
+    def clear_environment(self,frame,stamp):
+        with self.condition:
+            if not self.stopping and self.settings['map_hz']>0:
+                self.pending['map']=(frame,stamp)
+                self.identities.pop('map',None)
+                self.condition.notify()
+
     def close(self):
         with self.condition:self.stopping=True;self.condition.notify_all()
 
@@ -65,6 +72,7 @@ class RuntimeDisplay:
             height_mode=settings['height_mode'],ground_plane_radius_m=settings['ground_plane_radius_m'],
             reference_max_age_s=reference_max_age_s,trajectory_max_age_s=trajectory_max_age_s)
         self.grids=DisplayGrids(metrics,asset=asset);self.last_navigation_grid=None
+        self.last_environment_grid=None
         self.navigation_lock=threading.Lock();self.navigation_result=None;self.last_navigation=None;self.last_view=None
         from .people import PeopleScene
         self.people=PeopleScene()
@@ -76,7 +84,7 @@ class RuntimeDisplay:
         self.buffer.offer('scan',identity,lambda:(np.array(points[::stride,:3],copy=True),dict(row)),now=began)
         self.buffer.offer('people',identity,lambda:(copy.deepcopy(people),row['health']!=0),now=began)
         if grid is not None:
-            self.buffer.offer('map',grid.metadata['snapshot_id'],lambda:grid,now=began)
+            self.environment(grid,now=began)
         if rgb is not None:
             self.buffer.offer('rgb',(rgb_frame,people.get('rgb_stamp_s')),
                 lambda:(np.array(rgb,copy=True),people.get('rgb_stamp_s'),rgb_frame),now=began)
@@ -84,13 +92,19 @@ class RuntimeDisplay:
         if navigation is None:self.buffer.offer('navigation',identity,lambda:(dict(row),None,grid),now=began)
         self.submit_ms.append((time.monotonic()-began)*1000)
 
-    def navigation(self,result,reference,request,scene,row,control,reason,*,now,clock_domain,clock_rate,clock_mono,grid=None):
+    def environment(self,grid,*,now=None):
+        self.buffer.offer('map',grid.metadata['snapshot_id'],lambda:grid,now=time.monotonic() if now is None else now)
+
+    def clear_environment(self,frame,stamp):
+        self.buffer.clear_environment(frame,stamp)
+
+    def navigation(self,result,reference,request,scene,row,control,reason,*,now,clock_domain,clock_rate,clock_mono,grid=None,goal_hint=None):
         # Finalized results are replaced, never mutated after publication.
         if self.buffer.settings['navigation_hz']==0:return
         from .navigation import display_packet
         def make_item():
             packet=display_packet(result,reference,request,scene,row,control,reason,
-                now=now,clock_domain=clock_domain,clock_rate=clock_rate,clock_mono=clock_mono)
+                now=now,clock_domain=clock_domain,clock_rate=clock_rate,clock_mono=clock_mono,goal_hint=goal_hint)
             with self.navigation_lock:self.navigation_result=packet
             return dict(row),packet,grid
         self.buffer.offer('navigation',('control',now),make_item,now=time.monotonic())
@@ -140,7 +154,21 @@ class RuntimeDisplay:
             self.publishers['people'].publish(marker_array(self.people.update(people,sensor_only=sensor_only) or []))
         elif group=='map':
             from .surface import ground_cloud
+            if isinstance(item,tuple):
+                if self.last_environment_grid is not None:
+                    from perception.environment.layers import GridSnapshot
+                    from .scans import pointcloud_message
+                    frame,stamp=item
+                    previous=self.last_environment_grid
+                    grid=GridSnapshot(dict(previous.metadata,frame_id=frame,stamp_s=stamp),
+                        dict(occupancy=np.full_like(previous.layers['occupancy'],-1)))
+                    self._publish_occupancy('occupancy',grid)
+                    self._publish_occupancy('raw_occupancy',grid)
+                    self.publishers['ground_map'].publish(pointcloud_message(np.empty((0,3)),frame,stamp))
+                    self.last_environment_grid=None
+                return
             grid=self.grids.get(item)
+            self.last_environment_grid=grid
             self._publish_occupancy('occupancy',grid)
             if self.publishers['raw_occupancy'].get_num_connections():
                 self._publish_occupancy('raw_occupancy',self.grids.get(item,navigation=False))

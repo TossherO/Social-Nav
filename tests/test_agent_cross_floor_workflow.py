@@ -49,8 +49,12 @@ class CrossFloorWorkflowTests(unittest.TestCase):
     def test_standard_timeout_and_manual_reselection_resume_only_after_fresh_association(self):
         self.run_standard_ride(manual_retry=True)
 
-    def run_standard_ride(self, *, manual_retry):
+    def test_elevator_model_transport_failure_resumes_with_new_observation(self):
+        self.run_standard_ride(manual_retry=False, network_failure=True)
+
+    def run_standard_ride(self, *, manual_retry, network_failure=False):
         from decision.agent.core.loop import AgentLoop
+        from decision.agent.core.model import ModelTemporarilyUnavailable
         from decision.agent.core.session import AgentSession
         from decision.agent.core.store import Store
         from decision.agent.tools.framework import Reply
@@ -84,6 +88,8 @@ class CrossFloorWorkflowTests(unittest.TestCase):
                     description='乘电梯到一楼指定区域',floor_id='floor2',to_floor='floor1',
                     conditions=dict(robot_inside_region_id='floor1_arrival'))])))
             if state.get('ride'):
+                if network_failure and sum(bool(p['current_state'].get('ride')) for p in requests)==1:
+                    raise ModelTemporarilyUnavailable('test connection timeout')
                 if not manual_retry and 'decision_feedback' not in state:
                     return Reply.parse(dict(role='assistant',content='临时乘梯画面描述'))
                 return Reply.fixture(dict(tool='record_elevator_observation',arguments=dict(
@@ -100,18 +106,26 @@ class CrossFloorWorkflowTests(unittest.TestCase):
              patch('decision.agent.workflows.floor_handoff.subprocess.Popen',side_effect=launch), \
              patch('decision.agent.workflows.floor_handoff.ManualNavigation',return_value=nav2), \
              patch('decision.agent.workflows.floor_handoff.time') as clock, \
+             patch('decision.agent.core.loop.time') as model_clock, \
              patch('decision.agent.core.session.robot_context',return_value={}):
             clock.monotonic.return_value=100.
+            model_clock.monotonic.return_value=100.
             store=Store(Path(root)/'session.sqlite');session=AgentSession('下楼',floors['floor2'],nav1,store,floor_catalogs=floors)
             session.elevator=ElevatorRide({'floor1':'unused'},'source',root);actor=AgentLoop(session,work)
             try:
                 def until(condition):
                     for _ in range(35):
+                        model_clock.monotonic.return_value+=1.
                         actor.tick()
                         if actor.model.thread:actor.model.thread.join(1)
                         if condition():return
                     self.fail('Expected cross-floor state was never reached')
                 with patch.object(session,'prepare_reference'):
+                    if network_failure:
+                        until(lambda: session.state.get('reason')=='model_temporarily_unavailable')
+                        self.assertEqual(session.state['status'],'waiting_monitor')
+                        self.assertIsNone(session.elevator.frame)
+                        self.assertFalse(commands)
                     if manual_retry:
                         ride=session.elevator
                         until(lambda: len(commands)==1)
@@ -157,10 +171,14 @@ class CrossFloorWorkflowTests(unittest.TestCase):
                     self.assertEqual(evidence['destination_association']['initial_pose_source'],'operator_rviz')
                 else:
                     ride_states=[p['current_state'] for p in requests if p['current_state'].get('ride')]
-                    self.assertEqual(len(ride_states),2)
-                    self.assertIn('decision_feedback',ride_states[1])
-                    self.assertGreater(ride_states[1]['navigation']['feedback']['stamp_s'],
+                    self.assertEqual(len(ride_states),3 if network_failure else 2)
+                    self.assertIn('decision_feedback',ride_states[-1])
+                    self.assertGreater(ride_states[-1]['navigation']['feedback']['stamp_s'],
                                        ride_states[0]['navigation']['feedback']['stamp_s'])
+                    if network_failure:
+                        self.assertGreaterEqual(ride_states[1]['navigation']['feedback']['stamp_s']-
+                                                ride_states[0]['navigation']['feedback']['stamp_s'],5.)
+                        self.assertEqual(store.db.execute("SELECT count(*) FROM events WHERE kind='model_retry_scheduled'").fetchone()[0],1)
                     self.assertNotIn('临时乘梯画面描述',str(store.db.execute('SELECT value FROM events').fetchall()))
                 self.assertEqual(session.task_goals.goals[0]['status'],'completed')
                 checks=session.task_goals.goals[0]['completion']['checks']

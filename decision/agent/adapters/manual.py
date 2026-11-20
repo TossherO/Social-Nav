@@ -4,6 +4,7 @@ import math
 import time
 from .shadow import RuntimeShadowNavigation, apply_runtime_mapped_pose
 from ..core.route import record_route_visit,validate_route_progress
+from ..core.tasks import angle_error,goal_requires_heading
 
 
 class ManualNavigation(RuntimeShadowNavigation):
@@ -30,6 +31,8 @@ class ManualNavigation(RuntimeShadowNavigation):
         self.released_handle=None
         self.arrival_invalidation=None
         self.arrival_events=[]
+        self.environment_epoch=0
+        self.waiting_for_association=False
         self.route_progress_tolerance_m=.5
         super().__init__(catalog,client)
         if self.clock_domain != 'runtime_live':
@@ -46,8 +49,7 @@ class ManualNavigation(RuntimeShadowNavigation):
         self.route=self.route_index=self.route_start_stamp_s=None
         self.route_visits=[]
         requirement=place.get('requirement') or {}
-        require_yaw=(requirement.get('stage_type')=='seating' or 'required_yaw' in requirement or any(requirement.get(key) for key in
-                     ('facing','semantic_conditions','visual_preferences')))
+        require_yaw=goal_requires_heading(requirement)
         self.request=dict(place_id=place['place_id'],pose=copy.deepcopy(place['pose']),require_yaw=require_yaw)
         self.confirmation=None
         self.automatic_evidence=None;self.arrival_since=None;self.arrival_last_stamp=None
@@ -105,7 +107,13 @@ class ManualNavigation(RuntimeShadowNavigation):
 
     def tick(self):
         state=super().tick()
-        if self.follow_active:return state
+        epoch=state.get('environment_epoch',0)
+        if epoch!=self.environment_epoch:
+            self.environment_epoch=epoch
+            self.confirmation=self.automatic_evidence=self.arrival_since=self.arrival_last_stamp=None
+            if self.status=='arrived' and self.released_handle!=self.handle:self.status='running'
+            state=self.snapshot()
+        if self.follow_active or self.waiting_for_association:return state
         if (self.route is not None and self.status=='running' and
                 self.route_index < len(self.route['waypoints'])-1 and
                 not state.get('input_stale') and state.get('localization_status')=='valid' and
@@ -131,9 +139,9 @@ class ManualNavigation(RuntimeShadowNavigation):
             if current:
                 target=self.request['pose']
                 distance=math.hypot(pose[0]-target[0],pose[1]-target[1])
-                angle=abs(math.atan2(math.sin(pose[2]-target[2]),math.cos(pose[2]-target[2])))
                 current=(distance<=self.settings['goal_position_tolerance_m'] and
-                         (not self.request['require_yaw'] or angle<=self.settings['goal_yaw_tolerance_rad']))
+                         (not self.request['require_yaw'] or
+                          angle_error(pose[2],target[2])<=self.settings['goal_yaw_tolerance_rad']))
             if not current:
                 self.arrival_since=self.arrival_last_stamp=None
             elif (self.arrival_since is None or self.arrival_last_stamp is None or stamp<self.arrival_last_stamp or
@@ -152,6 +160,17 @@ class ManualNavigation(RuntimeShadowNavigation):
                 self.status='arrived';state=self.snapshot()
             else:self.arrival_last_stamp=stamp
         return state
+
+    def suspend_for_association(self):
+        self.waiting_for_association=True
+        self.confirmation=self.automatic_evidence=self.arrival_since=self.arrival_last_stamp=None
+        if self.handle is None or self.released_handle==self.handle or self.status not in ('running','arrived'):
+            return None
+        self.status='running'
+        if self.route is not None:
+            # Visits were bound to the old association. Keep the commanded route.
+            self.route_index=0;self.route_visits=[];self.route_start_stamp_s=None
+        return copy.deepcopy(self.handle)
 
     def cancel(self,handle):
         if handle != self.handle:
@@ -196,7 +215,8 @@ class ManualNavigation(RuntimeShadowNavigation):
                          manual_arrival_observation=False,velocity=copy.deepcopy(velocity))
             return state
         pose=state.get('origin_pose')
-        confirmation=self.confirmation or self.automatic_evidence
+        confirmation=(self.confirmation or self.automatic_evidence
+                      if state.get('environment_epoch',0)==self.environment_epoch else None)
         current=(not state['input_stale'] and state['localization_status']=='valid' and pose is not None and
                  feedback.get('status')=='valid')
         confirmed=(confirmation is not None and self.handle==confirmation['handle'] and
@@ -206,9 +226,9 @@ class ManualNavigation(RuntimeShadowNavigation):
         if confirmed:
             target=self.request['pose']
             distance=math.hypot(pose[0]-target[0],pose[1]-target[1])
-            angle=abs(math.atan2(math.sin(pose[2]-target[2]),math.cos(pose[2]-target[2])))
             confirmed=(distance<=self.settings['goal_position_tolerance_m'] and
-                       (not self.request['require_yaw'] or angle<=self.settings['goal_yaw_tolerance_rad']))
+                       (not self.request['require_yaw'] or
+                        angle_error(pose[2],target[2])<=self.settings['goal_yaw_tolerance_rad']))
         # Missing or stale velocity cannot prove movement; preserve the existing
         # confirmation while requiring a fresh stopped estimate to accept it.
         if confirmation is not None and current and feedback_current and not confirmed:
@@ -230,6 +250,7 @@ class ManualNavigation(RuntimeShadowNavigation):
             self.status='running'
         state.update(scope=self.scope,source='runtime_manual_observer',status='arrived' if confirmed else self.status,
             handle=copy.deepcopy(self.handle),stopped=bool(stopped),velocity=copy.deepcopy(velocity),
+            stop_measurement_stamp_s=stamp if feedback_current else None,
             manual_arrival_observation=bool(confirmed),manual_confirmation=copy.deepcopy(self.confirmation),
             manual_arrival_evidence=copy.deepcopy(confirmation),
             manual_arrival_invalidation=copy.deepcopy(self.arrival_invalidation),
@@ -241,7 +262,7 @@ class ManualNavigation(RuntimeShadowNavigation):
         return state
 
     def confirm_arrival(self):
-        if self.follow_active or self.handle is None or self.status != 'running':
+        if self.follow_active or self.waiting_for_association or self.handle is None or self.status != 'running':
             raise ValueError('No manual target is awaiting confirmation')
         state=self.tick()
         deadline=time.monotonic()+2.
@@ -257,10 +278,12 @@ class ManualNavigation(RuntimeShadowNavigation):
             state.get('origin_frame_id')!=self.catalog.value['frame_id'] or pose is None or not state.get('stopped')):
             raise ValueError('Current mapped localization and a fresh stopped estimate are required')
         distance=math.hypot(pose[0]-target[0],pose[1]-target[1])
-        angle=abs(math.atan2(math.sin(pose[2]-target[2]),math.cos(pose[2]-target[2])))
-        if (distance>self.settings['goal_position_tolerance_m'] or
-                self.request['require_yaw'] and angle>self.settings['goal_yaw_tolerance_rad']):
-            raise ValueError('Outside target tolerance: distance %.2f m, yaw error %.1f degrees' % (distance,math.degrees(angle)))
+        if distance>self.settings['goal_position_tolerance_m']:
+            raise ValueError('Outside target tolerance: distance %.2f m' % distance)
+        if self.request['require_yaw']:
+            angle=angle_error(pose[2],target[2])
+            if angle>self.settings['goal_yaw_tolerance_rad']:
+                raise ValueError('Outside target tolerance: yaw error %.1f degrees' % math.degrees(angle))
         if not self._ensure_final_visit(state):
             raise ValueError('A fresh final waypoint observation is required')
         self.confirmation=dict(handle=copy.deepcopy(self.handle),stamp_s=state['stamp_s'],
