@@ -83,6 +83,68 @@ def sample(grid, xy, transform=None):
     return values, valid
 
 
+def static_sightline(grid, camera_xy, target_xy):
+    """Trace a 2D camera ray through the static cells before the target cell.
+
+    Cell membership uses the same half-open intervals as map sampling. A cell
+    touched only at an edge crossing does not contribute an intervening interval.
+    Distances are measured to the entry of each cell from the camera origin.
+    An occupied interval and an earlier unknown interval can both be reported.
+    """
+    resolution = grid.metadata['resolution']
+    origin = grid.metadata['origin_xy']
+    start, target = (np.asarray([camera_xy, target_xy], dtype=float)-origin)/resolution
+    delta = target-start
+    distance = float(np.linalg.norm(delta)*resolution)
+    target_cell = np.floor(target)
+    occupancy = grid.layers['occupancy']
+    height, width = occupancy.shape
+    size = np.array([width, height])
+    if ((target_cell >= 0) & (target_cell < size)).all():
+        x, y = target_cell.astype(int)
+        value = occupancy[y, x]
+        endpoint = {0: 'free', 100: 'occupied'}.get(value, 'unknown')
+    else:
+        endpoint = 'out_of_map'
+
+    crossings = [np.array([0., 1.])]
+    for axis, limit in enumerate(size):
+        if delta[axis] == 0:
+            continue
+        low, high = sorted((start[axis], target[axis]))
+        first = max(0, math.ceil(low))
+        last = min(limit, math.floor(high))
+        if first > last:
+            continue
+        crossing = (np.arange(first, last+1)-start[axis])/delta[axis]
+        crossings.append(crossing[(crossing > 0.) & (crossing < 1.)])
+    boundaries = np.sort(np.concatenate(crossings))
+    left, right = boundaries[:-1], boundaries[1:]
+    # Coincident crossings at a grid corner can differ by floating-point roundoff.
+    keep = (right-left > 8*np.finfo(float).eps) & (distance > 0.)
+    entries = left[keep]
+    cells = np.floor(start+((entries+right[keep])/2)[:, None]*delta)
+    if endpoint != 'out_of_map':
+        intervening = (cells != target_cell).any(axis=1)
+        cells, entries = cells[intervening], entries[intervening]
+    valid = ((cells >= 0) & (cells < size)).all(axis=1)
+    x, y = cells[valid].astype(int).T
+    values = occupancy[y, x]
+    unknown_mask = ~valid
+    unknown_mask[valid] = (values != 0) & (values != 100)
+    occupied = entries[valid][values == 100]
+    unknown = entries[unknown_mask]
+    obstruction = float(occupied[0]*distance) if occupied.size else None
+    first_unknown = float(unknown[0]*distance) if unknown.size else None
+    if not ((start >= 0) & (start < size)).all():
+        first_unknown = 0.
+    elif endpoint == 'out_of_map' and first_unknown is None:
+        first_unknown = distance
+    status = 'occupied' if obstruction is not None else 'unknown' if first_unknown is not None else 'clear'
+    return dict(status=status, endpoint_status=endpoint, nearest_obstruction_distance_m=obstruction,
+                first_unknown_distance_m=first_unknown)
+
+
 def map_font(size):
     for path,index in (('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',2),
                        ('/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf',0),
@@ -597,7 +659,7 @@ class SpatialView:
         if candidate_preview is not None and candidate_preview['static_footprint'] != 'outside':
             candidate = np.asarray(candidate_preview['pose'],dtype=float)
             geom = inputs.get('geometry')
-            points = candidate[None,:2] if geom is None else geom.polygon(candidate)
+            points = geom.polygon(candidate) if geom is not None and len(candidate)==3 else candidate[None,:2]
             low = points.min(axis=0)-.35
             high = points.max(axis=0)+.35
             bounds = [min(bounds[0],float(low[0])),min(bounds[1],float(low[1])),

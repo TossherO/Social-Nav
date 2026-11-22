@@ -17,6 +17,23 @@ from runtime.config import ROOT,runtime_settings
 class RuntimeDisplayTests(unittest.TestCase):
     def setUp(self):self.settings=runtime_settings(ROOT/'configs/runtime.yaml')['display']
 
+    def test_interactive_and_standalone_views_show_one_navigation_basemap(self):
+        directory=ROOT/'perception/visualization/configs'
+        for name in ('interactive','runtime'):
+            manager=yaml.safe_load((directory/(name+'.rviz')).read_text())['Visualization Manager']
+            by_topic={layer['Topic']:layer for layer in manager['Displays'] if 'Topic' in layer}
+            main=by_topic['/social_nav_runtime_view/navigation_basemap']
+            self.assertTrue(main['Enabled'])
+            self.assertEqual((main['Color Transformer'],main['Decay Time']),('RGB8',0))
+            self.assertFalse(by_topic['/social_nav_runtime_view/ground_map']['Enabled'])
+            if name=='interactive':
+                static='/social_nav_interactive/ground_map'
+                self.assertFalse(by_topic[static]['Enabled'])
+                tools=[tool for tool in manager['Tools'] if tool['Class'] in
+                       ('social_nav_rviz/GroundInitialPose','social_nav_rviz/GroundGoal')]
+                self.assertEqual(len(tools),2)
+                self.assertTrue(all(static in tool.values() for tool in tools))
+
     def test_independent_limits_latest_items_and_no_copy_for_disabled_group(self):
         buffer=DisplayBuffer(self.settings);made=[]
         for group in ('scan','people','map','rgb','navigation'):

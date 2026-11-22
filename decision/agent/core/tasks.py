@@ -6,6 +6,10 @@ from navigation.control.tracking import load_config
 from perception.environment.context import fingerprint
 from ..tools.framework import GOAL_VALIDATOR, REGISTRATION_GOAL_VALIDATOR
 
+MAX_VISUAL_ADJUSTMENTS = 2
+DEFAULT_NEARBY_STOP_DISTANCE_M = .75
+EXACT_POINT_TOLERANCE_M = 1e-6
+
 
 def user_quoted(quote, messages):
     return bool(quote and quote.strip()) and any(quote in message for message in messages)
@@ -52,7 +56,7 @@ def normalize_registration(goal):
     for key in ('floor_id','to_floor','monitor','execution_notes'):
         if key in goal:result[key]=copy.deepcopy(goal[key])
     conditions=goal.get('conditions',{})
-    for key in ('required_yaw','facing','max_distance_m','robot_inside_region_id','wait_after'):
+    for key in ('initial_yaw','required_yaw','facing','max_distance_m','nearby_stop','robot_inside_region_id','wait_after'):
         if key in conditions:result[key]=copy.deepcopy(conditions[key])
     for item in conditions.get('visual',[]):
         key='semantic_conditions' if item['priority']=='required' else 'visual_preferences'
@@ -80,8 +84,9 @@ def angle_error(a, b):
     return abs(math.atan2(math.sin(a-b), math.cos(a-b)))
 
 
-def goal_requires_heading(requirement):
-    return (requirement.get('stage_type')=='seating' or 'required_yaw' in requirement or
+def goal_requires_heading(requirement, *, visual_adjustment=False):
+    return (requirement.get('stage_type')=='seating' or
+            TaskGoals.heading_field(requirement, visual_adjustment=visual_adjustment) in requirement or
             any(requirement.get(key) for key in ('facing','semantic_conditions','visual_preferences')))
 
 
@@ -113,6 +118,9 @@ class TaskGoals:
             stage=req.get('stage_type','navigation')
             if stage=='navigation':
                 tools=['navigate_route' if req['kind'] in ('route','sequence') else 'navigate']
+                tools.append('cancel_navigation')
+                if req['kind'] in ('point','region','reference') and (req.get('semantic_conditions') or req.get('visual_preferences')):
+                    tools.append('record_monitor_review')
             elif stage=='elevator':
                 tools=['record_elevator_observation','restart_map_localization']
             elif stage=='observation':
@@ -156,6 +164,8 @@ class TaskGoals:
                 active_floor=self._validate_requirement(goal,active_floor,ids)
                 if 'wait_after' in goal and not user_quoted(goal['wait_after'],user_messages):
                     raise ValueError('wait_after must quote an explicit wait instruction from the user')
+                if 'nearby_stop' in goal and not user_quoted(goal['nearby_stop']['instruction_quote'],user_messages):
+                    raise ValueError('nearby_stop must quote an explicit nearby parking permission from the user')
             except ValueError as error:
                 raise ValueError(f'goals[{index}]: {error}') from error
         self.goals = [dict(requirement=copy.deepcopy(g), binding=fingerprint(g), status='pending',
@@ -211,10 +221,13 @@ class TaskGoals:
         elif goal['kind'] == 'sequence':
             if target or 'position' in goal or not goal.get('checkpoints'):
                 raise ValueError('Sequence uses ordered annotated checkpoints and an empty target')
+            if not isinstance(goal['checkpoints'][-1],str):
+                raise ValueError('A sequence must end at one specified destination')
             for checkpoint in goal['checkpoints']:
-                if checkpoint not in catalog.regions and (checkpoint not in catalog.places or
-                        catalog.places[checkpoint].get('pose') is None):
-                    raise ValueError('Sequence checkpoint is not bound in this map')
+                for ident in ([checkpoint] if isinstance(checkpoint,str) else checkpoint['any_of']):
+                    if ident not in catalog.regions and (ident not in catalog.places or
+                            catalog.places[ident].get('pose') is None):
+                        raise ValueError('Sequence checkpoint is not bound in this map')
         elif goal['kind'] == 'reference':
             if 'position' in goal:
                 raise ValueError('Reference requirements do not fix the selected position')
@@ -238,6 +251,10 @@ class TaskGoals:
             raise ValueError('Checkpoints apply only to sequences')
         if 'max_distance_m' in goal and goal['kind'] != 'reference':
             raise ValueError('Distance applies only to references')
+        if 'nearby_stop' in goal and goal['kind'] != 'point':
+            raise ValueError('Nearby parking permission applies only to a point')
+        if 'initial_yaw' in goal and goal['kind'] != 'point':
+            raise ValueError('Initial yaw applies only to a point')
         if goal.get('facing') and goal['facing'] not in catalog.regions and (goal['facing'] not in catalog.places or
                                    catalog.places[goal['facing']].get('pose') is None):
             raise ValueError('Facing condition needs a bound annotated point or region')
@@ -247,10 +264,14 @@ class TaskGoals:
         region_id = goal.get('robot_inside_region_id')
         if region_id is not None and region_id not in self.floor_catalogs[completion_floor].regions:
             raise ValueError(f'Completion region {region_id!r} does not exist on floor {completion_floor!r}')
-        values = [*goal.get('position', []), *([goal['required_yaw']] if 'required_yaw' in goal else []),
-                  *([goal['max_distance_m']] if 'max_distance_m' in goal else [])]
+        values = [*goal.get('position', []), self.nearby_stop_distance(goal),
+                  *(goal[key] for key in ('initial_yaw','required_yaw','max_distance_m') if key in goal)]
         if not all(math.isfinite(v) for v in values):
             raise ValueError('Requirements must be finite')
+        if ('initial_yaw' in goal and 'required_yaw' in goal and
+                angle_error(goal['initial_yaw'],goal['required_yaw'])>self.settings['goal_yaw_tolerance_rad'] and
+                not (goal.get('semantic_conditions') or goal.get('visual_preferences'))):
+            raise ValueError('Use separate stages for different initial and final yaws without visual adjustment')
         return completion_floor
 
     def current(self, goal_id):
@@ -264,14 +285,41 @@ class TaskGoals:
             raise ValueError('Current task stage belongs to another floor')
         return current
 
-    def geometry(self, requirement, pose):
+    def point_xy(self, requirement):
+        target_id = requirement['target_id']
+        return self.catalog.places[target_id]['pose'][:2] if target_id else requirement['position']
+
+    @staticmethod
+    def nearby_stop_distance(requirement):
+        permission = requirement.get('nearby_stop')
+        return permission.get('max_distance_m',DEFAULT_NEARBY_STOP_DISTANCE_M) if permission else 0.
+
+    def visual_adjustment_state(self, goal):
+        review = goal.get('visual_review')
+        selected = goal.get('selected') or {}
+        adjustments = goal.get('visual_adjustments',[])
+        current_review = review if review and review['handle']==selected.get('handle') else None
+        return dict(remaining=MAX_VISUAL_ADJUSTMENTS-len(adjustments),
+                    tried_poses=copy.deepcopy(goal.get('visual_tried_poses',[])),
+                    review=copy.deepcopy(current_review))
+
+    @staticmethod
+    def heading_field(requirement, *, visual_adjustment=False):
+        if 'initial_yaw' in requirement and not visual_adjustment:
+            return 'initial_yaw'
+        return 'required_yaw'
+
+    def yaw_met(self, pose, yaw):
+        return len(pose)==3 and angle_error(pose[2],yaw)<=self.settings['goal_yaw_tolerance_rad']
+
+    def geometry(self, requirement, pose, selected=None):
         if np.shape(pose) not in ((2,),(3,)) or not np.isfinite(pose).all():
             raise ValueError('Expected a finite base_link XY or XY/yaw goal')
         if requirement['kind'] == 'point':
-            point = requirement.get('position')
-            if point is None:
-                point = self.catalog.places[requirement['target_id']]['pose'][:2]
-            position_met = float(np.linalg.norm(np.asarray(pose[:2])-point)) <= self.settings['goal_position_tolerance_m']
+            distance = math.dist(pose[:2],self.point_xy(requirement))
+            position_met = distance <= self.settings['goal_position_tolerance_m']
+            if selected and selected.get('nearby_stop'):
+                position_met = distance <= self.nearby_stop_distance(requirement)
         elif requirement['kind']=='region':
             position_met = inside(pose[:2], self.catalog.regions[requirement['target_id']]['polygon'])
         elif requirement['kind']=='route':
@@ -287,28 +335,32 @@ class TaskGoals:
                 distance = (distance_to_region(pose[:2],self.catalog.regions[target]['polygon']) if target in self.catalog.regions else
                             float(np.linalg.norm(np.asarray(pose[:2])-self.catalog.places[target]['pose'][:2])))
                 position_met = distance <= requirement['max_distance_m']
-        yaw_met = ('required_yaw' not in requirement or
-                   (len(pose)==3 and angle_error(pose[2],requirement['required_yaw'])<=self.settings['goal_yaw_tolerance_rad']))
+        heading = self.heading_field(requirement, visual_adjustment=bool(selected and selected.get('initial_yaw_released')))
+        yaw_met = heading not in requirement or self.yaw_met(pose,requirement[heading])
         # A named object or area can be behind a wall. Its center alone does
         # not define the direction the user means at this particular pose.
         facing_met = None if requirement.get('facing') else True
-        return dict(position_met=bool(position_met), required_yaw_met=bool(yaw_met), facing_met=facing_met)
+        return dict(position_met=bool(position_met), facing_met=facing_met, **{f'{heading}_met':bool(yaw_met)})
 
     def checkpoint_met(self, checkpoint, point):
+        if isinstance(checkpoint,dict):
+            return any(self.checkpoint_met(ident,point) for ident in checkpoint['any_of'])
         if checkpoint in self.catalog.regions:
             return inside(point,self.catalog.regions[checkpoint]['polygon'])
         return float(np.linalg.norm(np.asarray(point)-self.catalog.places[checkpoint]['pose'][:2])) <= self.settings['goal_position_tolerance_m']
 
-    def select(self, goal_id, pose, orientation_source, view_id):
+    def select(self, goal_id, pose, orientation_source, view_id, *, nearby_stop=None, visual_adjustment=False):
         self.catalog.require_complete()
         current = self.current(goal_id)
         if current['requirement'].get('stage_type', 'navigation') != 'navigation':
             return dict(status='refused', reason='stage_skill_not_available',
                         stage_type=current['requirement']['stage_type'])
-        checks = self.geometry(current['requirement'], pose)
+        requirement = current['requirement']
+        selection = dict(nearby_stop=nearby_stop, initial_yaw_released=visual_adjustment)
+        checks = self.geometry(requirement, pose, selection)
         if any(value is False for value in checks.values()):
             return dict(status='refused', reason='selected_pose_violates_task_requirement', checks=checks)
-        allowed = self.orientation_sources(current['requirement'])
+        allowed = self.orientation_sources(requirement, visual_adjustment=visual_adjustment)
         if len(pose)==3 and orientation_source not in allowed:
             return dict(status='refused',reason='orientation_source_disagrees_with_registered_requirement',
                         allowed_orientation_sources=allowed)
@@ -317,12 +369,17 @@ class TaskGoals:
                         reference='base_link', frame_id=self.catalog.value['frame_id'],
                         orientation_source=orientation_source, view_id=view_id,
                         requirement=copy.deepcopy(current['requirement']))
+        if nearby_stop:
+            selected['nearby_stop'] = nearby_stop
+        if visual_adjustment and 'initial_yaw' in requirement:
+            selected['initial_yaw_released'] = True
         current['selected'] = copy.deepcopy(selected)
         return dict(status='selected', destination=selected)
 
     @staticmethod
-    def orientation_sources(requirement):
-        return ['user'] if 'required_yaw' in requirement else ['semantic','autonomous']
+    def orientation_sources(requirement, *, visual_adjustment=False):
+        heading = TaskGoals.heading_field(requirement, visual_adjustment=visual_adjustment)
+        return ['user'] if heading in requirement else ['semantic','autonomous']
 
     def complete(self, goal_id, proof, checks, semantic):
         current = self.current(goal_id)

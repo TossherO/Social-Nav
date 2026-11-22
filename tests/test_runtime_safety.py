@@ -121,7 +121,8 @@ class SafetyIsolationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             marker=Path(temporary)/'started'
             with patch.dict(os.environ,SOCIAL_NAV_TEST_GATE_STARTED=str(marker)),patch('runtime.safety._run',delayed_gate_run):
-                safety=SafetyProcess(incoming,fixture.config,fixture.motion,fixture.geometry,clock_domain='synthetic');incoming.close()
+                safety=SafetyProcess(incoming,fixture.config,fixture.motion,fixture.geometry,
+                    clock_domain='synthetic',trace_timing=True);incoming.close()
                 try:
                     deadline=time.monotonic()+10
                     while not safety.ready:
@@ -143,6 +144,9 @@ class SafetyIsolationTests(unittest.TestCase):
                     outputs=safety.poll();self.assertTrue(outputs)
                     self.assertFalse(any(r['state']=='allowed' for r in outputs),outputs)
                     self.assertTrue(any(r.get('as_of')==10.01 for r in outputs),outputs)
+                    stamps={use['measurement_stamp_s'] for r in outputs for use in r.get('grid_uses',())}
+                    self.assertIn(10.,stamps)
+                    self.assertIn(10.01,stamps)
                 finally:sender.close();safety.close()
 
     def test_main_stall_does_not_block_independent_stop_decisions(self):

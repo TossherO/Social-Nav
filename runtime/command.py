@@ -61,6 +61,7 @@ class AgentState:
                 self.control.update(map_binding=None,scene_binding=None,agent_mapped_pose=None,
                     goal_observation=None,idle_feedback=None,manual_preview=None,feedback={},
                     reason=fault.reason,planning_status='unavailable',planning_reason=fault.reason,
+                    reference_observation=None,control_observation=None,
                     reference_accepted=False,environment_epoch=epoch,environment_fault=fault.reason)
 
     def _environment_observation_current(self, record):
@@ -72,7 +73,8 @@ class AgentState:
         return stamp>cutoff if type(stamp) is int else record.get('stamp_s',-float('inf'))>cutoff/1e9
 
     def publish_control(self, packet, localization=None, *, map_binding=None, cancelled_request=None, idle_feedback=None,
-                        manual_preview=None, agent_mapped_pose=None, environment_epoch=0, environment_fault=None):
+                        manual_preview=None, reference_observation=None, control_observation=None,
+                        agent_mapped_pose=None, environment_epoch=0, environment_fault=None):
         value = dict(request=copy.deepcopy(packet.get('request')), stamp_s=packet['stamp_s'], clock_domain=packet['clock_domain'],
             scene_binding=packet.get('scene_binding'), feedback=copy.deepcopy(packet.get('feedback') or {}),
             reason=packet.get('reason'), reference_accepted=packet.get('result_accepted', False),
@@ -82,6 +84,8 @@ class AgentState:
         value['cancelled_request'] = copy.deepcopy(cancelled_request)
         value['idle_feedback'] = copy.deepcopy(idle_feedback)
         value['manual_preview'] = copy.deepcopy(manual_preview)
+        value['reference_observation'] = copy.deepcopy(reference_observation)
+        value['control_observation'] = copy.deepcopy(control_observation)
         value['agent_mapped_pose'] = copy.deepcopy(agent_mapped_pose)
         value.update(environment_epoch=environment_epoch,environment_fault=environment_fault)
         proposal=packet.get('proposal') or {}
@@ -99,7 +103,8 @@ class AgentState:
                 self._clear_follow_observations()
             self.environment_fault=environment_fault
             if environment_fault is not None:
-                value.update(planning_status='unavailable',planning_reason=environment_fault)
+                value.update(planning_status='unavailable',planning_reason=environment_fault,
+                             reference_observation=None,control_observation=None)
             if self.goal_evidence is not None:
                 value['goal_observation'] = self.goal_evidence.update(packet,map_binding)
             self.control, self.updated_mono = value, time.monotonic()

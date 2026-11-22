@@ -8,9 +8,11 @@ record_task 的顶层参数只有 goals。数组中每项都要有唯一的 goal
 • point 到明确点，region 进入标注区域，reference 在对象附近自主选停车位。无标注的 reference 需保留可观察的视觉要求。
 • “到大厅中央”“停在等候区靠右侧”等要求登记为 region，在 description 保留位置要求，具体坐标由执行阶段结合现场选择。明确要到某个标注点或用户明确给出的坐标时，登记为 point。
 • route 用于自主选途经点，如绕区域。sequence 用于用户指定的有序地点，仅把这些正式 ID 按顺序放入 target.checkpoints。保留用户对路线和终点的要求，具体选点留给执行。live 自动导航只支持单目标，依次停靠可登记为多项，无法执行的路线向用户说明。
+• 如果指令要求“经过 A 或 B 到 C”，登记为一个 sequence，checkpoints 为 [{"any_of":["A 的正式 ID","B 的正式 ID"]},"C 的正式 ID"]。这表示中间任选其一，执行时才决定走哪里。只有用户明确允许选择时才登记选项。
 • follow 跟随指定人物，seating 停靠桌边，observation 在当前位置停稳后观察。要先到某处并观察时，登记导航及相应视觉要求。跟随描述写清最初如何认人、何时结束。“此时背对相机”等初始特征只用于选人。
 • 人工驾驶跨楼层任务按“到来源楼层等候区、elevator、目标楼层后续任务”登记。各段写 floor_id，乘梯另写 to_floor。先核对 cross_floor 中的楼层，缺少配置时询问如何分段。
 
-conditions 只登记用户明确的完成要求。视觉要求写入 visual 数组，必须满足用 required，尽量满足用 preferred。只有用户给出数值时才登记距离上限或固定 yaw。只有明确要求等口令，才在相应阶段的 conditions.wait_after 逐字引用等待条款。普通的“到电梯口，再乘梯”连续执行。
+conditions 只登记用户明确的任务要求。视觉要求写入 visual 数组，必须满足用 required，尽量满足用 preferred。只有指令给出距离上限时才登记数值。用户指定地图轴向或数值朝向时换算成地图 yaw 弧度。例如“首次停车朝地图正北（+Y）”登记为 initial_yaw=1.5708，适用于该点的首次停靠。“最终必须朝北”才登记为 required_yaw=1.5708。“面向电梯口”保留为语义要求，执行时结合位置选择朝向。若用户要求先后完成两次不同朝向，且无论视觉结果如何都必须转到最终朝向，则登记为两个子任务。只有明确要求等口令，才在相应阶段的 conditions.wait_after 逐字引用等待条款。普通的“到电梯口，再乘梯”连续执行。
+指定停靠点时保留原点。只有用户明确允许另停附近时才登记 conditions.nearby_stop，instruction_quote 逐字引用许可条款。仅允许“原点被占据时”换点的许可只用于占据。若明确允许因视野不足而移动，或无条件允许停在附近，可同时登记 allow_visual_reselection。视觉要求中保留用户指定的数量，以及是否要求同时看到。
 
 monitor 决定何时查看进展。省略即用阶段默认设置，{} 表示只订阅状态事件。例如“进入大厅后持续看目标是否举手，结束时轮椅要在大厅”，应将大厅正式 ID 同时填入 monitor.continuous_region_id 和 conditions.robot_inside_region_id，并设 monitor.review_mode 为 after_result。interval_s 会在区域外也触发，仅在需要时设置。execution_notes 可留下一句该阶段如何使用工具、取证或处理异常的提示。

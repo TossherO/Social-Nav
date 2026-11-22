@@ -4,6 +4,7 @@ import math
 import time
 
 from ..core.tasks import angle_error
+from ..core.completion import stage_evidence
 
 
 def _check_observation_stage(session, goal_id, goal, state, observation_id, semantic_result, evidence):
@@ -144,6 +145,15 @@ def check_goal(session, goal_id, observation_id=None, semantic_result=None, evid
                 return dict(status='needs_task_review',reason='agent_review_result_and_evidence_required')
             if not session.valid_context(context):
                 return dict(status='unproven',reason='task_review_context_changed')
+            selected = goal.get('selected') or {}
+            review = goal.get('required_visual_review')
+            conditions = goal['requirement'].get('semantic_conditions',[])
+            if conditions and review_result=='satisfied' and (
+                    (review and review['handle']==selected.get('handle')) or goal.get('visual_adjustments')):
+                facts,_ = stage_evidence(session,goal)
+                if not facts.get('rgb') or 'new_rgb_after_unsatisfied_visual_review' in facts['missing']:
+                    return dict(status='needs_semantic_evidence', checks=facts.get('checks'), conditions=conditions,
+                                reason='read_a_fresh_post_arrival_rgb_then_judge_all_conditions')
             session.monitor.note_review(goal_id,review_result,review_evidence.strip(),source_stamp_s=context.get('source_stamp_s'))
             if review_result != 'satisfied':
                 return dict(status='unknown' if review_result=='unknown' else 'not_met',
@@ -167,7 +177,7 @@ def check_goal(session, goal_id, observation_id=None, semantic_result=None, evid
         state, manual_issues = _wait_for_manual_goal_evidence(session,goal_id, state, proofs, selected)
         session._drain_manual_arrival_events()
     from ..core.completion import navigation_facts
-    result = navigation_facts(session,goal,state,selected,proofs)
+    result = navigation_facts(session,goal,state,selected,proofs,require_final_yaw=True)
     if result['status'] != 'available':
         if manual_issues is not None:
             result['details'] = manual_issues

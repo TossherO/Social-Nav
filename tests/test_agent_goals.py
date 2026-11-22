@@ -16,9 +16,9 @@ from decision.agent.core.store import Budget, Store
 from decision.agent.core.tasks import inside
 from decision.agent.tools.observations import Observation
 from decision.agent.tools.places import Catalog
-from decision.agent.tools.framework import Reply
 from perception.environment.context import fingerprint
-from tests.test_agent import ScriptedFeedback, action, point_goal, navigate, query_map
+from tests.test_agent import ScriptedFeedback, point_goal, navigate, query_map
+from tests.test_agent_conversation import wire
 
 
 class IndoorGoalTests(unittest.TestCase):
@@ -348,7 +348,7 @@ class IndoorGoalTests(unittest.TestCase):
         self.assertIsNone(inputs['stamp_s'])
 
     def test_three_source_bound_images_reach_same_model_request(self):
-        self.session.call('record_task',goals=[point_goal('elevator')])
+        self.session.call('record_task',goals=[dict(point_goal('elevator'), initial_yaw=.2)])
         query_map(self.session)
         view = self.session.spatial_view
         rows = self.store.db.execute('SELECT role,sha256,png FROM map_images WHERE view_id=? ORDER BY role',(view.record['view_id'],)).fetchall()
@@ -361,16 +361,13 @@ class IndoorGoalTests(unittest.TestCase):
         seen=[]
         def handle(request):
             body=json.loads(request.content);seen.append(body)
-            state=json.loads(body['messages'][-1]['content'][0]['text'])['state']
-            native=Reply.fixture(action('navigate',goal_id='a',pose=[5,4,.2],view_id=state['visual_inputs']['maps']['view_id'],orientation_source='semantic')).message['tool_calls'][0]
-            parts=[dict(model='qwen3.8-flash',choices=[dict(delta=dict(tool_calls=[dict(native,index=0)]),finish_reason='tool_calls')]),
-                   dict(model='qwen3.8-flash',choices=[],usage=dict(prompt_tokens=20,completion_tokens=10))]
-            return httpx.Response(200,text=''.join('data: '+json.dumps(p)+'\n\n' for p in parts)+'data: [DONE]\n\n')
+            native=dict(id='fixture_navigate',type='function',function=dict(name='navigate',arguments='{}'))
+            return httpx.Response(200,text=wire([native]))
         try:
             result=Model(config,budget,self.store,transport=httpx.MockTransport(handle)).decide(
                 self.session.prompt(),observation=observation,spatial_view=view)
-            self.assertEqual(result.action['arguments']['pose'],[5,4,.2])
-            self.assertEqual(result.action['arguments']['view_id'],view.record['view_id'])
+            self.assertEqual(result.action['arguments'],dict(goal_id='elevator',point_id='elevator',
+                yaw=.2,orientation_source='user',view_id=view.record['view_id']))
             images=[v for v in seen[0]['messages'][-1]['content'] if v['type']=='image_url']
             self.assertEqual(len(images),3)
             self.assertTrue(images[1]['image_url']['url'].startswith('data:image/png;'))

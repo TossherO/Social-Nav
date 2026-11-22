@@ -61,7 +61,18 @@ class ImageDetector:
             import tensorrt
             from packaging.version import Version
             self.metadata['tensorrt'] = tensorrt.__version__
-            self.metadata['tensorrt_distribution'] = importlib.metadata.version('tensorrt-cu13')
+            module_path = Path(tensorrt.__file__).resolve()
+            distributions = []
+            for name in ('tensorrt-cu12', 'tensorrt-cu13'):
+                for distribution in importlib.metadata.distributions(name=name):
+                    installed_path = distribution.locate_file('tensorrt/__init__.py')
+                    if Path(installed_path).resolve() == module_path:
+                        distributions.append((name, distribution.version))
+            if len(distributions) != 1:
+                raise ValueError(f'无法根据已导入模块确定唯一的TensorRT CUDA发行包：{module_path}')
+            name, version = distributions[0]
+            self.metadata['tensorrt_distribution_name'] = name
+            self.metadata['tensorrt_distribution'] = version
             build=json.loads(path.with_suffix('.engine.json').read_text())
             if (build['engine_sha256'] != self.metadata['sha256'] or build['imgsz'] != config['imgsz'] or
                     build['precision'] != config['precision'] or build['batch'] != 1 or

@@ -15,6 +15,7 @@
 
 namespace {
 constexpr double pi=3.14159265358979323846;
+constexpr double sample_yaw=.05;
 using Pose=std::array<double,3>;
 using XY=std::array<double,2>;
 using Clock=std::chrono::steady_clock;
@@ -55,7 +56,8 @@ struct State {double cost;bool closed=false;};
 
 struct Search {
   const int8_t* cells;const uint8_t* costs;const float* clearance;
-  int w,h,vertices,max_states,max_expanded;double res,state_res,ox,oy,radius,margin,budget,reverse_penalty,turn_weight,approach;
+  int w,h,vertices,max_states,max_expanded,output_capacity;
+  double res,state_res,ox,oy,radius,margin,budget,reverse_penalty,turn_weight,approach;
   bool reverse,spin,hard_yaw;Pose start,goal;std::vector<XY> footprint;
   double outer=0.;Clock::time_point began=Clock::now();
   int expanded=0,checks=0,joins=0,code=3;double heuristic_ms=0.;
@@ -112,30 +114,34 @@ struct Search {
     }
     return true;
   }
-  bool freeMotion(const Pose& from,double distance,double curvature,int depth=0) {
+  bool freeMotion(const Pose& from,double distance,double curvature,int depth=0,double extra=0.) {
     ScopeTime timer(profile&&depth==0?&motion_ms:nullptr);
     if((checks&255)==0&&expired())return false;
     const double half_curve=distance==0.?curvature/2:curvature;
     const Pose mid=advance(from,distance/2,half_curve);
     const double enclosure=(std::abs(distance)+outer*std::abs(distance==0.?curvature:distance*curvature))/2;
-    if(freePose(mid,enclosure))return true;
-    if(!freePose(mid)||enclosure<1e-4||depth>=15)return false;
-    return freeMotion(from,distance/2,half_curve,depth+1)&&freeMotion(mid,distance/2,half_curve,depth+1);
+    if(freePose(mid,enclosure+extra))return true;
+    if(!freePose(mid,extra)||enclosure<1e-4||depth>=15)return false;
+    return freeMotion(from,distance/2,half_curve,depth+1,extra)&&freeMotion(mid,distance/2,half_curve,depth+1,extra);
   }
-  bool freeCurve(const Pose& from,const Curve& curve) {
+  bool freeCurve(const Pose& from,const Curve& curve,double extra=0.) {
     Pose p=from;
     for(int i=0;i<curve.count;++i) {
       auto segment=curve.segments[i];
-      if(!freeMotion(p,segment.distance,segment.curvature))return false;
+      if(!freeMotion(p,segment.distance,segment.curvature,0,extra))return false;
       p=advance(p,segment.distance,segment.curvature);
     }
-    return freePose(p);
+    return freePose(p,extra);
+  }
+  int samples(Segment segment)const {
+    const double angle=segment.distance==0.?segment.curvature:segment.distance*segment.curvature;
+    return std::max(1,int(std::ceil(std::max(std::abs(segment.distance)/(res/2),std::abs(angle)/sample_yaw))));
   }
   void append(std::vector<Pose>& path,const Curve& curve)const {
     for(int j=0;j<curve.count;++j) {
       auto segment=curve.segments[j];
       const double angle=segment.distance==0.?segment.curvature:segment.distance*segment.curvature;
-      const Pose p=path.back();const int n=std::max(1,int(std::ceil(std::max(std::abs(segment.distance)/(res/2),std::abs(angle)/.05))));
+      const Pose p=path.back();const int n=samples(segment);
       for(int i=1;i<=n;++i)path.push_back(advance(p,segment.distance*i/n,segment.distance==0.?angle*i/n:segment.curvature));
     }
   }
@@ -174,7 +180,36 @@ struct Search {
     }
     return out;
   }
-  bool connect(const Pose& p,Curve& chosen) {
+  double connectionCost(const Curve& curve)const {
+    double value=0.;
+    const double direction_cost=curve.reverse?reverse_penalty:1.;
+    for(int i=0;i<curve.count;++i) {
+      const auto edge=curve.segments[i];
+      const double motion_cost=edge.distance==0.?outer*std::abs(edge.curvature)*(1.+turn_weight):
+        std::abs(edge.distance)*(1.+turn_weight*radius*std::abs(edge.curvature));
+      value+=motion_cost*direction_cost;
+    }
+    return value;
+  }
+  Curve forwardTangent(const Pose& from)const {
+    const double dx=goal[0]-from[0],dy=goal[1]-from[1];
+    const double c=std::cos(from[2]),s=std::sin(from[2]);
+    const double x=c*dx+s*dy,y=-s*dx+c*dy,lateral=std::abs(y);
+    const double tangent_squared=x*x+lateral*(lateral-2*radius);
+    if(x<=0.||tangent_squared<=0.)return {};
+    const double straight=std::sqrt(tangent_squared);
+    // Work in the positive half-plane, then reflect the turn for a right-side goal.
+    const double angle=std::atan2(lateral-radius,x)+std::atan2(radius,straight);
+    if(angle<=1e-8||angle>=pi/2)return {};
+    const double arc=radius*angle;
+    Curve candidate;
+    candidate.segments[0]={arc,std::copysign(1./radius,y)};
+    candidate.segments[1]={straight,0.};
+    candidate.count=2;
+    candidate.length=arc+straight;
+    return candidate;
+  }
+  bool connect(const Pose& p,Curve& chosen,bool prefer_tangent=false) {
     ScopeTime timer(profile?&connect_ms:nullptr);
     ++joins;
     const double distance=std::hypot(goal[0]-p[0],goal[1]-p[1]);
@@ -218,7 +253,20 @@ struct Search {
       int tried=0;
       for(const auto& curve:candidates) {
         if(expired()||tried++>=12)break;
-        if(freeCurve(p,curve)){chosen=curve;return true;}
+        if(freeCurve(p,curve)) {
+          chosen=curve;
+          const double direct_limit=1.1*distance+1e-7;
+          if(prefer_tangent&&!hard_yaw&&curve.length<=direct_limit&&!expired()) {
+            const Curve tangent=forwardTangent(p);
+            // The Python certificate sweeps between published samples by linear
+            // interpolation. Cover the arc/chord difference plus sweep tolerance.
+            const double extra=radius*sample_yaw*sample_yaw/8+.001;
+            if(tangent.count&&tangent.length<=direct_limit&&connectionCost(tangent)<connectionCost(curve)&&
+                1+samples(tangent.segments[0])+samples(tangent.segments[1])<=output_capacity&&
+                freeCurve(p,tangent,extra)&&!expired())chosen=tangent;
+          }
+          return true;
+        }
       }
     }
     return false;
@@ -234,6 +282,12 @@ struct Search {
     using Entry=std::pair<float,int>;std::priority_queue<Entry,std::vector<Entry>,std::greater<Entry>> q;
     potential[g]=0.;q.push({0.,g});
     const int dx[8]={1,-1,0,0,1,1,-1,-1},dy[8]={0,0,1,-1,1,-1,1,-1};
+    std::array<double,256> axial_cost,diagonal_cost;
+    for(size_t value=0;value<axial_cost.size();++value) {
+      const double weight=1.+.25*value/254.;
+      axial_cost[value]=res*weight;
+      diagonal_cost[value]=res*std::sqrt(2.)*weight;
+    }
     int pops=0;
     while(!q.empty()) {
       if((++pops&1023)==0&&expired())break;
@@ -242,7 +296,7 @@ struct Search {
       for(int k=0;k<8;++k) {
         const int nx=x+dx[k],ny=y+dy[k];if(nx<0||ny<0||nx>=w||ny>=h)continue;
         const int j=ny*w+nx;if(cells[j]!=0)continue;
-        const float cost=entry.first+res*(k<4?1.:std::sqrt(2.))*(1.+.25*costs[j]/254.);
+        const float cost=entry.first+(k<4?axial_cost[costs[j]]:diagonal_cost[costs[j]]);
         if(cost<potential[j]){potential[j]=cost;q.push({cost,j});}
       }
     }
@@ -264,11 +318,7 @@ struct Search {
     if(!freePose(start)){code=4;return {};}
     Curve ending;
     std::vector<Pose> incumbent;double incumbent_cost=std::numeric_limits<double>::infinity();
-    auto connectionCost=[&](const Curve& curve) {
-      double value=0.;for(int i=0;i<curve.count;++i){auto edge=curve.segments[i];value+=(edge.distance==0.?outer*std::abs(edge.curvature)*(1.+turn_weight):std::abs(edge.distance)*(1.+turn_weight*radius*std::abs(edge.curvature)))*(curve.reverse?reverse_penalty:1.);}
-      return value;
-    };
-    if(connect(start,ending)) {
+    if(connect(start,ending,true)) {
       incumbent={start};append(incumbent,ending);incumbent_cost=connectionCost(ending);
       // A collision-free Dubins word is not necessarily a good obstacle route.
       // Retain long analytic detours as an incumbent while searching multi-bend
@@ -371,6 +421,7 @@ static int plan_search(HeuristicCache* cache,int options,const int8_t* cells,con
     Search s(cache);s.cache_enabled=options&1;s.profile=options&2;
     s.cells=cells;s.costs=costs;s.clearance=clearance;s.w=width;s.h=height;s.res=resolution;s.ox=origin[0];s.oy=origin[1];s.vertices=vertices;
     s.radius=params[0];s.margin=params[1];s.max_states=int(params[2]);s.max_expanded=int(params[3]);s.budget=params[4];s.reverse=int(params[5])&1;s.spin=int(params[5])&2;
+    s.output_capacity=capacity;
     s.reverse_penalty=params[6];s.turn_weight=params[7];s.approach=params[8];s.hard_yaw=hard_yaw!=0;
     s.state_res=std::max(resolution,params[9]);
     s.start={start[0],start[1],start[2]};s.goal={goal[0],goal[1],goal[2]};

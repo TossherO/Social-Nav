@@ -49,7 +49,18 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn('navigate',{t['function']['name'] for t in second['tools']})
         execution={t['function']['name'] for t in second['tools']}
         self.assertIn('complete_subtask',execution)
-        self.assertTrue({'finish_local_task','check_goal','finish_task'}.isdisjoint(execution))
+        self.assertTrue({'finish_local_task','check_goal','finish_task','navigate_route','start_local_task',
+                         'select_follow_target','restart_map_localization','read_keyframe'}.isdisjoint(execution))
+
+    def test_unoffered_stage_tool_preserves_response_without_running_it(self):
+        self.session.call('record_task',goals=[point_goal('elevator')])
+        native=reply('start_local_task',goal_id='elevator',task_type='follow').message['tool_calls']
+        client=self.client(lambda _:httpx.Response(200,text=wire(native)))
+        result=client.decide(self.session.prompt())
+        self.assertEqual(result.message['tool_calls'],native)
+        self.assertIsNone(result.action)
+        self.assertEqual(result.argument_error['reason'],'tool_unavailable_for_current_stage')
+        self.assertIsNone(self.session.skill.record['handle'])
 
     def test_unoffered_tool_is_preserved_but_never_accepted_or_retried(self):
         native=reply('get_navigation_state').message['tool_calls']
@@ -97,18 +108,30 @@ class RegistrationTests(unittest.TestCase):
         result=client.decide(self.session.prompt())
         self.assertEqual(result.action['arguments']['goals'][0]['stage'],'point')
 
-    def test_plain_text_is_visible_but_identified_as_unregistered(self):
-        raw='建议按航点前往，并声称已经完成。'
-        actor=AgentLoop(self.session,lambda *_:Reply.parse(dict(role='assistant',content=raw)))
+    def test_text_correction_respects_request_limit_without_registering(self):
+        raw='建议按航点前往。'
+        actor=AgentLoop(self.session,lambda *_:Reply.parse(dict(role='assistant',content=raw)),max_requests=1)
         try:
-            actor.tick();actor.model.thread.join(1);actor.tick()
-            self.assertEqual(self.session.state['status'],'needs_clarification')
-            self.assertEqual(self.session.state['reason'],'model_text_without_task_registration')
-            self.assertEqual(self.session.state['assistant_text'],raw)
+            actor.tick();actor.model.thread.join(2);actor.tick();actor.tick()
+            self.assertEqual(actor.requests,1)
+            self.assertEqual(actor.state['reason'],'model_request_limit')
             self.assertFalse(self.session.task_goals.goals)
-            event=json.loads(self.store.db.execute("SELECT value FROM events WHERE kind='assistant_message'").fetchone()[0])
-            self.assertEqual(event['message']['content'],raw)
-            self.assertFalse(event['automatically_retried'])
+            event=json.loads(self.store.db.execute("SELECT value FROM events WHERE kind='model_action_missing'").fetchone()[0])
+            self.assertFalse(event['correction_requested'])
+        finally:actor.close()
+
+    def test_plain_text_correction_can_lead_to_a_real_clarifying_question(self):
+        raw='请问您需要我帮您做什么？'
+        question='请选择入口一还是入口二？'
+        responses=iter([Reply.parse(dict(role='assistant',content=raw)),reply('ask_user',question=question)])
+        actor=AgentLoop(self.session,lambda *_:next(responses))
+        try:
+            for _ in range(2):
+                actor.tick();actor.model.thread.join(2);actor.tick()
+            self.assertEqual(self.session.state['status'],'needs_clarification')
+            self.assertEqual(self.session.state['reason'],question)
+            self.assertEqual(actor.requests,2)
+            self.assertFalse(self.session.task_goals.goals)
         finally:actor.close()
 
     def test_execution_handoff_keeps_plan_and_consumed_ids_only(self):

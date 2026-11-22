@@ -2,12 +2,216 @@
 import copy
 import hashlib
 import json
+from pathlib import Path
+import tempfile
 import unittest
 
+import httpx
+from decision.agent.core.model import Model
 from decision.agent.core.model_projection import ModelProjection, ModelReferenceNames
+from decision.agent.core.store import Budget, Store
+from decision.agent.tools.framework import EXECUTION_TOOLS, native_tools
+from tests.test_agent_conversation import wire
 
 
 class ModelProjectionTests(unittest.TestCase):
+    @staticmethod
+    def state(*, goal_id='g1', view='original-view', rgb='original-rgb', **selected):
+        return dict(
+            next_goal_id=goal_id, selected_goal=dict(goal_id=goal_id, **selected),
+            visual_inputs=dict(maps=dict(available=True, view_id=view),
+                               rgb=dict(available=True, observation_id=rgb)),
+        )
+
+    def test_model_can_use_registered_first_point_without_retyping_pose_or_ids(self):
+        captured = []
+        message = [dict(id='compact-navigation', type='function',
+                        function=dict(name='navigate', arguments='{}'))]
+
+        def handle(request):
+            captured.append(json.loads(request.content))
+            return httpx.Response(200, text=wire(message))
+
+        projection = ModelProjection()
+        projection.allow(self.state(selection=None, initial_pose=[3, 4, 1.2], initial_point_id='elevator',
+                                    heading_required=True, allowed_orientation_sources=['user']))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root/'fixture.json'
+            config.write_text(json.dumps(dict(base_url='https://unit.invalid/v1', api_key='fixture')))
+            store = Store(root/'session.sqlite')
+            budget = Budget(root/'budget.sqlite')
+            try:
+                reply = Model(config, budget, store, transport=httpx.MockTransport(handle)).request(
+                    'test', [], tool_names=('navigate',), projection=projection)
+            finally:
+                budget.close()
+                store.close()
+
+        schema = captured[0]['tools'][0]['function']['parameters']
+        self.assertEqual(schema['required'], [])
+        self.assertFalse({'goal_id', 'view_id', 'orientation_source'} & schema['properties'].keys())
+        self.assertEqual(reply.message['tool_calls'], message)
+        self.assertEqual(reply.action, dict(tool='navigate', arguments=dict(
+            goal_id='g1', view_id='original-view', point_id='elevator', yaw=1.2, orientation_source='user')))
+
+    def test_first_stop_defaults_leave_new_candidate_pose_and_source_validation_in_place(self):
+        projection = ModelProjection()
+        projection.allow(self.state(initial_pose=[3, 4], heading_required=False,
+                                    allowed_orientation_sources=['semantic', 'autonomous']))
+        self.assertEqual(projection.resolve_action(projection.validate_action(
+            dict(tool='navigate', arguments={})))['arguments'],
+            dict(goal_id='g1', view_id='original-view', pose=[3, 4]))
+        action = dict(tool='navigate', arguments=dict(pose=[3.1, 4.2, 1.7]))
+        self.assertEqual(projection.resolve_action(projection.validate_action(action))['arguments'],
+                         dict(goal_id='g1', view_id='original-view', pose=[3.1, 4.2, 1.7],
+                              orientation_source='autonomous'))
+        self.assertEqual(action['arguments'], dict(pose=[3.1, 4.2, 1.7]))
+
+        state = self.state(selection=dict(pose=[3, 4, 1.2]), initial_pose=[3, 4],
+                           heading_required=True, allowed_orientation_sources=['semantic', 'autonomous'])
+        next_turn = ModelProjection()
+        next_turn.allow(state)
+        self.assertEqual(next_turn.validate_action(action)['arguments']['orientation_source'], 'semantic')
+        with self.assertRaisesRegex(ValueError, 'goal_id'):
+            next_turn.resolve_action(next_turn.validate_action(dict(tool='navigate', arguments=dict(
+                pose=[3.1, 4.2], goal_id='earlier-stage'))))
+
+    def test_source_binding_does_not_replace_explicit_stale_references(self):
+        names = ModelReferenceNames()
+        first = ModelProjection(names)
+        first.allow(self.state())
+        old_view = first.reference('view', 'original-view')
+        old_rgb = first.reference('obs', 'original-rgb')
+        current = ModelProjection(names)
+        current.allow(self.state(view='second-view', rgb='second-rgb'))
+        for tool, arguments in (
+            ('check_candidate', dict(pose=[1, 2], view_id=old_view)),
+            ('save_keyframe', dict(reason='重要线索', observation_id=old_rgb)),
+        ):
+            with self.subTest(tool=tool), self.assertRaises(ValueError):
+                current.resolve_action(current.validate_action(dict(tool=tool, arguments=arguments)))
+        expanded = current.resolve_action(current.validate_action(dict(tool='check_candidate', arguments=dict(pose=[1, 2]))))
+        self.assertEqual(expanded['arguments']['view_id'], 'second-view')
+        schemas = {tool['function']['name']: tool['function']['parameters']['properties']
+                   for tool in current.tools(native_tools(('read_keyframe', 'start_local_task', 'save_keyframe')))}
+        self.assertIn('keyframe_id', schemas['read_keyframe'])
+        self.assertIn('reference_id', schemas['start_local_task'])
+        self.assertNotIn('observation_id', schemas['save_keyframe'])
+
+    def test_navigation_and_visual_review_availability_tracks_the_current_stop(self):
+        names = ('navigate', 'record_monitor_review', 'wait_for_event', 'complete_subtask')
+        state = self.state(visual_adjustment=dict(review=None))
+        before_arrival = ModelProjection()
+        before_arrival.allow(state)
+        self.assertEqual(before_arrival.available_tools(names), ('navigate', 'wait_for_event', 'complete_subtask'))
+
+        state.update(completion_evidence=dict(arrival_stamp_s=10.))
+        arrived = ModelProjection()
+        arrived.allow(state)
+        self.assertEqual(arrived.available_tools(names), ('record_monitor_review', 'wait_for_event', 'complete_subtask'))
+        review = dict(tool='record_monitor_review', arguments=dict(result='partly_satisfied', evidence='看见门，另一侧被挡'))
+        self.assertEqual(arrived.resolve_action(arrived.validate_action(review))['arguments']['observation_id'],
+                         'original-rgb')
+
+        state['selected_goal']['visual_adjustment']['review'] = dict(result='partly_satisfied')
+        state.update(task_monitor=dict(continuous_region_id='lobby', conditional_review=dict(phase='reviewing')))
+        reviewing = ModelProjection()
+        reviewing.allow(state)
+        self.assertEqual(reviewing.available_tools(names), names)
+        self.assertNotIn('observation_id', reviewing.validate_action(review)['arguments'])
+        review['arguments']['visual_priority'] = 'required'
+        self.assertEqual(reviewing.resolve_action(reviewing.validate_action(review))['arguments']['observation_id'],
+                         'original-rgb')
+
+        state['task_monitor'] = {}
+        state['completion_evidence']['missing'] = ['current_rgb']
+        waiting = ModelProjection()
+        waiting.allow(state)
+        self.assertNotIn('record_monitor_review',waiting.available_tools(names))
+        self.assertIn('wait_for_event',waiting.available_tools(names))
+
+    def test_known_execution_stage_keeps_its_actions_and_common_controls(self):
+        actions = {'navigate', 'navigate_route', 'select_follow_target', 'start_local_task',
+                   'pause_map_localization', 'restart_map_localization', 'record_elevator_observation'}
+        controls = {'wait_for_event', 'cancel_navigation', 'lookup_places', 'ask_user', 'fail_task',
+                    'complete_subtask', 'observe_scene', 'check_candidate', 'set_navigation_monitor'}
+        for stage, kind, expected in (
+            ('navigation', 'point', {'navigate'}),
+            ('navigation', 'region', {'navigate'}),
+            ('navigation', 'reference', {'navigate'}),
+            ('navigation', 'route', {'navigate_route'}),
+            ('navigation', 'sequence', {'navigate_route'}),
+            ('follow', 'skill', {'select_follow_target', 'start_local_task'}),
+            ('seating', 'skill', {'start_local_task'}),
+            ('observation', 'skill', set()),
+            ('elevator', 'skill', {'pause_map_localization'}),
+        ):
+            with self.subTest(stage=stage, kind=kind):
+                state = self.state()
+                state['completion_evidence'] = dict(requirement=dict(goal_id='g1', stage_type=stage, kind=kind))
+                projection = ModelProjection()
+                projection.allow(state)
+                offered = set(projection.available_tools(EXECUTION_TOOLS))
+                self.assertEqual(offered & actions, expected)
+                self.assertTrue(controls <= offered)
+                self.assertNotIn('read_keyframe', offered)
+                self.assertNotIn('record_monitor_review', offered)
+
+        state.update(keyframes=[dict(keyframe_id='stored-keyframe')],
+                     task_monitor=dict(continuous_region_id='lobby', conditional_review=dict(phase='reviewing')))
+        projection = ModelProjection()
+        projection.allow(state)
+        self.assertTrue({'read_keyframe', 'record_monitor_review'} <= set(projection.available_tools(EXECUTION_TOOLS)))
+        del state['completion_evidence']
+        uncertain = ModelProjection()
+        uncertain.allow(state)
+        self.assertEqual(uncertain.available_tools(EXECUTION_TOOLS), EXECUTION_TOOLS)
+
+    def test_single_visual_priority_is_bound_only_for_unambiguous_post_stop_review(self):
+        state = self.state(visual_adjustment=dict(review=None))
+        requirement = dict(goal_id='g1', kind='point', semantic_conditions=['入口可见'])
+        state['completion_evidence'] = dict(requirement=requirement, arrival_stamp_s=10.)
+        review = dict(tool='record_monitor_review', arguments=dict(result='partly_satisfied', evidence='看见门框'))
+        for both, conditional in ((False, False), (True, False), (False, True)):
+            with self.subTest(both=both, conditional=conditional):
+                requirement['visual_preferences'] = ['尽量看到标牌'] if both else []
+                state['task_monitor'] = dict(continuous_region_id='lobby') if conditional else None
+                projection = ModelProjection()
+                projection.allow(state)
+                tool = projection.tools(native_tools(('record_monitor_review',)))[0]['function']
+                self.assertEqual('visual_priority' in tool['parameters']['properties'], both or conditional)
+                action = projection.resolve_action(projection.validate_action(review))
+                self.assertEqual(action['arguments'].get('visual_priority'),
+                                 None if both or conditional else 'required')
+
+    def test_only_visual_navigation_schema_offers_combined_sightline_check(self):
+        for visual in (False, True):
+            with self.subTest(visual=visual):
+                state = self.state()
+                requirement = dict(goal_id='g1', kind='point',
+                                   semantic_conditions=['入口可见'] if visual else [])
+                state['completion_evidence'] = dict(requirement=requirement)
+                projection = ModelProjection()
+                projection.allow(state)
+                tools = {tool['function']['name']: tool['function']
+                         for tool in projection.tools(native_tools(('navigate', 'check_candidate')))}
+                self.assertEqual('point_ids' in tools['navigate']['parameters']['properties'], visual)
+                self.assertIn('point_ids', tools['check_candidate']['parameters']['properties'])
+                self.assertIn('pose=[x,y,yaw]', tools['navigate']['description'])
+                self.assertIn('point_id 加单独的 yaw', tools['navigate']['description'])
+
+    def test_registered_xy_offers_only_one_way_to_express_a_new_heading(self):
+        state = self.state()
+        state['completion_evidence'] = dict(requirement=dict(goal_id='g1',kind='point',target_id='',
+                                                             position=[-18.6,-9.0],semantic_conditions=['同框']))
+        projection = ModelProjection()
+        projection.allow(state)
+        tool = projection.tools(native_tools(('navigate',)))[0]['function']
+        self.assertNotIn('yaw',tool['parameters']['properties'])
+        self.assertNotIn('point_id',tool['parameters']['properties'])
+        self.assertIn('pose=[x,y,yaw]',tool['description'])
+
     def test_projected_references_resolve_without_changing_source_or_native_protocol(self):
         raw_view='a'*64;raw_observation='scene:'+'b'*64;raw_candidate='c'*64
         native_id='tool_call_'+'d'*32

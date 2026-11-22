@@ -7,7 +7,7 @@ import time
 import numpy as np
 
 from navigation.planning.continuity import check_reference,content_valid,context_binding,goal_binding,local_goal
-from navigation.planning.inputs import request_status,scene_status
+from navigation.planning.inputs import association_status,request_status,scene_status
 from navigation.planning.planner import se2,transform_poses
 from perception.mapping_localization.context import pose_matrix
 from .surface import DisplaySurface,sample_ground,sample_poses,complete_display_heights
@@ -16,12 +16,12 @@ from .surface import DisplaySurface,sample_ground,sample_poses,complete_display_
 IDENTITY=('session_id','generation','frame_id')
 
 
-def display_packet(result,reference,request,scene,row,control,reason,*,now,clock_domain,clock_rate,clock_mono=None,goal_hint=None):
+def display_packet(result,reference,request,scene,row,control,reason,*,now,clock_domain,clock_rate,clock_mono=None,goal_hint=None,search_map=None):
     """Copy only small metadata; finalized results remain immutable shared objects."""
     clock_mono=time.monotonic() if clock_mono is None else clock_mono
     record=None if scene is None else copy.deepcopy({k:scene.record[k] for k in (
         *IDENTITY,'as_of','clock_domain','localization','geometry','prior','input_fingerprint')})
-    return dict(result=result,reference=reference,request=copy.deepcopy(request),goal_hint=copy.deepcopy(goal_hint),scene=record,
+    return dict(result=result,reference=reference,request=copy.deepcopy(request),goal_hint=copy.deepcopy(goal_hint),scene=record,search_map=search_map,
         row=copy.deepcopy(row),proposal=copy.deepcopy(control.get('proposal')),reason=control.get('reason'),
         reference_reason=reason,now_s=now,clock_domain=clock_domain,clock_rate=clock_rate,mono=clock_mono)
 
@@ -52,7 +52,7 @@ class NavigationView:
                 self.history.append((row['stamp_s'],pose.copy(),z))
                 self.raw_history.append((row['stamp_s'],list(row['position']),list(row['quaternion_xyzw'])))
         out=dict(frame_id=row['frame_id'],stamp_s=row['stamp_s'],localization_row=row,history=list(self.history),
-            raw_history=list(self.raw_history),pose=pose,reference=None,trajectory=None,goal=None,
+            raw_history=list(self.raw_history),pose=pose,reference=None,trajectory=None,goal=None,search_map=None,
             text='SHADOW | no control observation',level='waiting',z=z,ground_source=ground_source,
             text_z=z+1.6 if np.isfinite(z) else float(row['position'][2])+.8)
         if stopped:
@@ -98,6 +98,21 @@ class NavigationView:
                     map_from_local=copy.deepcopy(record['prior']['map_from_local']) if local_to_map is not None else None)
                 ref_reason='ready (age %.2fs)'%(now-reference['as_of'])
             except (ValueError,KeyError,TypeError) as error:ref_reason=str(error)
+        snapshot=packet.get('search_map')
+        if (snapshot is not None and common is None and self.asset is not None and
+                snapshot['goal_binding']==goal_binding(request) and
+                0<=now-snapshot['stamp_s']<=self.reference_max_age_s and
+                association_status(scene,self.asset,self.planning) is None):
+            if reference is None and snapshot['status']!='path_found':
+                out['search_map']=snapshot
+                ref_reason=snapshot['reason'] or ref_reason
+            elif (out['reference'] is not None and
+                    snapshot['reference_binding']==reference['binding']):
+                out['search_map']=snapshot
+                path=np.asarray(reference['result']['path'],float)
+                if reference['result']['frame_id']!=snapshot['frame_id']:
+                    path=transform_poses(path,np.linalg.inv(snapshot['local_from_map']))
+                out['reference']['search_xy']=sample_poses(path,snapshot['resolution'])[:,:2]
         result=packet['result']
         if common is None and result is not None and proposal.get('status')=='candidate':
             try:
@@ -121,6 +136,10 @@ class NavigationView:
         return self._project(out,surface)
 
     def _project(self,out,surface):
+        if self.asset is not None:
+            snapshot=out.get('search_map')
+            label='selected static map' if snapshot is None else 'reference search #%s'%snapshot['job_id']
+            out['text']+='\nMAP: '+label
         pose=out['pose'];out['footprint']=out['heading']=np.empty((0,3));out['goal_z']=np.nan
         if pose is not None:
             polygon=self.geometry.polygon(pose);polygon=np.vstack([polygon,polygon[0]])
@@ -148,6 +167,9 @@ class NavigationView:
                     fallback=out['localization_row']['position'][2]+self.z
                     data['heights'],approx=complete_display_heights(data['heights'],fallback)
                     data['height_sources'][approx]=5
+                    if 'search_xy' in data and self.height_mode=='ground':
+                        status+=' | reference on search terrain'
+                        continue
                     if approx.any():status+=' | reference approximate display heights %d'%int(approx.sum())
                 if key=='trajectory':data['heights']+=.02
                 status+=' | %s height %d/%d'%(key,int(np.isfinite(data['heights']).sum()),len(data['heights']))

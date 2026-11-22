@@ -98,13 +98,14 @@ class ManualReferenceTests(unittest.TestCase):
         scene=SimpleNamespace(record=dict(prior=dict(valid=True,map_id='map'),as_of=10.))
         loop.scene=None;loop.pending=(scene,object());loop.lock=threading.Lock();loop.offered_mono=None
         loop.environment_epoch=int(recovered);loop.environment_fault=None
-        loop.session=SimpleNamespace(epoch=0,pause_requested=False,paused=False,publish_observation=lambda *a,**k:None)
+        loop.session=SimpleNamespace(epoch=0,pause_requested=False,paused=False,lock=threading.RLock(),
+            command_generation=0,publish_observation=lambda *a,**k:None)
         loop.session_epoch=0;loop.follow=None;loop.route_replay=None;loop.request=None;loop.manual_preview_key=None
         loop.scene_settings={'max_association_age_s':.5}
         loop.settings=dict(control_period_s=.1);loop.metrics=SimpleNamespace(trace_path=None,add=lambda *a:None,span=lambda *_:nullcontext())
         loop.reference=SimpleNamespace(observe=MagicMock(),invalidate=MagicMock(),update=MagicMock(),tick=MagicMock(return_value=dict(
             status='reference_ready',reason=None,waiting={},start_evidence=None)),current=dict(as_of=9.9),
-            reference=object(),reason=None,blocked=False,note_control=MagicMock(),drain_events=lambda:[])
+            reference=object(),display_map=None,reason=None,blocked=False,note_control=MagicMock(),drain_events=lambda:[])
         packet=dict(request=None,stamp_s=10.,clock_domain='runtime_live',feedback={},sequence_id=1,reason='no_active_goal')
         controller=SimpleNamespace(result=None,clear=lambda:None)
         loop.controller=SimpleNamespace(controller=controller,geometry=object(),motion={'state_max_age_s':.1},step=MagicMock(return_value=packet))

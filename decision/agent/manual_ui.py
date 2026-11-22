@@ -12,7 +12,7 @@ import uuid
 from PyQt5 import QtCore, QtGui, QtWidgets
 import yaml
 from . import ROOT
-from .ui_data import ContextTimeline,connect_readonly,display_value,event_detail,event_summary,format_event_detail,goal_requirements,poll_session,request_context,select_detail
+from .ui_data import ContextTimeline,blockage_text,connect_readonly,display_value,event_detail,event_summary,format_event_detail,goal_requirements,poll_session,request_context,select_detail
 
 STATUS={'ready':'准备决策','waiting_navigation':'等待人工驾驶和自动到达检查','waiting_observation':'等待新观察',
         'waiting_monitor':'等待任务监控触发',
@@ -29,15 +29,16 @@ OPERATION_EVENTS={'manual_goal_evidence_wait_started':'等待到达证据',
     'api_input_rejected':'模型输入超过估算限制',
     'operator_command':'操作结果','subtask_skipped':'子任务已跳过','registered_task_imported':'复用历史登记','task_monitor_event':'任务复核触发','navigation_context_lost':'定位或地图变化',
     'navigation_association_waiting':'等待同图重新关联','navigation_association_recovered':'同图关联已恢复',
-    'task_connection_lost':'连接中断','model_failed':'模型错误','model_action_missing':'模型未提交执行动作',
+    'task_connection_lost':'连接中断','model_failed':'模型错误','model_action_missing':'模型未调用工具',
     'model_protocol_rejected':'模型格式错误','conversation_trimmed':'上下文裁剪','route_repeated_refusal':'路线重复被拒绝',
     'navigation_repeated_refusal':'导航目标重复被拒绝',
+    'navigation_blocked':'导航受阻','navigation_unblocked':'导航受阻解除','route_attempt_retired':'原路线已撤销',
     'agent_run_finished':'会话结束'}
 MONITOR_TRIGGER_LABELS={'navigation_state_changed':'导航状态变化','operator_review_requested':'用户请求复核',
     'semantic_review_due':'周期复核','region_entered':'进入区域','no_measured_progress':'暂无测量进展',
     'distance_progress':'行驶距离','rotation_progress':'转角','stopped_duration':'持续停稳','monitor_timeout':'等待超时',
     'conditional_review_due':'条件式持续复核'}
-MONITOR_REVIEW_LABELS={'satisfied':'已满足','not_satisfied':'未满足','unknown':'证据不足'}
+MONITOR_REVIEW_LABELS={'satisfied':'已满足','partly_satisfied':'部分满足','not_satisfied':'未满足','unknown':'证据不足'}
 
 
 def update_readonly_text(widget, text):
@@ -864,6 +865,10 @@ class ManualWindow(QtWidgets.QMainWindow):
                 '\n模型判断：'+MONITOR_REVIEW_LABELS.get(review.get('result'),str(review.get('result') or '无'))+
                 ('\n判断依据：'+str(review['evidence']) if review.get('evidence') else ''))
             conditional=monitor.get('conditional_review') or {}
+            if s.get('navigation_status')=='blocked' and s.get('blockage'):
+                summary+='\n当前规划反馈：'+blockage_text(s['blockage'])
+            elif s.get('detour_preview_conflict'):
+                summary+='\n当前参考路径仍经过上一次的阻点，请停稳核对。'
             if conditional:
                 region_name=self.annotation_names.get(conditional.get('region_id'),conditional.get('region_id'))
                 region_label={'inside':'区域内','outside':'区域外','unknown':'定位不可用'}.get(conditional.get('region_state'),'未知')

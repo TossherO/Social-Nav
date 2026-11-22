@@ -46,18 +46,27 @@ class AgentLoop:
         ride_phase = session.elevator.transition.status if self.state.get('elevator_active') else None
         return (self.state['task_id'], self.state['revision'], goal_id, ride_phase)
 
-    def _execution_text(self, reply, transient):
+    def _handle_text_reply(self, reply, transient):
         stage = self._decision_stage()
         repeated = self.missing_action_for == stage
         self.missing_action_for = stage
-        record = dict(correction_requested=not repeated)
+        registration = not self.session.task_goals.goals
+        record = dict(phase='registration' if registration else 'execution', correction_requested=not repeated)
         if transient:
             self.session.elevator.feedback = dict(status='refused', reason='native_tool_required',
                                                   previous_text=reply.message.get('content'))
         else:
             record['message'] = reply.message
+        if registration:
+            self.session.conversation.commit(reply)
         if repeated:
-            self.session.stop('paused', 'model_action_missing')
+            if registration:
+                self.session.stop('needs_clarification', 'model_text_without_task_registration')
+            else:
+                self.session.stop('paused', 'model_action_missing')
+        elif registration and self.requests >= self.max_requests:
+            self.session.stop('needs_clarification', 'model_request_limit')
+            record.update(correction_requested=False, reason='model_request_limit')
         elif transient:
             self.session.wait_for_event('monitor')
         self.session._save('model_action_missing', record)
@@ -173,7 +182,10 @@ class AgentLoop:
         if result is not None:
             timing = result['timing']
             timing['consumed_s'] = perf_counter()
-            valid = not result['stale'] and self.session.valid_context(result['context'])
+            reply = result.get('value')
+            tool = (reply.action.get('tool') if isinstance(reply,Reply) and isinstance(reply.action,dict) and
+                    reply.argument_error is None else None)
+            valid = not result['stale'] and self.session.valid_context(result['context'],tool=tool)
             self.session.store.event('model_result_consumed', dict(request_index=result['request_index'],
                 valid_context=valid, ok=result['ok'], timing=timing))
             if result['ok']:
@@ -223,7 +235,6 @@ class AgentLoop:
             else:
                 if s.get('reason')==MODEL_RETRY_REASON:
                     s['reason']=None
-                reply = result['value']
                 try:
                     if not isinstance(reply,Reply):
                         raise ValueError('Model worker must return a checked native reply')
@@ -241,13 +252,7 @@ class AgentLoop:
                         self.session._save('tool_arguments_rejected',reply.argument_error)
                         return s
                     if reply.action is None:
-                        if self.session.task_goals.goals:
-                            self._execution_text(reply, transient)
-                            return s
-                        self.session.conversation.commit(reply)
-                        self.session.stop('needs_clarification','model_text_without_task_registration')
-                        self.session._save('assistant_message',dict(message=reply.message,task_success=False,
-                            unregistered_task=True,automatically_retried=False))
+                        self._handle_text_reply(reply, transient)
                         return s
                     self.missing_action_for = None
                     value = reply.action
@@ -324,7 +329,14 @@ class AgentLoop:
             self.session._save('spatial_view_expired_before_request')
         payload = self.session.prompt()
         if self.missing_action_for is not None and self.missing_action_for == self._decision_stage():
-            payload['current_state']['decision_feedback'] = '上一轮只返回了文字。请依据本轮证据选择并调用一个原生工具。'
+            current = payload['current_state']
+            if current['requirements_registered']:
+                current['decision_feedback'] = '上一轮只返回了文字。请依据本轮证据选择并调用一个原生工具。'
+            else:
+                current['registration_instruction'] = s['instruction']
+                current['decision_feedback'] = ('上一轮只返回了文字，任务尚未登记。请根据 registration_instruction '
+                                                '和已有澄清，用 record_task 登记完整要求。需要核对标注时先查询，'
+                                                '只有确需用户补充信息时才调用 ask_user。')
         context = self.session.context()
         observation = copy.deepcopy(self.session.observation)
         spatial_view = copy.deepcopy(self.session.spatial_view)

@@ -11,8 +11,8 @@ from perception.environment.context import fingerprint
 from tests.test_navigation_prediction import track, tracked_scene
 
 
-def scene(stamp, x=4., *, support=None, state='observed', generation=7, present=True, velocity=(.5,0.,0.)):
-    value=track(x,2.,velocity,stamp=stamp if support is None else support)
+def scene(stamp, x=4., *, y=2., support=None, state='observed', generation=7, present=True, velocity=(.5,0.,0.)):
+    value=track(x,y,velocity,stamp=stamp if support is None else support)
     value.update(state=state,lifecycle_generation=generation)
     return tracked_scene([value] if present else [],stamp=stamp)
 
@@ -69,10 +69,12 @@ class FollowContinuityTests(unittest.TestCase):
 
     def test_predicted_track_expires_and_cannot_resume_automatically(self):
         initial=scene(10.);self.history.add(initial);policy=TaskPolicy('f','follow',self.config,self.geometry)
-        policy.start_continuous_follow(reference(initial),initial,self.history,now=10.)
-        brief=scene(10.3,support=10.,state='predicted')
+        first=policy.start_continuous_follow(reference(initial),initial,self.history,now=10.)
+        brief=scene(10.3,x=6.,support=10.,state='predicted')
         self.history.add(brief)
-        self.assertEqual(policy.update(brief,now=10.3,history=self.history)['operation'],'plan')
+        held=policy.update(brief,now=10.3,history=self.history)['request']
+        self.assertEqual(held['goal'],first['request']['goal'])
+        self.assertEqual(held['goal_revision'],first['request']['goal_revision'])
         late=scene(10.9,support=10.,state='predicted')
         self.history.add(late)
         self.assertEqual(policy.update(late,now=10.9,history=self.history)['operation'],'stop')
@@ -133,10 +135,22 @@ class FollowContinuityTests(unittest.TestCase):
         self.assertIsNone(request_status(result['request'],initial,10.,'synthetic'))
         self.assertEqual(request_status(result['request'],initial,10.51,'synthetic'),'request_expired')
         turning=scene(10.1,velocity=(0.,.5,0.));self.history.add(turning)
-        result=policy.update(turning,now=10.1,history=self.history)
-        np.testing.assert_allclose(result['request']['goal'],[4.,.5])
+        unchanged=policy.update(turning,now=10.1,history=self.history)['request']
+        self.assertEqual(unchanged['goal'],result['request']['goal'])
+        self.assertEqual(unchanged['goal_revision'],result['request']['goal_revision'])
         self.assertFalse(policy.cancel()['task_completed'])
         self.assertEqual(policy.update(turning,now=10.1,history=self.history)['reason'],'task_cancelled')
+
+    def test_close_start_and_recovery_after_predicted_gap(self):
+        initial=scene(10.,x=2.4);self.history.add(initial)
+        policy=TaskPolicy('f','follow',self.config,self.geometry)
+        first=policy.start_continuous_follow(reference(initial),initial,self.history,now=10.)
+        np.testing.assert_allclose(first['request']['goal'],[2.,2.])
+        # The intervening prediction is observed by the runtime between two policy updates.
+        self.history.add(scene(10.1,x=6.,support=10.,state='predicted'))
+        current=scene(10.2,x=3.5,y=4.);self.history.add(current)
+        recovered=policy.update(current,now=10.2,history=self.history)
+        np.testing.assert_allclose(recovered['request']['goal'],[2.6,2.8])
 
     def test_continuous_request_uses_existing_planner_and_safety(self):
         from navigation.control.runtime import DwaNavigationControl

@@ -4,14 +4,15 @@ from .continuity import reference_envelope
 from .planner import Planner
 
 
-def preview(request, scene, rows, controller, planning, *, asset=None, dt=.1):
+def preview(request, scene, rows, controller, planning, *, asset=None, dt=.1, on_mapped_grid=None):
     now = scene.record['as_of']
     clock = scene.record['clock_domain']
     if clock != 'runtime_bag':
         raise ValueError('Frozen planning is restricted to bag observations')
     scene.verify()
     planner = Planner(planning, controller.geometry, require_actual_start=True)
-    result = planner.query(request, scene=scene, asset=asset, now=now, clock_domain=clock)
+    result = planner.query(request, scene=scene, asset=asset, now=now, clock_domain=clock,
+                           on_mapped_grid=on_mapped_grid)
     reference = reference_envelope(result, request, scene, asset)
     feedback = observed_feedback(rows, scene, controller.geometry, controller.motion, now=now)
     controller.clear()

@@ -136,6 +136,80 @@ def line_segments(points):
     return np.stack([points[:-1][valid],points[1:][valid]],axis=1).reshape(-1,3)
 
 
+class SearchMapSurface:
+    """Draw a reference search's cells at display heights from the static asset."""
+
+    def __init__(self, asset, offset=.005):
+        from perception.environment.geometry import nearest_support
+
+        grid = asset.snapshot
+        meta, layers = grid.metadata, grid.layers
+        self.shape = layers['occupancy'].shape
+        self.frame_id = meta['frame_id']
+        self.resolution = meta['resolution']
+        self.origin_xy = tuple(meta['origin_xy'])
+        rows, columns = self.shape
+        self.x = (self.origin_xy[0] + (np.arange(columns) + .5) * self.resolution).astype(np.float32)
+        self.y = (self.origin_xy[1] + (np.arange(rows) + .5) * self.resolution).astype(np.float32)
+
+        # A horizontal plane at the mapped median (or Z=0 without any ground)
+        # keeps known search cells visible outside measured ground coverage.
+        ground_z = layers.get('ground_z')
+        height = np.zeros(self.shape, dtype=np.float32)
+        if ground_z is not None:
+            known = np.zeros(self.shape, dtype=bool)
+            for layer in ('ground_support', 'ground_estimated'):
+                if layer in layers:
+                    known |= layers[layer]
+            known &= np.isfinite(ground_z)
+            if known.any():
+                measured = ground_z[known]
+                height.fill(np.median(measured))
+                height[known] = measured
+                if not known.all():
+                    distance, nearest = nearest_support(known)
+                    nearby = ~known & (distance * self.resolution <= 1.)
+                    height[nearby] = ground_z[nearest[0][nearby], nearest[1][nearby]]
+        height += offset
+        self.height = height.ravel()
+
+    def path_points(self,xy,offset):
+        """Lift a path already in the search frame onto the displayed terrain."""
+        x,y=np.floor((xy-self.origin_xy)/self.resolution).astype(int).T
+        valid=(x>=0)&(x<self.shape[1])&(y>=0)&(y<self.shape[0])
+        z=np.full(len(x),np.nan)
+        z[valid]=self.height[y[valid]*self.shape[1]+x[valid]]+offset
+        return np.column_stack((xy,z))
+
+    def cloud(self, snapshot):
+        from navigation.planning.runtime import decode_display_map
+        from sensor_msgs.msg import PointField
+        from .scans import pointcloud_message
+
+        if (tuple(snapshot['shape']) != self.shape or snapshot['frame_id'] != self.frame_id or
+                snapshot['resolution'] != self.resolution or tuple(snapshot['origin_xy']) != self.origin_xy):
+            raise ValueError('Search display grid geometry differs from the static map')
+
+        cells, conditional = decode_display_map(snapshot)
+        cells = cells.ravel()
+        indices = np.flatnonzero(cells >= 0)
+        rows, columns = np.divmod(indices, self.shape[1])
+        data = np.empty(indices.size, dtype=[('x', '<f4'), ('y', '<f4'), ('z', '<f4'), ('rgb', '<u4')])
+        data['x'], data['y'], data['z'] = self.x[columns], self.y[rows], self.height[indices]
+        data['rgb'] = 0xD7DDE3
+        if conditional is not None:
+            data['rgb'][conditional.ravel()[indices]] = 0xE7A343
+        data['rgb'][cells[indices] == 100] = 0xF05848
+
+        message = pointcloud_message(np.empty((0, 3)), self.frame_id, snapshot['stamp_s'])
+        message.fields.append(PointField(name='rgb', offset=12, datatype=PointField.UINT32, count=1))
+        message.width = indices.size
+        message.point_step = data.dtype.itemsize
+        message.row_step = message.width * message.point_step
+        message.data = data.tobytes()
+        return message
+
+
 def ground_cloud(grid,offset=.005):
     """A coloured surface with fitted heights distinguished from supported ground."""
     from .scans import pointcloud_message

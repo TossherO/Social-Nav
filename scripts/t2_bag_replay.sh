@@ -5,10 +5,10 @@ set -eo pipefail
 cd "$(dirname -- "${BASH_SOURCE[0]}")/.."
 usage() {
   printf '%s\n' '用法: bash scripts/t2_bag_replay.sh --bag 文件 [--floor floor1|floor2] [--start 秒] [--rate 倍率] [--initial-z 米] [--pose-file 文件] [--reuse-session 文件 --auto-follow [--auto-follow-single-person]] [--ros-port 端口] [--t2-backend hosted|dspark|reid] [--t2-reid-weights 路径] [--t2-image-format jpeg|png] [--t2-jpeg-quality 1..95]' \
-    '启动独立 ROS、RViz 和 Agent 界面；不会连接底盘。默认二楼、1 倍速和 hosted。' \
+    '仅回放 bag，不连接底盘。默认二楼、1 倍速，跟随后端读取本机配置，未配置时使用 hosted。' \
     'reid 权重使用 .onnx 选择 OpenCV CPU，使用 .engine 选择 TensorRT CUDA。'
 }
-bag='' floor=floor2 start=0 rate=1 pose_file='' initial_z='' reuse_session='' auto_follow=0 auto_follow_single_person=0 port=11329 backend=hosted reid_weights='' image_format=auto jpeg_quality=70
+bag='' floor=floor2 start=0 rate=1 pose_file='' initial_z='' reuse_session='' auto_follow=0 auto_follow_single_person=0 port=11329 backend='' reid_weights='' image_format=auto jpeg_quality=70
 while (($#)); do
   case "$1" in
     --help|-h) usage; exit 0;;
@@ -18,7 +18,12 @@ while (($#)); do
       if (($# < 2)); then usage >&2; exit 2; fi
       case "$1" in
         --bag) bag=$2;; --floor) floor=$2;; --start) start=$2;; --rate) rate=$2;;
-        --pose-file) pose_file=$2;; --initial-z) initial_z=$2;; --reuse-session) reuse_session=$2;; --ros-port) port=$2;; --t2-backend) backend=$2;;
+        --pose-file) pose_file=$2;; --initial-z) initial_z=$2;; --reuse-session) reuse_session=$2;; --ros-port) port=$2;;
+        --t2-backend)
+          case "$2" in
+            hosted|dspark|reid) backend=$2;;
+            *) echo 'T2 后端只能是 hosted、dspark 或 reid。' >&2; exit 2;;
+          esac;;
         --t2-reid-weights)
           if [[ -n "$reid_weights" || -z "$2" || "$2" == --* ]]; then echo '--t2-reid-weights 需要一个本地权重路径且只能指定一次。' >&2; exit 2; fi
           reid_weights=$2;;
@@ -30,13 +35,8 @@ while (($#)); do
 done
 [[ -f "$bag" ]] || { echo '请使用 --bag 指定存在的 bag 文件。' >&2; exit 2; }
 [[ "$floor" == floor1 || "$floor" == floor2 ]] || { echo '楼层只能是 floor1 或 floor2。' >&2; exit 2; }
-[[ "$backend" == hosted || "$backend" == dspark || "$backend" == reid ]] || { echo 'T2 后端只能是 hosted、dspark 或 reid。' >&2; exit 2; }
-[[ -z "$reid_weights" || "$backend" == reid ]] || { echo '--t2-reid-weights 要求使用 reid 后端。' >&2; exit 2; }
 [[ "$image_format" == auto || "$image_format" == png || "$image_format" == jpeg ]] || { echo '图像格式只能是 jpeg 或 png。' >&2; exit 2; }
 [[ "$jpeg_quality" =~ ^[1-9][0-9]?$ ]] && ((jpeg_quality<=95)) || { echo 'JPEG 质量需在 1 至 95 之间。' >&2; exit 2; }
-if [[ "$image_format" == auto ]]; then
-  if [[ "$backend" == hosted ]]; then image_format=jpeg; else image_format=png; fi
-fi
 if [[ "$auto_follow" == 1 && ! -f "$reuse_session" ]]; then echo '--auto-follow 需要用 --reuse-session 指定已登记任务的 session.sqlite。' >&2; exit 2; fi
 if [[ "$auto_follow_single_person" == 1 && "$auto_follow" != 1 ]]; then echo '--auto-follow-single-person 需要同时启用 --auto-follow。' >&2; exit 2; fi
 if [[ -n "$reuse_session" && "$auto_follow" != 1 ]]; then echo '--reuse-session 需与 --auto-follow 一起使用；也可在窗口中手动选择历史任务。' >&2; exit 2; fi
@@ -47,6 +47,13 @@ if [[ -f outputs/runtime/environment/activate.sh ]]; then
 fi
 replay_python="${replay_requested_python:-${SOCIAL_NAV_PYTHON:-python}}"
 command -v "$replay_python" >/dev/null || { echo '找不到回放解释器，请激活本机运行环境或设置 SOCIAL_NAV_PYTHON。' >&2; exit 1; }
+if [[ -z "$backend" ]]; then
+  backend=$("$replay_python" -B -c 'from decision.vlm.t2.hosted import LOCAL_BACKEND, follow_backend; print(follow_backend() if LOCAL_BACKEND.is_file() else "hosted")')
+fi
+[[ -z "$reid_weights" || "$backend" == reid ]] || { echo '--t2-reid-weights 要求使用 reid 后端。' >&2; exit 2; }
+if [[ "$image_format" == auto ]]; then
+  if [[ "$backend" == hosted ]]; then image_format=jpeg; else image_format=png; fi
+fi
 if [[ "$backend" == reid ]]; then
   reid_weights=$("$replay_python" -B - "$reid_weights" <<'PY'
 import sys

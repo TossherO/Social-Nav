@@ -11,7 +11,17 @@ def parameters(properties=None, required=()):
 
 
 TEXT = dict(type='string', minLength=1, maxLength=2048)
+CHECKPOINT = dict(anyOf=[TEXT, parameters({
+    'any_of': dict(type='array',items=TEXT,minItems=2,maxItems=16,uniqueItems=True),
+}, ['any_of'])],description='地点 ID。用户明确允许任选其一的中途地点可写为 {"any_of":[ID,ID]}。终点须为单个 ID。')
 CONTINUE_CLAUSE = dict(TEXT,description='仅用户明确要求等待继续口令时，逐字引用原指令或用户答复中的等待条款。')
+NEARBY_STOP = parameters({
+    'instruction_quote': dict(TEXT,description='逐字引用用户明确允许在指定点附近另选停车位置的完整条款。'),
+    'max_distance_m': dict(type='number',exclusiveMinimum=0,
+                           description='用户给出附近停车距离上限时填写，单位为米。'),
+    'allow_visual_reselection': dict(type='boolean',
+                                    description='仅用户允许因视觉不足改点，或无条件允许在原点附近停车时填写 true。'),
+}, ['instruction_quote'])
 XY = dict(type='array', items=dict(type='number'), minItems=2, maxItems=2)
 POSE = dict(type='array', items=dict(type='number'), minItems=3, maxItems=3)
 GOAL = parameters({
@@ -24,12 +34,14 @@ GOAL = parameters({
     'position': dict(XY,description='仅匿名点需要用户明确给出的地图[x,y]米；命名点可省略，区域不得填写。'),
     'floor_id': dict(TEXT,description='跨楼层人工测试时该阶段所在楼层；只使用当前任务提供的楼层身份。'),
     'to_floor': dict(TEXT,description='仅乘梯阶段填写目标楼层身份；由用户的跨楼层任务确定。'),
-    'required_yaw': dict(type='number',description='仅用户硬性指定的地图yaw弧度；自主选择的朝向不填这里。'),
+    'initial_yaw': dict(type='number',description='仅点目标使用。用户明确指定的首次停靠地图 yaw，单位为弧度。'),
+    'required_yaw': dict(type='number',description='用户硬性指定的完成朝向，使用地图 yaw 弧度。视觉调整仍须遵守。'),
     'facing': dict(type='string',description='仅用户要求面向时填写一个已标注点或区域的正式ID字符串，不是ID数组；依据位置、通道和观察自主判断朝向，不强制指向几何中心。硬性视觉条件使用semantic_conditions，尽力满足的视觉偏好使用visual_preferences。'),
     # Read the old internal shape for recorded tool replay. The model schema below omits this field.
     'position_rule': dict(type='string',enum=['region_centroid']),
     'max_distance_m': dict(type='number',exclusiveMinimum=0,maximum=50,description='仅用户明确指定参考对象的距离上限时填写，单位为米。'),
-    'checkpoints': dict(type='array',items=TEXT,minItems=2,maxItems=16,description='仅sequence使用；按用户要求的顺序填写正式点或区域ID，不含Agent自主添加的途经点。'),
+    'nearby_stop': dict(NEARBY_STOP,description='仅 point 且用户明确允许附近停车时登记。优先原点。'),
+    'checkpoints': dict(type='array',items=CHECKPOINT,minItems=2,maxItems=16,description='sequence 的有序地点要求，最后一项为原终点。'),
     'semantic_conditions': dict(type='array',items=TEXT,maxItems=8,
         description='仅用户明确要求必须满足、需到达后用RGB确认的条件；“尽量”要求只放visual_preferences，不要同时登记为硬条件。'),
     'visual_preferences': dict(type='array',items=TEXT,maxItems=8,
@@ -74,8 +86,8 @@ GOAL['allOf'] = [
 REGISTRATION_TARGET = parameters({
     'id': dict(TEXT, description='当前任务地图上的正式点或区域 ID。'),
     'position': dict(XY, description='用户明确指定的匿名地图坐标 [x,y]，单位米。'),
-    'checkpoints': dict(type='array', items=TEXT, minItems=2, maxItems=16,
-                        description='sequence 的用户指定地点 ID，按要求顺序填写。'),
+    'checkpoints': dict(type='array', items=CHECKPOINT, minItems=2, maxItems=16,
+                        description='sequence 使用。按用户要求依次登记中途地点和终点。'),
 })
 VISUAL_CONDITION = parameters({
     'description': dict(TEXT, description='用户提出的视觉要求。'),
@@ -84,9 +96,11 @@ VISUAL_CONDITION = parameters({
 }, ['description','priority'])
 REGISTRATION_CONDITIONS = parameters({
     'wait_after': GOAL['properties']['wait_after'],
+    'initial_yaw': GOAL['properties']['initial_yaw'],
     'required_yaw': GOAL['properties']['required_yaw'],
     'facing': dict(type='string',description='用户要求面向的正式点或区域 ID；结合连通关系判断朝向，不强制指向几何中心。'),
     'max_distance_m': GOAL['properties']['max_distance_m'],
+    'nearby_stop': GOAL['properties']['nearby_stop'],
     'robot_inside_region_id': GOAL['properties']['robot_inside_region_id'],
     'visual': dict(type='array', items=VISUAL_CONDITION, maxItems=16,
                    description='必须满足和尽量满足的视觉要求；按用户原意区分。'),
@@ -125,10 +139,10 @@ TOOL_SPECS = {
     'query_map': ('查询静态先验地图的裁剪，可用bounds指定范围；不叠加当前局部占据或人物，不能据此判断当前环境空闲。结果和下一轮图片同源，不移动轮椅或生成候选。',
                   parameters({'bounds': dict(type='array',items=dict(type='number'),minItems=4,maxItems=4,
                       description='当前地图米制[xmin,ymin,xmax,ymax]，xmin<xmax且ymin<ymax；省略时取自车附近。裁剪远处不代表那里有当前测量。')})),
-    'check_candidate': ('检查自主选择的候选base_link位姿：静态地图和可覆盖候选的同源局部占据中的完整车体轮廓与安全余量，以及指定标注点相对候选相机的近似水平视野。结果不证明动态障碍已排除，不检查路线、遮挡或实际可见性，不提交导航。',
-                        parameters({'pose':dict(POSE,description='候选地图位姿[x,y,yaw]，米和弧度，参考base_link。'),
+    'check_candidate': ('检查候选停车位置或位姿在静态先验和同源局部占据中的几何条件。只有 [x,y] 时可识别所有朝向都受阻的位置，只有覆盖各朝向车体及安全余量的范围全空闲时才返回 free。undetermined 表示尚未判定。提供 yaw 时检查该朝向下的车体轮廓和安全余量。另传 point_ids 时，逐点估计水平视野，并检查相机至标注点之前的二维静态栅格。遇占据或未知以及终点所在格会单独报告，实际可见性须看 RGB。',
+                        parameters({'pose':dict(POSE,minItems=2,description='以 base_link 为参考的地图 [x,y] 或 [x,y,yaw]，单位为米和弧度。'),
                                     'view_id':dict(TEXT,description='原样填写本轮当前空间图提供的短 view_id。'),
-                                    'point_ids':dict(type='array',items=TEXT,maxItems=16,description='需要检查视野的已标注点ID；区域和未知目标不能当作点。')}, ['pose','view_id'])),
+                                    'point_ids':dict(type='array',items=TEXT,maxItems=16,description='观察任务中需要估计视野和静态遮挡的标注点 ID，同框对象一起填写，pose 必须含 yaw。普通停车可省略。')}, ['pose','view_id'])),
     'observe_scene': ('当前RGB缺失或需要显式重新读取时使用，返回available或不可用原因；不移动轮椅、不主动推进录包，等新帧用wait_for_event。', parameters()),
     'select_follow_target': ('从本轮带编号的当前 RGB 人物候选中确认跟随对象，保存该人物的视觉参考。此操作不启动跟随或运动；观察不足时重新观察。',
                  parameters({'goal_id':dict(TEXT,description='当前跟随阶段的 goal_id。'),
@@ -154,20 +168,22 @@ TOOL_SPECS = {
                                   'reason':dict(TEXT,description='简短说明要保留的可见线索及未来用途，不把过去图像写成当前执行证明。')}, ['observation_id','reason'])),
     'read_keyframe': ('根据当前keyframes索引重读过去RGB；最多两张历史图保留在上下文，裁剪不删除已保存记录。不会取得新观察或刷新源时间。',
                       parameters({'keyframe_id':dict(TEXT,description='本任务当前修订已经保存的keyframe_id，不能使用其他任务、其他修订或未来观察。')}, ['keyframe_id'])),
-    'navigate': ('point、region、reference 的单目标导航。普通目标只提交 point_id 或 pose=[x,y]。selected_goal.heading_required 为 true 时，额外提供 yaw 或使用 pose=[x,y,yaw]，并填写 orientation_source。accepted 表示已接收目标。',
+    'navigate': ('提交一个停车目标。可在提交观测位姿时一次检查同框标注点。指定首停优先，换点须有相应许可和证据。accepted 表示目标已接收。',
                  parameters({'goal_id':dict(TEXT,description='当前next_goal_id，必须先登记要求。'),
                              'pose':dict(POSE,minItems=2,description='以 base_link 为参考的地图 [x,y] 或 [x,y,yaw]。区域目标在标注范围内选可停车的位置。匿名指定坐标时使用用户给出的 x、y。'),
                              'point_id':dict(TEXT,description='明确导航到的标注点的正式 place_id。采用该点的标注坐标。'),
+                             'point_ids':dict(type='array',items=TEXT,minItems=1,maxItems=16,uniqueItems=True,
+                                description='可选。观测任务中拟在同一画面看到的标注点 ID。按提交的位姿检查水平视野。'),
                              'yaw':dict(type='number',description='使用point_id时模型明确选择的地图yaw弧度，不自动采用标注朝向。'),
                              'view_id':dict(TEXT,description='原样填写本轮visual_inputs.maps/current_spatial_view给出的短view_id，不是reference_map_id或图片编号。'),
                              'orientation_source': dict(type='string',enum=['user','semantic','autonomous'],
                                 description='仅提供 yaw 时填写，从 selected_goal.allowed_orientation_sources 选择。')},
                             ['goal_id', 'view_id'])),
-    'navigate_route': ('route、sequence 的多点导航，仅仿真和人工驾驶支持。按顺序一次提交途经点，点间路径由导航器规划。某点被拒时查看 diagnostics.waypoints 中的 index、位置与占据原因。',
+    'navigate_route': ('route、sequence 的多点导航，仅仿真和人工驾驶支持。每次提交一条有序路线，点间路径由导航器规划。阶段开始时选定一条路线。当前路段持续受阻并撤销停稳后，可从实际位置重新提交保留原终点和剩余地点要求的路线。某点被拒时查看 diagnostics.waypoints。',
                        parameters({'goal_id':dict(TEXT,description='当前next_goal_id。'),
                                    'view_id':dict(TEXT,description='当前地图view_id。'),
                                    'orientation_source':dict(type='string',enum=['user','semantic','autonomous'],description='从 selected_goal.allowed_orientation_sources 选终点朝向来源。'),
-                                   'waypoints':dict(type='array',minItems=2,maxItems=32,items=XY,description='地图米制 [[x,y],…]，相邻点须不同。sequence 按顺序覆盖所有 checkpoints，并在最后一个结束。仅要求返回时把用户指定的返回位置列为末点。'),
+                                   'waypoints':dict(type='array',minItems=2,maxItems=32,items=XY,description='地图米制 [[x,y],…]，相邻点须不同。sequence 按顺序覆盖尚未实测经过的 checkpoints，每个 any_of 选一项，并在原终点结束。仅要求返回时才将指定的返回位置列为末点。'),
                                    'final_yaw':dict(type='number',description='终点base_link地图yaw弧度；用户没有朝向或视觉要求时可省略。'),
                                    'waypoint_reason':dict(type='string',minLength=1,maxLength=512,description='不同位置超过三个时说明加点的任务或地图依据。sequence 的阈值为指定检查点数加二。点位仍须通过占据检查。')},
                                   ['goal_id','view_id','orientation_source','waypoints'])),
@@ -190,9 +206,11 @@ TOOL_SPECS = {
         parameters({'goal_id':dict(TEXT,description='当前next_goal_id。'),
                     **MONITOR_FIELDS},
                    ['goal_id','focus'])),
-    'record_monitor_review': ('记录条件式持续复核中尚未满足或证据不足的判断及其当前观察依据；记录后等待新观察继续复核，不代表任务完成。满足时调用 complete_subtask。',
+    'record_monitor_review': ('记录未满足、部分满足或证据不足的判断。到达后用本轮有效的停稳 RGB 说明已看见什么和仍缺什么。硬性视觉条件全部满足且完成证据齐全时，直接用 complete_subtask 提交。',
         parameters({'goal_id':dict(TEXT,description='正在复核的当前子任务 ID。'),
-                    'result':dict(type='string',enum=['not_satisfied','unknown'],description='本轮条件尚未满足，或当前观察不足以判断。'),
+                    'result':dict(type='string',enum=['not_satisfied','partly_satisfied','unknown'],description='未满足、部分可见或证据不足。partly_satisfied 用于到达停稳后的硬性视觉条件和视觉偏好。'),
+                    'observation_id':dict(TEXT,description='到达停稳后的视觉复核可引用本轮 RGB。未填写时使用本轮已读取的 RGB。'),
+                    'visual_priority':dict(type='string',enum=['required','preferred'],description='到达停稳后的视觉复核应指明条件或偏好的优先级。仅登记一种且没有持续区域复核时可以省略。'),
                     'evidence':dict(type='string',minLength=1,maxLength=512,description='简述本轮观察及未满足或无法判断的原因。')},
                    ['goal_id','result','evidence'])),
     'cancel_navigation': ('撤销活动导航或局部任务并等待对应取消或停稳反馈；取消请求本身不证明已经停稳。', parameters()),
@@ -202,7 +220,7 @@ TOOL_SPECS = {
                            'instruction_quote': CONTINUE_CLAUSE}, ['event'])),
     'ask_user': ('目标身份、必要条件或证据无法自行澄清时询问；保留原任务，收到回答再继续。有活动运动目标须先取消；已确认停稳的实机保持状态可以直接询问。',
                  parameters({'question':dict(TEXT,description='只问当前缺少的具体信息，不要求用户反复确认已知条件。')}, ['question'])),
-    'complete_subtask': ('查看 completion_evidence 和本轮观察。你判断当前子任务已满足时，一次提交完成决定和依据。跟随会先请求停车，末段停稳后自动结束整项任务。',
+    'complete_subtask': ('completion_evidence 齐全且本轮观察表明子任务已满足时，直接提交完成决定和依据。任务要求到达后观察时，说明本次停稳后 RGB 中哪些内容满足硬性视觉条件。跟随会先请求停车，末段停稳后自动结束整项任务。',
         parameters({'goal_id':dict(TEXT,description='当前 next_goal_id。'),
                     'evidence':dict(TEXT,description='用本轮测量和观察说明已满足的要求，包括视觉偏好实际满足的程度。')},
                    ['goal_id','evidence'])),
@@ -267,6 +285,12 @@ def validate_call(value, *, model_schema=False):
         has_heading='yaw' in args or len(args.get('pose',()))==3
         if has_heading != ('orientation_source' in args):
             raise jsonschema.ValidationError('orientation_source is required exactly when a heading is provided')
+        if 'point_ids' in args and not has_heading:
+            raise jsonschema.ValidationError('point_ids requires a candidate heading',path=['point_ids'])
+    if value['tool']=='check_candidate':
+        args=value['arguments']
+        if len(args['pose'])==2 and args.get('point_ids'):
+            raise jsonschema.ValidationError('check_candidate requires yaw when checking point visibility',path=['pose'])
     return value
 
 
@@ -285,7 +309,7 @@ class Reply:
     argument_error: dict | None = None
 
     @classmethod
-    def parse(cls, message, *, report_argument_error=False, model_schema=False):
+    def parse(cls, message, *, report_argument_error=False, model_schema=False, validate_action=None):
         """Validate the native reply without fixing content, arguments or identities."""
         if not isinstance(message,dict) or message.get('role') != 'assistant' or message.get('content') is not None and not isinstance(message['content'], str):
             raise ValueError('Expected an assistant message with optional text')
@@ -303,7 +327,8 @@ class Reply:
                 raise ValueError('Function arguments must be a JSON string')
             try:
                 arguments = json.loads(function['arguments'], object_pairs_hook=unique_fields)
-                action = validate_call(dict(tool=function.get('name'), arguments=arguments),model_schema=model_schema)
+                call = dict(tool=function.get('name'), arguments=arguments)
+                action = validate_call(call,model_schema=model_schema) if validate_action is None else validate_action(call)
             except (ValueError,jsonschema.ValidationError) as error:
                 if not report_argument_error or function.get('name') not in TOOL_SPECS:
                     raise

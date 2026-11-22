@@ -31,8 +31,18 @@ Visualization Manager:
       Marker Topic: /social_nav_runtime_view/people
       Queue Size: 1
     - Class: rviz/PointCloud2
-      Name: Navigation occupancy (terrain height)
+      Name: Navigation basemap
       Enabled: true
+      Topic: /social_nav_runtime_view/navigation_basemap
+      Queue Size: 1
+      Style: Squares
+      Size (m): 0.1
+      Color Transformer: RGB8
+      Alpha: 0.8
+      Decay Time: 0
+    - Class: rviz/PointCloud2
+      Name: Local navigation map (DWA diagnostic)
+      Enabled: false
       Topic: /social_nav_runtime_view/ground_map
       Queue Size: 1
       Style: Squares

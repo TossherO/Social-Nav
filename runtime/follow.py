@@ -98,18 +98,7 @@ class FollowRunner:
                 rgb<=self.policy.last_visual):
             raise ValueError('follow_visual_result_expired_or_out_of_order')
         key,generation=self.history.validate(reference,scene,now=now)
-        # Check the entire transition before changing the active policy.
-        if key!=self.policy.target:
-            # A different person needs a fresh planning revision even when the
-            # two predicted follow poses happen to coincide.
-            self.policy.request=None
-        self.policy.target=key
-        self.policy.tracked_generation=generation
-        self.policy.last_visual=rgb
-        self.policy.response_stamp=reference['stamp_s']
-        self.policy.response_binding=reference['reference_id']
-        self.policy.track_scene_binding=scene.record['input_fingerprint']
-        self.policy.last_update=None
+        self.policy.apply_validated_follow_reference(reference,key,generation,scene,self.history)
         self.reference=copy.deepcopy(reference)
         self.occluded_since=None
         self.trace.clear()

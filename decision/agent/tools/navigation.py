@@ -2,6 +2,7 @@
 import copy
 import math
 import uuid
+from interfaces.runtime import source_stamp_ns
 
 
 class IntentRejected(ValueError):
@@ -14,6 +15,14 @@ def spatial_context(value):
                 map_binding=copy.deepcopy(value.get('map_binding')))
 
 
+def _blockage_signature(observation):
+    return tuple(observation.get(key) for key in ('source','kind','reason','blocked_position'))
+
+
+def _planning_goal(observation):
+    return tuple(observation.get(key) for key in ('goal_binding','request_id','task_id','goal_revision','segment_id'))
+
+
 class NavigationSkill:
     def __init__(self, navigation, catalog, task_id, emit):
         if navigation.scope not in ('simulation', 'shadow', 'live', 'manual'):
@@ -24,15 +33,167 @@ class NavigationSkill:
         self.record = dict(status='idle', handle=None, place_id=None, reason=None, context_lost=False,
                            connected=True, completed=[], attempts=[], goal_revision=0, goal_id=None, selected_pose=None,
                            pending_completion=None, stage_type='navigation',follow_ready=False,search_deadline_s=None,
-                           association_waiting=False,association_epoch=0)
+                           association_waiting=False,association_epoch=0,blockage=None,
+                           recovery_cancel_stamp_s=None,recovery_stop=None)
         self.association_wait_stamp=None
         self.last_stamp = None
-        self.blocked_since = None
-        self.blocked_notified = False
+        self.blockage_run = None
+        self.blockage_latest_ns = {}
+        self.blockage_episode = 0
+        self.environment_epoch = self.initial.get('environment_epoch',0)
         self.follow_phase = None
+        self.follow_blocked_since = None
 
     def _emit(self, event):
         self.emit(event, copy.deepcopy(self.record))
+
+    def _clear_blockage(self):
+        self.blockage_run=None
+        self.blockage_latest_ns.clear()
+        self.follow_blocked_since=None
+        self.record['blockage']=None
+
+    @staticmethod
+    def current_planning_observation(feedback):
+        observation=feedback.get('planning_observation')
+        if observation is not None and observation['source_stamp_s']<=feedback['stamp_s']<=observation['valid_until_s']:
+            return observation
+        return None
+
+    def blockage_matches_feedback(self, blockage, feedback):
+        stamp=feedback.get('stamp_s')
+        if (type(stamp) not in (int,float) or not math.isfinite(stamp) or
+                self.last_stamp is not None and stamp<self.last_stamp or
+                feedback.get('handle')!=blockage.get('handle') or feedback.get('route_index')!=blockage.get('route_index') or
+                feedback.get('status')!='running' or feedback.get('input_stale') or feedback.get('environment_fault') or
+                feedback.get('scope')!=self.navigation.scope or feedback.get('source')!=self.initial.get('source') or
+                feedback.get('localization_status','valid')!='valid' or spatial_context(feedback)!=self.context or
+                feedback.get('environment_epoch',0)!=self.environment_epoch):
+            return False
+        observation=self.current_planning_observation(feedback)
+        if observation is None:
+            return True
+        if _planning_goal(observation)!=_planning_goal(blockage):
+            return False
+        return (observation['status']=='unknown' or
+                observation['status']=='blocked' and _blockage_signature(observation)==_blockage_signature(blockage))
+
+    def _observe_blockage(self, feedback):
+        r=self.record
+        observation=self.current_planning_observation(feedback)
+        route_index=feedback.get('route_index')
+        active=r['blockage']
+        if active is not None and route_index!=active['route_index']:
+            self._clear_blockage()
+            r.update(status='running',reason=None)
+            self._emit('navigation_unblocked')
+            return True
+        if observation is None:
+            # Keep measurements across a matching background search, without
+            # treating the wait itself as another scan or extending its expiry.
+            pending = feedback.get('pending_reference_request_id')
+            run = self.blockage_run
+            if (not pending or run is None or run['reference_request_id'] != pending or
+                    feedback['stamp_s'] > run['valid_until_s']):
+                self.blockage_run = None
+            if active is not None:
+                active['current']=False
+            return False
+        stamp=observation['source_stamp_s']
+        stamp_ns=source_stamp_ns(stamp,observation.get('source_stamp_ns'))
+        source=observation['source']
+        last_ns=self.blockage_latest_ns.get(source)
+        new_goal=active is not None and _planning_goal(active)!=_planning_goal(observation)
+        new_blockage=(active is not None and observation['status']=='blocked' and
+                      (new_goal or _blockage_signature(active)!=_blockage_signature(observation)))
+        if last_ns is not None and (stamp_ns<last_ns or
+                                    stamp_ns==last_ns and observation['status']=='blocked' and not new_blockage):
+            # Same-scan refreshes cannot restore evidence or add to the hold time.
+            return False
+        self.blockage_latest_ns[source]=stamp_ns
+        if observation['status']=='unknown':
+            self.blockage_run=None
+            if new_goal:
+                r.update(status='running',reason=None,blockage=None)
+                self._emit('navigation_blockage_changed')
+                return True
+            elif active is not None:
+                active['current']=False
+            return False
+        if observation['status']=='clear':
+            self.blockage_run=None
+            if active is not None and stamp_ns>=source_stamp_ns(active['source_stamp_s'],active.get('source_stamp_ns')):
+                r.update(status='running',reason=None,blockage=None)
+                self._emit('navigation_unblocked')
+                return True
+            return False
+        if observation['status']!='blocked' or observation.get('kind') not in (
+                'destination_occupied','route_blocked','local_control_blocked'):
+            return False
+        signature=_blockage_signature(observation)
+        if new_blockage:
+            r.update(status='running',reason=None,blockage=None)
+            active=None
+        signature=(*signature,_planning_goal(observation),route_index)
+        run=self.blockage_run
+        continuous=run is not None and run['signature']==signature and stamp<=run['valid_until_s']
+        if continuous:
+            run['count']+=1
+        else:
+            self.blockage_run=run=dict(signature=signature,first_stamp_s=stamp,count=1,
+                                       reference_request_id=observation.get('request_id') if source=='reference' else None)
+        run['valid_until_s']=observation['valid_until_s']
+        confirmed=active is not None and active['current'] and continuous
+        hold_s=10. if source=='dwa' else 3.
+        if not confirmed and (run['count']<2 or stamp-run['first_stamp_s']<hold_s):
+            if active is not None:
+                active['current']=False
+            if new_blockage:
+                self._emit('navigation_blockage_changed')
+            return new_blockage
+        if active is None:
+            self.blockage_episode+=1
+        evidence=dict(copy.deepcopy(observation),handle=copy.deepcopy(r['handle']),
+                      route_index=route_index,episode=self.blockage_episode,first_source_stamp_s=run['first_stamp_s'],
+                      observation_count=run['count'],current=True)
+        r.update(status='blocked',reason=observation['reason'],blockage=evidence)
+        if active is not None:
+            return False
+        self._emit('navigation_blocked')
+        return True
+
+    def _observe_follow_or_search_velocity(self, feedback, stamp):
+        r=self.record
+        if feedback.get('planning_reason')=='no_admissible_velocity':
+            if self.follow_blocked_since is None:
+                self.follow_blocked_since=stamp
+            elif r['status']=='running' and stamp-self.follow_blocked_since>=10.:
+                r.update(status='blocked',reason='no_admissible_velocity')
+                self._emit('navigation_blocked')
+                return True
+        else:
+            self.follow_blocked_since=None
+            if r['status']=='blocked':
+                r.update(status='running',reason=None)
+                self._emit('navigation_unblocked')
+                return True
+        return False
+
+    def _confirm_recovery_stop(self, feedback, stamp):
+        r=self.record
+        requested=r.get('recovery_cancel_stamp_s')
+        if requested is None:
+            return True
+        measured=feedback.get('stop_measurement_stamp_s')
+        if (r['context_lost'] or feedback.get('input_stale') or feedback.get('environment_fault') or
+                feedback.get('localization_status')!='valid' or feedback.get('handle')!=r['handle'] or
+                spatial_context(feedback)!=self.context or feedback.get('stopped') is not True or
+                type(measured) not in (int,float) or not math.isfinite(measured) or
+                not requested<measured<=stamp or stamp-measured>.5):
+            return False
+        r['recovery_stop']=dict(handle=copy.deepcopy(r['handle']),source=feedback['source'],
+            stop_measurement_stamp_s=measured,stamp_s=stamp,context=spatial_context(feedback))
+        return True
 
     def start(self, destination, revision):
         r = self.record
@@ -57,9 +218,10 @@ class NavigationSkill:
             # Retain the named-point access policy without borrowing its pose.
             self.catalog.destination(requirement['target_id'], self.navigation.scope)
         if requirement['kind'] == 'sequence':
-            for ident in requirement['checkpoints']:
-                if ident in self.catalog.places:
-                    self.catalog.destination(ident,self.navigation.scope)
+            for checkpoint in requirement['checkpoints']:
+                for ident in ([checkpoint] if isinstance(checkpoint,str) else checkpoint['any_of']):
+                    if ident in self.catalog.places:
+                        self.catalog.destination(ident,self.navigation.scope)
         place = copy.deepcopy(destination)
         route = self.navigation.check_route(place)
         if not route['reference_found'] and not (self.navigation.scope in ('shadow','live','manual') and route.get('proposal_allowed')):
@@ -75,8 +237,7 @@ class NavigationSkill:
                  search_deadline_s=destination.get('valid_until_s'))
         attempt.update(status='active', call_id=handle['call_id'])
         self.last_stamp = None
-        self.blocked_since = None
-        self.blocked_notified = False
+        self._clear_blockage()
         self._emit('navigation_intent')
         try:
             ack = (self.navigation.start_route(place, handle) if 'route' in place
@@ -95,7 +256,8 @@ class NavigationSkill:
             r['reason'] = 'submission_uncertain_'+type(error).__name__
             self.cancel(reason=r['reason'])
             return dict(status='uncertain', handle=handle, reason=r['reason'])
-        r['status'] = 'shadow_proposed' if self.navigation.scope == 'shadow' else 'running'
+        r.update(status='shadow_proposed' if self.navigation.scope=='shadow' else 'running',
+                 recovery_cancel_stamp_s=None,recovery_stop=None)
         self._emit('navigation_ack')
         return dict(status='accepted', handle=handle, scope=self.navigation.scope, execution_completed=False, route=route)
 
@@ -120,6 +282,7 @@ class NavigationSkill:
         r.update(status='submitting',handle=handle,place_id=None,goal_id=goal_id,selected_pose=None,reason=None,
                  stage_type='follow',follow_ready=False,search_deadline_s=None)
         r['attempts'].append(dict(goal_id=goal_id,place_id=None,revision=revision,status='active',call_id=handle['call_id']))
+        self._clear_blockage()
         self.last_stamp=None;self.follow_phase=None;self._emit('follow_intent')
         try:
             ack=self.navigation.start_follow(intent,handle)
@@ -130,7 +293,8 @@ class NavigationSkill:
         except (OSError,EOFError,ValueError) as error:
             r['reason']='submission_uncertain_'+type(error).__name__;self.cancel(reason=r['reason'])
             return dict(status='uncertain',handle=handle,reason=r['reason'])
-        r['status']='shadow_proposed' if self.navigation.scope=='shadow' else 'running'
+        r.update(status='shadow_proposed' if self.navigation.scope=='shadow' else 'running',
+                 recovery_cancel_stamp_s=None,recovery_stop=None)
         self._emit('follow_ack')
         return dict(status='accepted',handle=copy.deepcopy(handle),scope=self.navigation.scope,execution_completed=False)
 
@@ -160,7 +324,8 @@ class NavigationSkill:
             return dict(status='uncertain',reason=r['reason'])
         r.update(goal_revision=new['goal_revision'],handle=new,selected_pose=copy.deepcopy(destination['pose']),
                  status='running',reason=None,pending_completion=None)
-        self.last_stamp=None;self.blocked_since=None;self.blocked_notified=False
+        self._clear_blockage()
+        self.last_stamp=None
         self._emit('navigation_retargeted')
         return dict(status='accepted',handle=copy.deepcopy(new),execution_completed=False)
 
@@ -185,6 +350,7 @@ class NavigationSkill:
         r = self.record
         if r['handle'] is None:
             return dict(status='idle', execution_completed=False)
+        self._clear_blockage()
         r.update(status='stopping', reason=reason)
         self._emit('navigation_stop_intent')
         try:
@@ -223,6 +389,9 @@ class NavigationSkill:
             if current==self.context or r['status']=='stopping' or feedback.get('environment_fault'):
                 return None
             handle=self.navigation.suspend_for_association()
+            self._clear_blockage()
+            if r['status']=='blocked':
+                r.update(status='running',reason=None)
             self.association_wait_stamp=now
             r['association_waiting']=True;r['association_epoch']+=1
             if handle is not None and r['status']=='succeeded' and r['handle'] is None:
@@ -232,7 +401,8 @@ class NavigationSkill:
             self.last_stamp=None
             self._emit('navigation_association_waiting')
             return False
-        if r['status']=='stopping' and feedback.get('proposal_cancelled') is True and feedback.get('status')=='stopped':
+        if (r['status']=='stopping' and feedback.get('proposal_cancelled') is True and
+                feedback.get('status')=='stopped' and self._confirm_recovery_stop(feedback,now)):
             self._mark_attempt(r['handle'],'cancelled')
             r.update(status='cancelled',handle=None,pending_completion=None)
             self._emit('navigation_cancel_confirmed')
@@ -265,6 +435,12 @@ class NavigationSkill:
                 self.emit('navigation_connection_lost', dict(error_type=type(error).__name__, automatically_retried=False))
             return False
         r['connected'] = True
+        epoch=feedback.get('environment_epoch',0)
+        if epoch!=self.environment_epoch:
+            self.environment_epoch=epoch
+            self._clear_blockage()
+            if r['status']=='blocked':
+                r.update(status='running',reason=None)
         follow=(feedback.get('follow_status') or {}) if r['stage_type']=='follow' else {}
         if (r['handle'] is not None and follow.get('handle')==r['handle'] and follow.get('status')=='failed' and
                 r['status']!='stopping'):
@@ -326,6 +502,7 @@ class NavigationSkill:
                 feedback.get('status') in ('running','proposed')):
             r['follow_ready']=True;self._emit('follow_started');return True
         if self.navigation.scope in ('live','shadow','manual') and feedback.get('status') == 'preempted':
+            self._clear_blockage()
             r.update(status='interrupted', handle=None, context_lost=True, reason='operator_goal_preempted_agent')
             self._mark_attempt(handle, 'interrupted')
             self._emit('navigation_interrupted')
@@ -343,11 +520,15 @@ class NavigationSkill:
                     and feedback.get('status') == 'stopped'):
                 proof = r.get('pending_completion')
                 if proof is not None:
+                    measured=feedback.get('stop_measurement_stamp_s',stamp)
                     if r['stage_type']=='follow':
-                        measured=feedback.get('stop_measurement_stamp_s',stamp)
                         if type(measured) not in (int,float) or not proof['stamp_s']<measured<=stamp:
                             return False
                         proof.update(stopped=True,stop_stamp_s=measured)
+                    elif self.navigation.scope=='live':
+                        if type(measured) not in (int,float) or not proof['stamp_s']<=measured<=stamp:
+                            return False
+                        proof['stop_stamp_s']=measured
                     r['completed'].append(proof)
                     if self.navigation.scope=='manual':
                         r.update(status='succeeded',handle=None,pending_completion=None,reason=None)
@@ -361,28 +542,13 @@ class NavigationSkill:
             stopped = (feedback.get('stopped') and feedback.get('execution_feedback') is True if self.navigation.scope == 'simulation'
                        else feedback.get('stop_observation') is True if self.navigation.scope == 'live'
                        else feedback.get('proposal_cancelled') is True)
-            if stopped and feedback.get('status') in ('stopped', 'failed'):
+            if stopped and feedback.get('status') in ('stopped', 'failed') and self._confirm_recovery_stop(feedback,stamp):
                 failed=bool(follow.get('status')=='failed')
                 r.update(status='failed' if failed else 'cancelled', handle=None, pending_completion=None)
                 self._mark_attempt(handle, 'failed' if failed else 'cancelled')
                 self._emit('navigation_cancel_confirmed')
                 return True
             return False
-        if self.navigation.scope == 'live':
-            if feedback.get('planning_reason') == 'no_admissible_velocity':
-                if self.blocked_since is None:self.blocked_since=stamp
-                if not self.blocked_notified and stamp-self.blocked_since >= 10.:
-                    self.blocked_notified=True
-                    r.update(status='blocked',reason='no_admissible_velocity')
-                    self._emit('navigation_blocked')
-                    return True
-            else:
-                self.blocked_since=None
-                if self.blocked_notified:
-                    self.blocked_notified=False
-                    r.update(status='running',reason=None)
-                    self._emit('navigation_unblocked')
-                    return True
         goal = feedback.get('goal') or {}
         arrived = ((self.navigation.scope == 'simulation' and feedback.get('execution_feedback') is True and goal.get('task_completed')) or
                    (self.navigation.scope == 'live' and feedback.get('arrival_observation') is True) or
@@ -390,6 +556,7 @@ class NavigationSkill:
         if (feedback.get('status') == 'arrived' and arrived and feedback.get('stopped') and
                 goal.get('task_id') == self.task_id and
                 goal.get('goal_revision') == handle['goal_revision']):
+            self._clear_blockage()
             proof = dict(goal_id=r['goal_id'], place_id=r['place_id'], handle=copy.deepcopy(handle), stamp_s=stamp,
                          scope=self.navigation.scope, source=feedback['source'], context=current,
                          pose=copy.deepcopy(feedback.get('origin_pose') if self.navigation.scope in ('live','manual') else feedback.get('pose')),
@@ -423,6 +590,13 @@ class NavigationSkill:
             return True
         if feedback.get('status') in ('stopped', 'failed'):
             self.cancel(reason=feedback.get('stop_reason') or 'navigation_stopped_without_arrival')
+        elif (self.navigation.scope=='live' and
+                (r['stage_type']=='follow' or r.get('search_deadline_s') is not None)):
+            return self._observe_follow_or_search_velocity(feedback,stamp)
+        elif (self.navigation.scope in ('manual','live','simulation') and r['stage_type']=='navigation' and
+                r.get('search_deadline_s') is None and
+                r['status'] in ('running','blocked') and feedback.get('status')=='running'):
+            return self._observe_blockage(feedback)
         return False
 
     def _mark_attempt(self, handle, status):

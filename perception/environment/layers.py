@@ -293,10 +293,11 @@ class LocalEnvironmentMap:
             self.ground_conflict_heights=np.full((size,size),np.nan,np.float32)
         else:
             dx, dy = np.rint((self.origin-origin)/resolution).astype(int)
-            self.ground_z = shift_array(self.ground_z,dx,dy,np.nan)
-            self.ground_seen = shift_array(self.ground_seen,dx,dy,-np.inf)
-            self.ground_conflicts=shift_array(self.ground_conflicts,dx,dy,False)
-            self.ground_conflict_heights=shift_array(self.ground_conflict_heights,dx,dy,np.nan)
+            if dx or dy:
+                self.ground_z = shift_array(self.ground_z,dx,dy,np.nan)
+                self.ground_seen = shift_array(self.ground_seen,dx,dy,-np.inf)
+                self.ground_conflicts=shift_array(self.ground_conflicts,dx,dy,False)
+                self.ground_conflict_heights=shift_array(self.ground_conflict_heights,dx,dy,np.nan)
         was_pending=self.ground_tracker.history_suspended
         plane,status = self.ground_tracker.fit(world,sensor,config)
         old_floor,old_support=self._ground_support(stamp)

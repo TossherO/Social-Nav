@@ -73,6 +73,48 @@ class GroundBatchTests(unittest.TestCase):
 
 
 class FloorTests(unittest.TestCase):
+    def test_ground_history_reuses_stationary_window_and_keeps_sealed_layers(self):
+        config=load_config()
+        config['compute']['backend']='cpu'
+        model=LocalEnvironmentMap(config)
+        self.addCleanup(model.close)
+        x,y=np.meshgrid(np.linspace(-3,3,30),np.linspace(-3,3,30))
+        floor=np.c_[x.ravel(),y.ravel(),np.full(x.size,-.85)]
+        unshifted=np.eye(4)
+        identity=('test',0)
+        for i in range(5):
+            first=model.update(floor,unshifted,1+i*.1,identity,scan_duration=.1)
+        self.assertTrue(first.layers['ground_support'].any())
+        sealed={name:array.copy() for name,array in first.layers.items()}
+        work_arrays=(model.ground_z,model.ground_seen,model.ground_conflicts,model.ground_conflict_heights)
+
+        next_floor=floor.copy()
+        next_floor[:,2]+=.02
+        second=model.update(next_floor,unshifted,2.,identity,scan_duration=.1)
+        for old,current in zip(work_arrays,(model.ground_z,model.ground_seen,model.ground_conflicts,
+                                          model.ground_conflict_heights)):
+            self.assertIs(old,current)
+        self.assertFalse(np.array_equal(sealed['ground_z'],second.layers['ground_z'],equal_nan=True))
+
+        shifted=np.eye(4)
+        shifted[0,3]=.15
+        missing=np.empty((0,3))
+        prior=model.ground_z.copy()
+        prior_stamps=model.ground_seen.copy()
+        expiry=2.+config['voxel_ttl_s']
+        moved=model.update(missing,shifted,expiry,identity)
+        self.assertAlmostEqual(moved.metadata['origin_xy'][0]-second.metadata['origin_xy'][0],config['resolution'])
+        np.testing.assert_array_equal(model.ground_z[:,:-1],prior[:,1:])
+        np.testing.assert_array_equal(model.ground_seen[:,:-1],prior_stamps[:,1:])
+        self.assertTrue(moved.layers['ground_support'].any())
+        self.assertTrue(np.isnan(model.ground_z[:,-1]).all())
+        aged=model.update(missing,shifted,expiry+.001,identity)
+        self.assertFalse(aged.layers['ground_support'].any())
+        self.assertTrue(np.isnan(aged.layers['ground_z']).all())
+        for name,array in first.layers.items():
+            self.assertFalse(array.flags.writeable)
+            np.testing.assert_array_equal(array,sealed[name])
+
     def test_dense_wall_returns_do_not_tilt_the_visible_floor(self):
         config=load_config();tracker=GroundTracker(config['ground_tracking'])
         x,y=np.meshgrid(np.linspace(-2,2,40),np.linspace(2.5,5.5,35))

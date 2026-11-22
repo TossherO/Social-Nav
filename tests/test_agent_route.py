@@ -23,14 +23,16 @@ class RouteFeedback(ScriptedFeedback):
         self.route=copy.deepcopy(place['route'])
         self.visits=[]
         self.points=iter(self.route['waypoints'])
-        self.state['route_count']=len(self.route['waypoints'])
         self.final_yaw=place['route']['final_yaw']
         self.start_stamp=None
-        self.state.update(handle=copy.deepcopy(handle),status='running',stopped=False)
+        self.state.update(handle=copy.deepcopy(handle),status='running',stopped=False,goal=None,
+                          route_count=len(self.route['waypoints']),route_index=0,route_visits=[],route_start_stamp_s=None,
+                          planning_observation=None)
         return dict(accepted=True,handle=copy.deepcopy(handle))
 
     def tick(self):
         self.t+=.11;self.state['stamp_s']=10+self.t
+        self.state.update(stop_measurement_stamp_s=self.state['stamp_s'],localization_status='valid')
         if self.state['status']=='running':
             point=next(self.points,None)
             if point is None:
@@ -42,6 +44,7 @@ class RouteFeedback(ScriptedFeedback):
                               origin_stamp_s=self.state['stamp_s'])
                 record_route_visit(self.route,self.visits,self.handle,measured,len(self.visits),.2)
                 self.state['route_visits']=copy.deepcopy(self.visits)
+                self.state['route_index']=min(len(self.visits),len(self.route['waypoints'])-1)
                 if self.start_stamp is None:self.start_stamp=self.state['stamp_s']
                 self.state['route_start_stamp_s']=self.start_stamp
         return self.snapshot()
@@ -376,6 +379,89 @@ class AgentRouteTests(unittest.TestCase):
         self.assertIsNone(self.session.skill.record['handle'])
         self.assertFalse(self.session.task_goals.finished())
         self.assertEqual(self.session.call('check_goal',goal_id='visit')['status'],'unproven')
+
+    def test_blocked_route_replacement_keeps_endpoint_and_uses_only_new_handle_for_route_progress(self):
+        goal=dict(goal_id='visit',kind='sequence',target_id='',description='依次经过电梯口和大厅门口',
+                  checkpoints=['elevator','lobby_entrance','corridor_wait'],required_yaw=.1)
+        self.session.call('record_task',goals=[goal])
+        args=dict(goal_id='visit',orientation_source='user',waypoints=[[5.,4.],[6.,4.],[8.,4.]])
+        accepted=self.session.call('navigate_route',view_id=query_map(self.session),**args)
+        old_handle=accepted['handle']
+        self.session.tick()
+        planning=dict(status='blocked',kind='route_blocked',reason='test_blocked_reference',source='reference',
+                      goal_binding='unit-route-leg',source_stamp_s=self.nav.state['stamp_s'],
+                      valid_until_s=self.nav.state['stamp_s']+5.,blocked_position=[5.5,4.])
+        self.nav.state.update(planning_observation=planning,route_index=1)
+        self.session.skill.record.update(status='blocked',blockage=dict(planning,handle=old_handle,route_index=1,current=True,
+            first_source_stamp_s=planning['source_stamp_s']-3.,observation_count=2))
+        self.assertEqual(self.session.call('cancel_navigation')['status'],'stopping')
+        stage=self.session.task_goals.current('visit')
+        self.assertEqual(self.session.navigation_replacement_gate(stage)['reason'],'awaiting_confirmed_stop_after_blockage')
+        self.nav.stopped();self.session.tick()
+        archived=stage['route_attempts'][0]
+        self.assertEqual(archived['handle'],old_handle)
+        self.assertEqual([visit['waypoint'] for visit in archived['visits']],[[5.,4.]])
+        self.assertTrue(archived['measured_trajectory'])
+        view=query_map(self.session)
+        self.assertEqual(self.session.call('navigate_route',view_id=view,**args)['reason'],
+                         'route_replacement_repeats_blocked_segment')
+        self.assertEqual(self.session.call('navigate_route',view_id=view,**dict(args,waypoints=[[6.,4.],[8.,4.]]))['reason'],
+                         'route_replacement_repeats_blocked_segment')
+        alternative=[[5.5,5.],[6.,4.],[8.,4.]]
+        self.assertEqual(self.session.call('navigate_route',view_id=view,**dict(args,waypoints=alternative,final_yaw=.2))['reason'],
+                         'route_replacement_changed_required_final_yaw')
+        self.assertEqual(self.session.call('navigate_route',view_id=view,**dict(args,waypoints=[[5.5,5.],[6.,4.],[8.,4.1]]))['reason'],
+                         'route_replacement_changed_final_position')
+        self.assertEqual(self.session.call('navigate_route',view_id=view,**dict(args,waypoints=[[5.5,4.],*alternative]))['reason'],
+                         'route_replacement_uses_blocked_position')
+        self.nav.check_route=lambda _:dict(reference_found=False,status='no_path',reason='candidate_preview_failed')
+        refusal=self.session.call('navigate_route',view_id=view,**dict(args,waypoints=alternative))
+        self.assertEqual(refusal['reason'],'candidate_preview_failed')
+        self.assertEqual(stage['selected']['handle'],old_handle)
+        self.nav.check_route=RouteFeedback.check_route.__get__(self.nav)
+        accepted=self.session.call('navigate_route',view_id=view,**dict(args,waypoints=alternative))
+        self.assertEqual(accepted['status'],'accepted',accepted)
+        self.assertNotEqual(accepted['handle'],old_handle)
+        self.assertEqual(stage['selected']['route']['final_yaw'],.1)
+        self.assertEqual(self.nav.state['route_visits'],[])
+        for _ in range(4):self.session.tick()
+        result=self.session.call('check_goal',goal_id='visit')
+        self.assertEqual(result['status'],'completed',result)
+        self.assertEqual(result['checks']['sequence_checkpoint_progress'],dict(confirmed_count=3,required_count=3))
+        visits=result['checks']['route_progress']['visits']
+        self.assertEqual([visit['waypoint'] for visit in visits],alternative)
+        self.assertTrue(all(visit['handle']==accepted['handle'] for visit in visits))
+        self.assertEqual(len(stage['route_attempts']),1)
+
+    def test_ordinary_cancellation_cannot_change_a_route(self):
+        self.session.call('record_task',goals=[dict(goal_id='route',kind='route',target_id='',description='按顺序经过')])
+        args=dict(goal_id='route',orientation_source='autonomous',waypoints=[[5.,4.],[6.,4.]])
+        self.assertEqual(self.session.call('navigate_route',view_id=query_map(self.session),**args)['status'],'accepted')
+        self.session.call('cancel_navigation')
+        self.nav.stopped();self.session.tick()
+        view=query_map(self.session)
+        changed=self.session.call('navigate_route',view_id=view,**dict(args,waypoints=[[5.,5.],[6.,4.]]))
+        self.assertEqual(changed['reason'],'route_replacement_requires_confirmed_blockage')
+        self.assertEqual(self.session.call('navigate_route',view_id=view,**args)['status'],'accepted')
+
+    def test_simulation_replacement_preflight_compares_actual_first_leg_to_blocked_position(self):
+        from types import SimpleNamespace
+        from decision.agent.adapters.simulation import SimulationNavigation
+        nav=SimulationNavigation.__new__(SimulationNavigation)
+        nav.t=0.;nav.pose=[4.,4.,0.];nav.geometry=None
+        nav.world=SimpleNamespace(scene=lambda *_:None)
+        plan=dict(status='path_found',reason=None,frame_id='sim_odom',path=[[4.,4.,0.],[6.,4.,0.]])
+        nav.planner=SimpleNamespace(query=lambda *_args,**_kwargs:plan)
+        place=dict(route=dict(waypoints=[[6.,4.],[8.,4.]]),route_blocked_position_check=
+                   dict(position=[5.,4.],frame_id='sim_odom',tolerance_m=.2))
+        result=nav.check_route(place)
+        self.assertFalse(result['reference_found'])
+        self.assertEqual(result['reason'],'route_replacement_preview_crosses_blocked_position')
+        plan['path']=[[4.,4.,0.],[4.,5.,0.],[6.,5.,0.],[6.,4.,0.]]
+        result=nav.check_route(place)
+        self.assertTrue(result['reference_found'])
+        self.assertEqual(result['blocked_position_check']['status'],'clear')
+        self.assertFalse(result['remaining_route_legs_checked'])
 
     @unittest.skipUnless((ROOT/'outputs/runtime/build/planning/libsocial_nav_pose_search.so').is_file(),
                          'runtime CPU planner is not available')

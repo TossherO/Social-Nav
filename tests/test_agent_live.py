@@ -341,16 +341,35 @@ class LiveCompletionTests(unittest.TestCase):
             view_id='view',task_goal_binding='binding',requirement=dict(kind='point',target_id='elevator'))
         self.assertEqual(skill.start(destination,1)['status'],'accepted')
         nav.state['planning_reason']='no_admissible_velocity'
+        evidence=dict(source='dwa',status='blocked',kind='local_control_blocked',
+            reason='no_admissible_velocity',goal_binding='goal',source_stamp_s=10.,valid_until_s=10.5)
+        nav.state['planning_observation']=evidence
         self.assertFalse(skill.tick())
-        nav.t=10.2
+        for i in range(1,40):
+            nav.t=i/4
+            stamp=10+nav.t
+            evidence.update(source_stamp_s=stamp,valid_until_s=stamp+.5)
+            self.assertFalse(skill.tick())
+        nav.t=10.
+        evidence.update(source_stamp_s=20.,valid_until_s=20.5)
         self.assertTrue(skill.tick())
         self.assertEqual(skill.record['status'],'blocked')
         self.assertIsNotNone(skill.record['handle'])
         self.assertFalse(skill.tick())
         self.assertEqual(events.count('navigation_blocked'),1)
         nav.state['planning_reason']=None
+        evidence.update(status='clear',source_stamp_s=20.2,valid_until_s=20.7)
         self.assertTrue(skill.tick())
         self.assertEqual(skill.record['status'],'running')
+
+        skill.record['stage_type']='follow'
+        nav.state['planning_observation']=None
+        nav.state['planning_reason']='no_admissible_velocity'
+        self.assertFalse(skill.tick())
+        nav.t=21.
+        self.assertTrue(skill.tick())
+        self.assertEqual(skill.record['status'],'blocked')
+        self.assertIsNone(skill.record['blockage'])
 
     def test_manual_disarm_stops_agent_loop_without_another_model_call(self):
         from decision.agent import CONFIG_DIR

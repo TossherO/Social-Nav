@@ -363,6 +363,9 @@ def main(argv=None):
     state_pub = rospy.Publisher('/social_nav_interactive/state', String, queue_size=1, latch=True)
     map_pub = rospy.Publisher('/social_nav_interactive/map', OccupancyGrid, queue_size=1, latch=True)
     terrain_pub = rospy.Publisher('/social_nav_interactive/ground_map', PointCloud2, queue_size=1, latch=True)
+    # The interactive process owns the visual basemap during picking; the
+    # runtime takes ownership when launched. Ground picking keeps its own map.
+    initial_base_pub = rospy.Publisher('/social_nav_runtime_view/navigation_basemap', PointCloud2, queue_size=1, latch=True)
     reference_pub = rospy.Publisher('/social_nav_interactive/preview_reference', RosPath, queue_size=1, latch=True)
     trajectory_pub = rospy.Publisher('/social_nav_interactive/preview_trajectory', RosPath, queue_size=1, latch=True)
     label_pub = rospy.Publisher('/social_nav_interactive/preview_status', Marker, queue_size=1, latch=True)
@@ -377,7 +380,9 @@ def main(argv=None):
     message.info.origin.position.x, message.info.origin.position.y = grid.metadata['origin_xy']; message.info.origin.orientation.w = 1.
     message.data = grid.layers['occupancy'].reshape(-1).tolist(); map_pub.publish(message)
     from perception.visualization.surface import ground_cloud,annotation_height
-    terrain_pub.publish(ground_cloud(grid,offset=-.015))
+    initial_terrain=ground_cloud(grid,offset=-.015)
+    terrain_pub.publish(initial_terrain)
+    initial_base_pub.publish(initial_terrain)
     runtime = rviz = log = None
     from .initial_preview import PreviewState, PreviewGroundEstimator, preview_points
     from perception.visualization.scans import pointcloud_message
@@ -680,6 +685,9 @@ def main(argv=None):
             xy=anchor if seed is None else seed[3:5]
             z=annotation_height(grid,xy,anchor_z)
             view['Visualization Manager']['Views']['Current']['Focal Point']=dict(X=float(xy[0]),Y=float(xy[1]),Z=z)
+            for layer in view['Visualization Manager']['Displays']:
+                if layer.get('Topic') in ('/social_nav_runtime_view/navigation_basemap','/social_nav_interactive/ground_map'):
+                    layer['Size (m)']=float(grid.metadata['resolution'])
             for tool in view['Visualization Manager']['Tools']:
                 if tool['Class'] in ('social_nav_rviz/GroundInitialPose','social_nav_rviz/GroundGoal'):
                     tool['Cell size']=float(grid.metadata['resolution'])
@@ -700,6 +708,7 @@ def main(argv=None):
                     command = runtime_command(args, config, selection[0])
                     (output/'command.json').write_text(json.dumps(command, ensure_ascii=False, indent=2))
                     log = (output/'runtime.log').open('x')
+                    initial_base_pub.unregister()
                     runtime = subprocess.Popen(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             if runtime is not None:
                 if runtime.poll() is not None:

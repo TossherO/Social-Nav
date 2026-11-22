@@ -209,6 +209,132 @@ class ReferenceOverlayTests(unittest.TestCase):
             self.assertFalse(runtime.obstacles.blocked)
             self.assertEqual(source.snapshot.layers['occupancy'][target],0)
 
+    def test_work_cache_keeps_door_evidence_and_rechecks_each_observation(self):
+        from types import SimpleNamespace
+        from navigation.planning.costmap import build_costmap
+        from navigation.planning.overlay import ReferenceObstacles
+        from perception.environment.scene import assemble_scene
+        from perception.environment.layers import load_config as environment_config
+
+        cfg=load_config()
+        cfg['algorithm']='dijkstra'
+        cfg['pose_search']['enabled']=False
+        geometry=VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],np.eye(4),source='synthetic')
+        backend=SimpleNamespace(search=lambda *args: (np.empty((0,2),int),0.))
+        planner=Planner(cfg,geometry,backend)
+        source=asset()
+        ledger=ReferenceObstacles()
+        door=(27,27)
+        req=request('mapped')
+
+        def observation(stamp,value,generation=0):
+            local=bundle(generation=generation).geometry
+            local.metadata['stamp_s']=stamp
+            local.metadata['association'].update(stamp_s=stamp,measurement_stamp_s=stamp-.05)
+            local.layers['occupancy'][door]=value
+            local.layers['last_observed']=np.full((60,60),stamp)
+            return assemble_scene(local,clock_domain='synthetic',settings=environment_config()['scene'])
+
+        def query(scene,request=req):
+            stamp=scene.record['as_of']
+            return planner.query(request,scene=scene,asset=source,now=stamp,clock_domain='synthetic',
+                reference_obstacles=ledger.blocked)
+
+        for stamp,value,blocked,cost_reused in [
+            (10.,0,False,False),(11.,100,True,False),(12.,-1,True,True),
+            (13.,0,False,False),(14.,0,False,True)
+        ]:
+            with self.subTest(stamp=stamp):
+                scene=observation(stamp,value)
+                ledger.update(scene,source.snapshot,np.eye(3),('map',0))
+                result=query(scene)
+                self.assertFalse(result['reference_work_reused'])
+                self.assertEqual(result['costmap_reused'],cost_reused)
+                self.assertEqual(result['input_binding']['as_of'],stamp)
+                search_grid=planner._reference_work[3]
+                self.assertEqual(search_grid.layers['occupancy'][door],100 if blocked else 0)
+                costs,clearance=build_costmap(search_grid,geometry.inscribed_radius,planner.config,return_clearance=True)
+                np.testing.assert_array_equal(planner._costs,costs)
+                np.testing.assert_array_equal(planner._clearance,clearance)
+
+                # A caller may annotate its reply. The private grid retains its proof.
+                result['reference_overlay']['source_scene']='caller_annotation'
+                repeated=query(scene)
+                self.assertTrue(repeated['reference_work_reused'])
+                self.assertTrue(repeated['costmap_reused'])
+                self.assertEqual(repeated['reference_overlay']['source_scene'],scene.record['input_fingerprint'])
+                if blocked:
+                    rejected=query(scene,dict(req,goal=[2.75,2.75,0.]))
+                    self.assertEqual(rejected['reason'],'goal_footprint_occupied')
+                    self.assertNotIn('costmap_comparison',rejected['timing_ms'])
+
+        changed_session=query(observation(15.,0,generation=1))
+        self.assertFalse(changed_session['reference_work_reused'])
+        self.assertFalse(changed_session['costmap_reused'])
+        planner.reset()
+        after_seek=query(observation(15.,0,generation=1))
+        self.assertFalse(after_seek['reference_work_reused'])
+        self.assertFalse(after_seek['costmap_reused'])
+        source=asset()
+        after_map_reload=query(observation(15.,0,generation=1))
+        self.assertFalse(after_map_reload['reference_work_reused'])
+        self.assertFalse(after_map_reload['costmap_reused'])
+        revised_at_same_time=observation(15.,100,generation=1)
+        at_same_time=query(revised_at_same_time)
+        self.assertFalse(at_same_time['reference_work_reused'])
+        self.assertFalse(at_same_time['costmap_reused'])
+        self.assertEqual(planner._reference_work[3].layers['occupancy'][door],100)
+        stale=planner.query(req,scene=revised_at_same_time,asset=source,now=16.,clock_domain='synthetic')
+        self.assertEqual(stale['reason'],'geometry_future_or_stale')
+        self.assertNotIn('reference_work_reused',stale)
+
+        # Measured free removes the conditional cost even when the optimistic
+        # reference occupancy remains free on both sides of the update.
+        from tests.test_environment_changes import evidence
+        source=asset()
+        static_cells=np.zeros((60,60),np.int8)
+        static_cells[door]=100
+        source.snapshot.layers.update(evidence(static_cells).layers)
+        source.snapshot.layers['conditional_obstacle']=static_cells==100
+        query(observation(16.,-1))
+        before_grid=planner._reference_work[3]
+        before_costs=planner._costs
+        self.assertTrue(before_grid.layers['conditional_obstacle'][door])
+        local=observation(17.,0).geometry
+        local.layers.update(evidence(local.layers['occupancy'],17.).layers)
+        confirmed=assemble_scene(local,clock_domain='synthetic',settings=environment_config()['scene'])
+        after=query(confirmed)
+        self.assertFalse(after['costmap_reused'])
+        after_grid=planner._reference_work[3]
+        np.testing.assert_array_equal(before_grid.layers['occupancy'],after_grid.layers['occupancy'])
+        self.assertFalse(after_grid.layers['conditional_obstacle'][door])
+        self.assertTrue(np.any(before_costs!=planner._costs))
+
+    def test_conditional_cost_disk_matches_distance_threshold(self):
+        from scipy.ndimage import distance_transform_edt
+        from unittest.mock import patch
+        from navigation.planning.costmap import build_costmap
+
+        occupancy=np.zeros((55,63),np.int8)
+        occupancy[26,32]=100
+        conditional=np.zeros_like(occupancy,bool)
+        conditional[10,0]=conditional[8,7]=conditional[27,32]=True
+        grid=asset(occupancy).snapshot
+        risk=GridSnapshot(grid.metadata,dict(grid.layers,conditional_obstacle=conditional))
+        cfg=load_config()
+        resolution=grid.metadata['resolution']
+        distance=distance_transform_edt(~conditional)*resolution
+        for radius in (.2,.25,.45,.67):
+            with self.subTest(radius=radius):
+                expected,clearance=build_costmap(grid,radius,cfg,return_clearance=True)
+                near=(expected<253)&(distance <= radius+cfg['safety_margin_m']+resolution)
+                expected[near]=np.maximum(expected[near],cfg['conditional_obstacle_cost'])
+                costs,result_clearance=build_costmap(risk,radius,cfg,return_clearance=True)
+                np.testing.assert_array_equal(costs,expected)
+                np.testing.assert_array_equal(result_clearance,clearance)
+                with patch('navigation.planning.costmap.cv2',None):
+                    np.testing.assert_array_equal(build_costmap(risk,radius,cfg),expected)
+
     @unittest.skipUnless(POSE_LIBRARY.is_file(),'Native pose search library not built')
     def test_follow_reference_uses_static_free_beyond_local_observation(self):
         cfg=load_config()

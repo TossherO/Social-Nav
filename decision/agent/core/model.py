@@ -292,6 +292,8 @@ class Model:
         if tool_choice not in ('auto','required'):
             raise ValueError('Unsupported tool choice')
         tools = native_tools(tool_names)
+        if projection is not None:
+            tools = projection.tools(tools)
         offered={tool['function']['name'] for tool in tools}
         body = dict(model=self.model,messages=cache_messages(system,messages,self.cache_mode),tools=tools,
                     tool_choice=tool_choice,parallel_tool_calls=False,enable_thinking=self.thinking_mode!='off',temperature=0,
@@ -412,13 +414,16 @@ class Model:
             expected = 'tool_calls' if calls else 'stop'
             if returned_model!=self.model or finish_reason!=expected or self.thinking_mode=='off' and record['reasoning']:
                 raise ApiError('Unexpected model, finish reason or thinking output')
-            reply=Reply.parse(message,report_argument_error=True,model_schema=True)
+            reply=Reply.parse(message,report_argument_error=True,model_schema=True,
+                              validate_action=None if projection is None else projection.validate_action)
             if transient and self.transient_sink is not None:
                 self.transient_sink(dict(kind='response',call_id=call_id,message=copy.deepcopy(message)))
             if calls and message['tool_calls'][0]['function']['name'] not in offered:
                 name=message['tool_calls'][0]['function']['name']
                 if supervised_follow and name in FOLLOW_RESTART_TOOLS:
                     return Reply(reply.message,None,dict(status='refused',reason='local_follow_owns_recovery',tool=name))
+                if projection is not None and name in projection.hidden_tools:
+                    return Reply(reply.message,None,dict(status='refused',reason=projection.hidden_tools[name],tool=name))
                 raise ValueError('Model called a tool not offered for this phase')
             if reply.action is not None and projection is not None:
                 from ..tools.framework import validate_call
@@ -542,6 +547,8 @@ class Model:
         supervised_follow=not (ride_inputs or registration) and follow_supervision_active(state.get('navigation',{}))
         if supervised_follow:
             execution_tools=tuple(name for name in execution_tools if name not in FOLLOW_RESTART_TOOLS)
+        if not (ride_inputs or registration):
+            execution_tools=projection.available_tools(execution_tools)
         return self.request(system,messages,observation_id=None if observation is None else observation.record['observation_id'],
                             tool_names=(ELEVATOR_TOOLS[phase] if ride_inputs else
                                         REGISTRATION_TOOLS if registration else execution_tools),

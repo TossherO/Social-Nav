@@ -1,6 +1,5 @@
 """Geometric reference routes, current local validation, and result acceptance."""
 import copy
-import hashlib
 from collections import deque
 import time
 import numpy as np
@@ -66,6 +65,8 @@ class Planner:
         self.require_actual_start = require_actual_start
         # One immutable input's private costmap is reused for algorithm comparisons.
         self._cost_binding, self._costs, self._clearance = None, None, None
+        self._mapped_cost_input=None
+        self._reference_work=None
         self._pose_binding,self._pose_grid=None,None
         self._pose_backend=None
         self._local_planner=None
@@ -75,6 +76,8 @@ class Planner:
     def reset(self):
         """An explicit replay seek starts a fresh computational history."""
         self._cost_binding,self._costs,self._clearance=None,None,None
+        self._mapped_cost_input=None
+        self._reference_work=None
         self._pose_binding,self._pose_grid=None,None
         self._pose_backend=None
         self._prior_revisions.reset()
@@ -86,10 +89,48 @@ class Planner:
         scene.verify()
         reason=scene_status(scene,now,clock_domain,self.config) or association_status(scene,asset,self.config)
         if reason:raise ValueError(reason)
+        self._reference_work=None
         return self._prior_revisions.apply(asset.snapshot,scene.geometry,scene.record['prior'],
             scene_binding=scene.record['input_fingerprint'],bounds=bounds,overlay_current=False,geometry_only=geometry_only)
 
-    def query(self, request, *, scene=None, asset=None, now=None, clock_domain=None, reference_obstacles=()):
+    def _mapped_reference(self, scene, asset, contact, local_from_map, blocked, follow_last_position, timing):
+        from .overlay import reference_overlay,retain_obstacles
+        source=asset.snapshot
+        r=scene.record
+        # The worker sends a tuple of built-in integers. Unusual inputs still
+        # go through the original validation rather than comparing equal to a
+        # previously validated tuple (for example, 1.0 compares equal to 1).
+        cacheable=isinstance(blocked,(list,tuple)) and all(type(index) is int for index in blocked)
+        key=(asset.manifest['snapshot_id'],asset.manifest['layers_sha256'],r['input_fingerprint'],
+            source.metadata['frame_id'],source.metadata['resolution'],tuple(source.metadata['origin_xy']),
+            tuple(source.metadata['shape']),tuple(blocked),follow_last_position) if cacheable else None
+        cached=self._reference_work
+        if key is not None and cached is not None and cached[0] is source and cached[1]==key:
+            return cached[2:],True
+        self._reference_work=None
+        if self._prior_revisions.last is not None and scene.geometry.metadata['stamp_s']<self._prior_revisions.last:
+            self._mapped_cost_input=None
+        began=time.perf_counter()
+        revised=self._prior_revisions.apply(source,scene.geometry,r['prior'],
+            scene_binding=r['input_fingerprint'],overlay_current=False,geometry_only=True)
+        timing['reference_prior_revision']=(time.perf_counter()-began)*1000
+        began=time.perf_counter()
+        retained=retain_obstacles(revised,blocked)
+        timing['reference_retained_obstacles']=(time.perf_counter()-began)*1000
+        began=time.perf_counter()
+        measured,overlay=reference_overlay(retained,contact,scene.geometry.layers['occupancy'],local_from_map,scene)
+        timing['reference_current_overlay']=(time.perf_counter()-began)*1000
+        began=time.perf_counter()
+        search=measured if follow_last_position else reference_grid(measured,geometry_only=True)
+        timing['reference_conditional_grid']=(time.perf_counter()-began)*1000
+        # These snapshots contain only derived/static arrays, never a view into
+        # the shared observation slot that the worker releases after each job.
+        if key is not None:
+            self._reference_work=(source,key,measured,search,overlay)
+        return (measured,search,overlay),False
+
+    def query(self, request, *, scene=None, asset=None, now=None, clock_domain=None, reference_obstacles=(),
+              on_mapped_grid=None):
         begin = time.perf_counter()
         request = copy.deepcopy(request)
         result = dict(status='invalid_input', reason=None, executable=False, current_path_valid=False,
@@ -105,7 +146,7 @@ class Planner:
                 local_generation=scene.record['generation'], association=scene.record['prior'])
         result['input_binding'] = binding
         try:
-            self._query(request, scene, asset, now, clock_domain, result, reference_obstacles)
+            self._query(request, scene, asset, now, clock_domain, result, reference_obstacles, on_mapped_grid)
         except (ValueError, KeyError, TypeError) as error:
             result.update(status='invalid_input', reason=str(error), path=[], current_path_valid=False)
         except (OSError, RuntimeError) as error:
@@ -125,9 +166,11 @@ class Planner:
                 verified_as_of=result['input_binding']['as_of'])
         return result
 
-    def _query(self, r, scene, asset, now, clock, out, reference_obstacles):
+    def _query(self, r, scene, asset, now, clock, out, reference_obstacles, on_mapped_grid):
         prepare_begin=time.perf_counter()
         if scene is not None: scene.verify()
+        timing=out['timing_ms']
+        timing['scene_verification']=(time.perf_counter()-prepare_begin)*1000
         for key in ('request_id', 'task_id', 'frame_id'):
             if not isinstance(r[key], str) or not r[key]: raise ValueError('Missing '+key)
         if type(r['goal_revision']) is not int or r['goal_revision'] < 0: raise ValueError('Invalid goal_revision')
@@ -188,19 +231,23 @@ class Planner:
             else:
                 grid = local_grid; start = local_pose
         validate_grid(grid)
+        measured_grid=grid
         if mode=='mapped':
-            grid=self.observe(scene,asset,now=now,clock_domain=clock,geometry_only=True)
-            out['prior_revision']=grid.metadata['prior_revision']
-            from .overlay import reference_overlay,retain_obstacles
+            reference_begin=time.perf_counter()
             local_from_map=se2(local_pose)@np.linalg.inv(se2(start))
-            grid=retain_obstacles(grid,reference_obstacles)
-            grid,out['reference_overlay']=reference_overlay(grid,contact_grid,scene.geometry.layers['occupancy'],local_from_map,scene)
+            (measured_grid,grid,overlay),reused=self._mapped_reference(
+                scene,asset,contact_grid,local_from_map,reference_obstacles,follow_last_position,timing)
+            out['prior_revision']=copy.deepcopy(measured_grid.metadata['prior_revision'])
+            out['reference_overlay']=copy.deepcopy(overlay)
             out['reference_overlay']['retained_occupied_cells']=len(reference_obstacles)
+            out['reference_work_reused']=reused
             out['reference_search_frame']=grid.metadata['frame_id']
+            timing['reference_work']=(time.perf_counter()-reference_begin)*1000
+            if on_mapped_grid is not None:
+                on_mapped_grid(grid,local_from_map)
             if follow_last_position and out['reference_overlay']['status']!='valid':
                 out.update(status='unavailable',reason='follow_last_position_projection_unavailable');return
-        measured_grid=grid
-        if mode in ('static','mapped') and not follow_last_position:
+        elif mode=='static' and not follow_last_position:
             grid=reference_grid(grid,geometry_only=True)
         manual_free_cells = getattr(asset, 'manual_free_cells', None) if mode in ('static','mapped') else 0
         if manual_free_cells is None:
@@ -228,6 +275,7 @@ class Planner:
         for label, pose in endpoints:
             status = footprint_status(grid, self.geometry, pose, self.config['safety_margin_m'])
             if status != 'free':
+                timing['endpoints']=(time.perf_counter()-costs_begin)*1000
                 out.update(status='unavailable' if status=='unknown' else 'no_path',
                            reason=label+'_footprint_'+status,needs_observation=status=='unknown'); return
         issue=goal_cell_issue(grid,self.geometry,goal,self.config['safety_margin_m'])
@@ -240,26 +288,55 @@ class Planner:
                 alternatives=follow_goal_alternatives(grid,self.geometry,start,goal,self.config['safety_margin_m'])
                 out['follow_goal_adjustment']=dict(original_blockage=issue,candidate_count=len(alternatives))
             if not alternatives:
+                timing['endpoints']=(time.perf_counter()-costs_begin)*1000
                 unknown=issue.endswith('unknown')
                 out.update(status='unavailable' if unknown else 'no_path',reason=issue)
                 if issue!='goal_outside':out['needs_observation']=unknown
                 return
             goal=alternatives[0]
-        cost_binding = (grid.metadata['snapshot_id'], fingerprint(grid.metadata),
-                       out['input_binding']['scene'] if mode == 'local' else fingerprint(out['input_binding']['static_map']))
+        timing['endpoints']=(time.perf_counter()-costs_begin)*1000
+        compare_begin=time.perf_counter()
+        radius=self.geometry.radius if self.config['search_geometry']=='circle' else self.geometry.inscribed_radius
+        cost_parameters=(radius,self.config['max_cells'],self.config['safety_margin_m'],
+            self.config.get('clearance_cost_gain',1.),self.config['clearance_cost_scale_m'],
+            self.config.get('conditional_obstacle_cost'))
+        mapped_cost_input=None
         if mode=='mapped':
-            # Observation time still binds every result/local check. Reuse only
-            # the GLOBAL search graph when its actual geometry/cost inputs agree.
-            geometry_hash=hashlib.sha256(grid.layers['occupancy'].tobytes())
-            if 'conditional_obstacle' in grid.layers:geometry_hash.update(grid.layers['conditional_obstacle'].tobytes())
-            cost_binding=(fingerprint(out['input_binding']['static_map']),geometry_hash.hexdigest(),
-                grid.metadata['resolution'],tuple(grid.metadata['origin_xy']),tuple(grid.metadata['shape']))
+            scene_record=scene.record
+            association=scene_record['prior']
+            context=(asset.manifest['snapshot_id'],asset.manifest['layers_sha256'],
+                scene_record['clock_domain'],scene_record['session_id'],scene_record['generation'],
+                association.get('association_session'),association.get('association_generation'),
+                association.get('map_revision'),grid.metadata['frame_id'],
+                grid.metadata['resolution'],tuple(grid.metadata['origin_xy']),tuple(grid.metadata['shape']),
+                cost_parameters)
+            cells=grid.layers['occupancy']
+            conditional=grid.layers.get('conditional_obstacle')
+            old=self._mapped_cost_input
+            # Compare both exact raster inputs. Observation fingerprints bind
+            # the result even when its newly projected geometry costs the same.
+            reused=False
+            if old is not None:
+                old_source,old_context,old_stamp,old_cells,old_conditional=old
+                reused=(asset.snapshot is old_source and context==old_context and scene_record['as_of']>=old_stamp and
+                    (cells is old_cells or (cells.dtype==old_cells.dtype and np.array_equal(cells,old_cells))) and
+                    (conditional is old_conditional or (conditional is not None and old_conditional is not None
+                        and conditional.dtype==old_conditional.dtype and np.array_equal(conditional,old_conditional))))
+            cost_binding=self._cost_binding if reused else object()
+            mapped_cost_input=(asset.snapshot,context,scene_record['as_of'],cells,conditional)
+        else:
+            cost_binding = (grid.metadata['snapshot_id'], fingerprint(grid.metadata),
+                out['input_binding']['scene'] if mode == 'local' else fingerprint(out['input_binding']['static_map']),
+                cost_parameters)
+        timing['costmap_comparison']=(time.perf_counter()-compare_begin)*1000
         out['costmap_reused']=cost_binding==self._cost_binding
         if cost_binding != self._cost_binding:
             from .costmap import build_costmap
-            radius=self.geometry.radius if self.config['search_geometry']=='circle' else self.geometry.inscribed_radius
+            build_begin=time.perf_counter()
             self._costs,self._clearance = build_costmap(grid, radius, self.config,return_clearance=True)
+            timing['costmap_build']=(time.perf_counter()-build_begin)*1000
             self._cost_binding = cost_binding
+        self._mapped_cost_input=mapped_cost_input
         costs = self._costs
         out['proposal_radius_m']=self.geometry.radius if self.config['search_geometry']=='circle' else self.geometry.inscribed_radius
         out['timing_ms']['costmap_and_endpoints'] = (time.perf_counter()-costs_begin)*1000

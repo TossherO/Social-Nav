@@ -45,6 +45,15 @@ class DisplayBuffer:
                 self.identities.pop('map',None)
                 self.condition.notify()
 
+    def frozen_basemap(self,paused,snapshot):
+        identity=(paused,None if snapshot is None else snapshot['reference_binding'])
+        with self.condition:
+            if self.stopping or self.identities.get('frozen_map',(False,None))==identity:return
+            self.identities['frozen_map']=identity
+            self.pending.pop('navigation',None)
+            self.pending['frozen_map']=(paused,snapshot)
+            self.condition.notify()
+
     def close(self):
         with self.condition:self.stopping=True;self.condition.notify_all()
 
@@ -62,16 +71,17 @@ class RuntimeDisplay:
             from tf2_msgs.msg import TFMessage
             self.map_tf=rospy.Publisher('/tf',TFMessage,queue_size=4)
         self.Image,self.Path,self.OccupancyGrid=Image,Path,OccupancyGrid
-        self.publishers={name:rospy.Publisher('/social_nav_runtime_view/'+name,kind,queue_size=1,latch=name in ('path','occupancy'))
-            for name,kind in [('scan',PointCloud2),('ground_map',PointCloud2),('rgb',Image),('path',Path),('lidar_path',Path),('reference',Path),('trajectory',Path),('navigation',MarkerArray),('occupancy',OccupancyGrid),('raw_occupancy',OccupancyGrid),('people',MarkerArray)]}
+        self.publishers={name:rospy.Publisher('/social_nav_runtime_view/'+name,kind,queue_size=1,latch=name in ('path','occupancy','navigation_basemap'))
+            for name,kind in [('scan',PointCloud2),('ground_map',PointCloud2),('navigation_basemap',PointCloud2),('rgb',Image),('path',Path),('lidar_path',Path),('reference',Path),('trajectory',Path),('navigation',MarkerArray),('occupancy',OccupancyGrid),('raw_occupancy',OccupancyGrid),('people',MarkerArray)]}
         self.buffer=DisplayBuffer(settings);self.error=None;self.published=Counter()
-        self.publish_ms={name:deque(maxlen=512) for name in GROUPS};self.submit_ms=deque(maxlen=512)
+        self.publish_ms={name:deque(maxlen=512) for name in (*GROUPS,'frozen_map')};self.submit_ms=deque(maxlen=512)
         from .navigation import NavigationView
         from .surface import DisplayGrids
         self.navigation_view=NavigationView(geometry,planning,asset=asset,path_z_m=settings['path_z_m'],
             height_mode=settings['height_mode'],ground_plane_radius_m=settings['ground_plane_radius_m'],
             reference_max_age_s=reference_max_age_s,trajectory_max_age_s=trajectory_max_age_s)
         self.grids=DisplayGrids(metrics,asset=asset);self.last_navigation_grid=None
+        self.search_surface=None;self.basemap_key=None;self.static_cloud=None;self.frozen=False
         self.last_environment_grid=None
         self.navigation_lock=threading.Lock();self.navigation_result=None;self.last_navigation=None;self.last_view=None
         from .people import PeopleScene
@@ -98,13 +108,16 @@ class RuntimeDisplay:
     def clear_environment(self,frame,stamp):
         self.buffer.clear_environment(frame,stamp)
 
-    def navigation(self,result,reference,request,scene,row,control,reason,*,now,clock_domain,clock_rate,clock_mono,grid=None,goal_hint=None):
+    def frozen_basemap(self,paused,snapshot=None):
+        self.buffer.frozen_basemap(paused,snapshot)
+
+    def navigation(self,result,reference,request,scene,row,control,reason,*,now,clock_domain,clock_rate,clock_mono,grid=None,goal_hint=None,search_map=None):
         # Finalized results are replaced, never mutated after publication.
         if self.buffer.settings['navigation_hz']==0:return
         from .navigation import display_packet
         def make_item():
             packet=display_packet(result,reference,request,scene,row,control,reason,
-                now=now,clock_domain=clock_domain,clock_rate=clock_rate,clock_mono=clock_mono,goal_hint=goal_hint)
+                now=now,clock_domain=clock_domain,clock_rate=clock_rate,clock_mono=clock_mono,goal_hint=goal_hint,search_map=search_map)
             with self.navigation_lock:self.navigation_result=packet
             return dict(row),packet,grid
         self.buffer.offer('navigation',('control',now),make_item,now=time.monotonic())
@@ -138,7 +151,15 @@ class RuntimeDisplay:
         if len(self._map_tf_seen)>4096:self._map_tf_seen.popitem(last=False)
 
     def _publish(self,group,item):
-        if group=='scan':
+        if group=='frozen_map':
+            self.frozen,snapshot=item
+            if self.last_navigation is not None:
+                view=self.navigation_view.update(*self.last_navigation,grid=self.last_navigation_grid,stopped=True)
+                if self.frozen:view['text']='BAG PAUSED | see frozen preview'
+                self._publish_navigation(view)
+                self.last_navigation=None
+            self._show_basemap(snapshot)
+        elif group=='scan':
             from .scans import pointcloud_message
             from perception.mapping_localization.context import pose_matrix
             points,row=item;valid=row['health']==0
@@ -164,7 +185,7 @@ class RuntimeDisplay:
                         dict(occupancy=np.full_like(previous.layers['occupancy'],-1)))
                     self._publish_occupancy('occupancy',grid)
                     self._publish_occupancy('raw_occupancy',grid)
-                    self.publishers['ground_map'].publish(pointcloud_message(np.empty((0,3)),frame,stamp))
+                    self._publish_local_cloud(pointcloud_message(np.empty((0,3)),frame,stamp))
                     self.last_environment_grid=None
                 return
             grid=self.grids.get(item)
@@ -172,7 +193,8 @@ class RuntimeDisplay:
             self._publish_occupancy('occupancy',grid)
             if self.publishers['raw_occupancy'].get_num_connections():
                 self._publish_occupancy('raw_occupancy',self.grids.get(item,navigation=False))
-            self.publishers['ground_map'].publish(ground_cloud(grid))
+            if self.grids.asset is None or self.publishers['ground_map'].get_num_connections():
+                self._publish_local_cloud(ground_cloud(grid))
         elif group=='rgb':
             rgb,stamp,frame=item
             if stamp is None or not frame:raise ValueError('Display RGB needs its real observation time/frame')
@@ -180,8 +202,32 @@ class RuntimeDisplay:
             image.height,image.width=rgb.shape[:2];image.encoding='rgb8';image.step=image.width*3;image.data=rgb.tobytes()
             self.publishers['rgb'].publish(image)
         else:
+            if self.frozen:return
             row,packet,source=item;self.last_navigation=(row,packet);self.last_navigation_grid=self.grids.get(source)
-            self._publish_navigation(self.navigation_view.update(row,packet,grid=self.last_navigation_grid))
+            view=self.navigation_view.update(row,packet,grid=self.last_navigation_grid)
+            self._show_basemap(view['search_map'])
+            self._publish_navigation(view)
+
+    def _show_basemap(self,snapshot):
+        if self.grids.asset is None:return
+        key=('static',) if snapshot is None else ('search',snapshot['reference_binding'])
+        if self.basemap_key==key:return
+        if snapshot is None:
+            if self.static_cloud is None:
+                from .surface import ground_cloud
+                self.static_cloud=ground_cloud(self.grids.asset.snapshot,offset=-.015)
+            cloud=self.static_cloud
+        else:
+            if self.search_surface is None:
+                from .surface import SearchMapSurface
+                self.search_surface=SearchMapSurface(self.grids.asset)
+            cloud=self.search_surface.cloud(snapshot)
+        self.publishers['navigation_basemap'].publish(cloud)
+        self.basemap_key=key
+
+    def _publish_local_cloud(self,cloud):
+        self.publishers['ground_map'].publish(cloud)
+        if self.grids.asset is None:self.publishers['navigation_basemap'].publish(cloud)
 
     def _publish_occupancy(self,name,grid):
         message=self._header(self.OccupancyGrid(),grid.metadata['frame_id'],grid.metadata['stamp_s'])
@@ -228,9 +274,14 @@ class RuntimeDisplay:
             data=None if name=='history' else view.get(name)
             points=np.array([[p[0],p[1],height] for _,p,height in view['history']]) if name=='history' else (
                 np.empty((0,3)) if data is None else np.c_[data['display_poses'][:,:2],data['heights']])
+            curve_frame=frame
+            if name=='reference' and data is not None and 'search_xy' in data and self.navigation_view.height_mode=='ground':
+                points=self.search_surface.path_points(data['search_xy'],self.navigation_view.z)
+                curve_frame=self.search_surface.frame_id
             segments=line_segments(points)
             if not len(segments):continue
             line=marker(Marker.LINE_LIST,number,color);line.ns=name;line.scale.x=width
+            line.header.frame_id=curve_frame
             if data is not None:line.header.stamp=self.rospy.Time.from_sec(data['stamp_s'])
             line.points=[Point(*map(float,p)) for p in segments]
         pose=view['pose']
@@ -252,16 +303,19 @@ class RuntimeDisplay:
 
     def _work(self):
         try:
+            self._show_basemap(None)
             while True:
                 entry=self.buffer.take(timeout=.1)
                 if entry is None:
                     if self.last_navigation is not None:self._publish_navigation(self.navigation_view.update(*self.last_navigation,grid=self.last_navigation_grid,stopped=True))
+                    self._show_basemap(None)
                     return
                 if entry[0]=='idle':
-                    if self.last_navigation is not None:
+                    if self.last_navigation is not None and not self.frozen:
                         view=self.navigation_view.update(*self.last_navigation,grid=self.last_navigation_grid)
                         # No sensor input: clear expired predictions without refreshing source times.
-                        if any((view[k] is None)!=(self.last_view[k] is None) for k in ('reference','trajectory','goal')):
+                        if any((view[k] is None)!=(self.last_view[k] is None) for k in ('reference','trajectory','goal','search_map')):
+                            self._show_basemap(view['search_map'])
                             self._publish_navigation(view)
                     continue
                 group,item=entry;began=time.monotonic();self._publish(group,item)

@@ -294,13 +294,14 @@ def _run(args, resources, handles):
             static_map=args.static_map),allow_nan=False,indent=2)+'\n')
     if args.display:
         from perception.visualization.runtime import RuntimeDisplay
+        reference.display_enabled=asset is not None and settings['display']['navigation_hz']>0
         display = resources['display'] = RuntimeDisplay(settings['display'],geometry,planning,asset=asset,
             reference_max_age_s=reference.settings['max_age_s'],
             trajectory_max_age_s=controller.controller.safety_settings['max_input_age_s'],metrics=metrics)
     state_parent, state_input = _socket_pair(handles)
     safety = resources['safety'] = SafetyProcess(state_parent,planning,motion,geometry,clock_domain=clock_domain,asset=asset,
         slots=settings['shared_safety_slots'],slot_bytes=settings['shared_safety_slot_bytes'],settings=shadow,
-        chassis_port=args.chassis_port,chassis_output=output/'chassis')
+        chassis_port=args.chassis_port,chassis_output=output/'chassis',trace_timing=args.trace_timing)
     main_pose,pose_input=_socket_pair(handles, socket.AF_UNIX, socket.SOCK_DGRAM);main_pose.setblocking(False)
     from .association import AssociationInbox
     association_socket,association_input=_socket_pair(handles, socket.AF_UNIX, socket.SOCK_DGRAM)

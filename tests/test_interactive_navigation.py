@@ -7,7 +7,8 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, call, patch
 import numpy as np
 import yaml
 
@@ -185,6 +186,87 @@ class PlaybackTests(unittest.TestCase):
         self.assertEqual(result['as_of'],10.);self.assertEqual(scene.record,original)
         self.assertFalse(result['executable']);self.assertFalse(result['task_completed'])
         with self.assertRaises(ValueError):preview(fixture.req,fixture.scene,fixture.rows,fixture.controller.controller,fixture.config)
+
+    def test_frozen_display_map_follows_accepted_preview_and_stays_out_of_session_json(self):
+        from navigation.planning.runtime import decode_display_map
+        from perception.environment.layers import load_config
+        from perception.environment.scene import assemble_scene
+        from runtime.control import ControlLoop
+        from tests.navigation_fixtures import asset, bundle, request
+        from tests.test_navigation_shadow import ShadowTests
+
+        fixture=ShadowTests();fixture.setUp()
+        local=np.zeros((60,60),np.int8);local[45,44]=100
+        scene=assemble_scene(bundle(local).geometry,clock_domain='runtime_bag',settings=load_config()['scene'])
+        static=np.zeros_like(local);static[45,44:46]=100
+        prior=asset(static)
+        conditional=np.zeros_like(static,dtype=bool);conditional[45,44:46]=True
+        prior.snapshot.layers['conditional_obstacle']=conditional
+        goal=request('mapped',goal=[4.,2.],valid_until_s=12.)
+        loop=ControlLoop.__new__(ControlLoop)
+        loop.preview_token=None;loop.scene=scene;loop.device=object();loop.request=goal;loop.asset=prior
+        loop.display=Mock();loop.batch=Mock();loop.lock=threading.Lock();loop.environment_epoch=0
+        loop.controller=fixture.controller;loop.rows=fixture.rows;loop.settings=dict(control_period_s=.1)
+        loop.reference=SimpleNamespace(planning=fixture.config,display_enabled=True);loop.metrics=None
+        loop._search_scene=lambda scene:scene
+        with tempfile.TemporaryDirectory() as folder:
+            session=loop.session=InteractiveSession(live=False,safety=None,output=Path(folder))
+            self.addCleanup(session.close)
+            session.update_playback(dict(paused=True,epoch=1,source_ended=False,stamp_s=10.,offset_s=2.))
+            token=session.command_generation
+            with patch('perception.visualization.surface.DisplayGrids'), \
+                 patch('perception.visualization.interactive.preview_geometry',return_value={}) as geometry:
+                loop._preview_frozen(token,0)
+                clear,display=loop.display.frozen_basemap.call_args_list
+                self.assertEqual(call(True),clear)
+                snapshot=display.args[1]
+                saved=json.loads((Path(folder)/'preview.json').read_text())
+                self.assertEqual(saved,session.preview)
+                self.assertEqual(saved['reference']['binding'],snapshot['reference_binding'])
+                self.assertEqual(saved['reference']['result']['result_binding'],snapshot['result_binding'])
+                self.assertNotIn('display_map',saved)
+                self.assertNotIn('cells',saved['display'])
+                cells,conditional=decode_display_map(snapshot)
+                self.assertEqual(100,cells[45,44]);self.assertFalse(conditional[45,44])
+                self.assertEqual(0,cells[45,45]);self.assertTrue(conditional[45,45])
+                loop._preview_frozen(token,0)
+                self.assertEqual(2,loop.display.frozen_basemap.call_count)
+
+                # A new command arrives between the planning result and publication.
+                session.note_command('goal',goal)
+                geometry.side_effect=lambda *args:session.note_command('cancel',{}) or {}
+                loop._preview_frozen(session.command_generation,0)
+                self.assertEqual(call(True),loop.display.frozen_basemap.call_args)
+                self.assertIsNone(session.preview)
+                loop.request=None
+                loop._preview_frozen(session.command_generation,0)
+                self.assertEqual(call(True),loop.display.frozen_basemap.call_args)
+
+                # An environment fault arriving during the next query rejects its snapshot.
+                loop.request=goal
+                session.note_command('goal',goal)
+                geometry.side_effect=lambda *args:setattr(loop,'environment_epoch',1) or {}
+                loop._preview_frozen(session.command_generation,0)
+                self.assertEqual(call(True),loop.display.frozen_basemap.call_args)
+                self.assertIsNone(session.preview)
+
+                loop.scene=None
+                loop._preview_frozen(session.command_generation,1)
+                self.assertEqual('observation_unavailable',session.preview['reason'])
+                self.assertEqual(call(True),loop.display.frozen_basemap.call_args)
+                loop.scene=scene
+                resumed=dict(paused=False,epoch=2,source_ended=False,stamp_s=10.,offset_s=2.)
+                geometry.side_effect=lambda *args:session.update_playback(resumed) or {}
+                loop._preview_frozen(session.command_generation,1)
+                self.assertEqual(call(True),loop.display.frozen_basemap.call_args)
+                self.assertIsNone(session.preview)
+
+            loop.display=None;loop.preview_token=None
+            session.update_playback(dict(resumed,paused=True,epoch=3))
+            with patch('navigation.planning.runtime.encode_display_map') as encode:
+                loop._preview_frozen(session.command_generation,1)
+            encode.assert_not_called()
+            self.assertTrue(session.preview['reference_available'])
 
 
 class DriverTests(unittest.TestCase):

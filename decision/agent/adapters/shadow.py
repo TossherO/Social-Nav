@@ -43,6 +43,23 @@ def apply_runtime_mapped_pose(state, control, catalog):
     return state
 
 
+def bound_planning_observation(evidence, request, state):
+    """Expose only outcomes for the active request and current spatial context."""
+    if (not isinstance(evidence,dict) or not request or state.get('input_stale') or
+            state.get('localization_status')!='valid' or state.get('environment_fault')):
+        return None
+    from navigation.planning.continuity import goal_binding
+    stamp=evidence.get('source_stamp_s');limit=evidence.get('valid_until_s');now=state['stamp_s']
+    if (any(type(t) not in (int,float) or not math.isfinite(t) for t in (stamp,limit,now)) or
+            not stamp<=now<=limit or evidence.get('clock_domain')!=state['clock_domain'] or
+            evidence.get('local_identity')!=[state.get(k) for k in ('session_id','generation','frame_id')] or
+            evidence.get('map_binding')!=state.get('map_binding') or
+            any(evidence.get(k)!=request[k] for k in ('request_id','task_id','goal_revision')) or
+            evidence.get('goal_binding')!=goal_binding(request)):
+        return None
+    return copy.deepcopy(evidence)
+
+
 def load_catalog_map(catalog):
     from perception.environment.storage import StaticEnvironmentMap
     asset = StaticEnvironmentMap(ROOT/catalog.value['map_asset'])
@@ -500,6 +517,13 @@ class RuntimeLiveNavigation(RuntimeShadowNavigation):
             status = 'interrupted'
         else:
             status = 'arrived' if arrival else 'stopped' if cancelled and stopped else 'running' if match else 'pending'
+        planning = None
+        if match and enabled and not self.cancel_requested and not self.follow_active:
+            reference=bound_planning_observation(control.get('reference_observation'),self.request,result)
+            local=bound_planning_observation(control.get('control_observation'),self.request,result)
+            # A complete negative reference result can explain why DWA could
+            # not issue a proposal. A cached reference cannot clear a DWA stall.
+            planning=reference if reference and reference['status']=='blocked' else local
         result.update(scope='live',source='runtime_live_observer',status=status,
                       handle=copy.deepcopy(self.handle) if match or cancelled or follow or status in ('preempted','interrupted') else None,
                       pose=copy.deepcopy(feedback.get('pose')),velocity=copy.deepcopy(feedback.get('velocity')),
@@ -509,5 +533,6 @@ class RuntimeLiveNavigation(RuntimeShadowNavigation):
                       stop_reason=follow.get('reason') if failed_follow else None,
                       chassis_state=chassis.get('state'),chassis_status_fresh=chassis.get('status_fresh') is True,
                       planning_status=control.get('planning_status'),planning_reason=control.get('planning_reason'),
+                      planning_observation=planning,
                       goal=dict(task_id=evidence.get('task_id'),goal_revision=evidence.get('goal_revision')) if arrival else None)
         return result

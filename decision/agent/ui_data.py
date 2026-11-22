@@ -17,6 +17,7 @@ KINDS=('conversation_exchange','conversation_trimmed','tool_intent','model_actio
        'model_result_discarded','manual_arrival_confirmation','manual_goal_evidence_wait_started',
        'manual_goal_evidence_wait_finished','manual_goal_evidence_refresh_failed','manual_goal_evidence_unproven','manual_route_progress',
        'manual_route_trace','manual_reference_status','manual_reference_region_conflict','operator_command','navigation_completed','navigation_ack','navigation_cancel_confirmed',
+       'navigation_blocked','navigation_unblocked','route_attempt_retired',
        'navigation_context_lost','navigation_association_waiting','navigation_association_recovered',
        'task_connection_lost','user_event','subtask_skipped','registered_task_imported','task_created','assistant_message','model_action_missing','agent_run_finished',
        'route_repeated_refusal','reference_map_prepared','t2_replay','follow_target_confirmed','agent_bag_recording')
@@ -41,7 +42,8 @@ def goal_requirements(goal,names):
         if selected.get('direction'):
             origin='用户指定' if selected.get('direction_source')=='user' else 'Agent 选择'
             lines.append('执行方案方向：'+directions.get(selected['direction'],selected['direction'])+'（'+origin+'）')
-    fields={'position':'指定坐标','required_yaw':'要求朝向（弧度）','facing':'面向',
+    fields={'position':'指定坐标','initial_yaw':'首次停靠朝向（弧度）',
+            'required_yaw':'完成朝向（弧度）','facing':'面向',
             'max_distance_m':'距离上限（米）','checkpoints':'依次经过',
             'semantic_conditions':'必须满足','visual_preferences':'视觉偏好','stage_type':'任务阶段',
             'floor_id':'所在楼层','to_floor':'目标楼层','robot_inside_region_id':'完成时轮椅所在区域','wait_after':'完成后等待口令'}
@@ -52,14 +54,19 @@ def goal_requirements(goal,names):
             value=f"{req['to_floor']} · {value}"
         elif key in ('facing','robot_inside_region_id'):value=names.get(value,value)
         elif key=='stage_type' and value=='elevator':value='乘坐电梯'
-        elif key=='checkpoints':value=[names.get(item,item) for item in value]
+        elif key=='checkpoints':
+            value=[names.get(item,item) if isinstance(item,str) else ' 或 '.join(names.get(i,i) for i in item['any_of'])
+                   for item in value]
         lines.append(label+'：'+('、'.join(map(str,value)) if isinstance(value,list) and key!='position' else str(value)))
+    if req.get('nearby_stop'):
+        lines.append('附近停车许可：'+req['nearby_stop']['instruction_quote'])
     monitored=(req.get('monitor') or {}).get('continuous_region_id')
     if monitored:
         lines.append('持续复核区域：'+str(names.get(monitored,monitored)))
         if not req.get('robot_inside_region_id'):
             lines.append('完成时区域检查：未登记')
-    if 'required_yaw' not in req and not req.get('facing'):lines.append('用户要求朝向：未指定')
+    if 'initial_yaw' not in req and 'required_yaw' not in req and not req.get('facing'):
+        lines.append('用户要求朝向：未指定')
     return '\n'.join(lines)
 
 
@@ -335,8 +342,24 @@ def format_event_detail(kind,value):
     return kind,clean(value),images
 
 
+def blockage_text(blockage):
+    label={'destination_occupied':'终点足迹被占据','route_blocked':'当前路段持续受阻',
+           'local_control_blocked':'持续无可用控制速度'}.get(blockage.get('kind'),'规划受阻')
+    if blockage.get('reason')=='detour_preview_crosses_prior_blockage':
+        label='替代路线的参考路径仍经过上一次的阻点'
+    index=blockage.get('route_index')
+    if type(index) is int:
+        label+=f'（第 {index+1} 段）'
+    if blockage.get('current') is False:
+        label+='，等待新的规划反馈'
+    return label
+
+
 def event_summary(event):
     kind,value=event['kind'],event['value']
+    if kind=='navigation_blocked':return blockage_text(value.get('blockage') or {})
+    if kind=='navigation_unblocked':return '规划反馈已更新，原受阻状态已解除'
+    if kind=='route_attempt_retired':return '原路线已撤销，保留实际经过记录'
     if kind=='agent_bag_recording':
         labels={'preparing':'准备中','recording':'录制中','finalizing':'正在关闭与校验',
                 'saved':'已保存','failed':'失败','needs_review':'需要检查','finished':'已结束'}
@@ -380,6 +403,12 @@ def event_summary(event):
         return '到达证据失效：'+reasons.get(value.get('reason'),str(value.get('reason') or '未知原因'))
     if kind=='manual_arrival_recovered':return '已重新记录定位和停稳到达证据。'
     if kind=='model_action_missing':
+        if value.get('reason')=='model_request_limit':
+            return '模型只返回文字，已达本次请求次数上限。'
+        if value.get('phase')=='registration':
+            if value.get('correction_requested'):
+                return '任务尚未登记，正在用原指令要求模型重新调用工具。'
+            return '模型连续两次只返回文字，任务尚未登记，等待用户答复。'
         return '模型只返回文字，将依据当前证据重新决策一次。' if value.get('correction_requested') else '模型未提交执行动作，任务已请求暂停。'
     if kind=='model_retry_scheduled':
         delay=value.get('delay_s')

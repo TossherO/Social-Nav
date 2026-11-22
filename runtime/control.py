@@ -55,6 +55,27 @@ def manual_preview_path(reference, request):
     except (TypeError,ValueError,IndexError,KeyError):return None
 
 
+def control_planning_observation(packet, scene, max_age_s):
+    """Tie local control outcomes to a source scan, not to control loop time."""
+    request=packet.get('request')
+    if request is None or scene is None or packet.get('reason'):
+        return None
+    record=scene.record
+    if (packet.get('scene_binding')!=record['input_fingerprint'] or
+            not 0<=packet['stamp_s']-record['as_of']<=max_age_s or
+            (packet.get('feedback') or {}).get('status')!='valid'):
+        return None
+    proposal=packet.get('proposal') or {}
+    reason=proposal.get('reason')
+    blocked=reason=='no_admissible_velocity' and proposal.get('unattempted_candidates')==0
+    velocity=proposal.get('velocity') or [0.,0.]
+    moving=proposal.get('status')=='candidate' and (abs(velocity[0])>=.03 or abs(velocity[1])>=.05)
+    status='blocked' if blocked else 'clear' if moving else 'unknown'
+    from navigation.planning.reference import planning_observation
+    return planning_observation(request,record,source='dwa',status=status,reason=reason,max_age_s=max_age_s,
+        kind='local_control_blocked' if blocked else None)
+
+
 class ControlLoop:
     def __init__(self,reference,controller,batch,safety,pose_socket,commands,settings,scene_settings,metrics,record,*,asset=None,initial_goal=None,clock_domain='runtime_bag',display=None,route_replay=None,planning_recorder=None,session=None,follow_decision=None):
         self.reference,self.controller,self.batch,self.safety=reference,controller,batch,safety
@@ -124,12 +145,56 @@ class ControlLoop:
         return assemble_scene(grid,clock_domain=scene.record['clock_domain'],people=people_observation(scene),
                               stamp_ns=scene.record.get('stamp_ns'),settings=self.scene_settings)
 
+    def _preview_frozen(self, token, environment_epoch):
+        """Publish the search raster only for the preview accepted by the bag session."""
+        key=(token,self.scene is not None)
+        if key==self.preview_token:
+            return
+        self.preview_token=key
+        if self.display is not None:
+            self.display.frozen_basemap(True)
+        if self.request is None:
+            return
+        snapshot=None
+        if self.scene is None:
+            result=dict(scope='frozen_bag_observation',reason='observation_unavailable',executable=False)
+        else:
+            from navigation.planning.frozen import preview
+
+            mapped=[]
+            def capture(grid,local_from_map):
+                mapped.append((grid,local_from_map))
+
+            self.batch.bind(self.device)
+            scene=self._search_scene(self.scene)
+            result=preview(self.request,scene,list(self.rows),self.controller.controller,
+                self.reference.planning,asset=self.asset,dt=self.settings['control_period_s'],
+                on_mapped_grid=capture if self.display is not None and self.reference.display_enabled else None)
+            if mapped:
+                from navigation.planning.runtime import encode_display_map
+
+                grid,local_from_map=mapped[0]
+                snapshot=encode_display_map(grid,local_from_map,token,result['reference'])
+            if self.display is not None:
+                from perception.visualization.interactive import preview_geometry
+                from perception.visualization.surface import DisplayGrids
+
+                # A query-only copy avoids sharing the display thread's mutable cache.
+                grid=DisplayGrids(self.metrics,asset=self.asset).get(self.device)
+                result['display']=preview_geometry(result,grid,self.asset,self.display.buffer.settings)
+        with self.lock, self.session.lock:
+            if environment_epoch!=self.environment_epoch or not self.session.pause_requested:
+                return
+            if self.session.publish_preview(result,token) and snapshot is not None:
+                self.display.frozen_basemap(True,snapshot)
+
     def _work(self):
         try:
             import torch
             torch.cuda.set_device(0);stream=torch.cuda.Stream(priority=-1)
             next_tick=time.monotonic();last_tick=None;last_state=None
             previous_environment_epoch=0
+            frozen_display=False
             with torch.cuda.stream(stream):
                 while not self.done.is_set():
                     while True:
@@ -140,8 +205,16 @@ class ControlLoop:
                             (row['session_id'],row['generation'])!=(self.rows[-1]['session_id'],self.rows[-1]['generation'])):
                             self.rows.clear();self.reference.invalidate('localization_reset')
                         self.rows.append(row)
-                    if self.session is not None and self.session.epoch!=self.session_epoch:
-                        self.session_epoch=self.session.epoch
+                    epoch=self.session_epoch
+                    pause_requested=paused=False
+                    if self.session is not None:
+                        with self.session.lock:
+                            epoch=self.session.epoch
+                            pause_requested,paused=self.session.pause_requested,self.session.paused
+                            # A command offered after this read cannot accept the previous goal's preview.
+                            token=self.session.command_generation
+                    if epoch!=self.session_epoch:
+                        self.session_epoch=epoch
                         self.commands.agent_state.clear_follow_observations()
                         if self.follow is not None:
                             handle=self.follow.handle or (self.follow_pending or {}).get('handle')
@@ -212,28 +285,20 @@ class ControlLoop:
                             value['task_id']==self.request['task_id'] and value['goal_revision']>=self.request['goal_revision']):
                             if self.request is not None:self.reference.cancel(self.request)
                             self.request=None;self.controller.controller.clear();self.cancelled_request=value
-                    if self.session is not None and (self.session.pause_requested or self.session.paused):
-                        if self.session.paused and self.rows:
+                    freezing=pause_requested or paused
+                    if freezing!=frozen_display:
+                        frozen_display=freezing
+                        if self.display is not None:
+                            self.display.frozen_basemap(freezing)
+                    if freezing:
+                        if paused and pause_requested and self.rows:
                             previous_environment_epoch,_,_=self._take_environment(previous_environment_epoch)
                             self.session.publish_observation(self.scene,self.rows[-1],goal_intent=self.request)
-                            token=self.session.command_generation
-                            if self.request is not None and token!=self.preview_token:
-                                self.preview_token=token
-                                if self.scene is None:
-                                    result=dict(scope='frozen_bag_observation',reason='observation_unavailable',executable=False)
-                                else:
-                                    from navigation.planning.frozen import preview
-                                    self.batch.bind(self.device)
-                                    scene=self._search_scene(self.scene)
-                                    result=preview(self.request,scene,list(self.rows),self.controller.controller,
-                                        self.reference.planning,asset=self.asset,dt=self.settings['control_period_s'])
-                                    if self.display is not None:
-                                        from perception.visualization.interactive import preview_geometry
-                                        from perception.visualization.surface import DisplayGrids
-                                        # A query-only copy avoids sharing the display thread's mutable cache.
-                                        grid=DisplayGrids(self.metrics,asset=self.asset).get(self.device)
-                                        result['display']=preview_geometry(result,grid,self.asset,self.display.buffer.settings)
-                                self.session.publish_preview(result,token)
+                            self._preview_frozen(token,previous_environment_epoch)
+                        elif self.preview_token is not None:
+                            self.preview_token=None
+                            if self.display is not None:
+                                self.display.frozen_basemap(True)
                         self.done.wait(.01);continue
                     mono=time.monotonic()
                     if self.clock is None:self.done.wait(.005);continue
@@ -291,6 +356,8 @@ class ControlLoop:
                         self.reference.invalidate('manual_preview_changed')
                     self.manual_preview_key=preview_key
                     status=None
+                    tracing=self.metrics.trace_path is not None
+                    if tracing:query_mono=time.monotonic()
                     if planning_request is not None and self.scene is not None:
                         self.reference.update(planning_request,self.scene,None,self.asset,now=now,
                             clock_rate=self.clock['clock_rate'],follow_key=follow_key,
@@ -328,15 +395,22 @@ class ControlLoop:
                             adjustment=(available_reference['result'].get('follow_goal_adjustment') or {}).get('selected_goal')
                             self.follow_issued=(copy.deepcopy(control_request),copy.deepcopy(adjustment))
                     control_reference = available_reference if control_request is not None else None
+                    if tracing:
+                        ready_mono=time.monotonic()
+                        reference_request=None if available_reference is None else available_reference['result']['request']
                     with self.metrics.span('dwa_control'):
                         packet=self.controller.step(control_request,self.scene,list(self.rows),control_reference,
                             now=now,clock_domain=self.clock_domain,dt=dt,reason=environment_fault)
                     self.reference.note_control(packet,monotonic_s=mono)
                     self.safety.packet(packet);self.record('control',packet);self.count+=1
-                    if self.metrics.trace_path is not None:
+                    if tracing:
                         r=None if self.scene is None else self.scene.record
                         self.metrics.trace('control_cycle',sequence_id=packet['sequence_id'],now=now,
                             control_started_mono=mono,scene_offered_mono=offered_mono,
+                            reference_epoch=self.reference.epoch,
+                            goal_key=None if planning_request is None else [planning_request[k] for k in ('task_id','request_id','goal_revision')],
+                            reference_goal_key=None if reference_request is None else [reference_request[k] for k in ('task_id','request_id','goal_revision')],
+                            goal_checked_mono=query_mono,reference_checked_mono=ready_mono,
                             scene_binding=None if r is None else r['input_fingerprint'],
                             measurement_stamp_s=None if r is None else r['as_of'],
                             association_stamp_s=None if r is None else r['prior'].get('measurement_stamp_s'),
@@ -367,6 +441,7 @@ class ControlLoop:
                         from navigation.control.shadow import observed_feedback
                         idle_feedback=observed_feedback(list(self.rows),self.scene,self.controller.geometry,self.controller.motion,now=now)
                     preview_status=None
+                    reference_observation=None if status is None else status.get('planning_observation')
                     if preview is not None:
                         preview_status=dict(owner=preview['owner'],request_id=preview['request']['request_id'],
                             status=('blocked_by_observation_goal' if self.request is not None else
@@ -377,18 +452,29 @@ class ControlLoop:
                                               else available_reference['as_of'],executable=False)
                         if self.request is None:
                             preview_status['goal']=preview['request']['goal']
+                            preview_status['goal_revision']=preview['request']['goal_revision']
+                            preview_status['planning_observation']=reference_observation
                             preview_status['reference_path']=manual_preview_path(available_reference,display_request)
                             preview_status['reference_frame']=preview['request']['frame_id']
+                            if preview_status['reference_path'] is not None:
+                                preview_status['path_result_binding']=available_reference['result'].get('result_binding')
+                    control_observation=None
+                    if self.request is not None and self.scene is not None and environment_fault is None:
+                        control_observation=control_planning_observation(packet,self.scene,
+                            self.reference.planning['max_geometry_age_s'])
                     mapped_pose=agent_mapped_pose(self.scene,self.rows[-1],self.controller.geometry,now,
                         self.scene_settings['max_association_age_s'],self.clock_domain) if self.commands.agent_state.goal_evidence is not None else None
                     self.commands.agent_state.publish_control(packet,self.rows[-1],map_binding=binding,
                         cancelled_request=self.cancelled_request,idle_feedback=idle_feedback,manual_preview=preview_status,
+                        reference_observation=reference_observation if self.request is not None else None,
+                        control_observation=control_observation,
                         agent_mapped_pose=mapped_pose,environment_epoch=environment_epoch,environment_fault=environment_fault)
                     if self.display is not None:
                         self.display.navigation(self.controller.controller.result,available_reference,
                             display_request,self.scene,self.rows[-1],packet,
                             self.reference.reason if status is None else status['reason'],now=now,clock_domain=self.clock_domain,
                             clock_rate=self.clock['clock_rate'],clock_mono=mono,grid=None if self.scene is None else self.device,
+                            search_map=self.reference.display_map if status is not None else None,
                             goal_hint=planning_request if follow_key is not None else None)
                     for event in self.reference.drain_events():self.record('reference',event)
         except Exception as error:self.error=type(error).__name__+': '+str(error)

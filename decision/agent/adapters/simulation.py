@@ -5,7 +5,7 @@ No ROS imports or robot output. All feedback explicitly belongs to simulation.
 import copy
 import numpy as np
 from .. import ROOT
-from ..core.route import record_route_visit
+from ..core.route import record_route_visit, reference_crosses_blockage
 
 
 class SimulationNavigation:
@@ -44,6 +44,7 @@ class SimulationNavigation:
         self.request = None
         self.handle = None
         self.reference = None
+        self.planning_observation = None
         self.last_reference = -1e9
         self.stopping = False
         self.status = 'idle'
@@ -63,12 +64,14 @@ class SimulationNavigation:
         return dict(scope=self.scope, clock_domain=self.clock_domain, stamp_s=10+self.t,
                     frame_id='sim_odom', session_id='agent', generation=0, source='synthetic_differential_drive_plant',
                     pose=self.pose.tolist(), velocity=self.velocity.tolist(), handle=copy.deepcopy(self.handle),
+                    localization_status='valid',stop_measurement_stamp_s=10+self.t,
                     origin_pose=self.pose.tolist(), origin_frame_id='sim_odom', origin_stamp_s=10+self.t,
                     status=self.status, collision=self.collision, goal=copy.deepcopy(self.goal), executable=False, execution_feedback=True,
                     stop_reason=self.stop_reason,
                     command_reason=self.last_command_reason,
                     reference_status=None if self.reference is None else self.reference['result']['status'],
                     reference_reason=None if self.reference is None else self.reference['result']['reason'],
+                    planning_observation=copy.deepcopy(self.planning_observation),
                     planning_search_budget_s=self.planning['pose_search']['max_search_s'],
                     route_index=self.route_index,route_count=None if self.route is None else len(self.route['waypoints']),
                     route_start_stamp_s=self.route_start_stamp_s,
@@ -93,10 +96,19 @@ class SimulationNavigation:
                        frame_id='sim_odom', target_reference='base_link', goal=route['waypoints'][0] if route else place['pose'],
                        goal_behavior='pass_through' if route else 'stop')
         result = self.planner.query(request, scene=scene, now=10+self.t, clock_domain='simulation')
-        return dict(status=result['status'], reason=result['reason'], executable=False,
-                    scope=self.scope, reference_found=result['status'] == 'path_found',
-                    checked='first_route_leg_only' if route else 'single_goal',
-                    remaining_route_legs_checked=False if route else None)
+        check=dict(status=result['status'], reason=result['reason'], executable=False,
+                   scope=self.scope, reference_found=result['status'] == 'path_found',
+                   checked='first_route_leg_only' if route else 'single_goal',
+                   remaining_route_legs_checked=False if route else None)
+        blockage=place.get('route_blocked_position_check') if route else None
+        if blockage is not None:
+            crossed=(reference_crosses_blockage(result.get('path'),blockage['position'],blockage['tolerance_m'])
+                     if check['reference_found'] and result.get('frame_id')==blockage['frame_id'] else None)
+            check['blocked_position_check']=dict(status='crossed' if crossed is True else 'clear' if crossed is False
+                                                  else 'unavailable',scope='first_route_leg_base_reference_path',**blockage)
+            if crossed is True:
+                check.update(reference_found=False,status='no_path',reason='route_replacement_preview_crosses_blocked_position')
+        return check
 
     def start(self, place, handle):
         if self.status in ('running', 'stopping') or not self.snapshot()['stopped']:
@@ -108,6 +120,7 @@ class SimulationNavigation:
                             mode='local', frame_id='sim_odom', target_reference='base_link', goal=place['pose'], goal_behavior='stop')
         self.status, self.stopping = 'running', False
         self.reference, self.goal = None, None
+        self.planning_observation = None
         self.best_distance, self.no_progress_s = None, 0.
         self.progress_pose = self.pose.copy()
         self.stop_reason = None
@@ -134,8 +147,9 @@ class SimulationNavigation:
         if final and self.route['final_yaw'] is not None:goal.append(self.route['final_yaw'])
         self.request=dict(request_id=self.handle['call_id']+':'+str(self.route_index),task_id=self.handle['task_id'],
             goal_revision=self.handle['goal_revision'],mode='local',frame_id='sim_odom',target_reference='base_link',
-            goal=goal,goal_behavior='stop' if final else 'pass_through')
+            goal=goal,goal_behavior='stop' if final else 'pass_through',route_segment_id=str(self.route_index))
         self.reference=self.goal=None
+        self.planning_observation=None
         self.last_reference=-1e9
         self.control.controller.clear()
 
@@ -149,6 +163,7 @@ class SimulationNavigation:
     def tick(self):
         from navigation.kinematics import advance, velocity_step
         from navigation.planning.continuity import reference_envelope
+        from navigation.planning.reference import blocked_position, blockage_kind, planning_observation
         from navigation.planning.motion import interpolate_se2
         from navigation.planning.footprint import swept_check
         from perception.environment.layers import GridSnapshot
@@ -163,6 +178,14 @@ class SimulationNavigation:
         if active and (self.reference is None or self.t-self.last_reference >= 3):
             result = self.planner.query(self.request, scene=scene, now=now, clock_domain='simulation')
             self.reference = reference_envelope(result, self.request, scene, None)
+            kind=blockage_kind(result,self.request)
+            position=blocked_position(result,self.request) if kind is not None else None
+            self.planning_observation=planning_observation(self.request,scene.record,source='reference',
+                status='blocked' if kind else 'clear' if result['status']=='path_found' else 'unknown',
+                reason=result['reason'],max_age_s=5.,kind=kind,
+                **({'blocked_position':position} if position is not None else {}))
+            if not self.planning_observation['map_binding']['valid']:
+                self.planning_observation['map_binding']=None
             self.last_reference = self.t
         packet = self.control.step(self.request, scene, feedback, now=now, clock_domain='simulation', dt=self.dt,
                                    result=self.reference if active else None, active=active)

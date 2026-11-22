@@ -29,7 +29,7 @@ def _apply_command(engine, arm, chassis, kind, value):
             arm.update(enabled=False,revision=arm['revision']+1)
 
 
-def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,motion,geometry,clock_domain,asset_path,shadow_settings,chassis_fd=None):
+def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,motion,geometry,clock_domain,asset_path,shadow_settings,chassis_fd=None,trace_timing=False):
     signal.signal(signal.SIGINT,signal.SIG_IGN)
     os.environ['CUDA_VISIBLE_DEVICES']=''
     from navigation.safety.shadow import ShadowSafety,chassis_authorization
@@ -97,7 +97,7 @@ def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,mot
                 # Freeze this conversion for one check; source measurements may
                 # update concurrently and are revalidated by ShadowSafety.
                 now=lambda:source['stamp']+(time.monotonic()-source['mono'])*source['rate']
-                result=engine.tick(now(),mono=mono,clock_now=now)
+                result=engine.tick(now(),mono=mono,clock_now=now,trace_scenes=trace_timing)
                 result.update(scope='runtime_CPU_shadow',telemetry_dropped=dropped,process_cpu_s=time.process_time()-cpu_start,
                     decision_complete_mono=time.monotonic())
                 if chassis is not None:result['scope']='runtime_CPU_execution_check'
@@ -133,7 +133,7 @@ def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,mot
 
 
 class SafetyProcess:
-    def __init__(self,pose_socket,planning,motion,geometry,*,clock_domain,asset=None,slots=16,slot_bytes=256*1024,settings=None,chassis_port=None,chassis_output=None):
+    def __init__(self,pose_socket,planning,motion,geometry,*,clock_domain,asset=None,slots=16,slot_bytes=256*1024,settings=None,chassis_port=None,chassis_output=None,trace_timing=False):
         from contextlib import ExitStack
         with ExitStack() as startup:
             self.chassis=None
@@ -154,7 +154,7 @@ class SafetyProcess:
             startup.callback(child.close)
             self.process=context.Process(target=_run,args=(child,DupFd(pose_socket.fileno()),DupFd(child_out.fileno()),DupFd(pool.fd),
                 pool.owner,pool.slots,pool.slot_bytes,planning,motion,geometry,clock_domain,None if asset is None else str(asset.directory),settings,
-                None if self.chassis is None else DupFd(self.chassis.channel.fileno())),daemon=True)
+                None if self.chassis is None else DupFd(self.chassis.channel.fileno()),trace_timing),daemon=True)
             self.ready=False;self.pending={}
             self.send_lock=threading.Lock()
             self.process.start()

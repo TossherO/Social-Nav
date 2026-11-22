@@ -2,8 +2,8 @@
 import copy
 import math
 import time
-from .shadow import RuntimeShadowNavigation, apply_runtime_mapped_pose
-from ..core.route import record_route_visit,validate_route_progress
+from .shadow import RuntimeShadowNavigation, apply_runtime_mapped_pose, bound_planning_observation
+from ..core.route import record_route_visit,reference_crosses_blockage,validate_route_progress
 from ..core.tasks import angle_error,goal_requires_heading
 
 
@@ -28,6 +28,8 @@ class ManualNavigation(RuntimeShadowNavigation):
         self.route_index=None
         self.route_start_stamp_s=None
         self.route_visits=[]
+        self.detour_check=None
+        self.last_detour_result=None
         self.released_handle=None
         self.arrival_invalidation=None
         self.arrival_events=[]
@@ -51,6 +53,8 @@ class ManualNavigation(RuntimeShadowNavigation):
         requirement=place.get('requirement') or {}
         require_yaw=goal_requires_heading(requirement)
         self.request=dict(place_id=place['place_id'],pose=copy.deepcopy(place['pose']),require_yaw=require_yaw)
+        self.detour_check=copy.deepcopy(place.get('route_blocked_position_check'))
+        self.last_detour_result=None
         self.confirmation=None
         self.automatic_evidence=None;self.arrival_since=None;self.arrival_last_stamp=None
         self.cancel_requested=False
@@ -110,6 +114,7 @@ class ManualNavigation(RuntimeShadowNavigation):
         epoch=state.get('environment_epoch',0)
         if epoch!=self.environment_epoch:
             self.environment_epoch=epoch
+            self.detour_check=self.last_detour_result=None
             self.confirmation=self.automatic_evidence=self.arrival_since=self.arrival_last_stamp=None
             if self.status=='arrived' and self.released_handle!=self.handle:self.status='running'
             state=self.snapshot()
@@ -163,6 +168,7 @@ class ManualNavigation(RuntimeShadowNavigation):
 
     def suspend_for_association(self):
         self.waiting_for_association=True
+        self.detour_check=self.last_detour_result=None
         self.confirmation=self.automatic_evidence=self.arrival_since=self.arrival_last_stamp=None
         if self.handle is None or self.released_handle==self.handle or self.status not in ('running','arrived'):
             return None
@@ -200,6 +206,7 @@ class ManualNavigation(RuntimeShadowNavigation):
             abs(velocity[1])<=self.settings['stopped_angular_rps'])
         # Operator driving uses the idle estimator even with an Agent display target.
         state['pose'] = copy.deepcopy(feedback.get('pose')) if feedback_current else None
+        state['planning_observation']=None
         if self.follow_active:
             follow=state.get('follow_status') or {}
             acknowledged=(follow.get('handle')==self.handle and follow.get('status') in ('failed','stopped'))
@@ -259,7 +266,36 @@ class ManualNavigation(RuntimeShadowNavigation):
             route_start_stamp_s=self.route_start_stamp_s,
             route_visits=copy.deepcopy(self.route_visits),
             goal=dict(task_id=self.handle['task_id'],goal_revision=self.handle['goal_revision']) if confirmed else None)
+        if self.status=='running' and self.handle is not None and not self.waiting_for_association:
+            from ..workflows.manual_reference import reference_request
+            request=reference_request(self.handle,self.request['pose'],self.route,self.route_index,
+                                      self.catalog,require_yaw=self.request['require_yaw'])
+            preview=control.get('manual_preview') or {}
+            if preview.get('owner')==self.handle['call_id']:
+                observation=bound_planning_observation(preview.get('planning_observation'),request,state)
+                if self.route and self.detour_check and observation and observation['status']=='clear':
+                    self._check_detour_preview(preview,observation)
+                state['planning_observation']=observation
+                if (request and preview.get('request_id') == request['request_id'] and
+                        preview.get('goal_revision') == request['goal_revision'] and
+                        preview.get('planning_observation') is None and preview.get('status') == 'unavailable' and
+                        preview.get('reason') in ('waiting_for_background_reference', 'reference_observation_changed')):
+                    state['pending_reference_request_id'] = request['request_id']
         return state
+
+    def _check_detour_preview(self,preview,observation):
+        check=self.detour_check
+        result_id=observation.get('result_binding')
+        if (not result_id or preview.get('path_result_binding')!=result_id or
+                preview.get('reference_frame')!=check['frame_id']):
+            return
+        if self.last_detour_result is None or self.last_detour_result[0]!=result_id:
+            crossed=reference_crosses_blockage(preview.get('reference_path'),check['position'],check['tolerance_m'])
+            self.last_detour_result=(result_id,crossed)
+        if self.last_detour_result[1] is True:
+            # This reference crosses the old position. It does not measure the obstacle again.
+            observation.update(status='blocked',kind='route_blocked',reason='detour_preview_crosses_prior_blockage',
+                               blocked_position=list(check['position']))
 
     def confirm_arrival(self):
         if self.follow_active or self.waiting_for_association or self.handle is None or self.status != 'running':

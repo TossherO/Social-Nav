@@ -218,7 +218,7 @@ class ShadowSafety:
             # periodic tick into two checks of the same proposal every period.
             if changed:self.wake.set()
 
-    def tick(self,now,*,mono=None,clock_now=None):
+    def tick(self,now,*,mono=None,clock_now=None,trace_scenes=False):
         mono=time.monotonic() if mono is None else mono;began=time.perf_counter();self.sequence+=1
         out=dict(sequence_id=self.sequence,stamp_s=now,clock_domain=self.clock_domain,velocity=[0.,0.],
             state='stop_request',reason=None,scope='shadow_hypothetical_actuator_response',
@@ -258,6 +258,12 @@ class ShadowSafety:
                 check_now=now if clock_now is None else clock_now()
                 if check_now<now:raise ValueError('clock_reversed')
                 t=time.perf_counter();scene,selection,rows=self._current_scene()
+                if trace_scenes:
+                    # A retry can select a newer grid within the same gate cycle.
+                    out.setdefault('grid_uses',[]).append(dict(
+                        measurement_stamp_s=scene.record['as_of'],
+                        snapshot_id=scene.geometry.metadata['snapshot_id'],
+                        source_clock_s=clock_now() if clock_now is not None else check_now))
                 if context_binding(request,source_scene,self.asset)!=context_binding(request,scene,self.asset):raise ValueError('shadow_context_changed')
                 out['timing_ms']['observation_join']=out['timing_ms'].get('observation_join',0.)+(time.perf_counter()-t)*1000
                 proposal=copy.deepcopy(original)

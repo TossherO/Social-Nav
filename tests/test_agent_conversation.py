@@ -247,17 +247,21 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(saved['tool_calls'],calls)
         self.assertEqual(self.session.conversation.snapshot()['consumed_tool_calls'],0)
 
-    def test_text_only_reply_waits_for_user_without_claiming_success_or_parsing_action_json(self):
+    def test_two_registration_texts_wait_for_user_without_claiming_success_or_parsing_action_json(self):
         for text in ('任务完成。',json.dumps(action('get_navigation_state'))):
             response=Reply.parse(dict(role='assistant',content=text))
             actor=AgentLoop(self.session,lambda *_:response)
             try:
-                actor.tick();actor.model.thread.join(1);actor.tick()
+                actor.tick();actor.model.thread.join(2);actor.tick()
+                self.assertEqual(actor.state['status'],'ready')
+                self.assertFalse(self.session.task_goals.goals)
+                actor.tick();actor.model.thread.join(2);actor.tick();actor.tick()
                 self.assertEqual(self.session.state['status'],'needs_clarification')
+                self.assertEqual(actor.state['reason'],'model_text_without_task_registration')
                 self.assertEqual(self.session.state['assistant_text'],text)
                 self.assertFalse(self.session.state['completed_revisions'])
                 self.assertEqual(self.session.conversation.messages()[-1]['content'],text)
-                self.assertEqual(actor.requests,1)
+                self.assertEqual(actor.requests,2)
             finally:actor.close()
             self.session.event('answer','继续检查')
 

@@ -3,6 +3,7 @@ import copy
 import io
 import json
 import unittest
+from jsonschema import ValidationError
 import numpy as np
 from PIL import Image
 from decision.agent import CONFIG_DIR
@@ -298,8 +299,8 @@ class AgentContextTests(unittest.TestCase):
                     clock_domain=self.fixture.nav.clock_domain,geometry=geometry,sensors=sensors)
         self.fixture.nav.spatial_inputs=lambda:inputs
         self.session.prompt();original=self.session.spatial_view.record['view_id']
-        for _ in range(2):
-            result=self.session.call('check_candidate',pose=[4.,4.,0.],view_id=original,point_ids=['elevator'])
+        for pose in ([4.,4.,np.pi],[4.02,4.,-np.pi+np.deg2rad(.02)]):
+            result=self.session.call('check_candidate',pose=pose,view_id=original,point_ids=['elevator'])
             self.assertEqual(result['status'],'available')
         self.session.conversation.max_exchanges=1
         self.session.conversation.notice('trim_fixture',number=1)
@@ -316,6 +317,7 @@ class AgentContextTests(unittest.TestCase):
         view=self.session.spatial_view.record['view_id']
         result=self.session.call('check_candidate',pose=[8.,4.,0.],view_id=view,point_ids=['elevator'])
         self.assertEqual(result['status'],'available')
+        self.session.call('check_candidate',pose=[8.2,4.,0.],view_id=view,point_ids=['elevator'])
         self.session.prompt()
         self.assertTrue(self.session.spatial_view.record['candidate_display_expanded'])
         self.assertLess(self.session.spatial_view.record['requested_local_bounds'][2],8.)
@@ -323,17 +325,62 @@ class AgentContextTests(unittest.TestCase):
         inputs['stamp_s']=10.1;self.fixture.nav.state['stamp_s']=10.1
         payload=self.session.prompt()
         history=payload['current_state']['recent_candidate_checks']
-        self.assertEqual(len(history),2)
+        self.assertEqual(len(history),3)
         self.assertTrue(all(entry['historical_only'] for entry in history))
         self.assertTrue(all(entry['source_stamp_s']==10. for entry in history))
         self.assertIsNone(self.session.spatial_view.record['candidate_preview'])
         view=self.session.spatial_view.record['view_id']
-        self.session.call('check_candidate',pose=[8.,4.,0.],view_id=view,point_ids=['elevator'])
+        self.session.call('check_candidate',pose=[8.21,4.,0.],view_id=view,point_ids=['elevator'])
         payload=self.session.prompt();history=payload['current_state']['recent_candidate_checks']
+        self.assertEqual(len(history),3)
         self.assertFalse(history[-1]['historical_only']);self.assertEqual(history[-1]['source_stamp_s'],10.1)
+        self.assertEqual(history[-1]['first_source_stamp_s'],10.)
+        self.assertEqual(history[-1]['checks'],2)
+        self.assertEqual(history[-1]['checks_on_source'],1)
+        self.assertEqual(history[-1]['pose'],[8.21,4.,0.])
+        self.assertTrue(all(entry['historical_only'] for entry in history[:-1]))
         self.fixture.nav.state['generation']+=1
         payload=self.session.prompt()
         self.assertEqual(payload['current_state']['recent_candidate_checks'],[])
+
+    def test_xy_candidate_preserves_occupancy_and_draws_a_point(self):
+        from perception.environment.layers import GridSnapshot
+        geometry=VehicleGeometry([[-.2,-.3],[.8,-.3],[.8,.3],[-.2,.3]],np.eye(4),source='fixture')
+        inputs=dict(global_grid=self.fixture.grid,scene=None,local_grid_observation_id='obs',
+            local_grid_map_from_local=np.eye(4).tolist(),pose=[4.,4.,0.],stamp_s=10.,
+            clock_domain=self.fixture.nav.clock_domain,geometry=geometry)
+        self.fixture.nav.spatial_inputs=lambda:inputs
+        cases=((None,None,'free'),(45,100,'undetermined'),(40,-1,'unknown'),(40,100,'occupied'))
+        for x,cell,expected in cases:
+            with self.subTest(local_occupancy=expected):
+                cells=np.zeros((100,140),np.int8)
+                if x is not None:
+                    cells[40,x]=cell
+                inputs['local_grid']=GridSnapshot(dict(self.fixture.grid.metadata,snapshot_id='local'),
+                                                 dict(occupancy=cells))
+                self.session.prompt()
+                view=self.session.spatial_view.record['view_id']
+                call=reply('check_candidate',pose=[4.,4.],view_id=view).action
+                result=self.session.call(call['tool'],**call['arguments'])
+                self.assertEqual(result['static_footprint']['status'],'free')
+                self.assertEqual(result['local_footprint']['status'],expected)
+                self.assertEqual(result['camera_view']['reason'],'candidate_heading_unspecified')
+        with self.assertRaises(ValidationError):
+            self.session.call('check_candidate',pose=[4.,4.],view_id=view,point_ids=['elevator'])
+
+        self.session.call('check_candidate',pose=[8.,4.],view_id=view)
+        payload=self.session.prompt()
+        history=payload['current_state']['recent_candidate_checks']
+        self.assertEqual(len(history),len(cases)+1)
+        local_view=self.session.spatial_view
+        self.assertEqual(local_view.record['candidate_preview']['pose'],[8.,4.])
+        self.assertTrue(local_view.record['candidate_display_expanded'])
+        pixels=np.asarray(Image.open(io.BytesIO(local_view.images[1])))
+        self.assertTrue(np.any(np.all(pixels==[180,39,181],axis=2)))
+        manual=render(self.session.catalog,self.fixture.grid,[2.,2.,10.,6.],inputs['pose'],
+                      geometry=geometry,local_view=True,static_crop=True,candidate_preview=dict(pose=[8.,4.]))
+        pixels=np.asarray(Image.open(io.BytesIO(manual)))
+        self.assertTrue(np.any(np.all(pixels==[180,39,181],axis=2)))
 
     def test_candidate_preserves_occupied_unknown_and_missing_camera(self):
         from perception.environment.layers import GridSnapshot

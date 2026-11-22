@@ -6,7 +6,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from navigation.control.dwa import DwaController
-from navigation.planning.continuity import reference_envelope
+from navigation.planning.continuity import goal_binding,reference_envelope
 from navigation.planning.footprint import VehicleGeometry
 from navigation.planning.inputs import load_config
 from navigation.planning.motion import load_motion_config
@@ -121,6 +121,29 @@ class NavigationDisplayTests(unittest.TestCase):
         self.assertFalse(invalid['history']);self.assertIsNone(invalid['reference'])
         stopped=renderer.update(self.row,packet,mono=0.,stopped=True)
         self.assertIsNone(stopped['trajectory']);self.assertIn('stopped',stopped['text'])
+
+    def test_search_basemap_tracks_displayed_reference_failure_and_cancel(self):
+        static=asset();req=request('mapped',goal=[4.,2.,0.],goal_behavior='stop')
+        packet=self.packet(self.scene,req,static);reference=packet['reference']
+        snapshot=dict(job_id=19,stamp_s=10.,resolution=.1,frame_id='map',status='path_found',
+            goal_binding=goal_binding(req),reference_binding=reference['binding'])
+        renderer=NavigationView(self.geometry,self.cfg,asset=static)
+        packet['search_map']=snapshot
+        view=renderer.update(self.row,packet,mono=0.)
+        self.assertIs(view['search_map'],snapshot)
+        self.assertIn('reference search #19',view['text'])
+        np.testing.assert_allclose(view['reference']['search_xy'][[0,-1]],
+                                   np.asarray(reference['result']['path'])[[0,-1],:2])
+        failure=dict(snapshot,job_id=20,status='no_path',reason='goal_footprint_occupied')
+        packet.update(reference=None,result=None,search_map=failure)
+        view=renderer.update(self.row,packet,mono=0.)
+        self.assertIs(view['search_map'],failure)
+        self.assertIsNone(view['reference'])
+        self.assertIn('goal_footprint_occupied',view['text'])
+        for changed in (dict(req,goal_revision=req['goal_revision']+1),None):
+            view=renderer.update(self.row,dict(packet,request=changed),mono=0.)
+            self.assertIsNone(view['search_map'])
+            self.assertIn('selected static map',view['text'])
 
     def test_newer_measured_control_pose_is_used_without_predicting_history(self):
         packet=self.packet();packet['row'].update(stamp_s=10.1,position=[2.1,2.,-2.])

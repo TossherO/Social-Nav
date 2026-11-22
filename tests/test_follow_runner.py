@@ -40,6 +40,19 @@ class FollowRunnerTests(unittest.TestCase):
                 self.runner.start(handle,self.ref,self.initial,now=10.)
         self.assertIsNone(self.runner.policy)
 
+    def test_visual_reconfirmation_preserves_the_measured_corner(self):
+        self.runner.start(self.handle,self.ref,self.initial,now=10.)
+        for i,(x,y) in enumerate([(4.5,2.),(5.,2.),(5.5,2.),(5.5,2.5),(5.5,3.)],1):
+            current=scene(10.+i*.2,x,y=y)
+            self.runner.observe(current)
+            ref=reference(current)
+            ref.update(task_revision=1,goal_id='g')
+            ref['reference_id']=fingerprint({k:v for k,v in ref.items() if k!='reference_id'})
+            self.runner.retarget(ref,current,now=current.record['as_of'])
+            action=self.runner.update(current,now=current.record['as_of'])
+        # The last metre is northbound. The remaining half metre is on the eastbound leg.
+        np.testing.assert_allclose(action['request']['goal'],[5.,2.])
+
     def test_visual_occlusion_has_a_fixed_deadline_and_visible_can_clear_it(self):
         self.runner.start(self.handle,self.ref,self.initial,now=10.)
         def review(value,state):
@@ -117,8 +130,9 @@ class FollowRunnerTests(unittest.TestCase):
         ref['reference_id']=fingerprint({k:v for k,v in ref.items() if k!='reference_id'})
         current=two(10.2);self.runner.observe(current)
         self.runner.retarget(ref,current,now=10.2)
-        self.assertEqual(self.runner.update(current,now=10.2)['target_identity'],
-                         ['tracker_session',7,'b'])
+        switched=self.runner.update(current,now=10.2)
+        self.assertEqual(switched['target_identity'],['tracker_session',7,'b'])
+        np.testing.assert_allclose(switched['request']['goal'],[2.,2.])
 
     def test_moving_person_drives_planner_control_and_synthetic_plant(self):
         from navigation.control.runtime import DwaNavigationControl

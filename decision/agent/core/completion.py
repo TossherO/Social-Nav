@@ -6,7 +6,7 @@ from .tasks import angle_error, inside
 from ..tools.navigation import spatial_context
 
 
-def navigation_facts(session, goal, state, selected, proofs):
+def navigation_facts(session, goal, state, selected, proofs, *, require_final_yaw=False):
     live_arrival = (session.navigation.scope == 'live' and state.get('stop_observation') is True and
                     state.get('chassis_state') == 'armed' and state.get('chassis_status_fresh') is True and
                     state.get('origin_frame_id') == session.catalog.value['frame_id'] and
@@ -35,14 +35,21 @@ def navigation_facts(session, goal, state, selected, proofs):
     measured_pose = state.get('origin_pose') if live_arrival or manual_arrival else state.get('pose')
     if measured_pose is None:
         return dict(status='unproven',reason='current_base_pose_missing')
-    checks = session.task_goals.geometry(goal['requirement'], measured_pose)
+    checks = session.task_goals.geometry(goal['requirement'], measured_pose, selected)
     if goal['requirement']['kind'] in ('route','sequence'):
-        from .route import validate_route_progress
+        from .route import validate_route_progress, visited_checkpoints
         progress=validate_route_progress(selected.get('route'),proof)
         if progress['status']!='met':
             return dict(status='unproven',reason=progress['reason'],route_progress=progress)
         checks['route_progress']=progress
-    if goal['requirement']['kind']=='reference':
+        if goal['requirement']['kind']=='sequence':
+            checkpoints=goal['requirement']['checkpoints']
+            count=visited_checkpoints(goal.get('route_attempts',[]),checkpoints,session.task_goals.checkpoint_met,
+                                     current_visits=progress['visits'],handle=proof['handle'],context=proof['context'])
+            checks['sequence_checkpoint_progress']=dict(confirmed_count=count,required_count=len(checkpoints))
+            if count!=len(checkpoints):
+                return dict(status='unproven',reason='ordered_user_checkpoint_evidence_incomplete',checks=checks)
+    if goal['requirement']['kind']=='reference' or selected.get('nearby_stop'):
         import numpy as np
         actual=np.asarray(measured_pose,float);chosen=np.asarray(selected.get('pose'),float)
         checks['selected_position_met']=bool(actual.shape==(3,) and chosen.shape in ((2,),(3,)) and
@@ -50,6 +57,12 @@ def navigation_facts(session, goal, state, selected, proofs):
             np.linalg.norm(actual[:2]-chosen[:2])<=session.task_goals.settings['goal_position_tolerance_m'])
     if any(value is False for value in checks.values()):
         return dict(status='not_met', checks=checks)
+    # A valid first stop can supply visual review evidence before the final yaw is reached.
+    final_yaw = goal['requirement'].get('required_yaw')
+    if final_yaw is not None and 'required_yaw_met' not in checks:
+        checks['required_yaw_met'] = session.task_goals.yaw_met(measured_pose,final_yaw)
+        if require_final_yaw and checks['required_yaw_met'] is False:
+            return dict(status='not_met', checks=checks)
 
     return dict(status='available', proof=proof, checks=checks, measured_pose=measured_pose)
 
@@ -98,6 +111,8 @@ def stage_evidence(session, goal):
                 missing.append('route_endpoint')
         if arrival['status']!='available':
             missing.append(arrival.get('reason','navigation_geometry'))
+        elif facts['checks'].get('required_yaw_met') is False:
+            missing.append('required_yaw')
         if stage=='seating':
             selection=selected.get('seating')
             if not selection or not same_pose(pose,selected.get('pose'),settings):
@@ -120,6 +135,7 @@ def stage_evidence(session, goal):
         if proof:
             earliest = proof['stamp_s']
             facts['arrival_stamp_s'] = earliest
+            earliest = proof.get('stop_stamp_s',earliest)
             facts['handle'] = proof['handle']
         if req.get('facing') or (req['kind']=='reference' and req.get('target_id') and 'max_distance_m' not in req
                                  and not req.get('semantic_conditions') and not req.get('visual_preferences')):
@@ -172,15 +188,26 @@ def stage_evidence(session, goal):
         facts['completion_region']=dict(floor_id=req.get('to_floor',session.catalog.value.get('floor_id')),
                                         region_id=region_id,status=region_state,stamp_s=stamp if valid else None)
         if region_state!='inside':missing.append('completion_region_'+region_state)
-    needs_rgb = stage in ('observation','follow','seating') or bool(req.get('semantic_conditions'))
+    adjustments = goal.get('visual_adjustments',[])
+    adjustment = adjustments[-1] if adjustments else None
+    needs_rgb = stage in ('observation','follow','seating') or bool(req.get('semantic_conditions') or adjustment)
     rgb_stamp = (rgb.get('rgb') or {}).get('stamp_s')
+    rgb_source_matches = (rgb.get('local_identity')==spatial_context(state)['local_identity'] and
+                          (state.get('map_binding') is None or rgb.get('map_binding')==state['map_binding']))
     if (rgb and rgb['rgb'].get('status')=='valid' and rgb['clock_domain']==state['clock_domain'] and
+            (stage!='navigation' or rgb_source_matches) and
             earliest is not None and type(rgb_stamp) in (int,float) and earliest<=rgb_stamp<=state['stamp_s'] and
+            (adjustment is None or rgb_stamp>adjustment['review']['source_stamp_s']) and
             (stage=='follow' or same_pose(rgb.get('base_pose'),state.get('pose'),settings))):
         facts['rgb'] = dict(observation_id=rgb['observation_id'],source_stamp_s=rgb_stamp,
                             age_s=state['stamp_s']-rgb_stamp,input_fingerprint=rgb['input_fingerprint'])
     elif needs_rgb:
         missing.append('current_rgb')
+    review = goal.get('required_visual_review')
+    if (stage=='navigation' and review and
+            review['handle']==selected.get('handle') and
+            (not facts.get('rgb') or facts['rgb']['source_stamp_s']<=review['source_stamp_s'])):
+        missing.append('new_rgb_after_unsatisfied_visual_review')
     if view:
         facts['map_view'] = dict(view_id=view['view_id'],source_stamp_s=view['source_stamp_s'])
     return facts, proof

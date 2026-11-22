@@ -50,6 +50,36 @@ class TransportTests(unittest.TestCase):
         return [json.loads(row[0]) for row in self.store.db.execute(
             'SELECT value FROM events WHERE kind=? ORDER BY seq',(kind,))]
 
+    def test_low_thinking_registration_recovers_from_a_text_only_response(self):
+        self.args.planning_thinking_mode='low'
+        requests=[]
+        raw='请问您需要我帮您做什么？'
+        registration=reply('record_task',goals=[dict(goal_id='g1',stage='point',
+            target=dict(id='elevator'),description='到电梯口')])
+
+        def handle(request):
+            requests.append(json.loads(request.content))
+            body=wire(text=raw) if len(requests)==1 else wire(registration.message['tool_calls'])
+            return httpx.Response(200,text=body)
+
+        actor,_,_=self.make_actor(handle)
+        actor.before_request=lambda _:not self.session.task_goals.goals
+        for _ in range(2):
+            actor.tick();actor.model.thread.join(5);actor.tick()
+        self.assertEqual(len(requests),2)
+        corrected=requests[1]
+        self.assertEqual(corrected['reasoning_effort'],'low')
+        self.assertEqual(corrected['tool_choice'],'auto')
+        self.assertIn('record_task',[tool['function']['name'] for tool in corrected['tools']])
+        self.assertIn(dict(role='assistant',content=raw),corrected['messages'])
+        state=json.loads(corrected['messages'][-1]['content'][0]['text'])['state']
+        self.assertEqual(state['registration_instruction'],self.session.state['instruction'])
+        self.assertIn('record_task',state['decision_feedback'])
+        self.assertEqual([row['tool'] for row in self.events('tool_intent')],['record_task'])
+        self.assertEqual(self.session.task_goals.current('g1')['requirement']['target_id'],'elevator')
+        self.assertIsNone(self.session.skill.record['handle'])
+        self.assertNotIn(raw,json.dumps(self.session.conversation.messages(),ensure_ascii=False))
+
     def test_uses_one_client_across_phase_change_and_correlates_tool_timing(self):
         registration = reply('record_task',goals=[dict(goal_id='g1',stage='point',
             target=dict(id='elevator'),description='到电梯口')])

@@ -249,20 +249,25 @@ def run(args):
             handle=record.get('handle')
             following=record['stage_type']=='follow'
             association_waiting=record['association_waiting']
-            if record['status']=='running' and handle is not None and not following and not association_waiting:
+            active=record['status'] in ('running','blocked') and handle is not None
+            request=None
+            if active and not following and not association_waiting:
                 request=reference_request(handle,record['selected_pose'],navigation.route,
                                           navigation.route_index,session.catalog,
                                           require_yaw=navigation.request['require_yaw'])
                 reference.set(handle['call_id'],request)
             else:reference.set(None,None)
-            if record['status']=='running' and handle is not None:
+            if active:
                 preview=(navigation.value.get('control') or {}).get('manual_preview') or {}
                 error=reference.status()
                 index=0 if navigation.route is None else navigation.route_index
                 expected=handle['call_id'] if following else handle['call_id']+':'+str(index)
-                if preview.get('owner')!=handle['call_id'] or preview.get('request_id')!=expected:preview={}
+                if (preview.get('owner')!=handle['call_id'] or preview.get('request_id')!=expected or
+                        not following and (request is None or preview.get('goal_revision')!=request['goal_revision'])):
+                    preview={}
                 summary=dict(status='unavailable' if error else preview.get('status','waiting'),
-                    reason=error or preview.get('reason'),reference_stamp_s=preview.get('reference_stamp_s'))
+                    reason=error or (preview.get('planning_observation') or {}).get('reason') or preview.get('reason'),
+                    reference_stamp_s=preview.get('reference_stamp_s'))
                 key=(handle['call_id'],summary['status'],summary['reason'])
                 if key!=last_reference:
                     last_reference=key
@@ -302,6 +307,8 @@ def run(args):
                     manual_confirmation_available=bool(not association_waiting and not following and
                         confirmation_handle is not None and navigation.status=='running'),
                     reason=session.state.get('reason'),navigation_status=record['status'],
+                    blockage=copy.deepcopy(record['blockage']),
+                    detour_preview_conflict=(feedback.get('planning_observation') or {}).get('reason')=='detour_preview_crosses_prior_blockage',
                     stage_type=record['stage_type'],follow_status=copy.deepcopy(feedback.get('follow_status')),
                     model_busy=_actor.model.busy,localization_status=feedback.get('localization_status'),
                     input_stale=feedback.get('input_stale'),origin_pose=feedback.get('origin_pose'),
@@ -313,7 +320,7 @@ def run(args):
                                        if k!='reference_path'},
                     reference_preview_error=reference.status()))
             if last is not None and navigation.route is not None:
-                save_trace(force=handle is None or record['status']!='running')
+                save_trace(force=not active)
             if association_waiting:
                 if last is not None:display.send([])
                 last=last_progress=None
@@ -328,7 +335,7 @@ def run(args):
                         geometry,_=display_points(navigation.spatial_inputs()['global_grid'],[target[:2]])
                         display.send(geometry,None,target[2] if len(target)>2 else None)
                     else:display.send([])
-            elif record['status']=='running' and handle is not None and handle['call_id']!=last:
+            elif active and handle['call_id']!=last:
                 last=handle['call_id']
                 trace_cursor=None;trace_saved_at=0.
                 pose=record['selected_pose']
@@ -364,7 +371,7 @@ def run(args):
                     yaw_tolerance_degrees=(round(math.degrees(navigation.settings['goal_yaw_tolerance_rad']),1)
                                            if navigation.request['require_yaw'] else None),
                     instruction='使用原车手柄按建议路线驾驶；到达后依据实时定位和停稳估计自动检查。路线仅供参考。'))
-            if record['status']=='running' and handle is not None and navigation.route is not None:
+            if active and navigation.route is not None:
                 progress=(handle['call_id'],navigation.route_index)
                 if progress!=last_progress:
                     last_progress=progress
@@ -381,7 +388,7 @@ def run(args):
                         display.send(geometry,navigation.route_index,
                                      display_final_yaw(record['selected_pose'],navigation.route))
                     except (ValueError,KeyError,TypeError,OSError):pass
-            elif last is not None and (handle is None or record['status']!='running'):
+            elif last is not None and not active:
                 display.send([]);last=None;last_progress=None
             stage=next_unfinished_goal(session.task_goals.goals)
             key=None if stage is None else (session.state['revision'],stage['requirement']['goal_id'])

@@ -49,7 +49,8 @@ class FollowTrackHistory:
                             None if track['velocity'] is None else track['velocity'].tolist())
         self.rows.append(dict(stamp_s=r['as_of'],stamp_ns=r.get('stamp_ns'),clock_domain=r['clock_domain'],local_identity=identity(scene),
             scene_binding=r['input_fingerprint'],people_fingerprint=model.source,people_stamp_s=model.origin,
-            tracks=tracks,observations=observations))
+            tracks=tracks,observations=observations,
+            world_from_lidar=r['localization']['world_from_lidar'] if observations else None))
         while self.rows and r['as_of']-self.rows[0]['stamp_s']>self.seconds:self.rows.popleft()
 
     def validate(self, reference, scene, *, now):
@@ -83,7 +84,7 @@ class FollowTrackHistory:
         self._check(rows,key,generation)
         return key,generation
 
-    def continue_from(self, binding, key, generation, scene, *, observed_only=False):
+    def continuous_rows(self, binding, key, generation, scene):
         rows=list(self.rows)
         start=next((i for i,row in enumerate(rows) if row['scene_binding']==binding),None)
         end=next((i for i,row in enumerate(rows) if row['scene_binding']==scene.record['input_fingerprint']),None)
@@ -91,6 +92,10 @@ class FollowTrackHistory:
             raise ValueError('follow_track_history_unavailable')
         segment=rows[start:end+1]
         self._check(segment,key,generation)
+        return segment
+
+    def continue_from(self, binding, key, generation, scene, *, observed_only=False):
+        segment=self.continuous_rows(binding,key,generation,scene)
         if observed_only and any(key not in row['observations'] for row in segment):
             raise ValueError('follow_track_not_currently_observed')
         return segment[-1]
@@ -106,6 +111,57 @@ class FollowTrackHistory:
                     previous is not None and row['stamp_s']-previous>self.config['people']['max_observation_age_s']):
                 raise ValueError('follow_track_continuity_unavailable')
             previous=row['stamp_s'];last_support=value[2]
+
+
+class FollowTrail:
+    """Place the goal a walking distance behind the latest measured position."""
+    def __init__(self, distance, sample_spacing, max_gap_s):
+        self.distance=distance
+        self.sample_spacing=sample_spacing
+        self.max_gap_s=max_gap_s
+        self.points=[]
+        self.goal=None
+        self.last_stamp=None
+
+    def advance(self, rows, key, geometry):
+        for row in rows:
+            observation=row['observations'].get(key)
+            if observation is None:
+                # A prediction can hold a valid goal, but cannot extend the walk.
+                self.points.clear()
+                continue
+            stamp=row['people_stamp_s']
+            if self.last_stamp is not None:
+                if stamp<=self.last_stamp:continue
+                if stamp-self.last_stamp>self.max_gap_s:self.points.clear()
+            self.last_stamp=stamp
+            position=np.asarray(observation[0],dtype=float)
+            if not self.points:
+                base=geometry.pose(row['world_from_lidar'])[:2]
+                offset=base-position
+                separation=np.linalg.norm(offset)
+                self.goal=base if separation<=self.distance else position+offset*(self.distance/separation)
+                self.points=[self.goal,position] if separation>0 else [position]
+                continue
+            # Use the current measurement for interpolation. Commit a vertex only
+            # after enough displacement so stationary noise cannot build up arc length.
+            commit=np.linalg.norm(position-self.points[-1])>=self.sample_spacing
+            end=position
+            remaining=self.distance
+            for i in range(len(self.points)-1,-1,-1):
+                back=self.points[i]-end
+                length=np.linalg.norm(back)
+                if length>=remaining:
+                    self.goal=end+back*(remaining/length)
+                    del self.points[:i]
+                    break
+                remaining-=length
+                end=self.points[i]
+            else:
+                self.goal=self.points[0]
+            if commit:
+                self.points.append(position)
+        return self.goal
 
 
 class TaskPolicy:
@@ -124,6 +180,7 @@ class TaskPolicy:
         self.consumed=None
         self.last_update=None;self.response_binding=None
         self.tracked_generation=None;self.track_scene_binding=None
+        self.trail=None
 
     def start_continuous_follow(self, reference, scene, history, *, now):
         """Start only after proving continuity from the original selected frame."""
@@ -133,10 +190,24 @@ class TaskPolicy:
             raise ValueError('follow_reference_task_mismatch')
         target,generation=history.validate(reference,scene,now=now)
         self.observe(scene)
+        self.apply_validated_follow_reference(reference,target,generation,scene,history)
+        return self.update(scene,now=now,history=history)
+
+    def apply_validated_follow_reference(self,reference,target,generation,scene,history):
+        """Keep the trail across visual confirmations only while 3D support is continuous."""
+        continuous=(target==self.target and generation==self.tracked_generation)
+        if continuous:
+            try:history.continue_from(self.track_scene_binding,target,generation,scene)
+            except ValueError:continuous=False
+        if not continuous:
+            self.trail=FollowTrail(self.distance,min(.15,self.update_distance,self.distance),
+                                   self.config['people']['max_observation_age_s'])
+            self.request=None
+            self.track_scene_binding=reference['scene_binding']
+        self.last_update=None
         self.target=target;self.tracked_generation=generation
         self.last_visual=reference['rgb_stamp_s'];self.response_stamp=reference['stamp_s']
-        self.response_binding=reference['reference_id'];self.raw=None;self.track_scene_binding=scene.record['input_fingerprint']
-        return self.update(scene,now=now,history=history)
+        self.response_binding=reference['reference_id']
 
     def observe(self,scene,*,pid_to_track=None,candidates=None):
         scene.verify();r=scene.record
@@ -241,42 +312,37 @@ class TaskPolicy:
             return self._stop('follow_track_lost')
         track=model.tracks[model.ids.index(self.target)]
         if not 0<=now-scene.record['as_of']<=self.config['max_geometry_age_s']:
-            if self.tracked_generation is not None:self.target=None
+            self.target=None
             return self._stop('follow_scene_future_or_stale')
         stamp=scene.record['as_of']
-        if self.tracked_generation is not None:
-            from navigation.planning.inputs import scene_status
-            try:invalid=scene_status(scene,now,scene.record['clock_domain'],self.config,check_navigation=False)
-            except (ValueError,KeyError,TypeError):invalid='localization_or_geometry_invalid'
-            if invalid:
-                self.target=None
-                return self._stop('follow_'+invalid)
-            try:
-                if history is None:raise ValueError('follow_track_history_unavailable')
-                history.continue_from(self.track_scene_binding,self.target,self.tracked_generation,scene)
-            except ValueError:
-                self.target=None
-                return self._stop('follow_track_continuity_lost')
-            data=scene.record['people']['data']
-            from navigation.planning.people import stable_identity
-            raw=next((v for v in data['tracks'] if stable_identity(data,v)==self.target),None)
-            if (raw is None or raw.get('lifecycle_generation')!=self.tracked_generation or not raw.get('confirmed') or
-                    raw.get('state') not in ('observed','predicted') or
-                    not 0<=now-track['last_observed']<=self.config['people']['max_track_age_s']):
-                self.target=None
-                return self._stop('follow_track_continuity_lost')
-            self.track_scene_binding=scene.record['input_fingerprint']
+        from navigation.planning.inputs import scene_status
+        try:invalid=scene_status(scene,now,scene.record['clock_domain'],self.config,check_navigation=False)
+        except (ValueError,KeyError,TypeError):invalid='localization_or_geometry_invalid'
+        if invalid:
+            self.target=None
+            return self._stop('follow_'+invalid)
+        try:
+            if history is None:raise ValueError('follow_track_history_unavailable')
+            segment=history.continuous_rows(self.track_scene_binding,self.target,self.tracked_generation,scene)
+        except ValueError:
+            self.target=None
+            return self._stop('follow_track_continuity_lost')
+        from navigation.planning.people import stable_identity
+        data=scene.record['people']['data']
+        raw=next((v for v in data['tracks'] if stable_identity(data,v)==self.target),None)
+        if (raw is None or raw.get('lifecycle_generation')!=self.tracked_generation or not raw.get('confirmed') or
+                raw.get('state') not in ('observed','predicted') or
+                not 0<=now-track['last_observed']<=self.config['people']['max_track_age_s']):
+            self.target=None
+            return self._stop('follow_track_continuity_lost')
+        self.track_scene_binding=scene.record['input_fingerprint']
         if self.last_update is not None and (stamp<self.last_update or
                 stamp-self.last_update>self.config['people']['max_observation_age_s']):
             self.target=None
             return self._stop('follow_continuity_lost')
         self.last_update=stamp
-        position=model.positions([scene.record['as_of']])[0][0,model.ids.index(self.target)]
-        base=self.geometry.pose(scene.record['localization']['world_from_lidar'])
-        direction=track['velocity']
-        if direction is None or np.linalg.norm(direction)<.15:direction=position-base[:2]
-        direction=np.asarray(direction)/max(np.linalg.norm(direction),1e-9)
-        goal=position-self.distance*direction
+        goal=self.trail.advance(segment,self.target,self.geometry)
+        if goal is None:return self._stop('follow_track_not_currently_observed')
         request=self._goal(goal,scene,source=self.response_binding,stop=True);self.request=request
         request['valid_until_s']=min(stamp+self.config['max_geometry_age_s'],
             track['last_observed']+self.config['people']['max_track_age_s'])
