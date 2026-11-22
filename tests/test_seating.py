@@ -13,10 +13,10 @@ import numpy as np
 from PIL import Image
 
 from decision.vlm.annotation.rules import digest
-from decision.vlm.seating import geometry, inputs, inference
-from decision.vlm.seating.__main__ import main
-from decision.vlm.seating.inputs import select_poses
-from decision.vlm.seating.stage import CompletionLimits,SeatingStage
+from decision.vlm.t3 import geometry, inputs, inference
+from decision.vlm.t3.__main__ import main
+from decision.vlm.t3.inputs import select_poses
+from decision.vlm.t3.stage import CompletionLimits,SeatingStage
 
 
 def candidates():
@@ -85,7 +85,7 @@ class EdgeGeometryTests(unittest.TestCase):
         self.assertTrue(all(c['geometry']=='unknown' for c in result['candidates']))
 
     def policy(self):
-        return json.loads((Path(__file__).resolve().parents[1]/'decision/vlm/configs/seating_geometry.json').read_text())
+        return json.loads((Path(__file__).resolve().parents[1]/'decision/vlm/t3/configs/seating_geometry.json').read_text())
 
     def observation(self):
         row=candidates()

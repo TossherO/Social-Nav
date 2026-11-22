@@ -7,11 +7,15 @@ import json
 import math
 import os
 from pathlib import Path
+import queue
 import socket
 import threading
 import tempfile
 import time
 from .transport import Connection, exchange_request
+
+
+ACTIVE_FOLLOW_STATES = ('starting', 'running', 'searching')
 
 
 class AgentState:
@@ -21,7 +25,9 @@ class AgentState:
         self.vehicle_context = None
         self.goal_evidence = None
         self.follow = None
-        self.follow_observation = None
+        self.follow_frame = self.follow_candidate_frame = None
+        self.follow_view_revision = 0
+        self.follow_view_handle = None
         self.follow_candidate_history = deque(maxlen=16)
         self.follow_candidates_requested_mono = None
         self.seating=None
@@ -47,8 +53,8 @@ class AgentState:
             self.environment_epoch=epoch
             self.environment_fault=fault.reason
             self.environment_cutoff=([*fault.identity,fault.frame],fault.stamp_ns)
-            self.observation=self.image=self.follow_observation=None
-            self.follow_candidate_history.clear()
+            self.observation=self.image=None
+            self._clear_follow_observations()
             if self.goal_evidence is not None:
                 self.goal_evidence.key=self.goal_evidence.since=self.goal_evidence.last=None
             if self.control is not None:
@@ -85,6 +91,12 @@ class AgentState:
             ('stamp_s', 'session_id', 'generation', 'frame_id', 'health', 'source', 'position', 'quaternion_xyzw')}
         with self.lock:
             if environment_epoch!=self.environment_epoch:return
+            previous = self.control
+            if previous is not None and (
+                    value['clock_domain'] != previous['clock_domain'] or value['stamp_s'] < previous['stamp_s'] or
+                    self._local_identity(previous) is not None and
+                    self._local_identity(value) != self._local_identity(previous)):
+                self._clear_follow_observations()
             self.environment_fault=environment_fault
             if environment_fault is not None:
                 value.update(planning_status='unavailable',planning_reason=environment_fault)
@@ -92,24 +104,13 @@ class AgentState:
                 value['goal_observation'] = self.goal_evidence.update(packet,map_binding)
             self.control, self.updated_mono = value, time.monotonic()
 
-    def publish_observation(self, record, image, *, follow_handle=None):
+    def publish_observation(self, record, image):
         encoded = None if image is None else base64.b64encode(image).decode()
         if encoded is not None and len(encoded) > 1500000:
             raise ValueError('Agent observation exceeds IPC budget')
         with self.lock:
             if not self._environment_observation_current(record):return
-            if follow_handle is None:
-                self.observation, self.image = copy.deepcopy(record), encoded
-            elif (self.follow and self.follow.get('handle')==follow_handle and
-                  self.follow.get('status') in ('starting','running','searching')):
-                self.follow_observation=(copy.deepcopy(record),encoded)
-
-    def publish_follow_candidate(self,record,image):
-        encoded=None if image is None else base64.b64encode(image).decode()
-        if encoded is None or len(encoded)>1500000:raise ValueError('Agent candidate image unavailable or too large')
-        with self.lock:
-            if self._environment_observation_current(record):
-                self.follow_candidate_history.append((copy.deepcopy(record),encoded))
+            self.observation, self.image = copy.deepcopy(record), encoded
 
     def follow_candidate(self,observation_id,candidate_binding):
         with self.lock:
@@ -121,32 +122,98 @@ class AgentState:
 
     def publish_follow(self, value):
         with self.lock:
-            if ((self.follow or {}).get('handle')!=value.get('handle') or
-                    value.get('status') not in ('starting','running','searching')):
-                self.follow_observation=None
+            previous = self.follow or {}
+            ended = previous.get('status') in ACTIVE_FOLLOW_STATES and value.get('status') not in ACTIVE_FOLLOW_STATES
+            if previous.get('handle') != value.get('handle') or ended:
+                self._clear_follow_observations()
+            if ended and self.follow_view_handle == value.get('handle'):
+                self.follow_view_handle = None
             self.follow=copy.deepcopy(value)
+
+    def _clear_follow_observations(self):
+        self.follow_frame = self.follow_candidate_frame = None
+        self.follow_candidate_history.clear()
+        self.follow_view_revision += 1
+
+    def clear_follow_observations(self, *, stopped_call_id=None):
+        with self.lock:
+            self._clear_follow_observations()
+            if stopped_call_id is not None and (self.follow_view_handle or {}).get('call_id') == stopped_call_id:
+                self.follow_view_handle = None
+
+    def reserve_follow_observations(self, handle):
+        with self.lock:
+            self._clear_follow_observations()
+            self.follow_view_handle = copy.deepcopy(handle)
+
+    @staticmethod
+    def _local_identity(control):
+        localization = control.get('localization')
+        return None if localization is None else [localization.get(k) for k in ('session_id','generation','frame_id')]
+
+    def _current_follow_observation(self, source):
+        if not self._environment_observation_current(source) or self.control is None:
+            return False
+        identity = self._local_identity(self.control)
+        mapping = self.control.get('map_binding')
+        return (source['clock_domain'] == self.control['clock_domain'] and
+                0 <= self.control['stamp_s'] - source['stamp_s'] <= 3 and
+                (identity is None or identity == source['local_identity']) and
+                (mapping is None or mapping == source['map_binding']))
+
+    def offer_follow_frame(self, frame, handle):
+        """Keep only the newest raw initial-selection or active-task frame."""
+        with self.lock:
+            if not self._environment_observation_current(frame.source):
+                return
+            follow = self.follow or {}
+            active = follow.get('status') in ACTIVE_FOLLOW_STATES
+            if handle is None:
+                if not active and self.follow_view_handle is None:
+                    self.follow_candidate_frame = frame
+            elif active and handle == follow.get('handle') == self.follow_view_handle:
+                self.follow_frame = frame
+
+    def _state_snapshot(self, observation, image, frame, with_image):
+        return dict(status='waiting_for_control' if self.control is None else 'available', control=copy.deepcopy(self.control),
+            observation=copy.deepcopy(observation), image_base64=image if with_image else None,
+            follow_frame=copy.deepcopy(None if frame is None else frame.source),
+            vehicle_context=copy.deepcopy(self.vehicle_context), follow=copy.deepcopy(self.follow),
+            seating=None if self.seating is None else self.seating.snapshot(),
+            local_skills=dict(follow=self.follow_enabled,seating=self.seating is not None),
+            received_age_s=None if self.updated_mono is None else max(0., time.monotonic()-self.updated_mono),
+            scope='shadow_recommendation_not_execution', executable=False, execution_feedback=False)
 
     def snapshot(self, *, with_image=False, with_follow_candidates=False):
         with self.lock:
-            if with_follow_candidates:self.follow_candidates_requested_mono=time.monotonic()
-            observation,image=self.observation,self.image
-            if with_follow_candidates and self.follow_candidate_history and self.control:
-                record,encoded=self.follow_candidate_history[-1]
-                if (record['clock_domain']==self.control['clock_domain'] and
-                        0<=self.control['stamp_s']-record['stamp_s']<=3):
-                    observation,image=record,encoded
-            if self.follow_observation and self.control:
-                record,encoded=self.follow_observation
-                if (record['clock_domain']==self.control['clock_domain'] and
-                        0<=self.control['stamp_s']-record['stamp_s']<=3):
-                    observation,image=record,encoded
-            return dict(status='waiting_for_control' if self.control is None else 'available', control=copy.deepcopy(self.control),
-                observation=copy.deepcopy(observation), image_base64=image if with_image else None,
-                vehicle_context=copy.deepcopy(self.vehicle_context), follow=copy.deepcopy(self.follow),
-                seating=None if self.seating is None else self.seating.snapshot(),
-                local_skills=dict(follow=self.follow_enabled,seating=self.seating is not None),
-                received_age_s=None if self.updated_mono is None else max(0., time.monotonic()-self.updated_mono),
-                scope='shadow_recommendation_not_execution', executable=False, execution_feedback=False)
+            if with_follow_candidates:
+                self.follow_candidates_requested_mono=time.monotonic()
+            preview = False
+            frame = self.follow_frame
+            if frame is None and with_follow_candidates:
+                frame = self.follow_candidate_frame
+                preview = True
+            if frame is not None and not self._current_follow_observation(frame.source):
+                frame = None
+            observation,image = self.observation,self.image
+            if frame is None or not with_image:
+                if frame is not None and frame.encoded is not None:
+                    observation,image = frame.encoded
+                return self._state_snapshot(observation,image,frame,with_image)
+            revision = self.follow_view_revision
+        try:
+            record,encoded = frame.materialize()
+        except (ValueError,KeyError,TypeError,OSError) as error:
+            with self.lock:
+                state=self._state_snapshot(self.observation,self.image,None,True)
+                state['follow_frame_error']=str(error)
+                return state
+        with self.lock:
+            if revision != self.follow_view_revision or not self._current_follow_observation(frame.source):
+                return self._state_snapshot(self.observation,self.image,None,True)
+            if preview and (not self.follow_candidate_history or self.follow_candidate_history[-1][0] is not record):
+                self.follow_candidate_history.append((record,encoded))
+            return self._state_snapshot(record,encoded,frame,True)
 
     def follow_candidates_requested(self):
         with self.lock:
@@ -229,12 +296,17 @@ class CommandInbox:
             raise
         if self.temporary is not None:self.path.symlink_to(self.address)
         self.socket.listen(2);self.socket.settimeout(.1)
+        self.image_requests = queue.Queue(1)
+        self.image_worker = threading.Thread(target=self._work_images,name='runtime-agent-images',daemon=True)
+        self.image_worker.start()
         self.worker=threading.Thread(target=self._work,name='runtime-commands',daemon=True);self.worker.start()
 
     def offer(self,kind,value):
         value=validate(kind,value)
         with self.lock:
             if len(self.pending)>=64:raise RuntimeError('Command inbox is full')
+            if self.agent_owner and self.agent_owner.get('kind')=='follow':
+                self.agent_state.clear_follow_observations(stopped_call_id=self.agent_owner['request_id'])
             self.agent_owner=None
             self.route_preempted=True
             if self.session is not None:self.session.note_command(kind,value)
@@ -417,7 +489,7 @@ class CommandInbox:
                 candidate=self.agent_state.follow_candidate(ref.get('observation_id'),ref.get('candidate_binding'))
                 if candidate is None:raise ValueError('follow_agent_observation_unavailable')
                 from decision.agent.tools.observations import Observation
-                from decision.vlm.follow_target import reference as build_reference
+                from decision.vlm.t2.target import reference as build_reference
                 record,encoded=candidate
                 observation=Observation(record,base64.b64decode(encoded,validate=True)).verify()
                 checked,_,crop=build_reference(observation,ref.get('candidate_id'),intent['target_description'],
@@ -442,6 +514,7 @@ class CommandInbox:
                     raise ValueError('previous_agent_goal_not_completed_or_preempted')
                 if manual and self.manual_preview_snapshot_locked() is not None:
                     raise ValueError('Manual preview owned by another session')
+                self.agent_state.reserve_follow_observations(handle)
                 self.agent_owner=dict(kind='follow',manual=manual,request_id=handle['call_id'],task_id=handle['task_id'],
                     goal_revision=handle['goal_revision'],internal_task_id='follow:'+handle['call_id'],internal_revision=0,
                     arm_revision=chassis.get('arm_revision'),live=live,heartbeat_mono=time.monotonic())
@@ -470,6 +543,7 @@ class CommandInbox:
         return dict(accepted=True,scope='follow_intent',executable=False,execution_feedback=False)
 
     def _follow_stop_locked(self, owner, *, hold):
+        self.agent_state.clear_follow_observations(stopped_call_id=owner['request_id'])
         target=dict(task_id=owner['internal_task_id'],goal_revision=owner['internal_revision'])
         if owner.get('manual'):
             self.manual_preview_owner=None
@@ -565,12 +639,36 @@ class CommandInbox:
     def drain(self):
         with self.lock:items=list(self.pending);self.pending.clear();return items
 
+    def _send_agent_state(self, connection, *, live, with_image, with_follow_candidates):
+        state = self.agent_state.snapshot(with_image=with_image,with_follow_candidates=with_follow_candidates)
+        if live:
+            with self.lock:
+                state['agent_owner'] = copy.deepcopy(self.agent_owner)
+            state.update(scope='live_observation',chassis=self.session.status().get('chassis'))
+        connection.send(state)
+
+    def _work_images(self):
+        while True:
+            item = self.image_requests.get()
+            if item is None:
+                return
+            connection,live,with_follow_candidates = item
+            try:
+                self._send_agent_state(connection,live=live,with_image=True,
+                                       with_follow_candidates=with_follow_candidates)
+            except Exception as error:
+                try:connection.send(dict(accepted=False,error=str(error),executable=False))
+                except OSError:pass
+            finally:
+                connection.close()
+
     def _work(self):
         while not self.done:
             try:peer,_=self.socket.accept()
             except socket.timeout:continue
             except OSError:return
             connection=Connection(peer);peer.settimeout(.5)
+            deferred = False
             try:
                 request=connection.recv()
                 if set(request)!={'kind','value'}:raise ValueError('Use kind and value')
@@ -588,17 +686,21 @@ class CommandInbox:
                             'with_follow_candidates' in value and type(value['with_follow_candidates']) is not bool or
                             'follow_call_id' in value and (not isinstance(value['follow_call_id'],str) or not value['follow_call_id'])):
                         raise ValueError('State query requires a Boolean with_image')
-                    state=self.agent_state.snapshot(with_image=value['with_image'],
-                        with_follow_candidates=value.get('with_follow_candidates',False))
                     with self.lock:
                         if (self.agent_owner is not None and self.agent_owner.get('kind')=='follow' and self.agent_owner['live']==live and
                                 value.get('follow_call_id')==self.agent_owner['request_id']):
                             self.agent_owner['heartbeat_mono']=time.monotonic()
-                        if live:
-                            state['agent_owner']=copy.deepcopy(self.agent_owner)
-                    if live:
-                        state.update(scope='live_observation',chassis=self.session.status().get('chassis'))
-                    connection.send(state);continue
+                    candidates = value.get('with_follow_candidates',False)
+                    if value['with_image']:
+                        try:
+                            self.image_requests.put_nowait((connection,live,candidates))
+                        except queue.Full:
+                            pass
+                        else:
+                            deferred = True
+                            continue
+                    self._send_agent_state(connection,live=live,with_image=False,with_follow_candidates=candidates)
+                    continue
                 if request['kind']=='agent_manual_preview':
                     connection.send(self.manual_preview(request['value']));continue
                 if request['kind']=='agent_seating_select':
@@ -633,11 +735,18 @@ class CommandInbox:
             except Exception as error:
                 try:connection.send(dict(accepted=False,error=str(error),executable=False))
                 except OSError:pass
-            finally:connection.close()
+            finally:
+                if not deferred:
+                    connection.close()
 
     def close(self):
-        self.done=True;self.socket.close();self.worker.join(timeout=2);self.path.unlink(missing_ok=True)
-        if self.temporary is not None:self.temporary.cleanup()
+        from .export import drain_worker
+        self.done=True;self.socket.close();self.worker.join(timeout=2)
+        try:
+            drain_worker(self.image_worker,self.image_requests,timeout=2.)
+        finally:
+            self.path.unlink(missing_ok=True)
+            if self.temporary is not None:self.temporary.cleanup()
 
 
 def send_request(path,kind,value,*,timeout=2.):

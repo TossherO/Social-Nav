@@ -27,7 +27,7 @@ class ControlT2Tests(unittest.TestCase):
             return request.infer(client_factory=factory(self.choice))
         self.worker=FollowDecisionWorker(search,inference=infer,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768))
         from tests.test_follow_recovery import candidate_observation
-        from decision.vlm.follow_target import reference
+        from decision.vlm.t2.target import reference
         obs=candidate_observation(10.)
         ref,_,crop=reference(obs,0,'red jacket',task_id='mission',revision=1,goal_id='g')
         self.worker.begin(self.handle,'red jacket',reference=ref,crop=crop)

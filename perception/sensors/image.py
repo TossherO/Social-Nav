@@ -2,6 +2,16 @@
 import numpy as np
 
 
+def matching_camera_info(info, frame, stamp_ns, shape):
+    """Return intrinsics measured by this camera at or before exposure."""
+    if (isinstance(info, dict) and frame and type(info.get('stamp_ns')) is int
+            and info['stamp_ns'] <= stamp_ns
+            and str(info.get('frame_id') or '').lstrip('/') == frame.lstrip('/')
+            and (info.get('height'), info.get('width')) == shape[:2]):
+        return info
+    return None
+
+
 def rgb_array(message):
     count = {'rgb8': 3, 'bgr8': 3, 'rgba8': 4, 'bgra8': 4, 'mono8': 1}.get(message.encoding)
     if (count is None or message.step < message.width * count or

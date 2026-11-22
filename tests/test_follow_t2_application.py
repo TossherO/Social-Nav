@@ -5,7 +5,7 @@ import unittest
 
 import numpy as np
 
-from decision.vlm.follow_online import prepare
+from decision.vlm.t2.online import prepare
 from decision.vlm.observations import render_window
 from navigation.planning.footprint import VehicleGeometry
 from navigation.planning.inputs import load_config

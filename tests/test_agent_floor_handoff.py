@@ -103,6 +103,21 @@ class FloorHandoffTests(unittest.TestCase):
             with self.assertRaises(ValueError):follow_runtime_options(socket)
             (root/'command.json').write_text(json.dumps(['--agent-follow-candidates']))
             with self.assertRaisesRegex(ValueError,'backend was not recorded'):follow_runtime_options(socket)
+            for suffix in ('onnx','engine'):
+                weights=root/'model directory'/f'osnet.{suffix}'
+                weights.parent.mkdir(exist_ok=True)
+                local=['--t2-backend','reid','--t2-reid-weights',str(weights)]
+                (root/'command.json').write_text(json.dumps(local))
+                with self.assertRaisesRegex(ValueError,'weights file is unavailable'):
+                    follow_runtime_options(socket)
+                weights.touch()
+                if suffix=='engine':
+                    with self.assertRaisesRegex(ValueError,r'\.engine\.json metadata file'):
+                        follow_runtime_options(socket)
+                    weights.with_suffix('.engine.json').write_text('{}')
+                self.assertEqual(follow_runtime_options(socket),local)
+                (root/'command.json').write_text(json.dumps(local+['--t2-raw-rgb']))
+                with self.assertRaisesRegex(ValueError,'requires RGB-to-track'):follow_runtime_options(socket)
 
     def test_ride_starts_without_stopped_or_valid_source_localization(self):
         session=MagicMock()

@@ -1,7 +1,7 @@
 """Current wheelchair task semantics, independent of model or service availability."""
 import unittest
 from jsonschema import Draft202012Validator,ValidationError
-from decision.vlm.vlm_api_common import groups_schema,validate_groups
+from decision.vlm.t1.schema import groups_schema,validate_groups
 
 
 class PromptSchemaTests(unittest.TestCase):

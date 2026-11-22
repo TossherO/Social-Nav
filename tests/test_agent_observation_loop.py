@@ -1,4 +1,5 @@
 """Causal observations, asynchronous cancellation and nonexecuting boundaries."""
+import base64
 import copy
 import json
 from pathlib import Path
@@ -192,6 +193,103 @@ class ObservationLoopTests(unittest.TestCase):
             self.assertEqual(inbox.drain(), [])
         finally:
             inbox.close()
+
+    def test_active_follow_ticks_fetch_images_only_for_model_review(self):
+        from decision.agent.adapters.shadow import RuntimeShadowNavigation
+        from perception.environment.context import fingerprint
+        from tests.test_agent_composition import follow_goal
+        from tests.test_follow_recovery import candidate_observation
+
+        first = candidate_observation(10.)
+        second = candidate_observation(11.1)
+        third = candidate_observation(11.2)
+        base_record = {key:value for key,value in first.record.items()
+                       if key not in ('follow_candidates','input_fingerprint')}
+        base_record['input_fingerprint'] = fingerprint(base_record)
+        requests, received = [], []
+
+        def token(record):
+            result = {k:record[k] for k in ('observation_id','stamp_s','scene_binding','clock_domain',
+                                           'local_identity','map_binding')}
+            return dict(result, rgb_stamp_s=record['rgb']['stamp_s'])
+
+        class Client:
+            observation = staticmethod(RuntimeClient.observation)
+            local_grid = staticmethod(RuntimeClient.local_grid)
+            current = first
+            stamp = 10.
+            handle = None
+            newer_on_fetch = False
+
+            def snapshot(self, *, with_image=False, **options):
+                requests.append((with_image, options))
+                observation = third if with_image and self.newer_on_fetch else self.current
+                stamp = observation.record['stamp_s'] if with_image and self.newer_on_fetch else self.stamp
+                follow = None if self.handle is None else dict(handle=self.handle, status='running')
+                request = None if self.handle is None else dict(request_id=self.handle['call_id'])
+                control = dict(clock_domain='synthetic',stamp_s=stamp,request=request,
+                    localization=dict(zip(('session_id','generation','frame_id'), first.record['local_identity']),health=0),
+                    map_binding=first.record['map_binding'], feedback={})
+                record = observation.record if with_image else base_record
+                return dict(control=control, received_age_s=.01, observation=record,
+                    follow_frame=None if follow is None else token(observation.record), follow=follow,
+                    image_base64=base64.b64encode(observation.image).decode() if with_image else None)
+
+            def exchange(self, kind, value):
+                if kind=='follow_start':
+                    self.handle = value['handle']
+                return dict(accepted=True)
+
+        client = Client()
+        navigation = RuntimeShadowNavigation(self.catalog, client)
+        navigation.check_route = lambda _:dict(proposal_allowed=True)
+        session = AgentSession('跟随行人', self.catalog, navigation, self.store)
+        session.prepare_reference = lambda: None
+        session.call('record_task', goals=[follow_goal('person')])
+        requirement = session.task_goals.current('person')['requirement']
+        started = session.skill.start_follow('person', {}, 1, requirement)
+        self.assertEqual(started['status'], 'accepted')
+        session.set_navigation_monitor('person', '观察目标', interval_s=1.)
+        session.wait_for_event('navigation')
+
+        def work(payload, observation, spatial_view):
+            received.append((payload['current_state']['task_monitor']['last_trigger'], observation))
+            return reply('wait_for_event', event='monitor')
+
+        actor = AgentLoop(session, work)
+        try:
+            actor.tick()
+            actor.model.thread.join(1)
+            actor.tick()
+            self.assertEqual(actor.requests, 1)
+            self.assertEqual(received[0][1].record, first.record)
+            self.assertIs(navigation.observe(), navigation.observe())
+            original_rgb = session._monitor_observation_key()
+            for stamp in (10.2, 10.5, 10.9):
+                client.stamp = stamp
+                actor.tick()
+                self.assertEqual(session._monitor_observation_key(), original_rgb)
+            self.assertEqual(sum(flag for flag,_ in requests),1)
+            self.assertTrue(all(options=={'follow_call_id':started['handle']['call_id']}
+                                for flag,options in requests[1:] if not flag))
+
+            client.stamp, client.current, client.newer_on_fetch = 11.1, second, True
+            actor.tick()
+            actor.model.thread.join(1)
+            self.assertEqual(actor.requests, 2)
+            last_trigger, image = received[-1]
+            self.assertEqual(last_trigger['reasons'][0]['kind'], 'semantic_review_due')
+            self.assertEqual(image.record, third.record)
+            self.assertEqual(navigation.snapshot()['stamp_s'], 11.2)
+            self.assertNotEqual(session._monitor_observation_key(), original_rgb)
+            self.assertEqual(sum(flag for flag,_ in requests),2)
+
+            client.stamp, client.current = 15., third
+            navigation.tick()
+            self.assertIsNone(navigation.observe())
+            self.assertEqual(sum(flag for flag,_ in requests),2)
+        finally:
+            actor.close()
 
     def run_two_actions(self, work):
         actor = AgentLoop(self.tools, work)

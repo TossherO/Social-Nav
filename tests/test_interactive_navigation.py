@@ -51,9 +51,27 @@ class PlaybackTests(unittest.TestCase):
         args=parser().parse_args(['--live','--output','/tmp/example','--agent-observations',
                                   '--agent-follow-candidates'])
         config=dict(map='map',static_map='prior',coverage='coverage',motion_config='motion')
-        with patch('decision.vlm.follow_hosted.follow_backend',return_value='hosted'):
+        with patch('decision.vlm.t2.hosted.follow_backend',return_value='hosted'):
             command=runtime_command(args,config,[0.]*6)
         self.assertEqual(command[command.index('--t2-backend')+1],'hosted')
+
+    def test_reid_weights_are_frozen_for_floor_handoff_without_jpeg(self):
+        from runtime.interactive import parser,runtime_command
+        config=dict(map='map',static_map='prior',coverage='coverage',motion_config='motion')
+        with tempfile.TemporaryDirectory(prefix='local reid ') as directory:
+            weights=Path(directory)/'osnet.engine';weights.touch()
+            args=parser().parse_args(['--live','--output','/tmp/example','--agent-observations',
+                '--agent-follow-candidates','--t2-backend','reid','--t2-reid-weights',str(weights),
+                '--t2-jpeg-quality','80'])
+            with self.assertRaisesRegex(ValueError,r'\.engine\.json metadata file'):
+                runtime_command(args,config,[0.]*6)
+            weights.with_suffix('.engine.json').write_text('{}')
+            command=runtime_command(args,config,[0.]*6)
+            self.assertEqual(command[command.index('--t2-reid-weights')+1],str(weights))
+            self.assertNotIn('--t2-jpeg-quality',command)
+            args.t2_raw_rgb=True
+            with self.assertRaisesRegex(ValueError,'conflicts with --t2-raw-rgb'):
+                runtime_command(args,config,[0.]*6)
 
     def test_display_goal_follows_processed_intent_and_clears_on_cancel_or_replay_change(self):
         session=InteractiveSession(live=True,safety=None,output=Path('/tmp'))

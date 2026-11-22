@@ -16,7 +16,7 @@ class WheelchairLauncherTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name)
-        for name in ('scripts/interactive.sh','navigation/commissioning/performance.env'):
+        for name in ('scripts/interactive.sh','scripts/t2_bag_replay.sh','navigation/commissioning/performance.env'):
             dest=self.root/name;dest.parent.mkdir(parents=True,exist_ok=True)
             shutil.copyfile(ROOT/name,dest)
         ros=self.root/'perception/scripts/ros1_env.sh';ros.parent.mkdir(parents=True)
@@ -32,6 +32,8 @@ with log.open('a') as out:
     else: out.write('python '+repr(sys.argv[1:])+'\\n')
 if 'load_vehicle_profile' in source and os.environ.get('TEST_PROFILE_FAIL'): sys.exit(1)
 if 'rosgraph' in source and os.environ.get('TEST_CLOCK_FAIL'): sys.exit(1)
+if 'follow_settings' in source: sys.exit('fixture stopped at T2 asset validation')
+if 's.bind(' in source: sys.exit('fixture stopped before ROS starts')
 ''')
         fake.chmod(0o755)
         taskset=self.root/'taskset'
@@ -97,6 +99,16 @@ with pathlib.Path(os.environ['TEST_LAUNCH_LOG']).open('a') as out: out.write('ta
                                '--agent-follow-candidates','--t2-raw-rgb')
         self.assertNotEqual(result.returncode,0)
 
+    def test_reid_observation_passes_multicomponent_path_without_format_defaults(self):
+        args=('observe','--dry-run','--agent-observations','--agent-follow-candidates','--t2-backend','reid',
+              '--t2-reid-weights','/tmp/local reid/osnet.engine')
+        result=self.run_script('scripts/interactive.sh',*args)
+        self.assertEqual(result.returncode,0,result.stderr)
+        command=shlex.split(result.stdout)
+        self.assertEqual(command[command.index('--t2-reid-weights')+1],'/tmp/local reid/osnet.engine')
+        self.assertNotIn('--t2-jpeg-quality',command)
+        self.assertNotEqual(self.run_script('scripts/interactive.sh',*args,'--t2-raw-rgb').returncode,0)
+
     def test_check_uses_same_python_and_does_not_start_runtime(self):
         result=self.run_script('scripts/interactive.sh','execute','--check')
         self.assertEqual(result.returncode,0,result.stderr)
@@ -136,6 +148,29 @@ with pathlib.Path(os.environ['TEST_LAUNCH_LOG']).open('a') as out: out.write('ta
         result=self.run_script('scripts/interactive.sh','execute','--check')
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(self.calls(),'profile\n')
+
+    def test_replay_uses_explicit_python_with_or_without_local_activation(self):
+        bag=self.root/'fixture.bag';bag.touch()
+        activate=self.root/'outputs/runtime/environment/activate.sh'
+        for has_activation in (False, True):
+            with self.subTest(has_activation=has_activation):
+                if has_activation:
+                    activate.parent.mkdir(parents=True)
+                    activate.write_text('export SOCIAL_NAV_PYTHON=/invalid/python\n')
+                result=self.run_script('scripts/t2_bag_replay.sh','--bag',str(bag),'--t2-backend','reid',
+                                       '--t2-reid-weights','fixtures/osnet.engine')
+                self.assertEqual(result.returncode,1,result.stderr)
+                self.assertIn('fixture stopped at T2 asset validation',result.stderr)
+                self.assertEqual(self.calls(),"python ['-B', '-', 'fixtures/osnet.engine']\n")
+                self.log.unlink()
+
+    def test_replay_can_source_ros_setup_from_a_fresh_shell(self):
+        (self.root/'perception/scripts/ros1_env.sh').write_text('unset ROS_DISTRO\n: "$ROS_DISTRO"\n')
+        bag=self.root/'fixture.bag';bag.touch()
+        result=self.run_script('scripts/t2_bag_replay.sh','--bag',str(bag),'--t2-backend','dspark')
+        self.assertEqual(result.returncode,1,result.stderr)
+        self.assertIn('fixture stopped before ROS starts',result.stderr)
+        self.assertEqual(self.calls(),"python ['-B', '-', '11329']\n")
 
     def test_invalid_mode_never_starts(self):
         for kind,argument in [('observe','--execute'),('execute','--start')]:

@@ -10,7 +10,7 @@ from decision.agent.core.session import AgentSession
 from decision.agent.core.store import Store
 from decision.agent.tools.observations import Observation
 from decision.agent.tools.places import Catalog
-from decision.vlm.follow_target import annotated, candidates, reference, verify_candidates
+from decision.vlm.t2.target import annotated, candidates, reference, verify_candidates
 from tests.test_agent import ScriptedFeedback
 from tests.test_decision_runtime import observation
 
@@ -54,14 +54,30 @@ class FollowTargetTests(unittest.TestCase):
         with self.assertRaises(ValueError):verify_candidates(modified,self.obs)
 
     def test_candidate_view_is_only_selected_for_follow_stage(self):
+        from decision.agent.adapters.runtime import FollowAgentFrame
         from runtime.command import AgentState
+        _, arrays, association, scene = observation(10.)
+        pixels=arrays['rgb'].copy()
+        association['image_input']['raw_rgb_sha256']=hashlib.sha256(pixels.tobytes()).hexdigest()
+        association['image_input']['camera_frame']='camera'
+        association.update(detector_identity='test',detections=[self.detections[0]])
+        association['result']['tracks']['a/g7']['detection_index']=0
+        frame=FollowAgentFrame(scene,pixels,association,None,None)
         state=AgentState()
-        state.control=dict(clock_domain=self.obs.record['clock_domain'],stamp_s=10.)
+        state.control=dict(clock_domain=scene.record['clock_domain'],stamp_s=10.)
         state.publish_observation({'kind':'ordinary'},b'ordinary')
-        state.publish_follow_candidate(self.obs.record,self.obs.image)
+        state.offer_follow_frame(frame,None)
         self.assertEqual(state.snapshot()['observation']['kind'],'ordinary')
-        self.assertEqual(state.snapshot(with_follow_candidates=True)['observation']['input_fingerprint'],
-                         self.obs.record['input_fingerprint'])
+        pending=state.snapshot(with_follow_candidates=True)
+        self.assertIsNone(frame.encoded)
+        self.assertEqual(pending['observation']['kind'],'ordinary')
+        self.assertEqual(pending['follow_frame']['observation_id'],scene.record['observation_id'])
+        full=state.snapshot(with_image=True,with_follow_candidates=True)
+        self.assertEqual(full['observation']['observation_id'],pending['follow_frame']['observation_id'])
+        self.assertEqual(full['observation']['scene_binding'],pending['follow_frame']['scene_binding'])
+        self.assertEqual(state.snapshot(with_follow_candidates=True)['observation'],full['observation'])
+        candidate=state.follow_candidate(full['observation']['observation_id'],full['observation']['follow_candidates']['binding'])
+        self.assertEqual(candidate,(full['observation'],full['image_base64']))
 
     def test_raw_follow_observation_does_not_claim_a_visual_identity(self):
         from decision.agent.adapters.runtime import follow_observation

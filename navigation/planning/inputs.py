@@ -120,6 +120,12 @@ def request_status(request,scene,now,clock):
     """Optional task-policy lifecycle and expiry; manual goals remain explicit."""
     r=scene.record
     if request.get('completion_policy','goal') not in ('goal','continuous'):return 'invalid_completion_policy'
+    if 'follow_last_evidence_binding' in request:
+        last=request['follow_last_evidence_binding']
+        if (not isinstance(last,str) or not last or request['mode']!='mapped' or
+                np.shape(request.get('goal')) not in ((2,), (3,)) or request.get('goal_behavior')!='stop' or
+                request.get('completion_policy')!='goal'):
+            return 'follow_last_position_request_invalid'
     if request.get('local_identity',[r[k] for k in ('session_id','generation','frame_id')])!=[r[k] for k in ('session_id','generation','frame_id')]:
         return 'request_localization_changed'
     if request.get('clock_domain',clock)!=clock:return 'request_clock_mismatch'

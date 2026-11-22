@@ -95,21 +95,34 @@ class MapEditorInteractionTests(unittest.TestCase):
     def test_cursor_hidden_in_polygon_mode_and_view_reset(self):
         from matplotlib.backend_bases import KeyEvent
         self.event('motion_notify_event', (.2, .2))
+        self.assertTrue(any(circle.get_visible() for circle in self.ax.patches))
         mode = self.bar.findChild(self.QtWidgets.QComboBox, 'edit_mode')
         mode.setCurrentIndex(mode.findData('polygon'))
         self.assertFalse(any(circle.get_visible() for circle in self.ax.patches))
-        original = self.ax.get_xlim()
+        original = (self.ax.get_xlim(), self.ax.get_ylim())
         self.event('scroll_event', (.2, .2), button='up', step=1)
+        self.assertLess(np.ptp(self.ax.get_xlim()), np.ptp(original[0]))
         self.bar.findChild(self.QtWidgets.QAction, 'reset_view').trigger()
-        np.testing.assert_allclose(self.ax.get_xlim(), original)
         self.fig.canvas.draw()
+        np.testing.assert_allclose([self.ax.get_xlim(), self.ax.get_ylim()], original)
+        state = self.bar.findChild(self.QtWidgets.QComboBox, 'edit_state')
+        state.setCurrentIndex(state.findData(-1))
         for xy in [(.01, .01), (.4, .01), (.4, .4), (.01, .4)]:
             self.event('button_press_event', xy, button=1)
         self.fig.canvas.callbacks.process('key_press_event', KeyEvent('key_press_event', self.fig.canvas, key='enter'))
         with patch('PyQt5.QtWidgets.QMessageBox.information'), patch('PyQt5.QtWidgets.QMessageBox.warning') as warning:
             self.bar.findChild(self.QtWidgets.QAction, 'edit_save').trigger()
             self.assertFalse(warning.called, warning.call_args)
-        self.assertTrue(StaticEnvironmentMap(self.output).snapshot.layers['manual_edit'].any())
+        source = StaticEnvironmentMap(self.source).snapshot
+        saved = StaticEnvironmentMap(self.output).snapshot
+        origin, resolution = np.asarray(source.metadata['origin_xy']), source.metadata['resolution']
+        x, y = np.floor((np.array([.25, .25])-origin)/resolution).astype(int)
+        self.assertEqual(source.layers['occupancy'][y, x], 0)
+        self.assertEqual(saved.layers['occupancy'][y, x], -1)
+        self.assertTrue(saved.layers['manual_edit'][y, x])
+        x, y = np.floor((np.array([.75, .75])-origin)/resolution).astype(int)
+        self.assertEqual(saved.layers['occupancy'][y, x], source.layers['occupancy'][y, x])
+        self.assertFalse(saved.layers['manual_edit'][y, x])
 
     def test_localization_selection_after_zoom_and_pan(self):
         from matplotlib.backend_bases import KeyEvent

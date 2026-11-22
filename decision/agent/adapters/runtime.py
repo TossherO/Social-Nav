@@ -1,9 +1,11 @@
 """Optional bounded RGB preparation and explicit nonexecuting runtime client."""
 import base64
 import copy
+from dataclasses import replace
 from pathlib import Path
 import queue
 import threading
+import time
 import numpy as np
 from runtime.export import drain_worker
 from runtime.transport import exchange_request
@@ -11,16 +13,19 @@ from interfaces.runtime import rgb_age_s
 from ..tools.observations import Observation
 
 
-def follow_observation(scene,pixels,association,geometry,camera_info,*,image_metadata=None):
+def follow_observation(scene,pixels,association,geometry,camera_info,*,image_metadata=None,
+                       bound_candidates=None,fast_png=False):
     """Expose the exact frame and associations already prepared by the T2 worker."""
-    from decision.vlm.follow_target import candidates,raw_candidates
+    from decision.vlm.t2.target import candidates,raw_candidates
     from ..tools.sensors import sensor_context
     image=association['image_input'] if association is not None else image_metadata
     stamp_ns=image['rgb_stamp_ns']
     stamp=stamp_ns/1_000_000_000
     frame=image.get('camera_frame',image.get('rgb_frame'))
     people=scene.record['people'].get('data') or {}
-    if association is None:
+    if bound_candidates is not None:
+        detected=bound_candidates
+    elif association is None:
         detected=raw_candidates(scene,pixels,stamp,rgb_stamp_ns=stamp_ns)
     else:
         if association['perception_input_fingerprint']!=people.get('input_fingerprint'):
@@ -32,7 +37,58 @@ def follow_observation(scene,pixels,association,geometry,camera_info,*,image_met
     return Observation.from_scene(scene,geometry=geometry,
         rgb=dict(pixels=pixels,stamp_s=stamp,stamp_ns=stamp_ns,frame_id=frame,source=dict(kind='t2_window_current_rgb')),
         sensors=sensor_context(geometry,camera_info,rgb_shape=pixels.shape,rgb_frame=frame,rgb_stamp=stamp,rgb_stamp_ns=stamp_ns),
-        include_local_grid=True,follow_candidates=detected)
+        include_local_grid=True,follow_candidates=detected,fast_png=fast_png)
+
+
+class FollowAgentFrame:
+    """One owned RGB frame and its sealed T2 inputs, encoded only on demand."""
+    def __init__(self,scene,pixels,association,geometry,camera_info,*,image_metadata=None,
+                 bound_candidates=None,metrics=None):
+        if not pixels.flags.owndata:
+            raise ValueError('Agent follow RGB needs its own storage')
+        pixels.setflags(write=False)
+        image = association['image_input'] if association is not None else image_metadata
+        record = scene.record
+        stamp_ns = image['rgb_stamp_ns']
+        if type(stamp_ns) is not int or not 0 <= rgb_age_s(
+                record['as_of'],stamp_ns/1e9,record.get('stamp_ns'),stamp_ns) <= .15:
+            raise ValueError('Agent follow RGB is missing or stale')
+        self.source = dict(observation_id=record['observation_id'],stamp_s=record['as_of'],
+            stamp_ns=record.get('stamp_ns'),clock_domain=record['clock_domain'],
+            scene_binding=record['input_fingerprint'],
+            local_identity=[record[k] for k in ('session_id','generation','frame_id')],
+            map_binding={k:copy.deepcopy(record['prior'].get(k)) for k in
+                ('valid','map_id','map_frame','map_revision','association_session','association_generation')},
+            rgb_stamp_ns=stamp_ns,rgb_stamp_s=stamp_ns/1e9,
+            rgb_frame=image.get('camera_frame',image.get('rgb_frame')))
+        # The sealed scene arrays are shared, but verification's mutable
+        # navigation cache belongs to this reader.
+        self.scene = replace(scene,_navigation_checks={})
+        self.pixels,self.geometry = pixels,geometry
+        if bound_candidates is not None:
+            association = dict(image_input=image)
+        self.association,self.camera_info = copy.deepcopy(association),copy.deepcopy(camera_info)
+        self.image_metadata = copy.deepcopy(image_metadata)
+        self.bound_candidates = copy.deepcopy(bound_candidates)
+        self.metrics = metrics
+        self.lock = threading.Lock()
+        self.encoded = None
+
+    def materialize(self):
+        with self.lock:
+            if self.encoded is None:
+                started=time.monotonic()
+                result=follow_observation(self.scene,self.pixels,self.association,self.geometry,self.camera_info,
+                    image_metadata=self.image_metadata,bound_candidates=self.bound_candidates,fast_png=True)
+                encoded=base64.b64encode(result.image).decode('ascii')
+                if len(encoded)>1500000:
+                    raise ValueError('Agent follow observation exceeds IPC budget')
+                self.encoded=(result.record,encoded)
+                if self.metrics is not None:
+                    self.metrics.trace('agent_follow_frame_materialized',measurement_stamp_s=self.source['stamp_s'],
+                        rgb_stamp_ns=self.source['rgb_stamp_ns'],scene_binding=self.source['scene_binding'],
+                        elapsed_s=time.monotonic()-started,png_bytes=len(result.image))
+            return self.encoded
 
 
 class ObservationWorker:
@@ -125,6 +181,11 @@ class RuntimeClient:
         if record is None or record['rgb']['status'] == 'valid' and image is None:
             return None
         return Observation(copy.deepcopy(record), None if image is None else base64.b64decode(image, validate=True)).verify()
+
+    @staticmethod
+    def local_grid(value):
+        record = value.get('observation')
+        return None if record is None else Observation.local_grid_from_record(record)
 
 
 class LiveRuntimeClient(RuntimeClient):

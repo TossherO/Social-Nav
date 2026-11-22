@@ -11,6 +11,7 @@ import uuid
 from interfaces.shared import SharedArrayPool, BufferFull
 from interfaces.runtime import source_stamp_ns
 from decision.vlm.trajectory_inputs import local_scope, pose, HISTORY_S
+from perception.sensors.image import matching_camera_info
 from .export import drain_worker
 
 
@@ -20,8 +21,9 @@ ASSOCIATION_TRACK_FIELDS = ('track_id','lifecycle_generation','confirmed','box',
 
 
 class DecisionBuffer:
-    def __init__(self,*,max_frames=48,slot_bytes=4*1024*1024,metrics=None):
-        self.pool=SharedArrayPool(max_frames+3,slot_bytes);self.reader=self.pool.reader()
+    def __init__(self,*,max_frames=48,slot_bytes=4*1024*1024,metrics=None,camera_lookup=None):
+        self.camera_lookup=camera_lookup
+        self.pool=SharedArrayPool(max_frames+(6 if camera_lookup else 3),slot_bytes);self.reader=self.pool.reader()
         self.frames=deque();self.lock=threading.RLock();self.scope=None;self.metrics=metrics
         self.max_frames=max_frames;self.active=None;self.dropped=0
         self.association_history=deque(maxlen=max_frames)
@@ -74,19 +76,26 @@ class DecisionBuffer:
                 image_metadata=copy.deepcopy(image_metadata),scene=copy.deepcopy(record),buffer=ref))
             return True
 
-    def acquire(self):
+    def acquire(self, *, latest_only=False):
         """One in-flight request; no queue of outdated observations."""
         with self.lock:
             if self.active is not None or not self.frames:return None
+            if latest_only:
+                token=uuid.uuid4().hex
+                entry=self.frames[-1]
+                self.pool.retain(entry['buffer'],token)
+                self.active=token
+                return dict(token=token,entries=(entry,),association_history=tuple(self.association_history))
             end=self.frames[-1]['stamp_ns'];selected=[]
             for delta in (-1_000_000_000,-500_000_000,0):
                 past=[e for e in self.frames if e['stamp_ns']<=end+delta]
                 if not past or end+delta-past[-1]['stamp_ns']>150_000_000:return None
                 entry=past[-1]
-                if 'rgb' not in dict(entry['buffer'].arrays):return None
                 image=(entry['association'].get('image_input') or {}) if entry['association'] is not None else (entry['image_metadata'] or {})
                 rgb_ns=image.get('rgb_stamp_ns')
-                if type(rgb_ns) is not int or not 0<=entry['stamp_ns']-rgb_ns<=150_000_000:return None
+                if entry['association'] is not None or self.camera_lookup is None:
+                    if ('rgb' not in dict(entry['buffer'].arrays) or type(rgb_ns) is not int or
+                            not 0<=entry['stamp_ns']-rgb_ns<=150_000_000):return None
                 if entry['association'] is not None and not image.get('raw_rgb_sha256'):return None
                 selected.append(entry)
             if len({e['id'] for e in selected})!=3:return None
@@ -97,14 +106,54 @@ class DecisionBuffer:
             return dict(token=token,entries=tuple(selected),history=history,
                         association_history=tuple(self.association_history))
 
+    def _pair_follow_frame(self, entry, token):
+        from .follow_camera import PAIR_AGE_NS
+        if entry['association'] is not None:
+            return entry
+        meta = entry['image_metadata'] or {}
+        rgb = dict(entry['buffer'].arrays).get('rgb')
+        rgb_ns = meta.get('rgb_stamp_ns')
+        stamp = entry['stamp_ns']
+        age = stamp - rgb_ns if rgb is not None and type(rgb_ns) is int else None
+        if (age is not None and 0 <= age <= PAIR_AGE_NS and
+                matching_camera_info(meta.get('camera_info'), meta.get('rgb_frame'), rgb_ns, rgb.shape)):
+            return entry
+        # A scene that already attests specific pixels must keep that evidence.
+        bound_rgb = ((entry['scene'] or {}).get('rgb') or {}).get('status') == 'valid'
+        pair = None if bound_rgb else self.camera_lookup(stamp)
+        if pair is not None:
+            pixels, metadata = pair
+            raw = self.reader.arrays(entry['buffer'])['raw']
+            try:
+                with self.lock:
+                    ref = self.pool.publish(dict(raw=raw, rgb=pixels), readers=[token])
+                return dict(entry, buffer=ref, image_metadata=metadata)
+            except BufferFull:
+                pass
+        if age is not None and 0 <= age <= 150_000_000:
+            return entry
+        raise ValueError('T2 camera observation unavailable')
+
     @contextmanager
-    def consume(self,lease):
+    def consume(self,lease,*,latest_only=False):
         """Array views must not escape this scope. Release also on render failure."""
         if lease['token']!=self.active:raise ValueError('Unknown decision lease')
-        try:yield self.reader.arrays
+        original=lease['entries']
+        extra=[]
+        try:
+            if self.camera_lookup is not None:
+                entries=list(original)
+                for i in range(len(entries)-1 if latest_only else 0, len(entries)):
+                    entries[i] = self._pair_follow_frame(original[i], lease['token'])
+                    if entries[i] is not original[i]:
+                        extra.append(entries[i]['buffer'])
+                lease['entries']=tuple(entries)
+            yield self.reader.arrays
         finally:
             with self.lock:
-                for entry in lease['entries']:self.pool.release(entry['buffer'],lease['token'])
+                lease['entries']=original
+                for ref in extra:self.pool.release(ref,lease['token'])
+                for entry in original:self.pool.release(entry['buffer'],lease['token'])
                 self.active=None
 
     def close(self):

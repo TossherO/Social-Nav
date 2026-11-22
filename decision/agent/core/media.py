@@ -4,8 +4,11 @@ import io
 from PIL import Image
 
 
-def image_part(data, size, format):
+def image_part(data, size, format, *, preserve_png=False):
     with Image.open(io.BytesIO(data)) as source:
+        if (preserve_png and format=='PNG' and source.format=='PNG' and source.mode=='RGB'
+                and max(source.size)<=size and not getattr(source,'is_animated',False)):
+            return png_part(data)
         picture = source.convert('RGB')
         picture.thumbnail((size,size))
         buffer = io.BytesIO()

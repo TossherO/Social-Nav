@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
-from decision.vlm import local_inference as local
+from decision.vlm.local_inference import local_messages
+from decision.vlm.t1 import __main__ as local
 from tests.test_vlm_api import request_fixture
 
 
@@ -41,7 +42,7 @@ class LocalInferenceTests(unittest.TestCase):
         result=json.loads((self.out/'response.json').read_text())
         self.assertEqual(result['raw_content'],'{"walking":[[0,1]]}')
         self.assertNotIn('request_sha256',result) # No HTTP request was sent.
-        translated=local.local_messages(self.body)
+        translated=local_messages(self.body)
         self.assertEqual(translated[1]['content'][1]['image'],self.body['messages'][1]['content'][1]['image_url']['url'])
 
     def test_invalid_identity_or_incomplete_grammar_is_saved_without_retry(self):

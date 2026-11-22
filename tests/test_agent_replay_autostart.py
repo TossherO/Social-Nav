@@ -3,24 +3,37 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from decision.agent.workflows.shadow import wait_for_bag_navigation,hold_after_t2_failure,start_unique_bag_follow
+from decision.agent.workflows.shadow import wait_for_bag_navigation,hold_after_t2_failure,start_unique_bag_follow,replay_t2_result
 
 
 class ReplayAutostartTests(unittest.TestCase):
+    def test_replay_displays_local_decision_and_remote_choice(self):
+        local = dict(backend='reid', selection=dict(status='same', reason='confirmed', candidate_id=0))
+        self.assertEqual(replay_t2_result(local)['selection'], '人物 0')
+        local.update(selection=dict(status='unconfirmed', reason='no_detections'), search_choice=dict(kind='rotate'))
+        self.assertEqual(replay_t2_result(local)['selection'], 'rotate')
+        remote = dict(backend='dspark', selection='P0', choices={'P0': {'kind': 'person'}})
+        self.assertEqual(replay_t2_result(remote)['choice'], remote['choices']['P0'])
+
     def test_local_start_requires_one_associated_candidate_and_uses_current_observation(self):
         candidates=[]
         observation=SimpleNamespace(record=dict(observation_id='frame',follow_candidates=dict(candidates=candidates)))
         navigation=SimpleNamespace(snapshot=lambda:dict(localization_status='valid',map_binding=dict(valid=True)),
-                                   observe=lambda:observation)
+                                   observation_record=lambda:observation.record,value={})
         session=SimpleNamespace(navigation=navigation,observation=observation,context=lambda:'context',
             call=Mock(side_effect=[{'status':'available'},{'status':'selected','reference_id':'ref'},{'status':'accepted'}]),
             wait_for_event=Mock(),_save=Mock())
-        self.assertFalse(start_unique_bag_follow(session,'g'))
-        candidates.extend([dict(id=0,track={}),dict(id=1,track={})])
-        self.assertFalse(start_unique_bag_follow(session,'g'))
+        self.assertEqual(start_unique_bag_follow(session,'g'),'waiting')
+        candidates.extend([dict(id=0,track={'track_key':'a/g1'}),dict(id=1,track={'track_key':'b/g1'})])
+        self.assertEqual(start_unique_bag_follow(session,'g'),'agent_selection')
         session.call.assert_not_called()
         candidates[1]['track']=None
-        self.assertTrue(start_unique_bag_follow(session,'g'))
+        self.assertEqual(start_unique_bag_follow(session,'g'),'agent_selection')
+        candidates.pop(0)
+        self.assertEqual(start_unique_bag_follow(session,'g'),'waiting')
+        session.call.assert_not_called()
+        candidates[0]=dict(id=0,track={'track_key':'a/g1'})
+        self.assertEqual(start_unique_bag_follow(session,'g'),'started')
         self.assertEqual([c.args[0] for c in session.call.call_args_list],
                          ['observe_scene','select_follow_target','start_local_task'])
         self.assertEqual(session.call.call_args_list[1].kwargs['candidate_id'],0)

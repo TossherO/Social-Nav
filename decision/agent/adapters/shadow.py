@@ -1,6 +1,8 @@
 """Nonexecuting adapters for causal saved observations and runtime shadow IPC."""
 import copy
 import math
+from interfaces.runtime import source_stamp_ns
+from perception.environment.context import fingerprint
 from .. import ROOT
 
 
@@ -50,6 +52,20 @@ def load_catalog_map(catalog):
             value.get('localization_map_id',asset.snapshot.metadata.get('map_id')) != asset.snapshot.metadata.get('map_id')):
         raise ValueError('Semantic catalog and actual map asset do not match')
     return asset
+
+
+def observation_rgb_key(record):
+    """Identify the source RGB even when an observation has several views."""
+    rgb = record.get('rgb') or {}
+    stamp = rgb.get('stamp_s')
+    if rgb.get('status')!='valid' or type(stamp) not in (int, float) or not math.isfinite(stamp):
+        return None
+    return (record['clock_domain'], tuple(record['local_identity']),
+            source_stamp_ns(stamp, rgb.get('stamp_ns')))
+
+
+def _frame_key(record):
+    return (record.get('observation_id'), record.get('scene_binding'), observation_rgb_key(record))
 
 
 class SavedShadowNavigation:
@@ -160,7 +176,8 @@ class RuntimeShadowNavigation:
         from navigation.planning.footprint import VehicleGeometry
         self.catalog, self.client = catalog, client
         self.geometry = VehicleGeometry.historical(ROOT/'configs/wheelchair_geometry_reference.json')
-        self.value = client.snapshot(with_image=True)
+        self.value = client.snapshot(with_image=False)
+        self._image_observation = None
         vehicle = self.value.get('vehicle_context')
         if vehicle is not None:
             self.geometry = VehicleGeometry(vehicle['footprint'],vehicle['base_from_lidar'],
@@ -191,8 +208,7 @@ class RuntimeShadowNavigation:
                    record.get('clock_domain')==self.clock_domain and
                    record.get('map_binding')==state.get('map_binding') and
                    0 <= state['stamp_s']-record.get('stamp_s',-float('inf')) <= 3.)
-        observation = self.client.observation(self.value) if current else None
-        grid = None if observation is None else observation.local_grid()
+        grid = self.client.local_grid(self.value) if current else None
         return dict(global_grid=self._asset.snapshot,scene=None,local_grid=grid,
                     local_grid_observation_id=record.get('observation_id') if grid is not None else None,
                     local_grid_map_from_local=(record.get('local_grid') or {}).get('map_from_local') if grid is not None else None,
@@ -205,14 +221,17 @@ class RuntimeShadowNavigation:
         return SavedShadowNavigation.reference_grid(self)
 
     def snapshot(self):
-        p = self.value['control']
+        return self._snapshot(self.value)
+
+    def _snapshot(self, value):
+        p = value['control']
         f = p['feedback']
         loc = p.get('localization') or {}
         identity = f.get('local_identity') or [loc.get(k) for k in ('session_id', 'generation', 'frame_id')]
         active = p.get('request')
         matches = self.handle is not None and active is not None and active.get('request_id') == self.handle['call_id']
         cancellation = p.get('cancelled_request') or {}
-        follow = self.value.get('follow') or {}
+        follow = value.get('follow') or {}
         follow_match = self.follow_active and self.handle is not None and follow.get('handle') == self.handle
         cancelled = (self.cancel_requested and active is None and self.handle is not None and
                      (cancellation.get('task_id') == 'follow:'+self.handle['call_id'] if self.follow_active else
@@ -221,7 +240,7 @@ class RuntimeShadowNavigation:
         if (follow_match and follow.get('status')=='failed' and active is None and
                 isinstance(follow.get('cancelled_request'),dict) and cancellation==follow['cancelled_request']):
             cancelled=True
-        observation = self.value.get('observation') or {}
+        observation = value.get('observation') or {}
         spatial = mapped_origin(self.catalog, observation)
         if 'map_binding' in p:
             spatial['map_binding'] = copy.deepcopy(p['map_binding'])
@@ -239,14 +258,19 @@ class RuntimeShadowNavigation:
                     execution_feedback=False, executable=False, proposal_cancelled=cancelled,
                     localization_status='valid' if loc.get('health') == 0 else 'invalid',
                     environment_fault=p.get('environment_fault'),environment_epoch=p.get('environment_epoch',0),
-                    input_stale=not self.connected or self.value.get('received_age_s') is None or self.value['received_age_s'] > 1., **spatial)
+                    input_stale=not self.connected or value.get('received_age_s') is None or value['received_age_s'] > 1., **spatial)
+
+    def _snapshot_options(self, *, with_image):
+        options = dict(with_image=with_image)
+        if self.follow_active and self.handle is not None:
+            options['follow_call_id'] = self.handle['call_id']
+        if getattr(self, 'want_follow_candidates', False):
+            options['with_follow_candidates'] = True
+        return options
 
     def tick(self):
         try:
-            options=dict(with_image=True)
-            if getattr(self,'want_follow_candidates',False):options['with_follow_candidates']=True
-            if self.follow_active and self.handle is not None:options['follow_call_id']=self.handle['call_id']
-            value = self.client.snapshot(**options)
+            value = self.client.snapshot(**self._snapshot_options(with_image=False))
             if not isinstance(value.get('control'), dict):
                 raise ValueError('Runtime has no control state')
         except (OSError, EOFError, ValueError):
@@ -256,10 +280,82 @@ class RuntimeShadowNavigation:
         self.t = self.value['control']['stamp_s']-self.first_stamp
         return self.snapshot()
 
+    @staticmethod
+    def _selected_record(value):
+        record = value.get('observation') or {}
+        frame = value.get('follow_frame')
+        if frame is None:
+            return record
+        pending = {key:frame.get(key) for key in
+                   ('observation_id', 'stamp_s', 'scene_binding', 'clock_domain', 'local_identity', 'map_binding')}
+        pending['rgb'] = dict(status='valid', stamp_s=frame['rgb_stamp_s'], stamp_ns=frame.get('rgb_stamp_ns'))
+        if 'follow_candidates' in record and _frame_key(record)==_frame_key(pending):
+            return record
+        return pending
+
+    def observation_record(self):
+        return self._selected_record(self.value)
+
+    def observation_key(self):
+        record = self.observation_record()
+        return fingerprint(_frame_key(record)) if record else None
+
+    def _current_image_record(self, record, state):
+        stamp = record.get('stamp_s')
+        rgb_stamp = (record.get('rgb') or {}).get('stamp_s')
+        return (not state['input_stale'] and state['localization_status']=='valid' and
+                record.get('clock_domain')==state['clock_domain'] and
+                record.get('local_identity')==[state[k] for k in ('session_id', 'generation', 'frame_id')] and
+                (state.get('map_binding') is None or record.get('map_binding')==state['map_binding']) and
+                type(stamp) in (int, float) and 0<=state['stamp_s']-stamp<=3 and
+                observation_rgb_key(record) is not None and 0<=state['stamp_s']-rgb_stamp<=3)
+
     def observe(self):
-        if self.snapshot()['input_stale']:
+        state = self.snapshot()
+        record = self.observation_record()
+        if state['input_stale'] or not record:
             return None
-        return self.client.observation(self.value)
+        if (record.get('rgb') or {}).get('status')!='valid':
+            return self.client.observation(self.value)
+        if not self._current_image_record(record, state):
+            return None
+        requested_rgb_ns = observation_rgb_key(record)[2]
+        cached = self._image_observation
+        preview = getattr(self, 'want_follow_candidates', False)
+        owner = (self.handle, self.follow_active, preview)
+        follow_frame = self.value.get('follow_frame') is not None or 'follow_candidates' in record
+        following = (state.get('follow_status') or {}).get('status') in ('starting','running','searching')
+        if (cached is not None and self._image_owner==owner and
+                _frame_key(cached.record)==_frame_key(record) and
+                ('follow_candidates' in cached.record)==follow_frame and
+                self._current_image_record(cached.record, state)):
+            self.value = dict(self.value, observation=cached.record)
+            return cached
+        try:
+            value = self.client.snapshot(**self._snapshot_options(with_image=True))
+            if not isinstance(value.get('control'), dict):
+                return None
+            actual = self._snapshot(value)
+            context_fields = ('clock_domain', 'session_id', 'generation', 'frame_id', 'map_binding', 'environment_epoch')
+            if (any(actual[key]!=state[key] for key in context_fields) or actual['stamp_s']<state['stamp_s'] or
+                    following and (actual.get('follow_status') or {}).get('handle')!=self.handle):
+                return None
+            selected = self._selected_record(value)
+            record = value.get('observation') or {}
+            candidate_view = 'follow_candidates' in record
+            if (not self._current_image_record(record, actual) or _frame_key(record)!=_frame_key(selected) or
+                    (follow_frame or value.get('follow_frame') is not None) and not candidate_view or
+                    candidate_view==follow_frame and observation_rgb_key(record)[2]<requested_rgb_ns):
+                return None
+            observation = self.client.observation(value)
+        except (OSError, EOFError, ValueError):
+            return None
+        if observation is not None:
+            self._image_observation = observation
+            self._image_owner = copy.deepcopy(owner)
+            self.value = dict(value, image_base64=None)
+            self.t = actual['stamp_s']-self.first_stamp
+        return observation
 
     def check_route(self, place):
         state = self.snapshot()

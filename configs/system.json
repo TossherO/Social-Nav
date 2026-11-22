@@ -130,8 +130,9 @@
           "documentation": "docs/decision/技术实现-VLM局部决策.md#直接运行时的三帧输入与响应接纳"
         },
         "groups": {
-          "path": "decision/vlm/vlm_api_common.py", "status": "offline_input_prompt_ready",
-          "documentation": "docs/decision/技术实现-VLM局部决策.md#实机t1群组输入",
+          "path": "decision/vlm/t1", "status": "offline_input_prompt_ready",
+          "entry": "python -B -m decision.vlm.t1 --help",
+          "documentation": "docs/decision/技术实现-T1群组识别.md",
           "online_integrated": false
         },
         "annotation": {
@@ -142,20 +143,25 @@
           "windows_verified": false, "t2_history_state_review": false
         },
         "follow": {
-          "path": "decision/vlm/follow_online.py", "status": "online_prototype",
-          "documentation": "docs/decision/技术实现-VLM局部决策.md#t2持续跟随决策",
+          "path": "decision/vlm/t2", "status": "online_prototype",
+          "documentation": "docs/decision/技术实现-T2行人跟随.md",
           "verification_scope": "synthetic_control_and_mocked_model_bag_shadow_hosted_api_samples",
           "online_integrated": true
         },
         "seating": {
-          "path": "decision/vlm/seating", "status": "optional_runtime_selection",
-          "entry": "python -B -m decision.vlm.seating --help",
-          "documentation": "docs/decision/技术实现-VLM局部决策.md#t3目标选择与就座",
+          "path": "decision/vlm/t3", "status": "optional_runtime_selection",
+          "entry": "python -B -m decision.vlm.t3 --help",
+          "documentation": "docs/decision/技术实现-T3桌边停靠.md",
           "verification_scope": "causal_table_prior_three_frame_remote_comparison_offline_view_goal_diagnostics_and_synthetic_sensor_to_planner_and_stage_completion",
           "automatic_table_geometry": false, "table_geometry": "measured_scan_with_agent_rgb_roi", "navigation_integrated": true,
           "candidate_navigation_preflight": true, "execution_feedback_adapter": true,
           "physical_completion_verified": false
         }
+      },
+      "osnet": {
+        "path": "decision/osnet", "status": "partial_online",
+        "runtime_backend": "reid", "hardware_verified": false,
+        "documentation": "docs/decision/技术实现-T2行人跟随.md#本地身份匹配"
       },
       "agent": {
         "path": "decision/agent", "status": "simulation_and_causal_shadow_ready",

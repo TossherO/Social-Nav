@@ -20,26 +20,31 @@ class Observation:
     record: dict
     image: bytes | None
 
-    def verify(self):
+    def _verify_record(self):
         r = self.record
         if fingerprint({k: v for k, v in r.items() if k != 'input_fingerprint'}) != r['input_fingerprint']:
             raise ValueError('Agent observation metadata changed')
         rgb = r['rgb']
         if rgb['status'] == 'valid':
-            if self.image is None or hashlib.sha256(self.image).hexdigest() != rgb['encoded_sha256']:
-                raise ValueError('Agent RGB asset changed')
             if not 0 <= rgb_age_s(r['stamp_s'],rgb['stamp_s'],r.get('stamp_ns'),rgb.get('stamp_ns')) <= .15:
                 raise ValueError('Future or stale RGB')
+        if 'follow_candidates' in r:
+            from decision.vlm.t2.target import verify_candidates
+            verify_candidates(r['follow_candidates'], self)
+
+    def verify(self):
+        self._verify_record()
+        rgb = self.record['rgb']
+        if rgb['status'] == 'valid':
+            if self.image is None or hashlib.sha256(self.image).hexdigest() != rgb['encoded_sha256']:
+                raise ValueError('Agent RGB asset changed')
         elif self.image is not None:
             raise ValueError('Unavailable RGB cannot carry an image')
-        if 'follow_candidates' in r:
-            from decision.vlm.follow_target import verify_candidates
-            verify_candidates(r['follow_candidates'], self)
         return self
 
     @classmethod
     def from_scene(cls, scene, *, rgb=None, source=None, geometry=None, sensors=None, include_local_grid=False,
-                   follow_candidates=None):
+                   follow_candidates=None, fast_png=False):
         from navigation.planning.footprint import VehicleGeometry
         from .. import ROOT
         scene.verify()
@@ -66,7 +71,11 @@ class Observation:
             if not 0 <= age <= .15 or pixels.dtype != np.uint8 or pixels.ndim != 3 or pixels.shape[2] != 3:
                 raise ValueError('RGB must be causal uint8 pixels from this observation')
             stream = io.BytesIO()
-            Image.fromarray(pixels).save(stream, format='PNG')
+            rgb_image = Image.fromarray(pixels)
+            rgb_image.save(stream, format='PNG', compress_level=1 if fast_png else 6)
+            if fast_png and stream.tell() > 1_125_000:
+                stream = io.BytesIO()
+                rgb_image.save(stream, format='PNG')
             image = stream.getvalue()
             bound_rgb = dict(status='valid', stamp_s=rgb['stamp_s'], age_s=age, frame_id=rgb['frame_id'],
                              pixel_sha256=hashlib.sha256(pixels.tobytes()).hexdigest(), shape=list(pixels.shape),
@@ -123,9 +132,21 @@ class Observation:
     def local_grid(self):
         """Decode only the bound occupancy projection, never an arbitrary scene."""
         self.verify()
+        return self._decode_local_grid()
+
+    @classmethod
+    def local_grid_from_record(cls, record):
+        """Verify the metadata binding when the snapshot intentionally omits RGB."""
+        observation = cls(record, None)
+        observation._verify_record()
+        return observation._decode_local_grid()
+
+    def _decode_local_grid(self):
         item = self.record.get('local_grid')
         if item is None:
             return None
+        if item.get('source_scene_binding') != self.record.get('scene_binding'):
+            raise ValueError('Agent local grid does not belong to the observation scene')
         from perception.environment.layers import GridSnapshot
         shape = item['metadata']['shape']
         if len(shape) != 2 or any(type(n) is not int or not 0 < n <= 600 for n in shape):

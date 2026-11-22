@@ -9,7 +9,7 @@ from decision.agent.core.session import AgentSession
 from decision.agent.core.store import Store
 from decision.agent.tools.observations import Observation
 from decision.agent.tools.places import Catalog
-from decision.vlm.follow_target import candidates
+from decision.vlm.t2.target import candidates
 from perception.environment.context import fingerprint
 from perception.environment.layers import load_config
 from perception.environment.scene import assemble_scene

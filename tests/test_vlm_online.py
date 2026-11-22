@@ -8,7 +8,8 @@ import jsonschema
 import numpy as np
 
 from decision.vlm.observations import render_window
-from decision.vlm.online import OnlineDecision
+from decision.vlm.t1.online import GroupsDecision
+from decision.vlm.t3.online import SeatingDecision
 from navigation.planning.footprint import VehicleGeometry
 from navigation.planning.inputs import load_config
 from navigation.planning.people import PeopleModel, social_groups
@@ -64,7 +65,7 @@ class OnlineVlmTests(unittest.TestCase):
     def test_social_window_bound_to_current_identities_and_expires(self):
         scene,window,images=self.window()
         policy=TaskPolicy('mission','social',self.planning,self.geometry)
-        online=OnlineDecision(policy)
+        online=GroupsDecision(policy)
         prepared=online.social(scene,window,images,now=11.1)
         factory,calls=self.client('{"walking":[[0,1]]}')
         answer=online.infer(prepared,client_factory=factory)
@@ -82,7 +83,7 @@ class OnlineVlmTests(unittest.TestCase):
 
     def test_social_rejects_changed_images_and_unready_service(self):
         scene,window,images=self.window()
-        online=OnlineDecision(TaskPolicy('mission','social',self.planning,self.geometry))
+        online=GroupsDecision(TaskPolicy('mission','social',self.planning,self.geometry))
         with self.assertRaisesRegex(ValueError,'image differs'):
             online.social(scene,window,(images[0],images[1],images[2]+b'x'),now=11.1)
         prepared=online.social(scene,window,images,now=11.1)
@@ -101,7 +102,7 @@ class OnlineVlmTests(unittest.TestCase):
         scene,window,images=self.window()
         for raw in ('{"walking":[[0,0]]}', '{"walking":[[97,98]],"walking":[[0,1]]}'):
             with self.subTest(raw=raw):
-                online=OnlineDecision(TaskPolicy('mission','social',self.planning,self.geometry))
+                online=GroupsDecision(TaskPolicy('mission','social',self.planning,self.geometry))
                 prepared=online.social(scene,window,images,now=11.1)
                 factory,_=self.client(raw)
                 answer=online.infer(prepared,client_factory=factory)
@@ -114,7 +115,7 @@ class OnlineVlmTests(unittest.TestCase):
         for options in (dict(complete=False),dict(model='wrong'),dict(finish='length'),dict(reasoning=True)):
             with self.subTest(options=options):
                 scene,window,images=self.window()
-                online=OnlineDecision(TaskPolicy('mission','social',self.planning,self.geometry))
+                online=GroupsDecision(TaskPolicy('mission','social',self.planning,self.geometry))
                 prepared=online.social(scene,window,images,now=11.1)
                 factory,calls=self.client('{}',**options)
                 answer=online.infer(prepared,client_factory=factory)
@@ -129,7 +130,7 @@ class OnlineVlmTests(unittest.TestCase):
         # The online scene normally carries RGB separately in the Agent observation.
         visual=Observation.from_scene(scene,rgb=dict(pixels=arrays['rgb'],stamp_s=9.98,frame_id='camera'))
         candidates=candidate_set(scene)
-        online=OnlineDecision(TaskPolicy('seat','seating',self.planning,self.geometry))
+        online=SeatingDecision(TaskPolicy('seat','seating',self.planning,self.geometry))
         prepared=online.seating(scene,candidates,now=10.,observation=visual)
         self.assertEqual(prepared['rgb_observation_binding'],visual.record['input_fingerprint'])
         factory,_=self.client('{"p":0,"s":"v"}')
@@ -146,7 +147,7 @@ class OnlineVlmTests(unittest.TestCase):
             rgb=dict(pixels=arrays['rgb'],stamp_s=9.98,frame_id='camera',reference=dict(source='test')),
             settings=environment_config()['scene'])
         candidates=candidate_set(scene)
-        online=OnlineDecision(TaskPolicy('seat','seating',self.planning,self.geometry))
+        online=SeatingDecision(TaskPolicy('seat','seating',self.planning,self.geometry))
         with self.assertRaisesRegex(ValueError,'historical context'):
             online.seating(scene,dict(candidates,context={}),now=10.)
         prepared=online.seating(scene,candidates,now=10.)
@@ -164,7 +165,7 @@ class OnlineVlmTests(unittest.TestCase):
         _,arrays,_,scene=observation(10.)
         _,_,_,other=observation(10.1)
         visual=Observation.from_scene(other,rgb=dict(pixels=arrays['rgb'],stamp_s=10.08,frame_id='camera'))
-        online=OnlineDecision(TaskPolicy('seat','seating',self.planning,self.geometry))
+        online=SeatingDecision(TaskPolicy('seat','seating',self.planning,self.geometry))
         with self.assertRaisesRegex(ValueError,'does not bind'):
             online.seating(scene,candidate_set(scene),now=10.,observation=visual)
         self.assertIsNone(online.gate.pending)

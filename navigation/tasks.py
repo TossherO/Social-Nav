@@ -35,14 +35,21 @@ class FollowTrackHistory:
             else:return
         data=(r.get('people') or {}).get('data') or {}
         tracks={}
+        observations={}
         if model.status=='valid' and valid_scene:
+            estimates=dict(zip(model.ids,model.tracks))
             for raw in data.get('tracks',[]):
                 from navigation.planning.people import stable_identity
                 key=stable_identity(data,raw)
-                if key in model.ids and raw.get('confirmed') and type(raw.get('lifecycle_generation')) is int:
+                if key in estimates and raw.get('confirmed') and type(raw.get('lifecycle_generation')) is int:
                     tracks[key]=(raw['lifecycle_generation'],raw.get('state'),raw.get('last_observed_stamp_s'))
+                    if raw.get('state')=='observed' and raw.get('last_observed_stamp_s')==model.origin:
+                        track=estimates[key]
+                        observations[key]=(track['xy'].tolist(),
+                            None if track['velocity'] is None else track['velocity'].tolist())
         self.rows.append(dict(stamp_s=r['as_of'],stamp_ns=r.get('stamp_ns'),clock_domain=r['clock_domain'],local_identity=identity(scene),
-            scene_binding=r['input_fingerprint'],people_fingerprint=model.source,people_stamp_s=model.origin,tracks=tracks))
+            scene_binding=r['input_fingerprint'],people_fingerprint=model.source,people_stamp_s=model.origin,
+            tracks=tracks,observations=observations))
         while self.rows and r['as_of']-self.rows[0]['stamp_s']>self.seconds:self.rows.popleft()
 
     def validate(self, reference, scene, *, now):
@@ -76,13 +83,17 @@ class FollowTrackHistory:
         self._check(rows,key,generation)
         return key,generation
 
-    def continue_from(self, binding, key, generation, scene):
+    def continue_from(self, binding, key, generation, scene, *, observed_only=False):
         rows=list(self.rows)
         start=next((i for i,row in enumerate(rows) if row['scene_binding']==binding),None)
         end=next((i for i,row in enumerate(rows) if row['scene_binding']==scene.record['input_fingerprint']),None)
         if start is None or end is None or end<start:
             raise ValueError('follow_track_history_unavailable')
-        self._check(rows[start:end+1],key,generation)
+        segment=rows[start:end+1]
+        self._check(segment,key,generation)
+        if observed_only and any(key not in row['observations'] for row in segment):
+            raise ValueError('follow_track_not_currently_observed')
+        return segment[-1]
 
     def _check(self, rows, key, generation):
         previous=None;last_support=None
@@ -139,7 +150,7 @@ class TaskPolicy:
             raise ValueError('PID mapping must bind current stable tracker identities')
         if len(set(tuple(v) for v in mapping.values()))!=len(mapping):raise ValueError('Duplicate PID identity')
         if candidates is not None:
-            from decision.vlm.seating.inference import validate_candidate_set
+            from decision.vlm.t3.inference import validate_candidate_set
             validate_candidate_set(candidates)
             if (candidates['observation_id']!=r['observation_id'] or candidates['stamp_s']!=r['as_of'] or
                     candidates['clock_domain']!=r['clock_domain'] or
@@ -176,14 +187,14 @@ class TaskPolicy:
         # silently resubmitted. A ticket permits one response attempt.
         self.consumed=ticket['binding'];self.raw=copy.deepcopy(response)
         if self.kind=='social':
-            from decision.vlm.vlm_api_common import validate_groups
+            from decision.vlm.t1.schema import validate_groups
             validate_groups(response,pids)
             groups=[[mapping[str(pid)] for pid in group] for group_list in response.values() for group in group_list]
             value=dict(source=ticket['binding'],stamp_s=ticket['stamp_s'],clock_domain=ticket['clock_domain'],
                 local_identity=ticket['local_identity'],groups=groups)
             value['binding']=fingerprint(value);self.groups=value;self.raw=copy.deepcopy(response)
             return dict(operation='social_context',social=value,raw_response=self.raw,task_completed=False,executable=False)
-        from decision.vlm.seating.inference import validate_selection,binding
+        from decision.vlm.t3.inference import validate_selection,binding
         candidates=ticket['candidates']
         if candidates is None:raise ValueError('Missing seating candidate set')
         validate_selection(response,candidates);self.raw=copy.deepcopy(response)

@@ -8,8 +8,8 @@ import numpy as np
 import cv2
 
 from decision.vlm.image_inputs import camera_calibration
-from decision.vlm.online import OnlineDecision
-from decision.vlm.seating.geometry import edge_seeds, fit_edge, segment_candidates
+from decision.vlm.t3.online import SeatingDecision
+from decision.vlm.t3.geometry import edge_seeds, fit_edge, segment_candidates
 from navigation.tasks import TaskPolicy
 
 
@@ -159,7 +159,7 @@ class SeatingWorker:
             candidates=dict(instruction=value['instruction'],observation_id=r['observation_id'],stamp_s=r['as_of'],
                 frame_id=r['frame_id'],clock_domain=r['clock_domain'],session_id=r['session_id'],generation=r['generation'],
                 revision=0,candidates=poses)
-            decision=OnlineDecision(TaskPolicy(value['selection_id'],'seating',self.planning,self.geometry))
+            decision=SeatingDecision(TaskPolicy(value['selection_id'],'seating',self.planning,self.geometry))
             request=decision.seating(scene,candidates,observation=obs,now=self._source_now(frame[-1]))
             response=decision.infer(request)
             result.update(raw_response=response.get('raw_content'),request_binding=request['request_binding'])

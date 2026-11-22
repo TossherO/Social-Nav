@@ -2,6 +2,8 @@
 /data/
 /models/
 /outputs/
+# Ultralytics writes local detection runs here when it uses its default project.
+/runs/
 __pycache__/
 *.py[cod]
 .pytest_cache/

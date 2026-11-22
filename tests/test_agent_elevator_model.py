@@ -90,9 +90,11 @@ class ElevatorModelTests(unittest.TestCase):
             store=Store(session);budget=Budget(root/'budget.sqlite')
             visible=[]
             model=Model(config,budget,store,transport=httpx.MockTransport(handler),transient_sink=visible.append)
+            reference_id = 'a'*64
             payload=dict(messages=[dict(role='user',content='乘梯')],
                 current_state=dict(requirements_registered=True,ride=dict(status='monitoring_ride',
                                    standard_start=dict(floor_id='floor1')),
+                                   follow_reference=dict(reference_id=reference_id),
                                    navigation=dict(feedback=dict(stamp_s=10.,clock_domain='ros_time'))),
                 ride_inputs=[('current_elevator_rgb',record,image,'JPEG')])
             try:
@@ -111,14 +113,21 @@ class ElevatorModelTests(unittest.TestCase):
             self.assertEqual(state['ride']['status'],'monitoring_ride')
             self.assertEqual(state['ride']['standard_start']['floor_id'],'floor1')
             self.assertFalse(state['visual_inputs']['maps']['available'])
+            self.assertEqual(state['follow_reference']['reference_id'],'r1')
             self.assertEqual(captured[0]['messages'][0],captured[1]['messages'][0])
             self.assertIn('data:image/jpeg;base64,',json.dumps(captured[0]))
             self.assertEqual([item['kind'] for item in visible],['request','response'])
             self.assertIn('data:image/jpeg;base64,',json.dumps(visible[0]['request']))
             self.assertIn('private-evidence',json.dumps(visible[1]['message']))
             store=Store(session)
-            try:events=str(store.db.execute('select value from events order by seq limit 2').fetchall())
+            try:
+                events=str(store.db.execute('select value from events order by seq limit 2').fetchall())
+                normal_request=json.loads(store.db.execute("SELECT value FROM events WHERE kind='api_request' ORDER BY seq DESC").fetchone()[0])
             finally:store.close()
+            self.assertNotIn('model_references',events)
+            self.assertNotIn(reference_id,events)
+            self.assertNotIn('model_references',visible[0])
+            self.assertEqual(normal_request['model_references']['r1'],['ref',reference_id])
             budget=Budget(root/'budget.sqlite')
             try:records=str(budget.db.execute('select record from calls').fetchall())
             finally:budget.close()

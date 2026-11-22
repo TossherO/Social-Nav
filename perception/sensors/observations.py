@@ -2,19 +2,22 @@
 from collections import deque
 from contextlib import contextmanager, nullcontext
 import queue
+import time
 import numpy as np
 from perception.mapping_localization.native import rs16_preprocess
 from perception.sensors.pointcloud import pointcloud_fields
 from perception.sensors.image import rgb_array
 
 
-def ros_messages(config,*,stop_event=None,include_rgb=False):
+def ros_messages(config,*,stop_event=None,include_rgb=False,camera_history=None):
     """Receive sensor topics from ROS without subscribing to derived results."""
     import rospy
     from sensor_msgs.msg import PointCloud2,Imu,Image,CameraInfo
     rospy.init_node('social_nav_sensor_edge',disable_signals=True)
     inbox=queue.Queue(24000);failed=[]
     def callback(message,topic):
+        if camera_history is not None and topic!=config['common']['imu_topic']:
+            camera_history.observe(topic,message,time.monotonic_ns())
         try:inbox.put_nowait((topic,message,None))
         except queue.Full:failed.append('Sensor edge backlog exceeded its budget')
     subscribers=[]
@@ -54,13 +57,15 @@ class _ScanInterval:
         return True
 
 
-def selected_messages(path,config,*,start=0.,duration=None,messages=None,image_topics=None):
+def selected_messages(path,config,*,start=0.,duration=None,messages=None,image_topics=None,camera_history=None):
     """Select a sensor interval, retaining its leading IMU measurements."""
     lidar=config['common']['lid_topic'];imu=config['common']['imu_topic']
     lead=deque();interval=_ScanInterval(start,duration)
     with _message_source(path,messages,[lidar,imu]+list((image_topics or {}).values())) as source:
         for row in source:
             topic,msg,_=row;stamp=msg.header.stamp.to_sec()
+            if camera_history is not None:
+                camera_history.observe(topic,msg,row[2].to_nsec())
             if interval.first is None:
                 if topic==imu:
                     lead.append(row)
@@ -74,7 +79,7 @@ def selected_messages(path,config,*,start=0.,duration=None,messages=None,image_t
             yield row
 
 
-def bag_observations(path,config,*,duration=None,image_topics=None,start=0.,messages=None):
+def bag_observations(path,config,*,duration=None,image_topics=None,start=0.,messages=None,camera_history=None):
     """Raw scans plus causally collected IMU; no roscore or internal topics.
 
     Header time is retained. A later IMU arrival only signals that a complete
@@ -114,7 +119,10 @@ def bag_observations(path,config,*,duration=None,image_topics=None,start=0.,mess
                 fields=pointcloud_fields(msg,['x','y','z','intensity','timestamp'])
                 raw=np.column_stack([fields[k] for k in ('x','y','z','intensity')]).astype(np.float32)
                 points,begin,end=rs16_preprocess(fields,config,stamp)
-                stamp_ns=msg.header.stamp.to_nsec() if config['preprocess'].get('stamp_at_scan_end',True) else round(end*1e9)
+                header_ns=msg.header.stamp.to_nsec()
+                stamp_ns=header_ns if config['preprocess'].get('stamp_at_scan_end',True) else round(end*1e9)
+                if camera_history is not None and stamp_ns!=header_ns:
+                    camera_history.set_scan_end(header_ns,stamp_ns)
                 scans.append((raw,points,begin,end,msg.header.frame_id,stamp_ns))
                 if len(scans)>32:raise RuntimeError('Scan backlog exceeds native input budget')
             while scans and last_imu>=scans[0][3]:

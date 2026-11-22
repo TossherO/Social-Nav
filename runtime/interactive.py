@@ -209,9 +209,13 @@ def runtime_command(args, config, pose):
         command += ['--agent-follow-candidates']
         # Freeze the effective backend for later floor handoffs even when the
         # original launcher relied on the local override or the default.
-        from decision.vlm.follow_hosted import follow_backend
-        command += ['--t2-backend',follow_backend(getattr(args,'t2_backend',None))]
-    if getattr(args,'t2_jpeg_quality',None) is not None:command += ['--t2-jpeg-quality',str(args.t2_jpeg_quality)]
+        from decision.vlm.t2.hosted import follow_settings
+        backend,weights=follow_settings(getattr(args,'t2_backend',None),weights=getattr(args,'t2_reid_weights',None),
+                                        raw_rgb=getattr(args,'t2_raw_rgb',False))
+        command += ['--t2-backend',backend]
+        if weights is not None:command += ['--t2-reid-weights',weights]
+        if backend!='reid' and getattr(args,'t2_jpeg_quality',None) is not None:
+            command += ['--t2-jpeg-quality',str(args.t2_jpeg_quality)]
     if getattr(args,'t2_raw_rgb',False):command += ['--t2-raw-rgb']
     if getattr(args,'record_t2_requests',False):command += ['--record-t2-requests']
     if getattr(args,'agent_seating',False):
@@ -252,7 +256,8 @@ def parser():
     p.add_argument('--runtime-config', help='Same machine scheduling override inspected by runtime.preflight')
     p.add_argument('--agent-observations', action='store_true', help='Publish bounded RGB observations for the nonexecuting Agent')
     p.add_argument('--agent-follow-candidates', action='store_true', help='Prepare optional YOLO person candidates for Agent follow selection')
-    p.add_argument('--t2-backend',choices=('dspark','hosted'),help='Select the T2 decision backend')
+    p.add_argument('--t2-backend',choices=('dspark','hosted','reid'),help='Select the T2 decision backend')
+    p.add_argument('--t2-reid-weights',help='Local OSNet .onnx (OpenCV CPU) or .engine (TensorRT CUDA) for reid T2')
     p.add_argument('--t2-jpeg-quality',type=int,help='Optional T2 JPEG quality (1..95)')
     p.add_argument('--t2-raw-rgb',action='store_true',help='Experimental nonexecuting T2 without 2D detection')
     p.add_argument('--record-t2-requests',action='store_true',help='Save T2 inputs and results including RGB locally')
@@ -293,12 +298,21 @@ def main(argv=None):
         p.error('--agent-follow-candidates requires --agent-observations')
     if args.t2_backend and not args.agent_follow_candidates:
         p.error('--t2-backend requires --agent-follow-candidates')
+    if args.t2_reid_weights is not None and not args.agent_follow_candidates:
+        p.error('--t2-reid-weights requires --agent-follow-candidates')
     if args.t2_raw_rgb and (not args.agent_follow_candidates or args.execute or args.agent_execution):
         p.error('--t2-raw-rgb requires follow candidates and nonexecuting observation')
     if args.t2_jpeg_quality is not None and (not args.agent_follow_candidates or not 1<=args.t2_jpeg_quality<=95):
         p.error('--t2-jpeg-quality requires --agent-follow-candidates and quality in 1..95')
     if args.record_t2_requests and not args.agent_follow_candidates:
         p.error('--record-t2-requests requires --agent-follow-candidates')
+    if args.agent_follow_candidates:
+        from decision.vlm.t2.hosted import follow_settings
+        try:
+            args.t2_backend,args.t2_reid_weights=follow_settings(args.t2_backend,weights=args.t2_reid_weights,
+                                                                raw_rgb=args.t2_raw_rgb)
+        except ValueError as error:
+            p.error(str(error))
     if args.agent_seating and not (args.live and args.agent_observations):
         p.error('--agent-seating requires --live and --agent-observations')
     if args.chassis_port and not args.execute:

@@ -168,13 +168,14 @@ class FollowOwnershipTests(unittest.TestCase):
         self.inbox.safety=SimpleNamespace(command=lambda *args:self.events.append(args))
         self.handle=dict(task_id='f',goal_id='g',plan_revision=1,goal_revision=1,call_id='call')
         from tests.test_follow_recovery import candidate_observation
-        from decision.vlm.follow_target import reference as visual_reference
+        from decision.vlm.t2.target import reference as visual_reference
         import base64
         obs=candidate_observation(10.,mapped=True)
         self.ref,_,_=visual_reference(obs,0,'red jacket',task_id='f',revision=1,goal_id='g')
         self.control.update(stamp_s=10.,clock_domain=obs.record['clock_domain'],map_binding=obs.record['map_binding'])
         self.inbox.agent_state=SimpleNamespace(snapshot=lambda:dict(control=self.control,received_age_s=.01),
-            follow_candidate=lambda *_:(obs.record,base64.b64encode(obs.image).decode()))
+            follow_candidate=lambda *_:(obs.record,base64.b64encode(obs.image).decode()),
+            clear_follow_observations=lambda **_:None,reserve_follow_observations=lambda *_:None)
         self.req=dict(task_id='follow:call',request_id='call',goal_revision=1,frame_id='odom',mode='local',
                       target_reference='base_link',goal=[2.5,2.],valid_until_s=10.5)
 

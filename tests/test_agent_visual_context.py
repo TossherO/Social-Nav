@@ -10,6 +10,7 @@ import httpx
 import numpy as np
 from PIL import Image, ImageDraw
 from decision.agent import CONFIG_DIR
+from decision.agent.core.media import image_part
 from decision.agent.core.model import Model, cache_messages, input_estimate
 from decision.agent.core.session import AgentSession
 from decision.agent.core.store import Budget, Store
@@ -92,8 +93,21 @@ class VisualContextTests(unittest.TestCase):
         state=json.loads(body['messages'][-1]['content'][0]['text'])['state']
         self.assertIn('occupancy',state['visual_inputs']['map_legend'])
         self.assertIn('camera',state['visual_inputs']['map_legend'])
+        current_images=[part['image_url']['url'] for part in body['messages'][-1]['content']
+                        if part['type']=='image_url']
+        self.assertEqual(tuple(base64.b64decode(url.split(',',1)[1]) for url in current_images[1:]),
+                         self.session.spatial_view.images)
         for data in self.session.spatial_view.images:
             self.assertEqual(max(Image.open(io.BytesIO(data)).size),1024)
+
+    def test_nonstandard_spatial_pngs_keep_original_normalization(self):
+        for mode, size, format in (('RGBA',(32,32),'PNG'),('RGB',(2048,1024),'PNG'),
+                                   ('RGB',(32,32),'JPEG')):
+            with self.subTest(mode=mode,size=size,format=format):
+                data=io.BytesIO()
+                Image.new(mode,size).save(data,format=format)
+                self.assertEqual(image_part(data.getvalue(),1024,'PNG',preserve_png=True),
+                                 image_part(data.getvalue(),1024,'PNG'))
 
     def test_compact_model_map_only_places_coordinate_ticks_outside_map(self):
         from unittest.mock import patch
@@ -110,6 +124,25 @@ class VisualContextTests(unittest.TestCase):
             if x<layout['left'] or y>=layout['top']+layout['height']:
                 float(text)  # Only numerical coordinate labels may lie outside the map.
         self.assertNotIn('MAP XY metres | x right, y up | yaw CCW radians',[t for _,t in written])
+
+    def test_overview_marker_keeps_the_origin_and_points_up_for_positive_yaw(self):
+        from math import pi
+
+        catalog = Catalog(dict(scope='simulation',map_condition='complete',frame_id='sim_odom',
+                               floor_id='unit',access={},places=[],regions=[]))
+        for bounds in ([0.,0.,8.,8.], [0.,0.,80.,80.]):
+            layout = compact_map_layout(bounds,max_edge=1024)
+            x = round(layout['left'] + 4 * layout['scale'])
+            y = round(layout['top'] + (bounds[3]-4) * layout['scale'])
+            for yaw, direction in ((pi/2,-1), (-pi/2,1)):
+                with self.subTest(bounds=bounds,yaw=yaw):
+                    data = render(catalog,self.grid,bounds,[4.,4.,yaw],compact=True)
+                    pixels = np.asarray(Image.open(io.BytesIO(data)))
+                    orange = np.all(np.abs(pixels.astype(int)-[215,107,11])<=22,axis=2)
+                    self.assertTrue(orange[y+10*direction,x-1:x+2].any())
+                    self.assertFalse(orange[y-10*direction,x-1:x+2].any())
+                    self.assertFalse(orange[y,x])  # Open centre at the projected base_link.
+                    self.assertFalse(orange[y,x-6:x-4].any())
 
     def test_static_crop_keeps_camera_view_and_local_grid_binding(self):
         from decision.agent.tools.sensors import sensor_context

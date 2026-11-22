@@ -11,9 +11,9 @@ from runtime.decision import DecisionBuffer, DecisionRecorder
 from decision.vlm.observations import freeze_window, frame
 from decision.vlm.navigation import DecisionRequest
 from decision.vlm.annotation.rules import digest
-from decision.vlm.seating.inputs import observation_clock, bind_scene_observation
-from decision.vlm.seating.geometry import check_navigation
-from decision.vlm.seating.stage import SeatingStage, CompletionLimits
+from decision.vlm.t3.inputs import observation_clock, bind_scene_observation
+from decision.vlm.t3.geometry import check_navigation
+from decision.vlm.t3.stage import SeatingStage, CompletionLimits
 from navigation.tasks import TaskPolicy
 from navigation.planning.footprint import VehicleGeometry
 from navigation.planning.inputs import load_config

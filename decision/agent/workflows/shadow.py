@@ -21,6 +21,21 @@ def require_bag_session(path):
         raise ValueError('Bag replay requires a nonexecuting bag session')
 
 
+def replay_t2_result(item):
+    """Summarize VLM choices and local identity decisions for the replay window."""
+    result = {key: item.get(key) for key in
+              ('event', 'source_stamp_s', 'backend', 'status', 'selection', 'raw_content', 'timing', 'reason')}
+    selection = result['selection']
+    if result['backend'] == 'reid' and isinstance(selection, dict):
+        candidate = selection.get('candidate_id')
+        choice = item.get('search_choice') or {}
+        result.update(status=selection['status'], reason=selection['reason'], choice=choice or None,
+                      selection=f'人物 {candidate}' if candidate is not None else choice.get('kind'))
+    else:
+        result['choice'] = (item.get('choices') or {}).get(selection)
+    return result
+
+
 def wait_for_bag_navigation(catalog, path, *, timeout_s=300., emit_status=emit):
     """Wait for a fresh, map-associated bag observation before creating a task."""
     from runtime.transport import exchange_request
@@ -68,35 +83,42 @@ def hold_after_t2_failure(session, actor):
 
 
 def start_unique_bag_follow(session, goal_id):
-    """Start from a unique current 2D/3D candidate, using normal Agent evidence tools."""
+    """Wait for one tracked person, or hand a multi-person view back to the Agent."""
     feedback=session.navigation.snapshot()
     if (feedback.get('input_stale') or feedback.get('localization_status')!='valid' or
             (feedback.get('map_binding') or {}).get('valid') is not True):
-        return False
-    observation=session.navigation.observe()
-    if observation is None:
-        return False
-    group=observation.record.get('follow_candidates') or {}
-    candidates=[item for item in group.get('candidates',[]) if item.get('track') is not None]
-    if len(candidates)!=1:
-        return False
+        return 'waiting'
+    record=session.navigation.observation_record()
+    group=record.get('follow_candidates')
+    if group is None and session.navigation.value.get('follow_frame') is None:
+        return 'waiting'
+    if group is not None:
+        candidates=group.get('candidates',[])
+        if len(candidates)>1:
+            return 'agent_selection'
+        if not candidates or not candidates[0].get('track'):
+            return 'waiting'
     if session.call('observe_scene').get('status')!='available':
-        return False
-    observation_id=observation.record['observation_id']
-    if session.observation.record['observation_id']!=observation_id:
-        return False
+        return 'waiting'
+    record=session.observation.record
+    candidates=(record.get('follow_candidates') or {}).get('candidates',[])
+    if len(candidates)>1:
+        return 'agent_selection'
+    if not candidates or not candidates[0].get('track'):
+        return 'waiting'
+    observation_id=record['observation_id']
     selected=session.call('select_follow_target',goal_id=goal_id,observation_id=observation_id,
         candidate_id=candidates[0]['id'],target_description='The person in the fixed reference',
         _context=session.context())
     if selected.get('status')!='selected':
-        return False
+        return 'waiting'
     result=session.call('start_local_task',goal_id=goal_id,task_type='follow',reference_id=selected['reference_id'])
     if result.get('status') not in ('accepted','uncertain'):
-        return False
+        return 'waiting'
     session.wait_for_event('navigation')
     session._save('replay_local_follow_started',dict(goal_id=goal_id,source='unique_current_associated_candidate',
                                                    status=result['status']))
-    return True
+    return 'started'
 
 
 def run(args):
@@ -150,7 +172,7 @@ def run(args):
             from ..core.reuse import import_registered_task
             import_registered_task(session,plan,assets,reuse_path)
         if auto_follow:
-            instruction=('任务已进入跟随阶段，等待当前帧出现唯一可靠关联行人。' if local_follow else
+            instruction=('任务已进入跟随阶段，单人且轨迹有效时直接跟随，多人时由 Agent 选人。' if local_follow else
                          '任务登记已载入；Agent 将观察并确认本次的跟随人物。')
             emit(dict(event='replay_auto_follow_started',instruction=instruction))
         actor = make_loop(args, session, output/'session.sqlite')
@@ -162,7 +184,12 @@ def run(args):
         if local_follow:
             initial_goal=plan['goals'][0]['goal_id']
             def start_before_model(actor):
-                if start_unique_bag_follow(session,initial_goal):
+                result=start_unique_bag_follow(session,initial_goal)
+                if result=='agent_selection':
+                    actor.before_request=None
+                    emit(dict(event='replay_follow_requires_selection',instruction='画面中有多名人物，交由 Agent 按原指令确认目标。'))
+                    return True
+                if result=='started':
                     actor.before_request=None
                     emit(dict(event='replay_auto_follow_started',instruction='已用当前 bag 观察确认行人，开始影子跟随。'))
                 return False
@@ -192,10 +219,7 @@ def run(args):
                             item=json.loads(line)
                             event=item.get('event')
                             if event not in ('follow_t2_result','follow_t2_rejected','follow_t2_input_unavailable'):continue
-                            choice=(item.get('choices') or {}).get(item.get('selection'))
-                            last_t2=dict(event=event,source_stamp_s=item.get('source_stamp_s'),
-                                backend=item.get('backend'),status=item.get('status'),selection=item.get('selection'),
-                                choice=choice,raw_content=item.get('raw_content'),timing=item.get('timing'),reason=item.get('reason'))
+                            last_t2=replay_t2_result(item)
                             session.store.event('t2_replay',last_t2)
                 feedback=navigation.snapshot()
                 current=next_unfinished_goal(session.task_goals.goals)

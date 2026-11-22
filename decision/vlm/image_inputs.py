@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 from interfaces.runtime import rgb_age_s
+from perception.sensors.image import matching_camera_info
 
 
 ROOT=Path(__file__).resolve().parents[2]
@@ -47,12 +48,7 @@ class ImagePreparer:
                 if (str(image.get('rgb_frame') or '').lstrip('/')!=self.calibration['target_frame'].lstrip('/') or
                         row['detection_frame_id'].lstrip('/')!=self.calibration['source_frame'].lstrip('/')):
                     raise ValueError('VLM image calibration does not match the observed camera/LiDAR frames')
-                camera = image.get('camera_info')
-                if (not isinstance(camera,dict) or type(camera.get('stamp_ns')) is not int or
-                        camera['stamp_ns'] > rgb_ns or
-                        str(camera.get('frame_id') or '').lstrip('/') != image['rgb_frame'].lstrip('/') or
-                        (camera.get('height'),camera.get('width')) != pixels.shape[:2]):
-                    camera = None
+                camera = matching_camera_info(image.get('camera_info'), image['rgb_frame'], rgb_ns, pixels.shape)
                 detections,elapsed=self.detector.detect(pixels);self.calls+=1
                 past=[h['result'] for h in history if h['stamp_ns']<=rgb_ns]
                 people=causal_geometry(people_in_lidar(row),row,past,rgb_stamp,.05)

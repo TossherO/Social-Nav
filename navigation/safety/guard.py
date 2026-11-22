@@ -116,6 +116,15 @@ class LocalSafety:
         try:
             from navigation.planning.inputs import validate_grid
             scene.verify();validate_grid(scene.geometry)
+            if 'follow_last_evidence_binding' in request:
+                from navigation.planning.inputs import association_status, load_config
+                if self._search_planning is None:self._search_planning=load_config()
+                if (association_status(scene,self.asset,self._search_planning) or
+                        not 0<=now-r['prior']['measurement_stamp_s']<=self._search_planning['max_association_age_s'] or
+                        request.get('map_snapshot_id')!=self.asset.manifest['snapshot_id'] or
+                        request['frame_id']!=self.asset.snapshot.metadata['frame_id']):
+                    self.last_target=np.zeros(2)
+                    return dict(result,reason='follow_last_position_map_invalid',state='stop_request')
             contact_grid=navigation_geometry(scene,now=now,asset=self.asset,check_asset=True)
         except (ValueError,KeyError,TypeError):
             self.last_target=np.zeros(2)

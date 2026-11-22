@@ -1,0 +1,1 @@
+The observation value must be the LETTER KEY of observation_options, such as "A", never the numeric id inside an option. Both fields are required. For example, {"target":null,"observation":"A"} or {"target":"P0","observation":null}.

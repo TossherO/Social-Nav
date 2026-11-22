@@ -18,6 +18,7 @@ if [[ $# -gt 0 ]]; then shift; fi
 SOCIAL_NAV_AGENT_OBSERVATIONS=0
 SOCIAL_NAV_AGENT_FOLLOW_CANDIDATES=0
 SOCIAL_NAV_T2_BACKEND=''
+SOCIAL_NAV_T2_REID_WEIGHTS=''
 SOCIAL_NAV_T2_IMAGE_FORMAT=jpeg
 SOCIAL_NAV_T2_JPEG_QUALITY=80
 SOCIAL_NAV_T2_IMAGE_OPTION_SET=0
@@ -35,8 +36,11 @@ while [[ $# -gt 0 ]]; do
     --agent-follow-candidates) SOCIAL_NAV_AGENT_FOLLOW_CANDIDATES=1 ;;
     --t2-raw-rgb) SOCIAL_NAV_T2_RAW_RGB=1 ;;
     --t2-backend)
-      if [[ $# -lt 2 || -n "$SOCIAL_NAV_T2_BACKEND" || ( "$2" != dspark && "$2" != hosted ) ]]; then echo '--t2-backend 仅接受 dspark 或 hosted。' >&2; exit 2; fi
+      if [[ $# -lt 2 || -n "$SOCIAL_NAV_T2_BACKEND" || ( "$2" != dspark && "$2" != hosted && "$2" != reid ) ]]; then echo '--t2-backend 仅接受 dspark、hosted 或 reid。' >&2; exit 2; fi
       SOCIAL_NAV_T2_BACKEND="$2"; shift ;;
+    --t2-reid-weights)
+      if [[ $# -lt 2 || -n "$SOCIAL_NAV_T2_REID_WEIGHTS" || -z "$2" || "$2" == --* ]]; then echo '--t2-reid-weights 需要一个本地 .onnx 或 .engine 路径且只能指定一次。' >&2; exit 2; fi
+      SOCIAL_NAV_T2_REID_WEIGHTS="$2"; shift ;;
     --t2-image-format)
       if [[ $# -lt 2 || ( "$2" != jpeg && "$2" != png ) ]]; then echo '--t2-image-format 仅接受 jpeg 或 png。' >&2; exit 2; fi
       SOCIAL_NAV_T2_IMAGE_FORMAT="$2"; SOCIAL_NAV_T2_IMAGE_OPTION_SET=1; shift ;;
@@ -66,7 +70,7 @@ case "$SOCIAL_NAV_LAUNCH_KIND" in
     SOCIAL_NAV_LAUNCH_MODE="${SOCIAL_NAV_MODE_ARG:---start}"
     case "$SOCIAL_NAV_LAUNCH_MODE" in
       --help)
-        printf '%s\n' '用法：bash scripts/interactive.sh observe [--dry-run] [--agent-observations] [--floor floor1|floor2] [--agent-follow-candidates] [--t2-raw-rgb] [--t2-backend dspark|hosted] [--t2-image-format jpeg|png] [--t2-jpeg-quality 1..95] [--agent-seating] [--trace-timing] [--initial-z 米]' \
+        printf '%s\n' '用法：bash scripts/interactive.sh observe [--dry-run] [--agent-observations] [--floor floor1|floor2] [--agent-follow-candidates] [--t2-raw-rgb] [--t2-backend dspark|hosted|reid] [--t2-reid-weights 路径] [--t2-image-format jpeg|png] [--t2-jpeg-quality 1..95] [--agent-seating] [--trace-timing] [--initial-z 米]' \
           '先运行传感器入口。本入口打开 RViz 进行在线观察与规划，不连接底盘。'
         exit 0;;
       --start|--dry-run) ;;
@@ -86,7 +90,7 @@ case "$SOCIAL_NAV_LAUNCH_KIND" in
     SOCIAL_NAV_LAUNCH_MODE="${SOCIAL_NAV_MODE_ARG:---dry-run}"
     case "$SOCIAL_NAV_LAUNCH_MODE" in
       --help)
-        printf '%s\n' '用法：bash scripts/interactive.sh execute [--dry-run|--check|--execute] [--agent-observations] [--agent-follow-candidates] [--t2-backend dspark|hosted] [--t2-image-format jpeg|png] [--t2-jpeg-quality 1..95] [--agent-seating] [--agent-execution] [--trace-timing] [--initial-z 米]' \
+        printf '%s\n' '用法：bash scripts/interactive.sh execute [--dry-run|--check|--execute] [--agent-observations] [--agent-follow-candidates] [--t2-backend dspark|hosted|reid] [--t2-reid-weights 路径] [--t2-image-format jpeg|png] [--t2-jpeg-quality 1..95] [--agent-seating] [--agent-execution] [--trace-timing] [--initial-z 米]' \
           '默认只打印命令；--check 只检查车辆档案；--execute 启动实机会话，仍需单独人工使能。' \
           '档案检查只验证字段和数值一致性，不验证实际制动或失联停车。'
         exit 0;;
@@ -97,6 +101,7 @@ case "$SOCIAL_NAV_LAUNCH_KIND" in
     SOCIAL_NAV_LAUNCH_OUTPUT=live_execution
     ;;
   preflight)
+    if [[ -n "$SOCIAL_NAV_T2_REID_WEIGHTS" ]]; then echo '此检查入口不接受其他参数。' >&2; exit 2; fi
     if [[ "$SOCIAL_NAV_MODE_ARG" == --help && -z "$SOCIAL_NAV_AGENT_FLOOR" && -z "$SOCIAL_NAV_T2_BACKEND" && "$SOCIAL_NAV_T2_IMAGE_OPTION_SET" == 0 && "$SOCIAL_NAV_T2_RAW_RGB" == 0 && "$SOCIAL_NAV_INITIAL_Z_SET" == 0 && "$SOCIAL_NAV_AGENT_OBSERVATIONS" == 0 && "$SOCIAL_NAV_AGENT_FOLLOW_CANDIDATES" == 0 && "$SOCIAL_NAV_AGENT_SEATING" == 0 && "$SOCIAL_NAV_AGENT_EXECUTION" == 0 && "$SOCIAL_NAV_TRACE_TIMING" == 0 ]]; then
       printf '%s\n' '用法：bash scripts/interactive.sh preflight' '只读检查地图、ROS、RViz、原生库与 GPU，不连接底盘。'
       exit 0
@@ -149,9 +154,10 @@ if [[ "$SOCIAL_NAV_AGENT_FOLLOW_CANDIDATES" == 1 ]]; then
   SOCIAL_NAV_LAUNCH_COMMAND+=(--agent-follow-candidates)
   if [[ "$SOCIAL_NAV_T2_RAW_RGB" == 1 ]]; then
     if [[ "$SOCIAL_NAV_LAUNCH_KIND" != observe ]]; then echo '--t2-raw-rgb 仅支持非执行观察。' >&2; exit 2; fi
+    if [[ "$SOCIAL_NAV_T2_BACKEND" == reid ]]; then echo 'reid 需要 RGB 与轨迹关联，不能与 --t2-raw-rgb 一起使用。' >&2; exit 2; fi
     SOCIAL_NAV_LAUNCH_COMMAND+=(--t2-raw-rgb)
   fi
-  if [[ "$SOCIAL_NAV_T2_IMAGE_FORMAT" == jpeg ]]; then
+  if [[ "$SOCIAL_NAV_T2_IMAGE_FORMAT" == jpeg && "$SOCIAL_NAV_T2_BACKEND" != reid ]]; then
     SOCIAL_NAV_LAUNCH_COMMAND+=(--t2-jpeg-quality "$SOCIAL_NAV_T2_JPEG_QUALITY")
   fi
 elif [[ "$SOCIAL_NAV_T2_IMAGE_OPTION_SET" == 1 || "$SOCIAL_NAV_T2_RAW_RGB" == 1 ]]; then
@@ -160,6 +166,12 @@ fi
 if [[ -n "$SOCIAL_NAV_T2_BACKEND" ]]; then
   if [[ "$SOCIAL_NAV_AGENT_FOLLOW_CANDIDATES" != 1 ]]; then echo '--t2-backend 要求启用 --agent-follow-candidates。' >&2; exit 2; fi
   SOCIAL_NAV_LAUNCH_COMMAND+=(--t2-backend "$SOCIAL_NAV_T2_BACKEND")
+fi
+if [[ -n "$SOCIAL_NAV_T2_REID_WEIGHTS" ]]; then
+  if [[ "$SOCIAL_NAV_AGENT_FOLLOW_CANDIDATES" != 1 || ( -n "$SOCIAL_NAV_T2_BACKEND" && "$SOCIAL_NAV_T2_BACKEND" != reid ) ]]; then
+    echo '--t2-reid-weights 要求启用跟随候选并使用 reid 后端。' >&2; exit 2
+  fi
+  SOCIAL_NAV_LAUNCH_COMMAND+=(--t2-reid-weights "$SOCIAL_NAV_T2_REID_WEIGHTS")
 fi
 if [[ "$SOCIAL_NAV_AGENT_SEATING" == 1 ]]; then
   if [[ "$SOCIAL_NAV_AGENT_OBSERVATIONS" != 1 ]]; then

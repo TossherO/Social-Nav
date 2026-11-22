@@ -5,6 +5,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+import base64
 
 import numpy as np
 
@@ -17,17 +18,77 @@ from runtime.control import ControlLoop
 from runtime.follow import FollowRunner
 from tests.test_follow_continuity import reference,scene
 from tests.test_follow_recovery import candidate_observation
-from decision.vlm.follow_target import reference as visual_reference
+from decision.vlm.t2.target import reference as visual_reference
 
 
 def install_reference(inbox,handle,description='red jacket'):
     obs=candidate_observation(10.,mapped=True)
     ref,_,_=visual_reference(obs,0,description,task_id=handle['task_id'],revision=handle['plan_revision'],goal_id=handle['goal_id'])
-    inbox.agent_state.publish_follow_candidate(obs.record,obs.image)
+    state=inbox.agent_state
+    current=state.snapshot()['control']
+    state.publish_control(dict(request=current['request'],stamp_s=10.,clock_domain='synthetic',feedback={}),
+                          map_binding=obs.record['map_binding'])
+    frame=SimpleNamespace(source=obs.record,encoded=None,
+        materialize=lambda:(obs.record,base64.b64encode(obs.image).decode('ascii')))
+    state.offer_follow_frame(frame,None)
+    assert state.snapshot(with_image=True,with_follow_candidates=True)['observation']==obs.record
     return ref,obs.record['map_binding']
 
 
 class FollowIpcTests(unittest.TestCase):
+    def test_heartbeat_and_cancel_do_not_wait_for_image_materialization(self):
+        session=SimpleNamespace(live=True,execute=True,status=lambda:dict(chassis=dict(
+            state='armed',status_fresh=True,arm_revision=1)),note_command=lambda *_:None)
+        with tempfile.TemporaryDirectory() as folder:
+            inbox=CommandInbox(Path(folder)/'commands.sock',SimpleNamespace(command=lambda *_:None),
+                               session=session,agent_execution=True,follow_enabled=True)
+            started,release=threading.Event(),threading.Event()
+            replies=[]
+            try:
+                client=LiveRuntimeClient(inbox.path)
+                state=inbox.agent_state
+                state.publish_control(dict(request=None,stamp_s=10.,clock_domain='synthetic',feedback={}))
+                handle=dict(task_id='f',goal_id='g',plan_revision=1,goal_revision=1,call_id='call')
+                ref,_=install_reference(inbox,handle)
+                client.exchange('follow_start',dict(handle=handle,intent=dict(target_description='red jacket',reference=ref)))
+                state.publish_follow(dict(status='running',handle=handle))
+                obs=candidate_observation(10.,mapped=True)
+                def materialize():
+                    started.set()
+                    if not release.wait(1.):
+                        raise RuntimeError('test did not release encoding')
+                    return obs.record,base64.b64encode(obs.image).decode('ascii')
+                frame=SimpleNamespace(source=obs.record,encoded=None,materialize=materialize)
+                state.offer_follow_frame(frame,handle)
+                worker=threading.Thread(target=lambda:replies.append(client.snapshot(with_image=True)),daemon=True)
+                worker.start()
+                self.assertTrue(started.wait(.25))
+                inbox.agent_owner['heartbeat_mono']=time.monotonic()-4.
+                self.assertIsNotNone(client.snapshot(follow_call_id='call')['follow_frame'])
+                self.assertLess(time.monotonic()-inbox.agent_owner['heartbeat_mono'],1.)
+                self.assertTrue(client.exchange('follow_cancel',dict(call_id='call'))['accepted'])
+                state.offer_follow_frame(frame,handle)
+                self.assertIsNone(client.snapshot()['follow_frame'])
+                release.set()
+                worker.join(.5)
+                self.assertFalse(worker.is_alive())
+                self.assertIsNone(replies[0]['follow_frame'])
+                self.assertIsNone(replies[0]['image_base64'])
+
+                state.publish_follow(dict(status='stopped',handle=handle))
+                next_handle=dict(handle,task_id='other-task')
+                ref,_=install_reference(inbox,next_handle)
+                client.exchange('follow_start',dict(handle=next_handle,intent=dict(
+                    target_description='red jacket',reference=ref)))
+                state.publish_follow(dict(status='running',handle=next_handle))
+                state.offer_follow_frame(frame,handle)
+                self.assertIsNone(client.snapshot()['follow_frame'])
+                state.offer_follow_frame(frame,next_handle)
+                self.assertEqual(client.snapshot()['follow_frame']['observation_id'],obs.record['observation_id'])
+            finally:
+                release.set()
+                inbox.close()
+
     def test_navigation_follow_navigation_requires_confirmed_holds(self):
         events=[];chassis=dict(state='armed',status_fresh=True,arm_revision=1)
         session=SimpleNamespace(live=True,execute=True,status=lambda:dict(chassis=chassis),note_command=lambda *_:None)

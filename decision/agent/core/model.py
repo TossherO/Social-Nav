@@ -4,18 +4,21 @@ import io
 import json
 import os
 from pathlib import Path
+import socket
 import time
 import base64
 import math
 import hashlib
+from contextlib import closing, contextmanager
 from email.utils import parsedate_to_datetime
+from threading import Lock, Timer
 from urllib.parse import urlsplit
 import httpx
 import jsonschema
 from .. import ROOT
 from .store import Store, encode, shared_budget
 from .media import image_part, png_part
-from .async_model import request_cancelled
+from .async_model import request_cancelled, request_timing
 from .context import project_dialogue, view_context, visual_inputs
 from .model_projection import ModelProjection
 from perception.environment.context import fingerprint
@@ -32,6 +35,102 @@ class ModelTemporarilyUnavailable(ApiError):
     def __init__(self, message='Agent model API temporarily unavailable', *, retry_after_s=None):
         super().__init__(message)
         self.retry_after_s = retry_after_s
+
+
+def http_client(transport=None):
+    return httpx.Client(timeout=httpx.Timeout(120.,connect=10),transport=transport,
+                        follow_redirects=False,trust_env=False)
+
+
+SSE_TAIL_TIMEOUT_S = .05
+
+
+def interrupt_http_tail(connection):
+    try:
+        connection.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
+def stream_payloads(response, timing):
+    done = False
+    tail_timer = None
+    try:
+        for line in response.iter_lines():
+            if request_cancelled():
+                raise ApiError('Request cancelled by a task event')
+            if done or not line.startswith('data:'):
+                continue
+            payload = line[5:].strip()
+            if payload=='[DONE]':
+                timing['transport_complete_s'] = time.perf_counter()
+                # HTTP/1.x can finish locally once all Content-Length bytes
+                # have arrived. Bound any remaining reads on a dedicated socket.
+                http1 = response.http_version in ('HTTP/1.0','HTTP/1.1')
+                fixed_body_received = (http1
+                    and 'transfer-encoding' not in response.headers
+                    and response.headers.get('content-length','').lstrip('0')==str(response.num_bytes_downloaded))
+                if not response.is_closed and not fixed_body_received:
+                    stream = response.extensions.get('network_stream') if http1 else None
+                    connection = stream.get_extra_info('socket') if stream is not None else None
+                    if connection is None:
+                        return
+                    tail_timer = Timer(SSE_TAIL_TIMEOUT_S,interrupt_http_tail,args=(connection,))
+                    tail_timer.daemon = True
+                    tail_timer.start()
+                done = True
+            else:
+                yield payload
+    except (httpx.TimeoutException,httpx.NetworkError,httpx.RemoteProtocolError):
+        # A broken HTTP trailer costs the connection, while the completed
+        # provider reply can still be validated and used.
+        if not done:
+            raise
+    else:
+        timing['http_body_complete_s'] = time.perf_counter()
+        timing.setdefault('transport_complete_s', timing['http_body_complete_s'])
+    finally:
+        if tail_timer is not None:
+            tail_timer.cancel()
+            tail_timer.join()
+
+
+class SessionTransport:
+    """Own a lazy HTTP pool for the session's single model request at a time."""
+
+    def __init__(self):
+        self._lock = Lock()
+        self._client = None
+        self._in_use = False
+        self._closed = False
+
+    @contextmanager
+    def client(self):
+        with self._lock:
+            if self._closed or request_cancelled():
+                raise ApiError('Request cancelled before transport')
+            if self._in_use:
+                raise RuntimeError('Agent HTTP transport already in use')
+            if self._client is None:
+                self._client = http_client()
+            client = self._client
+            self._in_use = True
+        try:
+            yield client
+        finally:
+            with self._lock:
+                client.cookies.clear()
+                self._in_use = False
+                if self._closed:
+                    client.close()
+                    self._client = None
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+            if self._client is not None and not self._in_use:
+                self._client.close()
+                self._client = None
 
 
 def retry_after_seconds(value):
@@ -134,8 +233,9 @@ def cache_usage(usage, mode):
 
 
 def retained_tool_reference(messages, key, record):
-    """Reference metadata only when the exact full record is still in the dialogue."""
-    for message in reversed(messages):
+    """Find the native tool whose retained result contains this exact record."""
+    for index in range(len(messages)-1,0,-1):
+        message = messages[index]
         if message.get('role')!='tool' or not isinstance(message.get('content'),str):
             continue
         try:
@@ -143,7 +243,10 @@ def retained_tool_reference(messages, key, record):
         except ValueError:
             continue
         if isinstance(result,dict) and result.get('status')=='available' and result.get(key)==record:
-            return message['tool_call_id']
+            previous = messages[index-1]
+            for call in previous.get('tool_calls') or ():
+                if call['id']==message['tool_call_id']:
+                    return call['function']['name']
     return None
 
 
@@ -154,13 +257,14 @@ def observation_context(messages, source, key, record):
     fields = ('view_id','source_stamp_s','frame_id','target_reference','units') if key=='view' else (
               'observation_id','stamp_s','clock_domain','pose_reference')
     return dict(source=source,**{key:{field:record[field] for field in fields if field in record}},
-                details_in_tool_call_id=reference)
+                details_in_tool=reference)
 
 
 class Model:
     model = 'qwen3.8-flash'
 
-    def __init__(self, private_config, budget, store, *, transport=None, cache_mode='implicit', thinking_mode='off', output_limit=None, transient_sink=None):
+    def __init__(self, private_config, budget, store, *, transport=None, cache_mode='implicit', thinking_mode='off', output_limit=None, transient_sink=None,
+                 session_transport=None):
         if cache_mode not in ('implicit','explicit'):
             raise ValueError('Choose an explicit cache policy; no automatic fallback')
         if thinking_mode not in ('off','low','medium'):
@@ -180,9 +284,11 @@ class Model:
             raise ValueError('API requires HTTPS and credentials outside the URL')
         self._url = url if url.endswith('/chat/completions') else url+'/chat/completions'
         self.budget, self.store, self.transport = budget, store, transport
+        self.session_transport = session_transport
 
     def request(self, system, messages, *, observation_id=None, max_tokens=2048, tool_names=None, tool_choice='auto', projection=None, transient=False,
-                supervised_follow=False):
+                supervised_follow=False, prepare_started_s=None):
+        timing = request_timing(prepare_started_s if prepare_started_s is not None else time.perf_counter())
         if tool_choice not in ('auto','required'):
             raise ValueError('Unsupported tool choice')
         tools = native_tools(tool_names)
@@ -202,15 +308,21 @@ class Model:
             bound = input_estimate(body['messages'],tools)
         except InputEstimateExceeded as error:
             self.store.event('api_input_rejected',dict(reason='estimated_context_limit',
-                estimated_input_tokens=error.estimate,limit=131072,request_sent=False))
+                estimated_input_tokens=error.estimate,limit=131072,request_sent=False,timing=dict(timing)))
             raise
         estimated_output=self.budget.estimate_output(self.model,self.thinking_mode,output_bound)
         call_id = self.budget.reserve(bound,estimated_output)
+        timing['call_id'] = call_id
         request_event=dict(call_id=call_id,purpose='elevator_monitor' if transient else 'native_tool_decision',model=self.model,
             observation_id=observation_id,input_token_reservation=bound,
-            input_estimate_method='empirical_utf8_and_image_area',estimated_output_tokens=estimated_output,cache_mode=self.cache_mode)
-        if not transient:request_event['request']=body
+            input_estimate_method='empirical_utf8_and_image_area',estimated_output_tokens=estimated_output,
+            cache_mode=self.cache_mode,timing=dict(timing))
+        if not transient:
+            request_event['request'] = body
+            if projection is not None and projection.references:
+                request_event['model_references'] = projection.references
         self.store.event('api_request',request_event)
+        # Keep the start used by existing first-token and full-return reports.
         began = time.perf_counter()
         settled=False
         first = usage = returned_model = finish_reason = status = None
@@ -221,26 +333,25 @@ class Model:
                 raise ApiError('Request cancelled before transport')
             if transient and self.transient_sink is not None:
                 self.transient_sink(dict(kind='request',call_id=call_id,request=copy.deepcopy(body)))
-            with httpx.Client(timeout=httpx.Timeout(120.,connect=10),transport=self.transport,
-                              follow_redirects=False,trust_env=False) as client:
-                with client.stream('POST',self._url,headers={'Authorization':'Bearer '+self._key},json=body) as response:
+            with (http_client(self.transport) if self.session_transport is None else self.session_transport.client()) as client:
+                request = client.build_request('POST',self._url,headers={'Authorization':'Bearer '+self._key},json=body)
+                timing['prepare_completed_s'] = time.perf_counter()
+                if request_cancelled():
+                    raise ApiError('Request cancelled before transport')
+                timing['transport_started_s'] = time.perf_counter()
+                with closing(client.send(request,stream=True)) as response:
                     status = response.status_code
                     if status != 200:
                         retry_after_s=retry_after_seconds(response.headers.get('Retry-After'))
-                        detail = response.read()[:16384].decode('utf-8',errors='replace')
+                        error_body = response.read()
+                        timing['http_body_complete_s'] = time.perf_counter()
+                        detail = error_body[:16384].decode('utf-8',errors='replace')
                         for secret in (self._key,self._url,self._private['base_url']):
                             detail = detail.replace(secret,'[private]')
                         self.store.event('api_http_error',dict(call_id=call_id,http_status=status,
                                                                detail='[transient request]' if transient else detail))
                         raise ApiError('API rejected native tool request; no retry performed')
-                    for line in response.iter_lines():
-                        if request_cancelled():
-                            raise ApiError('Request cancelled by a task event')
-                        if not line.startswith('data:'):
-                            continue
-                        payload = line[5:].strip()
-                        if payload=='[DONE]':
-                            break
+                    for payload in stream_payloads(response,timing):
                         chunk = json.loads(payload)
                         chunks.append(chunk)
                         if 'error' in chunk:
@@ -256,7 +367,8 @@ class Model:
                             if not isinstance(fragments,list):
                                 raise ValueError('Tool deltas must be a list')
                             if first is None and (delta.get('content') or delta.get('reasoning_content') or fragments):
-                                first = time.perf_counter()-began
+                                timing['transport_first_delta_s'] = time.perf_counter()
+                                first = timing['transport_first_delta_s']-began
                             text_parts.append(delta.get('content') or '')
                             reason_parts.append(delta.get('reasoning_content') or '')
                             for fragment in fragments:
@@ -279,17 +391,20 @@ class Model:
                                         raise ValueError('Unexpected function delta')
                                     call['function'][field] += value
                             finish_reason = choice.get('finish_reason') or finish_reason
+            if request_cancelled():
+                raise ApiError('Request cancelled by a task event')
             message = dict(role='assistant',content=''.join(text_parts) or None)
             if calls:
                 message['tool_calls'] = [calls[index] for index in sorted(calls)]
             record = dict(call_id=call_id,purpose='native_tool_decision',requested_model=self.model,
                 returned_model=returned_model,wall_s=time.time(),first_token_s=first,
-                full_return_s=time.perf_counter()-began,usage=usage,finish_reason=finish_reason,
+                full_return_s=timing['transport_complete_s']-began,
+                timing=dict(timing),usage=usage,finish_reason=finish_reason,
                 raw_chunks=chunks,content=message['content'],tool_calls=message.get('tool_calls',[]),
                 message=message,reasoning=''.join(reason_parts),thinking_mode=self.thinking_mode,
                 cache=cache_usage(usage,self.cache_mode))
             saved=({k:record[k] for k in ('call_id','requested_model','returned_model','wall_s','first_token_s',
-                                           'full_return_s','usage','finish_reason','thinking_mode','cache')} if transient else record)
+                                           'full_return_s','timing','usage','finish_reason','thinking_mode','cache')} if transient else record)
             if transient:saved['purpose']='elevator_monitor'
             self.budget.finish(call_id,saved)
             settled=True
@@ -316,11 +431,14 @@ class Model:
                 reply=Reply(reply.message,action)
             return reply
         except (httpx.HTTPError,ValueError,KeyError,TypeError,jsonschema.ValidationError,ApiError) as error:
+            timing['failed_s'] = time.perf_counter()
+            complete = timing.get('transport_complete_s')
+            full_return_s = None if complete is None else complete-began
             if not settled:
                 self.budget.finish(call_id,dict(requested_model=self.model,thinking_mode=self.thinking_mode,
-                    usage=usage,full_return_s=time.perf_counter()-began,first_token_s=first))
+                    usage=usage,full_return_s=full_return_s,first_token_s=first))
             self.store.event('api_failure',dict(call_id=call_id,error_type=type(error).__name__,http_status=status,
-                retry_after_s=retry_after_s,full_return_s=time.perf_counter()-began,
+                retry_after_s=retry_after_s,full_return_s=full_return_s,timing=dict(timing),
                 partial_chunks=[] if transient else chunks,automatically_retried=False))
             transport_failed=(status in (None,200) and
                               isinstance(error,(httpx.TimeoutException,httpx.NetworkError,httpx.RemoteProtocolError)))
@@ -329,6 +447,7 @@ class Model:
             raise ApiError('Native tool request failed or response rejected; see session events, no retry performed') from None
 
     def decide(self, payload, *, observation=None, spatial_view=None):
+        prepare_started_s = time.perf_counter()
         registration=payload.get('current_state',{}).get('requirements_registered') is False
         prompt='registration_prompt.txt' if registration else 'system_prompt.txt'
         system = (ROOT/'decision/agent/configs'/prompt).read_text().strip()
@@ -368,7 +487,7 @@ class Model:
             observation.verify()
             rgb = observation.image
             if observation.record.get('follow_candidates') is not None:
-                from decision.vlm.follow_target import annotated
+                from decision.vlm.t2.target import annotated
                 rgb = annotated(observation)
                 if observation.record['follow_candidates'].get('mode')=='raw_rgb':
                     content.append(dict(type='text',text='当前 RGB 为原图，持续跟随期间未进行二维人物检测或关联。'))
@@ -383,7 +502,7 @@ class Model:
                 'current_spatial_view','view',view_context(spatial_view.record,reference)))))
             for role,data in zip(spatial_view.record['image_roles'],spatial_view.images):
                 content += [dict(type='text',text=role+' | view_id='+spatial_view.record['view_id']),
-                            image_part(data,1024,'PNG')]
+                            image_part(data,1024,'PNG',preserve_png=True)]
         keyframes = payload.get('keyframes',{})
         remaining = set(keyframes)
         for message in reversed(messages):
@@ -416,7 +535,8 @@ class Model:
                 dict(type='text',text=encode(dict(source='static_reference_map',reference=reference.record))),
                 png_part(reference.image),dict(type='text',text='固定地图和全部固定标注；动态起点、实测轨迹与当前自车在本轮状态中。')]))
         messages.append(dict(role='user',content=content))
-        projection=ModelProjection()
+        projection=ModelProjection(payload.get('model_reference_names'))
+        projection.allow(state)
         messages=projection.messages(messages,protected_indices=(1 if reference is not None else 0,))
         execution_tools=EXECUTION_TOOLS
         supervised_follow=not (ride_inputs or registration) and follow_supervision_active(state.get('navigation',{}))
@@ -426,14 +546,21 @@ class Model:
                             tool_names=(ELEVATOR_TOOLS[phase] if ride_inputs else
                                         REGISTRATION_TOOLS if registration else execution_tools),
                             tool_choice='required' if self.thinking_mode=='off' else 'auto',projection=projection,
-                            transient=bool(payload.get('ride_inputs')),supervised_follow=supervised_follow)
+                            transient=bool(payload.get('ride_inputs')),supervised_follow=supervised_follow,
+                            prepare_started_s=prepare_started_s)
 
 
-def api_work(config, session, payload, observation=None, spatial_view=None, *, cache_mode='implicit', thinking_mode='off',transient_sink=None):
+def api_work(config, session, payload, observation=None, spatial_view=None, *, cache_mode='implicit', thinking_mode='off',transient_sink=None,
+             session_transport=None):
     # Background operations own their database connections and credentials.
-    store, budget = Store(session), shared_budget()
+    store = Store(session)
     try:
-        return Model(config,budget,store,cache_mode=cache_mode,thinking_mode=thinking_mode,transient_sink=transient_sink).decide(payload,observation=observation,spatial_view=spatial_view)
+        budget = shared_budget()
+        try:
+            return Model(config,budget,store,cache_mode=cache_mode,thinking_mode=thinking_mode,
+                         transient_sink=transient_sink,session_transport=session_transport).decide(
+                             payload,observation=observation,spatial_view=spatial_view)
+        finally:
+            budget.close()
     finally:
-        budget.close()
         store.close()

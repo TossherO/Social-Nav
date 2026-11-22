@@ -12,7 +12,8 @@ import httpx
 
 from decision.agent.core.store import Budget
 from decision.vlm import hosted_evaluation as hosted
-from decision.vlm.vlm_api_common import groups_schema, save_json
+from decision.vlm.t1.schema import groups_schema
+from decision.vlm.vlm_api_common import save_json
 
 
 class HostedTests(unittest.TestCase):

@@ -380,7 +380,7 @@ class CompositionTests(unittest.TestCase):
     def test_follow_finish_and_completion_keep_delayed_visual_source(self):
         self.session.call('record_task', goals=[follow_goal('person')])
         obs = self.observation('a')
-        from decision.vlm.follow_target import reference
+        from decision.vlm.t2.target import reference
         ref,_,_=reference(obs,0,'目标',task_id=self.session.state['task_id'],revision=1,goal_id='person')
         self.session.follow_reference=ref
         requirement=self.session.task_goals.current('person')['requirement']

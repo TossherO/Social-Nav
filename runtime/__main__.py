@@ -44,7 +44,8 @@ def parser():
     p.add_argument('--record-t2-requests',action='store_true',help='Save actual T2 requests and results locally, including RGB images')
     p.add_argument('--agent-observations',action='store_true',help='Bounded optional Agent RGB/scene outlet; no YOLO, API or chassis output')
     p.add_argument('--agent-follow-candidates',action='store_true',help='Enable optional continuous T2 follow input and candidate preparation')
-    p.add_argument('--t2-backend',choices=('dspark','hosted'),help='Explicit T2 inference backend; otherwise use the local override or dspark')
+    p.add_argument('--t2-backend',choices=('dspark','hosted','reid'),help='Explicit T2 decision backend; otherwise use the local override or dspark')
+    p.add_argument('--t2-reid-weights',help='Local OSNet .onnx (OpenCV CPU) or .engine (TensorRT CUDA) for reid T2')
     p.add_argument('--t2-jpeg-quality',type=int,help='Optional T2 JPEG image quality (1..95)')
     p.add_argument('--t2-raw-rgb',action='store_true',help='Experimental nonexecuting T2 without 2D detection or association')
     p.add_argument('--agent-seating',action='store_true',help='Enable current RGB/lidar table-edge selection for T3')
@@ -93,12 +94,18 @@ def _runtime_inputs(args):
         raise ValueError('--agent-follow-candidates requires --agent-observations and RGB input')
     if args.t2_backend and not args.agent_follow_candidates:
         raise ValueError('--t2-backend requires --agent-follow-candidates')
+    if args.t2_reid_weights is not None and not args.agent_follow_candidates:
+        raise ValueError('--t2-reid-weights requires --agent-follow-candidates')
     if args.t2_raw_rgb and (not args.agent_follow_candidates or args.execute or args.agent_execution):
         raise ValueError('--t2-raw-rgb requires follow candidates and nonexecuting observation')
     if args.t2_jpeg_quality is not None and (not args.agent_follow_candidates or not 1<=args.t2_jpeg_quality<=95):
         raise ValueError('--t2-jpeg-quality requires --agent-follow-candidates and quality in 1..95')
     if args.record_t2_requests and not args.agent_follow_candidates:
         raise ValueError('--record-t2-requests requires --agent-follow-candidates')
+    if args.agent_follow_candidates:
+        from decision.vlm.t2.hosted import follow_settings
+        args.t2_backend,args.t2_reid_weights=follow_settings(args.t2_backend,weights=args.t2_reid_weights,
+                                                            raw_rgb=args.t2_raw_rgb)
     if args.agent_seating and (not args.agent_observations or args.no_image or not args.live):
         raise ValueError('--agent-seating requires live agent observations with RGB')
     if args.chassis_port and not args.execute:raise ValueError('--chassis-port requires --execute')
@@ -316,24 +323,30 @@ def _run(args, resources, handles):
         agent_observer = resources['agent_observations'] = ObservationWorker(commands.agent_state.publish_observation,
             metrics=metrics,geometry=geometry,seating=commands.agent_state.seating)
     if args.agent_follow_candidates:
+        from .follow_camera import CameraPairClient
+        camera_socket,camera_input=_socket_pair(handles)
+        camera_client=CameraPairClient(camera_socket)
         from .follow_decision import FollowDecisionWorker
-        from decision.vlm.follow_hosted import follow_backend
-        from decision.agent.adapters.runtime import follow_observation
+        from decision.agent.adapters.runtime import FollowAgentFrame
         from navigation.search import follow_candidates
-        def publish_agent_frame(handle,scene,pixels,association,camera_info,*,image_metadata=None):
-            observation=follow_observation(scene,pixels,association,geometry,camera_info,image_metadata=image_metadata)
-            if handle is None:commands.agent_state.publish_follow_candidate(observation.record,observation.image)
-            else:commands.agent_state.publish_observation(observation.record,observation.image,follow_handle=handle)
+        def publish_agent_frame(handle,scene,pixels,association,camera_info,*,image_metadata=None,bound_candidates=None):
+            frame=FollowAgentFrame(scene,pixels,association,geometry,camera_info,image_metadata=image_metadata,
+                                  bound_candidates=bound_candidates,metrics=metrics)
+            commands.agent_state.offer_follow_frame(frame,handle)
         def search_factory(source,context):
             value=context or {}
             return follow_candidates(source,asset,geometry,value.get('last'),anchor=value.get('anchor'),
-                                     margin=planning['safety_margin_m'])
+                                     margin=planning['safety_margin_m'],planning=planning,
+                                     continuation=value.get('continuation'),local_reid=value.get('local_reid',False),
+                                     loss=value.get('loss'))
+        reid_options=dict(reid_weights=args.t2_reid_weights,reid_device=device) if args.t2_backend=='reid' else {}
         follow_decision = resources['follow_decision'] = FollowDecisionWorker(search_factory,metrics=metrics,image_policy=det_cfg['image_association'],
                                              camera_calibration=args.camera_calibration,publish_agent_frame=publish_agent_frame,
-                                             backend=follow_backend(args.t2_backend),
+                                             backend=args.t2_backend,camera_client=camera_client,
                                              record_directory=output/'t2_requests' if args.record_t2_requests else None,
-                                             jpeg_quality=args.t2_jpeg_quality,raw_rgb=args.t2_raw_rgb,
-                                             preview_requested=commands.agent_state.follow_candidates_requested if args.t2_raw_rgb else None)
+                                             jpeg_quality=None if reid_options else args.t2_jpeg_quality,raw_rgb=args.t2_raw_rgb,
+                                             preview_requested=commands.agent_state.follow_candidates_requested if args.t2_raw_rgb else None,
+                                             **reid_options)
     first_observation = None
     state_parent.close()
     parent, child = _socket_pair(handles)
@@ -437,6 +450,9 @@ def _run(args, resources, handles):
             if args.coverage:command+=['--coverage',str(Path(args.coverage).resolve())]
             if mode=='mapping':command+=['--map-output',str(output/'map')]
             pass_fds=(child.fileno(),state_input.fileno(),pose_input.fileno(),association_input.fileno())
+            if args.agent_follow_candidates:
+                command+=['--follow-camera-fd',str(camera_input.fileno())]
+                pass_fds+=(camera_input.fileno(),)
             if interactive is not None and interactive.child is not None:
                 command+=['--playback-fd',str(interactive.child.fileno())]
                 pass_fds+= (interactive.child.fileno(),)
@@ -445,6 +461,7 @@ def _run(args, resources, handles):
             child_env['LD_LIBRARY_PATH']='/opt/ros/noetic/lib:'+str(ROOT/'outputs/perception/dependencies/gtsam/lib')+':'+child_env.get('LD_LIBRARY_PATH','')
             worker_log = handles.enter_context((output / 'input.log').open('x'))
             worker=subprocess.Popen(command,cwd=ROOT,env=child_env,pass_fds=pass_fds,stdout=worker_log,stderr=subprocess.STDOUT,start_new_session=True)
+            if args.agent_follow_candidates:camera_input.close()
             if interactive is not None and interactive.child is not None:interactive.child.close()
             def request_stop(*_):
                 nonlocal stop_requested

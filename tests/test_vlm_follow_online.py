@@ -7,7 +7,7 @@ from pathlib import Path
 
 import httpx
 
-from decision.vlm.follow_online import FollowRequest, prepare, selected_reference
+from decision.vlm.t2.online import FollowRequest, prepare, selected_reference
 from decision.vlm.scene_inputs import model_eligible
 from perception.environment.context import fingerprint
 from tests.test_vlm_online import OnlineVlmTests
@@ -53,7 +53,7 @@ class FollowOnlineTests(unittest.TestCase):
 
     def test_hosted_backend_uses_same_candidates_and_validates_raw_response(self):
         from decision.agent.core.store import Budget
-        from decision.vlm.follow_hosted import hosted_body
+        from decision.vlm.t2.hosted import hosted_body
         prepared=prepare(self.window,self.images,'red jacket',self.search)
         with tempfile.TemporaryDirectory() as directory:
             config=Path(directory)/'config.json';config.write_text(json.dumps(dict(base_url='https://example.invalid/v1',api_key='fixture')))
@@ -85,7 +85,7 @@ class FollowOnlineTests(unittest.TestCase):
                 self.assertEqual(result['raw_content'],raw)
 
     def test_follow_backend_is_explicit_and_never_falls_back(self):
-        from decision.vlm.follow_hosted import follow_backend
+        from decision.vlm.t2.hosted import follow_backend
         with tempfile.TemporaryDirectory() as root:
             path=Path(root)/'backend.json'
             self.assertEqual(follow_backend(path=path),'dspark')
@@ -94,6 +94,30 @@ class FollowOnlineTests(unittest.TestCase):
             self.assertEqual(follow_backend('dspark',path=path),'dspark')
             path.write_text('{"backend":"unknown"}')
             with self.assertRaises(ValueError):follow_backend(path=path)
+
+    def test_reid_settings_require_local_weights_and_same_source_association(self):
+        from decision.vlm.t2.hosted import follow_settings
+        with tempfile.TemporaryDirectory(prefix='model directory ') as directory:
+            root=Path(directory)
+            config=root/'backend.json'
+            model=root/'weights.onnx';model.touch()
+            other=root/'override.engine';other.touch()
+            unsupported=root/'weights.pth';unsupported.touch()
+            config.write_text(json.dumps(dict(backend='reid',reid_weights=str(model))))
+            self.assertEqual(follow_settings(path=config),('reid',str(model)))
+            with self.assertRaisesRegex(ValueError,r'\.engine\.json metadata file'):
+                follow_settings('reid',weights=str(other),path=config)
+            other.with_suffix('.engine.json').write_text('{}')
+            self.assertEqual(follow_settings('reid',weights=str(other),path=config),('reid',str(other)))
+            self.assertEqual(follow_settings('dspark',path=config),('dspark',None))
+            config.write_text(json.dumps(dict(backend='reid',reid_weights=str(other))))
+            self.assertEqual(follow_settings(path=config),('reid',str(other)))
+            with self.assertRaisesRegex(ValueError,r'\.onnx.*\.engine'):
+                follow_settings('reid',weights=str(unsupported),path=config)
+            with self.assertRaisesRegex(ValueError,'conflicts with --t2-raw-rgb'):
+                follow_settings(raw_rgb=True,path=config)
+            with self.assertRaisesRegex(ValueError,'requires --t2-reid-weights'):
+                follow_settings('reid',path=root/'missing.json')
 
     def test_truncated_or_invalid_structured_completion_is_not_accepted(self):
         prepared=prepare(self.window,self.images,'red jacket',self.search)
@@ -153,7 +177,7 @@ class FollowOnlineTests(unittest.TestCase):
         import math
         import numpy as np
         from PIL import Image
-        from decision.vlm.follow_online import _draw_search
+        from decision.vlm.t2.online import _draw_search
         from decision.vlm.scene_inputs import bev_xy
         angle=math.pi/3
         transform=np.array([[math.cos(angle),0,math.sin(angle),0],

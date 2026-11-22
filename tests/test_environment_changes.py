@@ -9,7 +9,7 @@ from perception.environment.occupancy import OccupancyTree
 from navigation.planning.planner import Planner
 from navigation.planning.inputs import load_config as planning_config
 from navigation.planning.footprint import VehicleGeometry
-from tests.navigation_fixtures import asset, bundle, request
+from tests.navigation_fixtures import asset, bundle, request, scene_at
 
 
 def evidence(cells, stamp=10., generation=0):
@@ -191,16 +191,24 @@ class ChangeTests(unittest.TestCase):
         self.assertEqual(current.layers['occupancy'][20,20],100)
 
     def test_global_cache_reuses_geometry_but_rechecks_current_obstacles(self):
-        from tests.navigation_fixtures import bundle
         cfg=planning_config();geometry=VehicleGeometry([[-.1,-.1],[.1,-.1],[.1,.1],[-.1,.1]],np.eye(4),source='synthetic')
         planner=Planner(cfg,geometry);source=asset()
-        first=planner.query(request('mapped'),scene=bundle(),asset=source,now=10.,clock_domain='synthetic')
-        cells=np.zeros((60,60),np.int8);cells[20,20]=100
-        second=planner.query(request('mapped'),scene=bundle(cells),asset=source,now=10.,clock_domain='synthetic')
-        self.assertTrue(second['costmap_reused'])
+        first=planner.query(request('mapped'),scene=scene_at(9.9),asset=source,now=9.9,clock_domain='synthetic')
+        second=planner.query(request('mapped'),scene=bundle(),asset=source,now=10.,clock_domain='synthetic')
+        self.assertEqual(first['status'],'path_found',first)
+        self.assertFalse(first['costmap_reused'])
+        self.assertEqual(second['status'],'path_found',second)
         self.assertNotEqual(first['input_binding']['scene'],second['input_binding']['scene'])
-        self.assertFalse(second['current_path_valid'])
-        self.assertEqual(second['local_start_footprint'],'occupied')
+        self.assertTrue(second['costmap_reused'])
+        self.assertTrue(second['current_path_valid'])
+
+        cells=np.zeros((60,60),np.int8);cells[20,20]=100
+        blocked=planner.query(request('mapped'),scene=bundle(cells),asset=source,now=10.,clock_domain='synthetic')
+        self.assertNotEqual(second['input_binding']['scene'],blocked['input_binding']['scene'])
+        self.assertEqual(blocked['status'],'no_path',blocked)
+        self.assertEqual(blocked['reason'],'start_footprint_occupied')
+        self.assertFalse(blocked['current_path_valid'])
+        self.assertEqual(blocked['local_start_footprint'],'occupied')
 
 
 if __name__=='__main__':unittest.main()

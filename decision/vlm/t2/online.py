@@ -12,25 +12,12 @@ from PIL import Image, ImageDraw
 from interfaces.runtime import rgb_age_s
 
 from perception.environment.context import fingerprint
-from .annotation.rules import digest
-from .project_config import load_config
-from .vlm_api_common import parse_response, request_dspark
+from ..annotation.rules import digest
+from ..project_config import load_config, project_path
+from ..vlm_api_common import request_dspark
+from .schema import parse_selection, selection_regex
 
 
-PROMPT = (
-    'Follow the person described by the user, using the reference image when provided. '
-    'The next three images are causal RGB and BEV observations, oldest first. '
-    'Person IDs P0, P1, etc. are local to this request. In BEV, solid orange dots '
-    'are observed tracks, hollow purple dots are predicted tracks; solid blue '
-    'trails are observed and purple broken trails are predicted. A track ID does '
-    'not establish appearance identity. Select the matching person only when '
-    'the appearance evidence supports it. Otherwise choose one observation '
-    'option, including wait, that best helps find the person. Return exactly '
-    'a JSON object with target and observation fields. When choosing a person, '
-    'target must be that listed person ID and observation must be null. When '
-    'no person can be selected, target must be null and observation must be '
-    'one listed observation option ID. Do not include other fields or text.'
-)
 LABELS = string.ascii_uppercase + string.ascii_lowercase
 
 
@@ -52,7 +39,7 @@ def _image(payload, *, jpeg_quality=None):
         url='data:'+mime+';base64,' + base64.b64encode(payload).decode('ascii')))
 
 def _draw_search(image, window, choices, *, return_canvas=False):
-    from .scene_inputs import bev_xy, BEV_RECT, BEV_SIZE, font
+    from ..scene_inputs import bev_xy, BEV_RECT, BEV_SIZE, font
     scene=window.get('scene') or {}
     world=np.asarray((scene.get('localization') or {}).get('world_from_lidar'),dtype=float)
     prior=np.asarray((scene.get('prior') or {}).get('map_from_local'),dtype=float)
@@ -180,21 +167,13 @@ def prepare(window, images, description, search, *, reference_image=None, refere
         label=('Observation '+str(i//2)+(' raw RGB' if i%2==0 else ' independent LiDAR BEV')) if raw else 'Observation '+str(i)
         content.extend([dict(type='text',text=label),_image(image,jpeg_quality=jpeg_quality)])
     content.append(dict(type='text',text=json.dumps(user,ensure_ascii=False,separators=(',',':'))))
-    persons=[label for label,value in choices.items() if value['kind']=='person']
-    observations=[label for label,value in choices.items() if value['kind']=='observation']
-    variants=[]
-    if persons:variants.append(r'\{"target":"('+'|'.join(persons)+r')","observation":null\}')
-    variants.append(r'\{"target":null,"observation":"('+'|'.join(observations)+r')"\}')
-    prompt=PROMPT
-    if raw:
-        prompt=('The next six images are three time-ordered pairs: an unannotated RGB image and an independent LiDAR BEV. '
-                'No 2D detection or RGB-to-track association was performed. Match the described person in the RGB '
-                'to a listed BEV track only if spatial and temporal evidence supports it; otherwise choose wait. '
-                'The first image, when present, is the historical target reference crop. '+PROMPT.replace('The next three images are causal RGB and BEV observations, oldest first. ',''))
-    body=dict(model=load_config()['model']['served_name'],
+    config=load_config()
+    prompt_path=config['tasks']['follow']['raw_rgb_prompt' if raw else 'prompt']
+    prompt=project_path(prompt_path).read_text(encoding='utf-8').rstrip('\n')
+    body=dict(model=config['model']['served_name'],
         messages=[dict(role='system',content=prompt),dict(role='user',content=content)],
         chat_template_kwargs=dict(enable_thinking=False),temperature=0,max_tokens=24,
-        regex='('+'|'.join(variants)+')',stream=True,stream_options=dict(include_usage=True))
+        regex=selection_regex(choices),stream=True,stream_options=dict(include_usage=True))
     prepared=dict(window_binding=window['input_fingerprint'],search_binding=search['binding'],
         source_stamp_s=window['stamp_s'],clock_domain=window['clock_domain'],
         scene_binding=(window.get('scene') or {}).get('input_fingerprint'),
@@ -211,7 +190,7 @@ def _infer(prepared, *, client_factory=None, backend='dspark', private_config=No
         result=request_dspark(prepared['body'],client_factory=client_factory,timeout_s=5)
         result['backend']='dspark'
     elif backend=='hosted':
-        from .follow_hosted import request_hosted
+        from .hosted import request_hosted
         options={}
         if private_config is not None:options['private_config']=private_config
         if budget_factory is not None:options['budget_factory']=budget_factory
@@ -225,20 +204,6 @@ def _infer(prepared, *, client_factory=None, backend='dspark', private_config=No
             result['selection']=selection
             result['choice']=copy.deepcopy(prepared['choices'][selection])
     return result
-
-
-def parse_selection(raw, choices):
-    """Require exactly one target or observation from the corresponding set."""
-    try:value=parse_response(raw)
-    except (TypeError,ValueError):raise ValueError('Invalid T2 JSON') from None
-    if not isinstance(value,dict) or set(value)!={'target','observation'}:
-        raise ValueError('Invalid T2 fields')
-    target,observation=value['target'],value['observation']
-    if isinstance(target,str) and observation is None and choices.get(target,{}).get('kind')=='person':
-        return target
-    if target is None and isinstance(observation,str) and choices.get(observation,{}).get('kind')=='observation':
-        return observation
-    raise ValueError('Invalid T2 selection')
 
 
 def selected_reference(prepared, result, window, *, task_id, revision, goal_id):

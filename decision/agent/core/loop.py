@@ -2,6 +2,7 @@
 import copy
 import math
 import time
+from time import perf_counter
 import jsonschema
 from .async_model import AsyncModel
 from .model import ModelTemporarilyUnavailable
@@ -15,8 +16,9 @@ MODEL_RETRY_REASON = 'model_temporarily_unavailable'
 
 
 class AgentLoop:
-    def __init__(self, session, work, *, max_requests=32):
+    def __init__(self, session, work, *, max_requests=32, close_work=None):
         self.session, self.work = session, work
+        self.close_work = close_work
         self.model = AsyncModel()
         self.requests, self.max_requests = 0, max_requests
         self.exit_reason = None
@@ -169,7 +171,11 @@ class AgentLoop:
             return s
         result = self.model.poll()
         if result is not None:
+            timing = result['timing']
+            timing['consumed_s'] = perf_counter()
             valid = not result['stale'] and self.session.valid_context(result['context'])
+            self.session.store.event('model_result_consumed', dict(request_index=result['request_index'],
+                valid_context=valid, ok=result['ok'], timing=timing))
             if result['ok']:
                 self.model_retry_delay=MODEL_RETRY_DELAY_S
             if not valid:
@@ -247,12 +253,20 @@ class AgentLoop:
                     value = reply.action
                     # Every proposed target is checked with current geometry,
                     # independently of how long the model took to respond.
-                    if not transient and value['tool'] in ('navigate','navigate_route','check_candidate'):
-                        output = self.session.revalidate_spatial(value,result['context'])
-                        if output.get('status') == 'refused' and not output.get('revalidation'):
-                            self.session._history('tool',dict(call=value,result=output))
-                    else:
-                        output = self.session.call(value['tool'], _context=result['context'], **value['arguments'])
+                    timing['tool_processing_started_s'] = perf_counter()
+                    try:
+                        if not transient and value['tool'] in ('navigate','navigate_route','check_candidate'):
+                            output = self.session.revalidate_spatial(value,result['context'], _timing=timing)
+                            if output.get('status') == 'refused' and not output.get('revalidation'):
+                                self.session._history('tool',dict(call=value,result=output))
+                        else:
+                            output = self.session.call(value['tool'], _context=result['context'], _timing=timing,
+                                                       **value['arguments'])
+                    finally:
+                        timing['tool_processing_finished_s'] = perf_counter()
+                        self.session.store.event('model_tool_processed', dict(request_index=result['request_index'],
+                            tool=value['tool'], timing={key:stamp for key,stamp in timing.items()
+                                                       if key=='call_id' or key.startswith('tool_')}))
                     if transient:
                         self.session.conversation.consume_transient(reply)
                         self.session.elevator.feedback=(None if value['tool']=='record_elevator_observation' and
@@ -300,6 +314,7 @@ class AgentLoop:
             return s
         if self.before_request is not None and not self.before_request(self):
             return s
+        prepare_started_s = perf_counter()
         now = self.session.navigation.snapshot()['stamp_s']
         if self.session.observation is not None and not 0 <= now-self.session.observation.record['stamp_s'] <= 3:
             self.session.observation = None
@@ -313,11 +328,14 @@ class AgentLoop:
         context = self.session.context()
         observation = copy.deepcopy(self.session.observation)
         spatial_view = copy.deepcopy(self.session.spatial_view)
-        self.model.submit('tool', context, lambda: self.work(payload, observation, spatial_view))
+        self.model.submit('tool', context, lambda: self.work(payload, observation, spatial_view),
+                          prepare_started_s=prepare_started_s, request_index=self.requests+1)
         self.requests += 1
         return s
 
     def close(self):
         value = self.model.close()
+        if self.close_work is not None:
+            self.close_work()
         self.session.store.event('model_worker_closed', value)
         return value

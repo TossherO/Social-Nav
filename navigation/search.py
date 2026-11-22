@@ -1,4 +1,5 @@
 """Small, observation-bound search poses after losing a follow target."""
+from functools import lru_cache
 import math
 import numpy as np
 
@@ -39,6 +40,7 @@ def _inputs(inputs, *, now, clock_domain):
 
 
 def check_pose(inputs, target, *, now, clock_domain, anchor, margin=.05, radius_m=1.5):
+    """Check the short VLM search pose against current and mapped geometry."""
     pose,geometry,grid,local,transform=_inputs(inputs,now=now,clock_domain=clock_domain)
     target=np.asarray(target,dtype=float);anchor=np.asarray(anchor,dtype=float)
     if (target.shape!=(3,) or anchor.shape!=(2,) or not np.isfinite(target).all() or
@@ -46,7 +48,8 @@ def check_pose(inputs, target, *, now, clock_domain, anchor, margin=.05, radius_
             np.linalg.norm(pose[:2]-anchor)>radius_m+1e-9 or np.linalg.norm(target[:2]-pose[:2])>.8+1e-9):
         raise ValueError('search_pose_outside_budget')
     delta=target[:2]-pose[:2]
-    if np.linalg.norm(delta)>1e-8 and delta@np.array([math.cos(pose[2]),math.sin(pose[2])])<=0:
+    distance=np.linalg.norm(delta)
+    if distance>1e-8 and delta@np.array([math.cos(pose[2]),math.sin(pose[2])])<=0:
         raise ValueError('search_approach_not_ahead')
     inverse=np.linalg.inv(transform);yaw=math.atan2(transform[1,0],transform[0,0])
     def local_pose(p):
@@ -86,16 +89,104 @@ def current_search_pose(choice, pose):
     return [*endpoint.tolist(),float(yaw)]
 
 
-def candidates(inputs, last, *, now, clock_domain, local_identity, anchor, margin=.05):
-    pose,_,_,_,transform=_inputs(inputs,now=now,clock_domain=clock_domain)
-    anchor=np.asarray(anchor,dtype=float);headings=[];point=None
+def _last_point(last, *, now, clock_domain, local_identity, transform):
     if (isinstance(last,dict) and last.get('binding')==fingerprint({k:v for k,v in last.items() if k!='binding'}) and
             last.get('clock_domain')==clock_domain and last.get('local_identity')==local_identity and
             type(last.get('stamp_s')) in (int,float) and 0<=now-last['stamp_s']<=45.):
         xy=np.asarray(last.get('position_xy_m'),dtype=float)
         if xy.shape==(2,) and np.isfinite(xy).all():
-            point=(transform@np.r_[xy,1.])[:2]
-            if np.linalg.norm(point-pose[:2])>.05:headings.append(math.atan2(point[1]-pose[1],point[0]-pose[0]))
+            return (transform@np.r_[xy,1.])[:2]
+    return None
+
+
+@lru_cache(maxsize=1)
+def _arrival_tolerances():
+    from navigation.control.tracking import load_config
+    tracking = load_config()
+    return tracking['goal_position_tolerance_m'], tracking['goal_yaw_tolerance_rad']
+
+
+def check_last_position(scene, asset, geometry, target, planning, *, now, clock_domain):
+    """Check current occupancy and the requested endpoint before mapped planning."""
+    from navigation.planning.continuity import context_binding
+    from navigation.planning.footprint import footprint_status, wrap
+    from navigation.planning.inputs import association_status, scene_status
+    from navigation.planning.planner import goal_cell_issue
+    from perception.environment.navigation import navigation_geometry
+
+    scene.verify()
+    reason = scene_status(scene, now, clock_domain, planning) or association_status(scene, asset, planning)
+    if reason:
+        raise ValueError(reason)
+    point = np.asarray(target, dtype=float)
+    if point.shape not in ((2,), (3,)) or not np.isfinite(point).all():
+        raise ValueError('follow_last_position_invalid')
+    record = scene.record
+    if not 0 <= now-record['prior']['measurement_stamp_s'] <= planning['max_association_age_s']:
+        raise ValueError('association_future_or_stale')
+    local_from_lidar = np.asarray(record['localization']['world_from_lidar'])
+    local_pose = geometry.pose(local_from_lidar)
+    map_pose = geometry.pose(np.asarray(record['prior']['map_from_local']) @ local_from_lidar)
+    xy_tolerance, yaw_tolerance = _arrival_tolerances()
+    reached_xy = np.linalg.norm(point[:2]-map_pose[:2]) <= xy_tolerance
+    aligned = len(point) == 2 or abs(wrap(point[2]-map_pose[2])) <= yaw_tolerance
+    if reached_xy and aligned:
+        raise ValueError('follow_last_position_reached')
+    margin = planning['safety_margin_m']
+    reason = goal_cell_issue(asset.snapshot, geometry, point, margin)
+    if reason:
+        raise ValueError(reason)
+    if len(point) == 3 and footprint_status(asset.snapshot, geometry, point, margin) != 'free':
+        raise ValueError('follow_last_position_map_footprint_not_free')
+    local = navigation_geometry(scene, now=now, asset=asset, check_asset=True)
+    if footprint_status(local, geometry, local_pose, margin) != 'free':
+        raise ValueError('follow_last_position_start_not_free')
+    local_from_map = _se2(local_pose) @ np.linalg.inv(_se2(map_pose))
+    local_target = (local_from_map @ np.r_[point[:2], 1.])[:2].tolist()
+    reason = goal_cell_issue(local, geometry, local_target, margin)
+    if len(point) == 3:
+        yaw = point[2]+local_pose[2]-map_pose[2]
+        if footprint_status(local, geometry, [*local_target, yaw], margin) == 'occupied':
+            raise ValueError('follow_last_position_currently_occupied')
+    if reason in ('goal_occupied', 'goal_footprint_occupied'):
+        raise ValueError('follow_last_position_currently_occupied')
+    return dict(valid=True, source_stamp_s=record['as_of'], clock_domain=clock_domain,
+                map_context=context_binding(dict(mode='mapped'), scene, asset),
+                scope='mapped_goal_and_current_footprint')
+
+
+def last_position_candidate(scene, asset, geometry, last, planning, continuation=None, loss=None):
+    record = scene.record
+    stamp = record['as_of']
+    clock = record['clock_domain']
+    identity = [record[k] for k in ('session_id', 'generation', 'frame_id')]
+    local_from_lidar = np.asarray(record['localization']['world_from_lidar'])
+    map_pose = geometry.pose(np.asarray(record['prior']['map_from_local']) @ local_from_lidar)
+    local_pose = geometry.pose(local_from_lidar)
+    transform = _se2(map_pose) @ np.linalg.inv(_se2(local_pose))
+    point = _last_point(last, now=stamp, clock_domain=clock, local_identity=identity, transform=transform)
+    if point is None or continuation is not None and stamp >= continuation['expires_s']:
+        return None
+    target = point.tolist() if continuation is None else continuation['target']
+    departure_yaw = None if loss is None else loss.get('departure_yaw_rad')
+    if continuation is None and departure_yaw is not None:
+        yaw = departure_yaw + map_pose[2] - local_pose[2]
+        target.append(math.atan2(math.sin(yaw), math.cos(yaw)))
+    check = check_last_position(scene, asset, geometry, target, planning, now=stamp, clock_domain=clock)
+    result = dict(id=1, kind='approach', pose=target, check=check, last_evidence_binding=last['binding'])
+    if continuation is not None:
+        result['continuation_id'] = continuation['intent_id']
+    return result
+
+
+def candidates(inputs, last, *, now, clock_domain, local_identity, anchor, margin=.05):
+    pose,_,_,_,transform=_inputs(inputs,now=now,clock_domain=clock_domain)
+    anchor=np.asarray(anchor,dtype=float);headings=[]
+    point=_last_point(last,now=now,clock_domain=clock_domain,local_identity=local_identity,transform=transform)
+    if point is not None:
+        delta=point-pose[:2]
+        if np.linalg.norm(delta)>.05:headings.append(math.atan2(delta[1],delta[0]))
+    results=[dict(id=0,kind='wait',pose=None)]
     headings.extend([pose[2]+math.pi/4,pose[2]-math.pi/4])
     proposed=[]
     for heading in headings:
@@ -116,7 +207,6 @@ def candidates(inputs, last, *, now, clock_domain, local_identity, anchor, margi
         if step>=.2:
             end=pose[:2]+delta/distance*step
             proposed.append([float(end[0]),float(end[1]),yaw if distance<=.8 else math.atan2(delta[1],delta[0])])
-    results=[dict(id=0,kind='wait',pose=None)]
     for candidate in proposed:
         try:check=check_pose(inputs,candidate,now=now,clock_domain=clock_domain,anchor=anchor,margin=margin)
         except ValueError:continue
@@ -128,23 +218,34 @@ def candidates(inputs, last, *, now, clock_domain, local_identity, anchor, margi
     return results
 
 
-def follow_candidates(scene, asset, geometry, last=None, *, anchor=None, margin=.05):
-    """Build the T2 search choices from this scene; unavailable maps permit waiting only."""
+def follow_candidates(scene, asset, geometry, last=None, *, anchor=None, margin=.05,
+                      continuation=None, local_reid=False, planning=None, loss=None):
+    """Build search choices or check the existing fixed target against this scene."""
     from perception.environment.context import fingerprint
     from navigation.planning.inputs import association_status, load_config
     scene.verify();record=scene.record;stamp=record['as_of']
     identity=[record[k] for k in ('session_id','generation','frame_id')]
     results=[dict(id=0,kind='wait',pose=None)]
-    if asset is not None and not association_status(scene,asset,load_config()):
+    planning = load_config() if planning is None else planning
+    if local_reid:
+        if asset is not None and not association_status(scene, asset, planning):
+            try:
+                candidate = last_position_candidate(scene, asset, geometry, last, planning, continuation, loss)
+            except (ValueError, KeyError, TypeError):
+                candidate = None
+            if candidate is not None:
+                results.append(candidate)
+    elif asset is not None and not association_status(scene,asset,planning):
         matrix=np.asarray(record['localization'].get('world_from_lidar'),dtype=float)
         transform=np.asarray(record['prior'].get('map_from_local'),dtype=float)
         if matrix.shape==(4,4) and transform.shape==(4,4) and np.isfinite(matrix).all() and np.isfinite(transform).all():
             local_pose=geometry.pose(matrix);map_pose=geometry.pose(transform@matrix)
             inputs=dict(stamp_s=stamp,clock_domain=record['clock_domain'],scene=scene,geometry=geometry,
                         global_grid=asset.snapshot,local_pose=local_pose,pose=map_pose)
+            search_anchor=map_pose[:2] if anchor is None else anchor
             try:
                 results=candidates(inputs,last,now=stamp,clock_domain=record['clock_domain'],
-                    local_identity=identity,anchor=map_pose[:2] if anchor is None else anchor,margin=margin)
+                    local_identity=identity,anchor=search_anchor,margin=margin)
             except (ValueError,KeyError,TypeError):
                 pass
     value=dict(clock_domain=record['clock_domain'],source_stamp_s=stamp,scene_binding=record['input_fingerprint'],

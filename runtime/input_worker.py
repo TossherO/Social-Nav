@@ -24,6 +24,7 @@ def main():
     p.add_argument('--config',required=True);p.add_argument('--bag');p.add_argument('--live',action='store_true');p.add_argument('--mode',required=True)
     p.add_argument('--duration',type=float);p.add_argument('--rate',type=float,default=1.);p.add_argument('--coverage');p.add_argument('--map-output')
     p.add_argument('--with-rgb',action='store_true',help='Read camera input only for explicitly requested display, archive or VLM preparation')
+    p.add_argument('--follow-camera-fd',type=int)
     p.add_argument('--start',type=float,default=0.)
     p.add_argument('--playback-fd',type=int)
     p.add_argument('--pause-at',type=float)
@@ -52,15 +53,21 @@ def main():
     def release():
         ack=wire.recv();key=(ack['slot'],ack['epoch']);ref=pending.pop(key)
         pool.release(ref,'gpu')
+    camera_history = camera_server = None
     try:
+        if args.follow_camera_fd is not None:
+            from .follow_camera import FollowCameraHistory, CameraPairServer
+            camera_history=FollowCameraHistory(config['common']['lid_topic'],live=args.live)
+            camera_server=CameraPairServer(socket.socket(fileno=args.follow_camera_fd),camera_history,args.slot_bytes)
         if args.live:
-            source=ros_messages(config,stop_event=stop,include_rgb=args.with_rgb)
+            source=ros_messages(config,stop_event=stop,include_rgb=args.with_rgb,camera_history=camera_history)
         else:source=None
         image_topics=dict(rgb='/camera/color/image_raw',camera_info='/camera/color/camera_info') if args.with_rgb else None
-        raw_source=selected_messages(args.bag,config,duration=args.duration,start=args.start,messages=source,image_topics=image_topics)
+        raw_source=selected_messages(args.bag,config,duration=args.duration,start=args.start,messages=source,
+            image_topics=image_topics,camera_history=None if args.live else camera_history)
         session=LocalizationSession(args.config,mode=args.mode,coverage=args.coverage,
             allow_local_only=True,metrics=metrics,association_ready=association_ready,latest_matching=args.live)
-        iterator=bag_observations(None,config,messages=raw_source,image_topics=image_topics)
+        iterator=bag_observations(None,config,messages=raw_source,image_topics=image_topics,camera_history=camera_history)
         for batch in iterator:
             if playback is not None:
                 playback.boundary(wire.send,stop)
@@ -144,6 +151,7 @@ def main():
             metrics.write_trace();trace_written=True
         wire.send(dict(kind='error',error=type(error).__name__+': '+str(error)));raise
     finally:
+        if camera_server is not None:camera_server.close()
         try:
             if session is not None:session.close()
         finally:

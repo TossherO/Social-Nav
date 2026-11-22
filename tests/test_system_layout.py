@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from decision.vlm.vlm_api_common import groups_schema
+from decision.vlm.t1.schema import groups_schema
 from decision.vlm.project_config import ROOT, VLM_ROOT
 from interfaces import contracts
 from perception.mapping_localization.__main__ import finalize_artifacts
@@ -31,6 +31,7 @@ class SystemLayoutTests(unittest.TestCase):
         self.assertIn('perception.mapping_localization', {c['component'] for c in report['components']})
         self.assertNotIn('perception.mapping_localization', report['pending_components'])
         self.assertIn('decision.vlm', report['pending_components'])
+        self.assertIn('decision.osnet', report['pending_components'])
         self.assertIn('decision.agent', report['pending_components'])
         self.assertIn('navigation.safety', report['pending_components'])
 
@@ -75,7 +76,7 @@ class SystemLayoutTests(unittest.TestCase):
     def test_scaffold_packages_import_without_gpu_or_runtime(self):
         modules = ['perception', 'perception.detection_tracking.training', 'perception.detection_tracking.inference',
                    'perception.detection_tracking.ros', 'perception.mapping_localization',
-                   'perception.sensors', 'decision', 'decision.agent', 'navigation',
+                   'perception.sensors', 'decision', 'decision.osnet', 'decision.agent', 'navigation',
                    'navigation.planning', 'navigation.control', 'navigation.safety', 'interfaces.contracts']
         code = ('import importlib, sys\n'
                 f'for name in {modules!r}: importlib.import_module(name)\n'

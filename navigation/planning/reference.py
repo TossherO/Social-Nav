@@ -135,7 +135,7 @@ class ReferenceRuntime:
         if req is not None:self.cancelled[req['task_id']]=req['goal_revision']
         self.invalidate('cancel')
 
-    def update(self,request,scene,state,asset=None,*,now,clock_rate=1.,follow_key=None,**unused):
+    def update(self,request,scene,state,asset=None,*,now,clock_rate=1.,follow_key=None,locked_follow_goal=False,**unused):
         self.start_evidence=None
         try:
             if not np.isfinite(clock_rate) or clock_rate<=0:raise ValueError('Invalid planning source clock rate')
@@ -166,7 +166,8 @@ class ReferenceRuntime:
                     self.failure=None;self.next_retry=-np.inf
                 self._event('follow_goal_pending',goal_revision=request['goal_revision'],
                             goal=request['goal'],as_of=scene.record['as_of'])
-            self.latest=dict(request=copy.deepcopy(request),scene=scene,asset=asset,context=context,received_mono=time.monotonic(),clock_rate=clock_rate)
+            self.latest=dict(request=copy.deepcopy(request),scene=scene,asset=asset,context=context,
+                received_mono=time.monotonic(),clock_rate=clock_rate,locked_follow_goal=locked_follow_goal)
             pose=self.geometry.pose(scene.record['localization']['world_from_lidar'])
             grid=navigation_geometry(scene,now=now,asset=asset,check_asset=True)
             start_status=footprint_status(grid,self.geometry,pose,self.planning['safety_margin_m'])
@@ -252,10 +253,11 @@ class ReferenceRuntime:
                     # compatible active path may still work up to its endpoint
                     # while a different pending follow goal is unreachable.
                     active=self.reference
-                    if result['status']=='no_path' and (self.follow_key is None or active is None or
+                    if (result['status']=='no_path' or 'follow_last_evidence_binding' in requested) and (self.follow_key is None or active is None or
                             goal_binding(active['result']['request'])==goal_binding(requested)):
                         self.reference=self.current=None
                     self.failure=dict(request_binding=fingerprint(job['request']),reason=result['reason'],
+                        goal_binding=goal_binding(job['request']),
                         as_of=job['scene'].record['as_of'],job_id=job['job_id'])
                     raise ValueError('reference_has_no_path')
                 if (job.get('reference_obstacle_version',self.obstacles.version)!=self.obstacles.version and
@@ -322,6 +324,7 @@ class ReferenceRuntime:
         latest=item['request']
         if request['goal_revision']<self.follow_revision:return False
         if goal_binding(request)==goal_binding(latest):return True
+        if item.get('locked_follow_goal'):return False
         scene,asset=item['scene'],item['asset']
         a=local_goal(request,scene,self.geometry,asset,self.planning)[:2]
         b=local_goal(latest,scene,self.geometry,asset,self.planning)[:2]

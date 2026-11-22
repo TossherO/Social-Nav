@@ -1,12 +1,6 @@
-"""In-memory T1/T3 requests with the existing source and navigation gates.
-
-The caller owns scheduling, current-scene delivery and any actual motion.
-This interface neither starts a service nor issues navigation commands.
-"""
+"""Single-flight VLM request and response handling for T1 and T3."""
 import base64
 import copy
-import hashlib
-import io
 import json
 
 from perception.environment.context import fingerprint
@@ -22,11 +16,12 @@ def _image(data):
 
 
 class OnlineDecision:
-    """One in-flight T1 or T3 decision; acceptance is bound to a current scene."""
-    def __init__(self, policy, *, deadline_s=None):
-        if policy.kind not in ('social', 'seating'):
-            raise ValueError('Only social and seating decisions are supported')
+    """Prepare, send and accept one decision against its bound observation."""
+    def __init__(self, policy, *, kind, task, deadline_s=None):
+        if policy.kind != kind:
+            raise ValueError('Expected '+kind+' policy')
         self.policy = policy
+        self.task = task
         self.gate = DecisionRequest(policy, deadline_s=deadline_s)
         self.active = None
         self.attempted = False
@@ -34,7 +29,7 @@ class OnlineDecision:
 
     def _prepare(self, scene, envelope, fields, images, *, rgb_observation_binding=None):
         settings = load_config()
-        task = settings['tasks']['groups' if self.policy.kind == 'social' else 'seating']
+        task = settings['tasks'][self.task]
         prompt = project_path(task['prompt']).read_text()
         content = []
         for index, image in enumerate(images):
@@ -54,37 +49,6 @@ class OnlineDecision:
         self.attempted = False
         self.response = None
         return result
-
-    def social(self, scene, window, images, *, now):
-        if self.policy.kind != 'social':raise ValueError('Expected social policy')
-        if not isinstance(images,(list,tuple)) or len(images)!=3 or len(window.get('images',[]))!=3:
-            raise ValueError('T1 requires three bound causal images')
-        for image,spec in zip(images,window['images']):
-            if not isinstance(image,bytes) or hashlib.sha256(image).hexdigest()!=spec.get('sha256'):
-                raise ValueError('T1 image differs from source window')
-        envelope=self.gate.begin(scene,window=window,now=now)
-        try:return self._prepare(scene,envelope,window['fields'],images)
-        except BaseException:
-            self.gate.pending=None
-            raise
-
-    def seating(self, scene, candidates, *, now, observation=None):
-        if self.policy.kind != 'seating':raise ValueError('Expected seating policy')
-        # Existing historical edge contexts are offline hypotheses, not a live
-        # source of current table geometry or collision clearance.
-        if 'context' in candidates:raise ValueError('Current seating input cannot reuse historical context')
-        from .seating.inputs import render_scene
-        image=io.BytesIO()
-        render_scene(scene,candidates,image,observation=observation)
-        fields=dict(instruction=candidates['instruction'],units=dict(position='m',yaw='rad'),
-                    frame_id=candidates['frame_id'],ego_pose=scene.record['localization']['world_from_lidar'],
-                    candidates=copy.deepcopy(candidates['candidates']))
-        envelope=self.gate.begin(scene,candidates=candidates,now=now)
-        rgb_binding=None if observation is None else observation.record['input_fingerprint']
-        try:return self._prepare(scene,envelope,fields,[image.getvalue()],rgb_observation_binding=rgb_binding)
-        except BaseException:
-            self.gate.pending=None
-            raise
 
     def _check(self, prepared):
         if (self.active is None or fingerprint(prepared)!=self.active or

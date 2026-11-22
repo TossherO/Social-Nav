@@ -31,10 +31,10 @@ class DecisionRequest:
             if sorted(mapping)!=window['fields']['v']:raise ValueError('Rendered PIDs and navigation identities differ')
         ticket=self.policy.observe(scene,pid_to_track=mapping,candidates=candidates)
         if self.policy.kind=='social':
-            from .vlm_api_common import groups_schema
+            from .t1.schema import groups_schema
             schema=groups_schema(sorted(mapping))
         else:
-            from .seating.inference import selection_schema
+            from .t3.inference import selection_schema
             schema=selection_schema(candidates)
         envelope=dict(ticket=ticket,response_schema=schema,deadline_s=ticket['stamp_s']+self.deadline,
             input_fingerprint=None if window is None else window['input_fingerprint'])

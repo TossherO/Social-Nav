@@ -222,12 +222,13 @@ class ConversationTests(unittest.TestCase):
             return next(json.loads(p['text']) for p in body['messages'][-1]['content'] if p['type']=='text'
                         and p['text'].startswith('{') and json.loads(p['text']).get('source')=='current_spatial_view')
         referenced=context(seen[0]);full=context(seen[1])
-        self.assertEqual(referenced['details_in_tool_call_id'],call.message['tool_calls'][0]['id'])
-        self.assertEqual(referenced['view']['view_id'],ModelProjection().reference('view',view_id))
+        self.assertEqual(referenced['details_in_tool'],'query_map')
+        projection=ModelProjection(self.session.model_reference_names)
+        self.assertEqual(referenced['view']['view_id'],projection.reference('view',view_id))
         self.assertNotIn('annotations',referenced['view'])
-        self.assertNotIn('details_in_tool_call_id',full)
-        self.assertEqual(full['view']['view_id'],ModelProjection().reference('view',original['view_id']))
-        self.assertEqual(full['view']['annotation_reference']['reference_map_id'],ModelProjection().reference('map',self.session.reference_map.record['reference_map_id']))
+        self.assertNotIn('details_in_tool',full)
+        self.assertEqual(full['view']['view_id'],projection.reference('view',original['view_id']))
+        self.assertEqual(full['view']['annotation_reference']['reference_map_id'],projection.reference('map',self.session.reference_map.record['reference_map_id']))
         self.assertNotIn('annotations',full['view'])
         self.assertEqual(view.record,original)
         self.assertLess(len(json.dumps(referenced)),len(json.dumps(full)))
@@ -413,6 +414,48 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(sum(p['type']=='image_url' for p in seen[1]['messages'][-1]['content']),2)
         self.assertNotIn('data:image',json.dumps(self.session.conversation.messages()))
         self.assertEqual(self.session.spatial_view.record['source_stamp_s'],self.nav.state['stamp_s'])
+
+    def test_retained_tool_alias_stays_readable_but_cannot_act_on_a_changed_map_view(self):
+        self.session.call('record_task',goals=[point_goal('elevator')])
+        query_map(self.session)
+        old = self.session.prompt()
+        old_view = self.session.spatial_view
+        old_id = old_view.record['view_id']
+        alias = ModelProjection(self.session.model_reference_names).reference('view',old_id)
+        self.assertEqual(alias,'v1')
+        call = reply('check_candidate',pose=[5.,4.,0.],view_id=alias)
+        seen = []
+
+        def handle(request):
+            seen.append(json.loads(request.content))
+            tool_call = call.message['tool_calls'][0]
+            return httpx.Response(200,text=wire([dict(tool_call,id=tool_call['id']+str(len(seen)))]))
+
+        client=self.client(handle)
+        accepted=client.decide(old,spatial_view=old_view)
+        self.assertEqual(accepted.action['arguments']['view_id'],old_id)
+        # Keep the old alias in the assistant arguments alone.
+        self.session.conversation.commit(accepted,dict(status='available'))
+        self.nav.state['stamp_s']+=.5
+        query_map(self.session)
+        current=self.session.prompt()
+        self.assertNotEqual(self.session.spatial_view.record['view_id'],old_id)
+        refused=client.decide(current,spatial_view=self.session.spatial_view)
+        self.assertIsNone(refused.action)
+        self.assertEqual(refused.argument_error['reason'],'invalid_tool_reference')
+        previous,replayed = [m for m in seen[1]['messages'] if m['role'] in ('assistant','tool')]
+        self.assertEqual(previous,accepted.message)
+        self.assertEqual(previous['tool_calls'][0]['id'],replayed['tool_call_id'])
+        state=json.loads(seen[1]['messages'][-1]['content'][0]['text'])['state']
+        self.assertEqual(state['visual_inputs']['maps']['view_id'],'v2')
+        logged = [json.loads(row[0]) for row in self.store.db.execute(
+            "SELECT value FROM events WHERE kind='api_request' ORDER BY seq")]
+        self.assertEqual(logged[0]['model_references']['v1'],['view',old_id])
+        self.assertEqual(logged[1]['model_references']['v1'],['view',old_id])
+        self.assertEqual(logged[1]['model_references']['v2'],['view',self.session.spatial_view.record['view_id']])
+        for body in seen:
+            self.assertNotIn('model_references',body)
+            self.assertNotIn(old_id,json.dumps(body))
 
 
 if __name__=='__main__':unittest.main()

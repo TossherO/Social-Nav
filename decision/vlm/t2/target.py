@@ -122,7 +122,7 @@ def annotated(observation):
     with Image.open(io.BytesIO(observation.image)) as raw:
         image = raw.convert('RGB')
     draw = ImageDraw.Draw(image)
-    from .scene_inputs import font
+    from ..scene_inputs import font
     label_font = font(max(16, round(image.width*.025)))
     for item in value['candidates']:
         draw.rectangle(item['box'], outline='cyan', width=3)

@@ -9,6 +9,7 @@ import httpx
 from PIL import Image
 
 from decision.vlm import server,vlm_api_common as common
+from decision.vlm.t1.schema import groups_schema
 
 
 def request_fixture(directory):
@@ -19,7 +20,7 @@ def request_fixture(directory):
         Image.new('RGB',(8,8),(20*i,60,90)).save(path)
         images.append(path)
     fields=dict(v=[0,1],dt=[-1,-.5,0],ts={},e=[-5,15,-10,10],o=[],d=[])
-    case=dict(paths=images,model=dict(fields=fields,response_schema=common.groups_schema(fields['v']),
+    case=dict(paths=images,model=dict(fields=fields,response_schema=groups_schema(fields['v']),
               user_prompt=json.dumps(fields,separators=(',',':'))))
     return common.make_body('Identify social groups.',case,max_tokens=128)
 

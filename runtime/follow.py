@@ -13,6 +13,8 @@ class FollowRunner:
         self.occluded_since=None
         self.last_evidence=None
         self.t2_active=False
+        self.reid_reference_id=self.reid_stamp_ns=None
+        self.reid_last_evidence=None
         self.revision_floor=0
         self.trace=deque(maxlen=30)
 
@@ -22,7 +24,7 @@ class FollowRunner:
         else:
             self.history.add(scene)
 
-    def start(self, handle, reference, scene, *, now):
+    def start(self, handle, reference, scene, *, now, visual_hold_s=None):
         if self.policy is not None:raise ValueError('follow_already_active')
         if (not isinstance(handle,dict) or not isinstance(reference,dict) or
                 handle.get('task_id')!=reference.get('task_id') or
@@ -31,7 +33,7 @@ class FollowRunner:
                 not isinstance(handle.get('call_id'),str) or not handle['call_id']):
             raise ValueError('follow_handle_reference_mismatch')
         if scene is None:raise ValueError('follow_scene_unavailable')
-        policy=TaskPolicy(handle['task_id'],'follow',self.planning,self.geometry)
+        policy=TaskPolicy(handle['task_id'],'follow',self.planning,self.geometry,occlusion_hold_s=visual_hold_s)
         policy.revision=self.revision_floor
         result=policy.start_continuous_follow(reference,scene,self.history,now=now)
         if result['operation']!='plan':raise ValueError(result['reason'])
@@ -114,7 +116,8 @@ class FollowRunner:
 
     def apply_t2(self, handle, prepared, result, window, scene, *, now, deadline_s=None):
         """Apply one bound T2 choice; caller owns scheduling and checked search motion."""
-        from decision.vlm.follow_online import selected_reference,parse_selection
+        from decision.vlm.t2.online import selected_reference
+        from decision.vlm.t2.schema import parse_selection
         from decision.vlm.project_config import load_config
         from perception.environment.context import fingerprint
         from decision.vlm.annotation.rules import digest
@@ -162,6 +165,119 @@ class FollowRunner:
                     search_binding=prepared['search_binding'],source_stamp_s=prepared['source_stamp_s'],
                     task_completed=False,executable=False)
 
+    def apply_reid(self, handle, evidence, scene, *, now):
+        """Apply local evidence through the same 3D continuity and task policy checks."""
+        from perception.environment.context import fingerprint
+        from .follow_reid import bound, checked_departure, fresh_source, search_action, SEARCH_LEASE_S, VISUAL_HOLD_S
+
+        reference_id=evidence['reference_id']
+        if (scene is None or not bound(evidence) or evidence['task']!=handle or
+                self.handle!=handle or not isinstance(reference_id,str) or self.reid_reference_id!=reference_id):
+            raise ValueError('follow_reid_task_evidence_invalid')
+        source=evidence['source'];decision=evidence['decision']
+        fresh_source(source,scene,self.history,now)
+        stamp_ns=source['rgb_stamp_ns']
+        if decision['rgb_stamp_ns']!=stamp_ns:
+            raise ValueError('follow_reid_decision_source_mismatch')
+        if self.reid_stamp_ns is not None and stamp_ns<=self.reid_stamp_ns:
+            return dict(operation='continue',reason='follow_reid_source_not_new')
+        state=decision['status'];search=evidence['search'];selected=evidence['selected']
+        loss=evidence['loss']
+        continuation=evidence['continuation']
+        if selected is not None and selected['kind']!='wait':
+            last=self.reid_last_evidence
+            if (selected['kind']!='approach' or last is None or
+                    loss['last_evidence_binding']!=last['binding'] or
+                    selected['last_evidence_binding']!=last['binding'] or
+                    not isinstance(continuation,dict) or
+                    set(continuation)!={'intent_id','kind','target','expires_s'} or
+                    not isinstance(continuation['intent_id'],str) or not continuation['intent_id'] or
+                    continuation['kind']!=selected['kind'] or continuation['target']!=selected['pose'] or
+                    not now<continuation['expires_s']<=last['stamp_s']+45.):
+                raise ValueError('follow_reid_search_intent_invalid')
+            if len(selected['pose'])!=(3 if loss.get('departure_yaw_rad') is not None else 2):
+                raise ValueError('follow_reid_search_pose_invalid')
+            if len(selected['pose'])==3 and 'continuation_id' not in selected:
+                checked_departure(loss,last,self.history)
+        elif continuation is not None:
+            raise ValueError('follow_reid_search_intent_unexpected')
+        if state in ('same','recovered'):
+            item=next((item for item in source['candidates'] if item['id']==decision['candidate_id']),None)
+            track=None if item is None else item['track']
+            if (loss['state']!='confirmed' or track is None or source['association_status']!='complete' or track['identity']!=decision['identity'] or
+                    track['lifecycle_generation']!=decision['lifecycle_generation'] or
+                    search is not None or selected is not None):
+                raise ValueError('follow_reid_person_evidence_invalid')
+            reference=dict(task_id=handle['task_id'],task_revision=handle['plan_revision'],goal_id=handle['goal_id'],
+                track=track,reid_evidence_binding=evidence['binding'],
+                **{key:source[key] for key in ('stamp_s','rgb_stamp_s','rgb_stamp_ns','clock_domain','local_identity','scene_binding')})
+            reference['reference_id']=fingerprint(reference)
+            self.history.validate(reference,scene,now=now)
+            row=next(row for row in self.history.rows if row['scene_binding']==source['scene_binding'])
+            position,velocity=row['observations'][tuple(track['identity'])]
+            if self.policy is None:
+                action=self.start(handle,reference,scene,now=now,visual_hold_s=VISUAL_HOLD_S)
+            else:
+                self.retarget(reference,scene,now=now,max_age_s=VISUAL_HOLD_S)
+                action=self.update(scene,now=now)
+            self.t2_active=True
+            if action['operation']=='plan':
+                last=dict(identity=track['identity'],lifecycle_generation=track['lifecycle_generation'],
+                    stamp_s=track['support_stamp_s'],rgb_stamp_s=source['rgb_stamp_s'],
+                    rgb_stamp_ns=stamp_ns,clock_domain=source['clock_domain'],local_identity=source['local_identity'],
+                    scene_binding=source['scene_binding'],people_fingerprint=track['people_fingerprint'],
+                    position_xy_m=position,velocity_xy_mps=velocity)
+                last['binding']=fingerprint(last)
+                self.reid_last_evidence=copy.deepcopy(last)
+        elif state=='unconfirmed':
+            if decision['reason']=='source_not_new':return dict(operation='continue',reason='follow_reid_source_not_new')
+            if loss['state']=='holding' and (self.reid_last_evidence is None or
+                    loss['last_evidence_binding']!=self.reid_last_evidence['binding'] or
+                    source['association_status']!='complete'):
+                raise ValueError('follow_reid_hold_evidence_invalid')
+            if (selected is not None and search is None or search is not None and
+                    (loss['state']!='lost' or not decision['search_eligible'] or source['association_status']!='complete')):
+                raise ValueError('follow_reid_search_evidence_invalid')
+            if search is not None:search_action(search,source,selected)
+            if selected is not None and selected['kind']=='approach':
+                valid_until=source['stamp_s']+SEARCH_LEASE_S
+                if continuation is not None:valid_until=min(valid_until,continuation['expires_s'])
+                action=dict(operation='search',candidate=copy.deepcopy(selected),
+                            search_binding=search['binding'],valid_until_s=valid_until,
+                            continuation=copy.deepcopy(continuation),reason=decision['reason'])
+            else:
+                action=dict(operation='hold' if loss['state']=='holding' else 'wait',
+                            reason=loss['reason'])
+        else:
+            raise ValueError('follow_reid_decision_invalid')
+        self.reid_stamp_ns=stamp_ns
+        return action
+
+    def hold_reid(self, request, scene, *, now):
+        """Refresh the lease for the already issued goal using fresh 3D support."""
+        from navigation.planning.inputs import scene_status
+        from .follow_reid import VISUAL_HOLD_S
+
+        last=self.reid_last_evidence
+        if self.policy is None or request is None or last is None or scene is None:
+            raise ValueError('follow_reid_no_issued_goal')
+        if self.policy.target!=tuple(last['identity']) or self.policy.tracked_generation!=last['lifecycle_generation']:
+            raise ValueError('follow_reid_issued_identity_changed')
+        limit=last['rgb_stamp_s']+VISUAL_HOLD_S
+        if not last['rgb_stamp_s']<=now<limit:
+            raise ValueError('follow_visual_confirmation_expired')
+        clock=last['clock_domain']
+        reason=scene_status(scene,now,clock,self.planning,check_navigation=False)
+        if reason:
+            raise ValueError(reason)
+        row=self.history.continue_from(last['scene_binding'],self.policy.target,
+            self.policy.tracked_generation,scene,observed_only=True)
+        valid_until=min(limit,row['stamp_s']+self.planning['max_geometry_age_s'],
+            row['tracks'][self.policy.target][2]+self.planning['people']['max_track_age_s'])
+        if now>=valid_until or now>request['valid_until_s']:
+            raise ValueError('follow_reid_issued_goal_expired')
+        return dict(request,valid_until_s=valid_until)
+
     def _translate(self, result, scene):
         if result['operation']!='plan':return result
         from navigation.planning.people import PeopleModel,stable_identity
@@ -195,5 +311,7 @@ class FollowRunner:
         if self.policy is not None:self.policy.cancel()
         self.policy=self.handle=self.reference=self.request=self.occluded_since=self.last_evidence=None
         self.t2_active=False
+        self.reid_reference_id=self.reid_stamp_ns=None
+        self.reid_last_evidence=None
         self.revision_floor=0
         self.trace.clear()

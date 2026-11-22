@@ -3,7 +3,7 @@ from collections import deque
 from types import SimpleNamespace
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -25,12 +25,13 @@ class LocalTaskTests(unittest.TestCase):
         inbox.pending=deque()
         inbox.follow_enabled=True
         from tests.test_follow_recovery import candidate_observation
-        from decision.vlm.follow_target import reference
+        from decision.vlm.t2.target import reference
         import base64
         obs=candidate_observation(10.)
         control=dict(request=None,stamp_s=10.,clock_domain=obs.record['clock_domain'],map_binding=obs.record['map_binding'])
         inbox.agent_state=SimpleNamespace(snapshot=lambda:dict(received_age_s=.1,control=control),
-            follow_candidate=lambda *_:(obs.record,base64.b64encode(obs.image).decode()))
+            follow_candidate=lambda *_:(obs.record,base64.b64encode(obs.image).decode()),
+            clear_follow_observations=Mock(), reserve_follow_observations=Mock())
         inbox.safety=SimpleNamespace(command=lambda *_:self.fail('Manual preview called the safety command channel'))
         handle=dict(task_id='mission',goal_id='follow',call_id='turn',plan_revision=1,goal_revision=1)
         ref,_,_=reference(obs,0,'红衣',task_id='mission',revision=1,goal_id='follow')
@@ -45,6 +46,8 @@ class LocalTaskTests(unittest.TestCase):
         inbox.agent_follow('finish',dict(call_id='turn'),live=False,manual=True)
         self.assertIsNone(inbox.manual_preview_snapshot())
         self.assertIsNone(inbox.agent_owner)
+        inbox.agent_state.reserve_follow_observations.assert_called_once_with(handle)
+        inbox.agent_state.clear_follow_observations.assert_called_once_with(stopped_call_id='turn')
 
     def test_current_table_scan_through_model_selection_and_path_check(self):
         scene=bundle()

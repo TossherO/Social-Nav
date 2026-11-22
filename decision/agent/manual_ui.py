@@ -510,7 +510,7 @@ class ManualWindow(QtWidgets.QMainWindow):
                 self.status=value;self.status_received=time.monotonic()
             elif event=='elevator_transient':self.show_elevator_transient(value.get('data') or {})
             elif event=='elevator_transient_clear':self.clear_elevator_transient()
-            elif event in ('replay_preparing','replay_auto_follow_started','replay_t2_failed'):
+            elif event in ('replay_preparing','replay_auto_follow_started','replay_follow_requires_selection','replay_t2_failed'):
                 self.notice.setText(value.get('instruction','回放准备中'))
             elif event=='operator_command':
                 self.pending.pop(value.get('command_id'),None)
@@ -1015,7 +1015,7 @@ def main():
     parser.add_argument('--replay',action='store_true',help='连接不执行运动的 bag 回放影子会话')
     parser.add_argument('--reuse-session',default='',help='预载已登记的历史任务')
     parser.add_argument('--auto-follow',action='store_true',help='定位就绪后自动启动历史任务的第一项跟随')
-    parser.add_argument('--auto-follow-single-person',action='store_true',help='使用当前唯一可靠关联行人跳过启动时的模型选人')
+    parser.add_argument('--auto-follow-single-person',action='store_true',help='回放画面只有一人且具备三维轨迹时直接跟随，多人时由 Agent 选人')
     args=parser.parse_args()
     if not 1<=args.duration<=86400:parser.error('duration 必须在 1 至 86400 秒之间')
     if args.session and not Path(args.session).is_file():parser.error('session 文件不存在')

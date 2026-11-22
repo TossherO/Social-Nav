@@ -133,6 +133,7 @@ class Planner:
         if type(r['goal_revision']) is not int or r['goal_revision'] < 0: raise ValueError('Invalid goal_revision')
         if r.get('target_reference') != 'base_link': raise ValueError('Goal reference must explicitly be base_link')
         mode = r['mode']
+        follow_last_position='follow_last_evidence_binding' in r
         mapped_local=False
         if mode not in ('static', 'mapped', 'local'): raise ValueError('Unknown planning mode')
         goal = np.asarray(r['goal'], dtype=float)
@@ -196,8 +197,10 @@ class Planner:
             grid,out['reference_overlay']=reference_overlay(grid,contact_grid,scene.geometry.layers['occupancy'],local_from_map,scene)
             out['reference_overlay']['retained_occupied_cells']=len(reference_obstacles)
             out['reference_search_frame']=grid.metadata['frame_id']
+            if follow_last_position and out['reference_overlay']['status']!='valid':
+                out.update(status='unavailable',reason='follow_last_position_projection_unavailable');return
         measured_grid=grid
-        if mode in ('static','mapped'):
+        if mode in ('static','mapped') and not follow_last_position:
             grid=reference_grid(grid,geometry_only=True)
         manual_free_cells = getattr(asset, 'manual_free_cells', None) if mode in ('static','mapped') else 0
         if manual_free_cells is None:
@@ -386,7 +389,7 @@ class Planner:
             out['timing_ms']['local_check'] = (time.perf_counter()-check_begin)*1000
             out['global_reference_only'] = not out['current_path_valid']
             local_settings=self.config['local_replanning']
-            if (local_settings['enabled'] and out['local_start_footprint']=='free'
+            if (local_settings['enabled'] and not follow_last_position and out['local_start_footprint']=='free'
                     and local_check['status']!='free' and local_check['valid_distance_m']<local_settings['lookahead_m']):
                 began=time.perf_counter()
                 remaining=local_settings['lookahead_m'];travel=0.;target=None

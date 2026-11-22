@@ -104,15 +104,20 @@ class PersonObjectTests(unittest.TestCase):
             frame_id='odom',health='valid',clock_domain='synthetic',localization_binding=dict(session_id='test',generation=0,frame_id='odom'),
             tracks=[dict(track_id='a',box=[1.5,0,0,1.2,1.2,1.8,0,.99],state='observed',confirmed=True,hits=4,last_observed_stamp_s=10.)])
         cloud=np.array([[1.45,-.05,-.5],[1.5,0,0],[1.55,.05,.3],[1.95,-.05,-.5],[1.95,0,0],[1.95,.05,.3]])
-        n=int(cfg['window_m']/cfg['resolution'])
-        with patch.object(model,'_plane_ground',return_value=(np.full((n,n),-1.,np.float32),np.ones((n,n),bool),
-                dict(status='tracked',plane_world=[0,0,-1.]))):
-            raw=model.update(cloud,np.eye(4),10.,('test',0),frame='odom',people=data,clock_domain='synthetic')
+        x,y=np.meshgrid(np.linspace(-3,3,25),np.linspace(-3,3,25))
+        floor=np.c_[x.ravel(),y.ravel(),np.full(x.size,-1.)]
+        for steps in range(cfg['ground_tracking']['min_observations'],0,-1):
+            model.update(floor,np.eye(4),10.-steps*.1,('test',0))
+        raw=model.update(np.vstack((cloud,floor)),np.eye(4),10.,('test',0),people=data,clock_domain='synthetic')
+        self.assertEqual(raw.metadata['ground_tracking']['status'],'tracked')
+        self.assertFalse(raw.layers['ground_conflict'].any())
         xy=np.floor((cloud[:,:2]-raw.metadata['origin_xy'])/cfg['resolution']).astype(int)
         self.assertFalse((raw.layers['occupancy'][xy[:3,1],xy[:3,0]]==100).any())
         self.assertTrue((raw.layers['occupancy'][xy[3:,1],xy[3:,0]]==100).any())
         self.assertEqual(len(observed_objects(raw)),1)
-        np.testing.assert_equal(model.support_observation['person_owner'],[0,0,0,-1,-1,-1])
+        owners=model.support_observation['person_owner']
+        np.testing.assert_equal(owners[:len(cloud)],[0,0,0,-1,-1,-1])
+        self.assertTrue((owners[len(cloud):]==-1).all())
 
 
 if __name__=='__main__':unittest.main()

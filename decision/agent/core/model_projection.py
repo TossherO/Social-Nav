@@ -1,123 +1,213 @@
-"""Compact model-facing identifiers without changing source records or validation."""
+"""Model-facing references for observations, maps, and dialogue."""
 import copy
 import hashlib
 import json
 import re
+from threading import Lock
 
+from ..tools.framework import unique_fields
 from .store import encode
 
 
-REFERENCE_FIELDS = {
-    'view_id': 'view', 'observation_id': 'obs', 'keyframe_id': 'key',
-    'candidate_binding': 'candidates', 'reference_id': 'ref',
-    'reference_map_id': 'map',
+ACTION_REFERENCES = {
+    'view_id': 'view', 'observation_id': 'obs', 'keyframe_id': 'key', 'reference_id': 'ref',
 }
+REFERENCE_SOURCES = {
+    'view_id': 'visual_inputs.maps', 'observation_id': 'visual_inputs.rgb',
+    'keyframe_id': 'keyframes', 'reference_id': 'follow_reference',
+}
+REFERENCE_FIELDS = dict(ACTION_REFERENCES, reference_map_id='map')
+REFERENCE_PREFIXES = dict(view='v', obs='o', key='k', ref='r', map='m', track='p')
 LIST_REFERENCES = {'visible_keyframe_ids': 'key', 'historical_keyframe_ids': 'key'}
-OMIT_FIELDS = {
+AUDIT_FIELDS = {
     'task_id', 'call_id', 'session_id', 'local_identity', 'association_session',
-    'catalog_fingerprint', 'task_goal_binding', 'map_id', 'snapshot_id', 'sha256', 'evidence_id',
+    'map_id', 'snapshot_id', 'sha256', 'evidence_id', 'selection_id', 'binding',
 }
-REFERENCE_TOKEN = re.compile(r'^(?:view|obs|key|candidates|ref|map)-[0-9a-f]{16}$')
+AUDIT_SUFFIXES = ('_sha256', '_fingerprint', '_digest', '_session_id', '_task_id', '_call_id', '_map_id')
+REJECTED_ARGUMENTS = {'invalid_tool_arguments', 'invalid_tool_reference'}
+OPAQUE_TEXT = re.compile(
+    r'(?:scene:)?[0-9a-f]{24,}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}',
+    re.IGNORECASE,
+)
+
+
+def reference_kind(key):
+    if key in REFERENCE_FIELDS:
+        return REFERENCE_FIELDS[key]
+    for suffix, kind in ACTION_REFERENCES.items():
+        if key.endswith('_'+suffix):
+            return kind
+    return None
+
+
+def object_from_text(text):
+    try:
+        value = json.loads(text, object_pairs_hook=unique_fields)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+class ModelReferenceNames:
+    """Reserve short names for the lifetime of the Agent session."""
+
+    def __init__(self):
+        self.names = {kind: {} for kind in REFERENCE_PREFIXES}
+        self.originals = {}
+        self.lock = Lock()
+
+    def name(self, kind, original):
+        with self.lock:
+            names = self.names[kind]
+            if original not in names:
+                token = REFERENCE_PREFIXES[kind]+str(len(names)+1)
+                names[original] = token
+                self.originals[token] = (kind, original)
+            return names[original]
+
+    def lookup(self, token):
+        with self.lock:
+            return self.originals.get(token)
 
 
 class ModelProjection:
-    """Per-request reversible references; no prefix matching or implicit fallback."""
-    def __init__(self):
-        self.references = {}
+    """Stable display names and a separate allowlist of current tool inputs."""
 
-    def reference(self, kind, value, *, preserve_short=False):
+    def __init__(self, names=None):
+        self.names = names if names is not None else ModelReferenceNames()
+        self.references = {}
+        self.allowed = set()
+
+    def reference(self, kind, value):
         if not isinstance(value, str) or not value:
             return value
-        if preserve_short and REFERENCE_TOKEN.fullmatch(value):
-            return value
-        token = kind+'-'+hashlib.sha256(value.encode('utf-8')).hexdigest()[:16]
-        old = self.references.setdefault(token, (kind, value))
-        if old != (kind, value):
-            raise ValueError('Model reference collision')
+        token = self.names.name(kind, value)
+        self.references[token] = (kind, value)
         return token
 
-    def project(self, value, path=(), *, preserve_short=False):
-        if isinstance(value, dict):
-            result = {}
-            for key, item in value.items():
-                if key == 'last_completion' and isinstance(item,list) and all(isinstance(p,dict) for p in item):
-                    # Full measurements for the current stage are in completion_evidence.
-                    item = [{field: proof[field] for field in ('goal_id','stamp_s','scope','source','stopped')
-                             if field in proof} for proof in item]
-                if (key in OMIT_FIELDS or key.endswith(('_sha256','_fingerprint')) or
-                        key.endswith('_binding') and key != 'candidate_binding' and not isinstance(item,dict)):
-                    continue
-                if key == 'binding':
-                    if path and path[-1] in ('follow_candidates', 'candidate_set'):
-                        result[key] = self.reference('candidates', item, preserve_short=preserve_short)
-                    continue
-                if key in REFERENCE_FIELDS:
-                    result[key] = self.reference(REFERENCE_FIELDS[key], item, preserve_short=preserve_short)
-                elif key.endswith('_view_id'):
-                    result[key] = self.reference('view', item, preserve_short=preserve_short)
-                elif key.endswith('_observation_id'):
-                    result[key] = self.reference('obs', item, preserve_short=preserve_short)
-                elif key.endswith('_reference_id'):
-                    result[key] = self.reference('ref', item, preserve_short=preserve_short)
-                elif key in LIST_REFERENCES and isinstance(item, list):
-                    result[key] = [self.reference(LIST_REFERENCES[key], entry, preserve_short=preserve_short) for entry in item]
-                else:
-                    result[key] = self.project(item, path+(key,),preserve_short=preserve_short)
-            return result
+    def allow(self, state):
+        inputs = state['visual_inputs']
+        sources = [
+            ('view', (inputs.get('maps') or {}).get('view_id')),
+            ('obs', (inputs.get('rgb') or {}).get('observation_id')),
+            ('ref', (state.get('follow_reference') or {}).get('reference_id')),
+        ]
+        sources.extend(('key', item['keyframe_id']) for item in state.get('keyframes', ()))
+        for kind, original in sources:
+            if original:
+                self.allowed.add(self.reference(kind, original))
+
+    def project(self, value, path=()):
         if isinstance(value, list):
-            return [self.project(item, path,preserve_short=preserve_short) for item in value]
-        return value
+            return [self.project(item, path) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result = {}
+        for key, item in value.items():
+            kind = reference_kind(key)
+            if kind:
+                result[key] = self.reference(kind, item)
+            elif key in LIST_REFERENCES and isinstance(item, list):
+                result[key] = [self.reference(LIST_REFERENCES[key], entry) for entry in item]
+            elif (key in AUDIT_FIELDS or key.endswith(AUDIT_SUFFIXES) or
+                    key.endswith('_binding') and not isinstance(item, dict)):
+                continue
+            elif isinstance(item, (tuple, list)) and (
+                    key == 'target_identity' or key == 'identity' and path[-1:] == ('track',)):
+                result[key] = self.reference('track', encode(item))
+            elif key == 'last_completion' and isinstance(item, list) and all(isinstance(p, dict) for p in item):
+                # The current stage's measurement still appears in completion_evidence.
+                result[key] = [{field: proof[field] for field in ('goal_id', 'stamp_s', 'scope', 'source', 'stopped')
+                                if field in proof} for proof in item]
+            elif key == 'detail' and value.get('reason') in REJECTED_ARGUMENTS and isinstance(item, str):
+                result[key] = OPAQUE_TEXT.sub('[internal ID]', item)
+            else:
+                result[key] = self.project(item, path+(key,))
+        return result
+
+    def remember_historical_alias(self, kind, token):
+        if isinstance(token, str):
+            source = self.names.lookup(token)
+            if source is not None and source[0] == kind:
+                self.references[token] = source
+
+    def historical_reference(self, kind, value, originals):
+        if not isinstance(value, str):
+            return value
+        if (kind, value) in originals:
+            return originals[kind, value]
+        if re.fullmatch(re.escape(kind)+r'-[0-9a-f]{16}', value):
+            # Map a legacy alias only when its full source is known in this request.
+            matches = [name for (source_kind, source), name in originals.items() if source_kind == kind and
+                       kind+'-'+hashlib.sha256(source.encode('utf-8')).hexdigest()[:16] == value]
+            return matches[0] if len(matches) == 1 else value
+        if re.fullmatch(REFERENCE_PREFIXES[kind]+r'[1-9][0-9]*', value):
+            # The assistant already copied this alias from an earlier request.
+            self.remember_historical_alias(kind, value)
+            return value
+        return self.reference(kind, value)
 
     def messages(self, messages, *, protected_indices=()):
         material = copy.deepcopy(messages)
-        for index,message in enumerate(material):
-            role=message.get('role')
-            def text(value):
-                if not isinstance(value,str):return value
-                if index in protected_indices or role=='assistant':return value
-                try: parsed=json.loads(value)
-                except ValueError:return value
-                if not isinstance(parsed,dict):return value
-                # User instructions are not program-generated context.
-                if role=='user' and 'source' not in parsed:return value
-                return encode(self.project(parsed))
-            content=message.get('content')
-            if isinstance(content,str):message['content']=text(content)
-            elif isinstance(content,list):
-                for part in content:
-                    if part.get('type')=='text':part['text']=text(part.get('text'))
-            for call in message.get('tool_calls') or []:
-                next_message=material[index+1] if index+1<len(material) else {}
-                if next_message.get('role')=='tool' and next_message.get('tool_call_id')==call['id']:
-                    try:feedback=json.loads(next_message['content'])
-                    except (TypeError,ValueError):feedback=None
-                    if isinstance(feedback,dict) and feedback.get('reason') in ('invalid_tool_arguments','invalid_tool_reference'):
-                        continue
-                function=call.get('function') or {}
-                arguments=function.get('arguments')
-                if isinstance(arguments,str):
-                    try: parsed=json.loads(arguments)
-                    except ValueError:continue
-                    if isinstance(parsed,dict):
-                        projected=self.project(parsed,preserve_short=True)
-                        if projected!=parsed:function['arguments']=encode(projected)
-        # Image labels contain a view ID as plain text rather than structured JSON.
-        originals={original:token for token,(_,original) in self.references.items()}
-        for index,message in enumerate(material):
-            if index in protected_indices:continue
-            if isinstance(message.get('content'),list):
+        rejected = set()
+        for index, message in enumerate(material):
+            role = message.get('role')
+            if index in protected_indices or role == 'assistant':
+                continue
+            content = message.get('content')
+            parts = content if isinstance(content, list) else [dict(type='text', text=content)]
+            for part in parts:
+                if part.get('type') != 'text':
+                    continue
+                parsed = object_from_text(part.get('text'))
+                if parsed is None or role == 'user' and 'source' not in parsed:
+                    continue
+                if role == 'tool' and parsed.get('reason') in REJECTED_ARGUMENTS:
+                    rejected.add(message['tool_call_id'])
+                part['text'] = encode(self.project(parsed))
+            if isinstance(content, str):
+                message['content'] = parts[0]['text']
+
+        originals = {record: token for token, record in self.references.items()}
+        for index, message in enumerate(material):
+            if index in protected_indices:
+                continue
+            for call in message.get('tool_calls') or ():
+                function = call['function']
+                arguments = function['arguments']
+                parsed = object_from_text(arguments)
+                if call['id'] in rejected:
+                    if parsed is not None:
+                        for key, kind in ACTION_REFERENCES.items():
+                            self.remember_historical_alias(kind, parsed.get(key))
+                    function['arguments'] = OPAQUE_TEXT.sub('[internal ID]', arguments)
+                    continue
+                if parsed is None:
+                    continue
+                projected = parsed.copy()
+                for key, kind in ACTION_REFERENCES.items():
+                    if key in parsed:
+                        projected[key] = self.historical_reference(kind, parsed[key], originals)
+                if projected != parsed:
+                    function['arguments'] = encode(projected)
+            # Current map captions carry the same identity as their JSON metadata.
+            if isinstance(message.get('content'), list):
                 for part in message['content']:
-                    if part.get('type')=='text' and isinstance(part.get('text'),str):
-                        for original,token in originals.items():
-                            part['text']=part['text'].replace('view_id='+original,'view_id='+token)
+                    if part.get('type') != 'text' or not isinstance(part.get('text'), str):
+                        continue
+                    label, separator, raw_view = part['text'].partition(' | view_id=')
+                    alias = originals.get(('view', raw_view))
+                    if separator and alias:
+                        part['text'] = label+separator+alias
         return material
 
     def resolve_action(self, action):
-        result=copy.deepcopy(action)
-        for key,kind in REFERENCE_FIELDS.items():
-            if key not in result['arguments']:continue
-            token=result['arguments'][key]
-            if not isinstance(token,str) or token not in self.references or self.references[token][0]!=kind:
-                raise ValueError(f'{key}: use the {kind} reference from the current request')
-            result['arguments'][key]=self.references[token][1]
+        result = copy.deepcopy(action)
+        for key, kind in ACTION_REFERENCES.items():
+            if key not in result['arguments']:
+                continue
+            token = result['arguments'][key]
+            if not isinstance(token, str) or token not in self.allowed or self.references[token][0] != kind:
+                raise ValueError(f'{key}: use the reference from {REFERENCE_SOURCES[key]} in the current request')
+            result['arguments'][key] = self.references[token][1]
         return result

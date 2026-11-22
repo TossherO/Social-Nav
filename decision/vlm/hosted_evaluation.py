@@ -16,7 +16,8 @@ import httpx
 from . import vlm_api_common as common
 from .annotation.rules import digest
 from .project_config import ROOT
-from .seating.inference import validate_selection
+from .t1.schema import validate_groups
+from .t3.inference import validate_selection
 from decision.agent.core.model import Model
 from decision.agent.core.store import Budget
 
@@ -76,7 +77,7 @@ def prepare_case(batch,case,history=None):
 
 def validate_response(task,value,item,body):
     fields=json.loads(body['messages'][1]['content'][-1]['text'])
-    if task=='groups':common.validate_groups(value,item['fields']['v'],item['response_schema'])
+    if task=='groups':validate_groups(value,item['fields']['v'],item['response_schema'])
     elif task=='seating':validate_selection(value,item['candidate_set'])
     else:raise ValueError('Unsupported task')
 

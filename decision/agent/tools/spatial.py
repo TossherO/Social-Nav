@@ -245,6 +245,37 @@ def semantic_label_layout(entries, font, frame, ratio):
     return result
 
 
+def draw_heading(canvas, center, yaw, length, ratio, color):
+    """Draw a screen-sized origin marker and a forward arrow at the same pose."""
+    direction = np.array([math.cos(yaw), -math.sin(yaw)])
+    side = np.array([-direction[1], direction[0]])
+    origin = np.array(center)
+    tip = origin + length * direction
+    neck = tip - 6 * ratio * direction
+    stem = 1.35 * ratio * side
+    head = 4 * ratio * side
+    arrow = np.array([origin + stem, neck + stem, neck + head, tip, neck - head, neck - stem, origin - stem])
+    # Supersample this small patch so diagonals stay crisp at map resolution.
+    padding = math.ceil(5 * ratio) + 3
+    low = np.floor(arrow.min(axis=0)).astype(int) - padding
+    high = np.ceil(arrow.max(axis=0)).astype(int) + padding
+    width, height = high - low
+    factor = 4
+    overlay = Image.new('RGBA',(width*factor,height*factor))
+    draw = ImageDraw.Draw(overlay)
+    outline = [tuple(point) for point in (arrow-low)*factor]
+    draw.line([*outline,outline[0]],fill='#ffffff',width=max(1,round(2*ratio*factor)),joint='curve')
+    draw.polygon(outline,fill=color)
+    x, y = (origin-low)*factor
+    radius = 3.2 * ratio
+    white_border = (radius+.8*ratio)*factor
+    draw.ellipse((x-white_border,y-white_border,x+white_border,y+white_border),fill='#ffffff')
+    radius *= factor
+    draw.ellipse((x-radius,y-radius,x+radius,y+radius),fill='#ffffff',outline=color,width=max(1,round(1.2*ratio*factor)))
+    overlay = overlay.resize((width,height),Image.Resampling.LANCZOS)
+    canvas.paste(overlay,tuple(low),overlay)
+
+
 def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_local=None, tracks=(), geometry=None,
            size=(896,768), detailed=False, trajectory=(), local_view=False, sensors=None, static_crop=False,
            candidate_preview=None, route_preview=None, compact=False, max_edge=1024):
@@ -322,7 +353,7 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
             cx,cy = pixel(origin)
             draw.ellipse((cx-3*ratio,cy-3*ratio,cx+3*ratio,cy+3*ratio),fill='#7848bf')
     occupied_labels = []
-    def label(point,text,color,below=False):
+    def label(point,text,color,below=False,marker_bounds=None):
         x,y = pixel(point)
         if not (left<=x<=left+w and top<=y<=top+h):
             return
@@ -333,6 +364,13 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
             size = draw.textbbox((0,0),text,font=label_font)
             tw,th = size[2]-size[0],size[3]-size[1]
         candidates = [(x-35*ratio if below else x+10*ratio,y+12*ratio if below else y-23*ratio)]
+        if marker_bounds is not None:
+            x_low,y_low,x_high,y_high = marker_bounds
+            label_y = y-(size[1]+size[3])/2
+            horizontal = [(x_high+7*ratio,label_y),(x_low-tw-7*ratio,label_y)]
+            vertical = [(x-tw/2,y_high+7*ratio-size[1]),(x-tw/2,y_low-7*ratio-size[3])]
+            candidates = [*horizontal,*vertical] if local_view else [*vertical,*horizontal]
+        blocked = occupied_labels if marker_bounds is None else [*occupied_labels,marker_bounds]
         for step in (1,2,3):
             distance = step*(th+8*ratio)
             candidates += [(x+10*ratio,y-distance),(x+10*ratio,y+distance),
@@ -342,10 +380,10 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
             ty = min(max(ty,top+2-size[1]),top+h-size[3]-3)
             box = draw.textbbox((tx,ty),text,font=label_font)
             if not any(box[0]<old[2]+4 and box[2]>old[0]-4 and box[1]<old[3]+4 and box[3]>old[1]-4
-                       for old in occupied_labels):
+                       for old in blocked):
                 break
         occupied_labels.append(box)
-        if choice>0:
+        if choice>0 and marker_bounds is None:
             draw.line([(x,y),(max(box[0],min(x,box[2])),max(box[1],min(y,box[3])))],fill=color,width=max(1,round(ratio)))
         draw.text((tx,ty),text,fill=color,font=label_font,stroke_width=1,stroke_fill='#d4d8d9')
     def title(item):
@@ -390,18 +428,23 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
             r = .3*scale
             draw.ellipse((x-r,y-r,x+r,y+r),outline='#dd4168',width=3)
             label(point,'T'+str(track['track_id']),'#ac2149')
-    if pose is not None:
-        x,y = pixel(pose)
+    def draw_pose_marker(marker_pose, color, title, text_color):
+        center = pixel(marker_pose)
+        # The footprint uses map scale. The arrow is a direction symbol.
+        length = min(52*ratio,max(16*ratio,.6*scale)) if local_view else 16*ratio
+        tip = np.array(center) + length*np.array([math.cos(marker_pose[2]), -math.sin(marker_pose[2])])
+        marker = [center,tip]
         if geometry is not None:
-            draw.line([pixel(p) for p in [*geometry.polygon(pose),geometry.polygon(pose)[0]]],fill='#f08b19',width=3)
-        draw.ellipse((x-7*ratio,y-7*ratio,x+7*ratio,y+7*ratio),fill='#ed8819')
-        direction = np.array([math.cos(pose[2]),-math.sin(pose[2])])
-        tip = np.array([x,y])+max(.6*scale,20*ratio)*direction
-        draw.line([(x,y),tuple(tip)],fill='#cc6600',width=max(2,round(4*ratio)))
-        rear = tip-8*ratio*direction
-        side = 4*ratio*np.array([-direction[1],direction[0]])
-        draw.polygon([tuple(tip),tuple(rear+side),tuple(rear-side)],fill='#cc6600')
-        label(pose,'ROBOT','#ad5200',below=math.sin(pose[2])>=0)
+            polygon = [pixel(p) for p in geometry.polygon(marker_pose)]
+            draw.line([*polygon,polygon[0]],fill=color,width=max(1,round((2 if local_view else 1)*ratio)))
+            marker.extend(polygon)
+        draw_heading(canvas,center,marker_pose[2],length,ratio,color)
+        low = np.min(marker,axis=0)-4*ratio
+        high = np.max(marker,axis=0)+4*ratio
+        label(marker_pose,title,text_color,marker_bounds=(*low,*high))
+
+    if pose is not None:
+        draw_pose_marker(pose,'#d76b0b','ROBOT','#944600')
     if local_view and candidate_preview is not None:
         candidate = candidate_preview['pose']
         camera_xy = candidate_preview.get('camera_xy_m')
@@ -412,18 +455,13 @@ def render(catalog, global_grid, bounds, pose, *, local_grid=None, map_from_loca
                     draw.line([pixel(camera_xy),pixel(target)],fill='#b427b5',width=max(1,round(ratio)))
             cx,cy = pixel(camera_xy)
             draw.ellipse((cx-3*ratio,cy-3*ratio,cx+3*ratio,cy+3*ratio),fill='#b427b5')
-        if geometry is not None and len(candidate)==3:
-            polygon=geometry.polygon(candidate)
-            draw.line([pixel(p) for p in [*polygon,polygon[0]]],fill='#b427b5',width=max(2,round(3*ratio)))
-        x,y=pixel(candidate)
         if len(candidate)==3:
-            direction=np.array([math.cos(candidate[2]),-math.sin(candidate[2])])
-            tip=np.array([x,y])+max(.6*scale,20*ratio)*direction
-            draw.line([(x,y),tuple(tip)],fill='#b427b5',width=max(2,round(3*ratio)))
+            draw_pose_marker(candidate,'#b427b5','CANDIDATE','#8c168e')
         else:
+            x,y=pixel(candidate)
             r=4*ratio
             draw.ellipse((x-r,y-r,x+r,y+r),fill='#b427b5')
-        label(candidate,'CANDIDATE','#8c168e',below=len(candidate)==2 or math.sin(candidate[2])>=0)
+            label(candidate,'CANDIDATE','#8c168e',below=True)
     if local_view and route_preview is not None:
         points=route_preview['waypoints']
         diagnostics=route_preview['diagnostics']

@@ -214,15 +214,18 @@ class FollowDecisionWorkerTests(unittest.TestCase):
         finally:worker.close()
 
     def test_outer_agent_receives_same_t2_candidate_and_returns_to_ordinary_rgb_after_stop(self):
-        from decision.agent.adapters.runtime import follow_observation
+        from decision.agent.adapters.runtime import FollowAgentFrame
         from runtime.command import AgentState
         state=AgentState()
         state.control=dict(clock_domain='synthetic',stamp_s=11.2)
         state.publish_observation({'source':'ordinary'},b'ordinary')
+        state.reserve_follow_observations(self.handle)
         state.publish_follow(dict(status='starting',handle=self.handle))
+        frames=[]
         def publish(handle,scene,pixels,association,camera_info):
-            frame=follow_observation(scene,pixels,association,None,camera_info)
-            state.publish_observation(frame.record,frame.image,follow_handle=handle)
+            frame=FollowAgentFrame(scene,pixels,association,None,camera_info)
+            frames.append(frame)
+            state.offer_follow_frame(frame,handle)
         worker=FollowDecisionWorker(search,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),
                                     inference=lambda req:req.infer(client_factory=factory('P0')),publish_agent_frame=publish)
         try:
@@ -234,11 +237,13 @@ class FollowDecisionWorkerTests(unittest.TestCase):
                 assoc['result']['tracks']['a/g7']['detection_index']=0
                 worker.submit(row,pixels,association=assoc,scene=scene,image_metadata=None)
             self.assertEqual(self.wait_result(worker)['result']['choice']['kind'],'person')
+            self.assertEqual(state.snapshot()['observation'],{'source':'ordinary'})
+            self.assertIsNone(frames[-1].encoded)
             current=state.snapshot(with_image=True)['observation']
             self.assertEqual(current['follow_candidates']['candidates'][0]['track']['identity'],['tracker_session',7,'a'])
             self.assertEqual(current['follow_candidates']['rgb_stamp_ns'],current['rgb']['stamp_ns'])
             state.publish_follow(dict(status='stopped',handle=self.handle))
-            state.publish_observation(current,b'late',follow_handle=self.handle)
+            state.offer_follow_frame(frames[-1],self.handle)
             self.assertEqual(state.snapshot()['observation'],{'source':'ordinary'})
         finally:worker.close()
 

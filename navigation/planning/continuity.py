@@ -31,6 +31,8 @@ def goal_binding(request):
     value['goal_behavior']=request.get('goal_behavior','pass_through')
     value['completion_policy']=request.get('completion_policy','goal')
     if 'search_bounds' in request:value['search_bounds']=request['search_bounds']
+    if 'follow_last_evidence_binding' in request:
+        value['follow_last_evidence_binding']=request['follow_last_evidence_binding']
     return fingerprint(value)
 
 

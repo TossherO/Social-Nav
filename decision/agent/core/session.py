@@ -1,6 +1,7 @@
 """One task record, tool dispatch, user events and model context."""
 import copy
 import math
+from time import perf_counter
 import uuid
 from .memory import EvidenceMemory
 from .tasks import TaskGoals, goal_requires_heading, next_unfinished_goal, user_quoted
@@ -10,7 +11,9 @@ from .trajectory import Trajectory
 from .monitor import TaskMonitor
 from .completion import stage_evidence
 from .context import robot_context
+from .model_projection import ModelReferenceNames
 from .store import encode
+from ..adapters.shadow import observation_rgb_key
 from ..tools.framework import FOLLOW_RESTART_TOOLS, TOOL_SPECS, follow_supervision_active, validate_call
 from ..tools.navigation import NavigationSkill, spatial_context
 from ..tools.spatial import SpatialView, ReferenceMap, spatial_source_binding, layer_binding
@@ -22,6 +25,7 @@ TERMINAL = {'succeeded', 'partial', 'failed', 'cancelled'}
 class AgentSession:
     def __init__(self, instruction, catalog, navigation, store, *, use_memory=True, floor_catalogs=None):
         self.store, self.navigation = store, navigation
+        self.model_reference_names = ModelReferenceNames()
         self.elevator = None
         self.memory = EvidenceMemory() if use_memory else None
         self.observation = None
@@ -237,7 +241,7 @@ class AgentSession:
         return (rgb.get('status') == 'valid' and observation.record['clock_domain'] == state.get('clock_domain') and
                 type(stamp) in (int, float) and type(now) in (int, float) and 0 <= now-stamp)
 
-    def revalidate_spatial(self, call, context):
+    def revalidate_spatial(self, call, context, *, _timing=None):
         """Apply geometry tools to a fresh view, retaining the model's original view ID."""
         import numpy as np
         tool, args = call['tool'], call['arguments']
@@ -284,7 +288,7 @@ class AgentSession:
         self.store.event(event+'_revalidation',audit)
         self._revalidated_view=(audit['model_view_id'],audit['checked_view_id'])
         try:
-            result=self.call(tool,_context=context,**args)
+            result=self.call(tool,_context=context,_timing=_timing,**args)
         finally:
             self._revalidated_view=None
         result['revalidation']=audit
@@ -294,7 +298,16 @@ class AgentSession:
     revalidate_route = revalidate_spatial
     revalidate_candidate = revalidate_spatial
 
-    def call(self, tool_name, *, _context=None, **arguments):
+    def _invoke_tool(self, tool_name, arguments, timing):
+        if timing is not None:
+            timing['tool_invoked_s'] = perf_counter()
+        try:
+            return self.registry[tool_name](**arguments)
+        finally:
+            if timing is not None:
+                timing['tool_returned_s'] = perf_counter()
+
+    def call(self, tool_name, *, _context=None, _timing=None, **arguments):
         call = validate_call(dict(tool=tool_name, arguments=arguments))
         if self.state['status'] != 'ready':
             raise ValueError('Task is not ready for another model action')
@@ -309,7 +322,7 @@ class AgentSession:
                 return dict(status='refused',reason='ride_observation_superseded')
             self._applying_context=_context
             try:
-                return self.registry[tool_name](**arguments)
+                return self._invoke_tool(tool_name,arguments,_timing)
             except (OSError,EOFError,ValueError,KeyError) as error:
                 return dict(status='refused',reason=str(error)[:240])
             finally:self._applying_context=None
@@ -321,7 +334,7 @@ class AgentSession:
                 value=dict(status='refused',reason='local_follow_owns_recovery',
                            follow_phase=self.skill.follow_phase, guidance='继续监控同一次跟随。用 wait_for_event 等待更新。')
             else:
-                value = self.registry[tool_name](**arguments)
+                value = self._invoke_tool(tool_name,arguments,_timing)
         except (OSError, EOFError, ValueError, KeyError) as error:
             value = dict(status='unavailable', error_type=type(error).__name__,
                          reason=str(error)[:240] if isinstance(error, ValueError) else type(error).__name__,
@@ -689,7 +702,7 @@ class AgentSession:
                 context.get('input_view_binding')!=fingerprint(observation.prompt()) or
                 'follow_candidates' not in observation.record):
             return dict(status='refused',reason='current_model_observation_with_follow_candidates_required')
-        from decision.vlm.follow_target import reference
+        from decision.vlm.t2.target import reference
         record,image,crop=reference(observation,candidate_id,target_description,
             task_id=self.state['task_id'],revision=self.state['revision'],goal_id=goal_id)
         self.store.follow_reference(record,image,crop)
@@ -767,9 +780,10 @@ class AgentSession:
         if stage_type!='follow' or self.skill.record['goal_id']!=goal_id:
             return dict(status='refused',reason='current_stage_is_not_active_local_task')
         context=self._applying_context or {};observation=self.observation
+        state=self.navigation.snapshot()
         if (observation is None or observation_id!=observation.record['observation_id'] or
                 context.get('observation_id')!=observation_id or
-                not self._current_rgb_context(context,observation,self.navigation.snapshot()) or
+                not self._current_rgb_context(context,observation,state) or
                 not isinstance(evidence,str) or not evidence.strip()):
             return dict(status='refused',reason='current_rgb_and_stage_evidence_required')
         target=self._observed_follow_target(context.get('follow_target_identity'),context.get('follow_target_generation'))
@@ -778,7 +792,7 @@ class AgentSession:
         semantic=dict(**target,source_stamp_s=observation.record['rgb']['stamp_s'],
             observation_binding=observation.record['input_fingerprint'],evidence=evidence.strip(),
             source='agent_visual_judgement_not_independent_ground_truth',
-            observation_age_s=self.navigation.snapshot()['stamp_s']-observation.record['rgb']['stamp_s'],
+            observation_age_s=state['stamp_s']-observation.record['rgb']['stamp_s'],
             current_scene_verified=False)
         return self.skill.finish_follow(semantic)
 
@@ -983,7 +997,7 @@ class AgentSession:
             return dict(status='refused',reason='conditional_review_or_observation_unavailable')
         evidence=evidence.strip()
         self.monitor.note_review(goal_id,result,evidence,source_stamp_s=context.get('source_stamp_s'))
-        self.monitor.await_next_observation(context.get('observation_binding'))
+        self.monitor.await_next_observation(observation_rgb_key(self.observation.record))
         self.state.update(status='waiting_monitor',waiting_binding=None)
         self._save('monitor_review',dict(goal_id=goal_id,result=result,evidence=evidence,
                                          source_stamp_s=context.get('source_stamp_s')))
@@ -998,6 +1012,8 @@ class AgentSession:
         return result
 
     def _observation_key(self):
+        if hasattr(self.navigation, 'observation_key'):
+            return self.navigation.observation_key()
         if hasattr(self.navigation, 'current'):
             r = self.navigation.current.record
         elif hasattr(self.navigation, 'value'):
@@ -1009,24 +1025,25 @@ class AgentSession:
 
     def _monitor_observation_key(self):
         """Use only a current RGB observation for the next conditional review."""
-        if hasattr(self.navigation,'value'):
-            value=self.navigation.value
-            r=value.get('observation') or {}
-            image_available=value.get('image_base64') is not None
+        if hasattr(self.navigation,'observation_record'):
+            r=self.navigation.observation_record()
+        elif hasattr(self.navigation,'current'):
+            r=self.navigation.current.record
         elif hasattr(self.navigation,'observe'):
             observation=self.navigation.observe()
             r={} if observation is None else observation.record
-            image_available=observation is not None and observation.image is not None
         else:return None
         state=self.navigation.snapshot();stamp=r.get('stamp_s');now=state.get('stamp_s')
-        if (not image_available or (r.get('rgb') or {}).get('status')!='valid' or
+        rgb_stamp=(r.get('rgb') or {}).get('stamp_s')
+        if ((r.get('rgb') or {}).get('status')!='valid' or
                 r.get('clock_domain')!=state.get('clock_domain') or
                 r.get('local_identity')!=spatial_context(state)['local_identity'] or
                 state.get('map_binding') is not None and r.get('map_binding')!=state.get('map_binding') or
                 state.get('input_stale') or state.get('localization_status','valid')!='valid' or
-                type(stamp) not in (int,float) or type(now) not in (int,float) or not 0<=now-stamp<=3):
+                type(stamp) not in (int,float) or type(now) not in (int,float) or not 0<=now-stamp<=3 or
+                type(rgb_stamp) not in (int,float) or not 0<=now-rgb_stamp<=3):
             return None
-        return r.get('input_fingerprint')
+        return observation_rgb_key(r)
 
     def _confirmed_live_hold(self, feedback):
         return (self.navigation.scope == 'live' and self.skill.record['status'] == 'held' and
@@ -1057,7 +1074,8 @@ class AgentSession:
             self.state['status']='waiting_monitor'
             return dict(status='waiting',event=event)
         if event in ('navigation','observation','monitor') and self.monitor.await_next_observation(
-                (self._applying_context or {}).get('observation_binding')):
+                observation_rgb_key(self.observation.record)
+                if self.observation is not None and self._applying_context is not None else None):
             self.state.update(status='waiting_monitor',waiting_binding=None)
             return dict(status='waiting',event='monitor')
         if event == 'navigation':
@@ -1324,7 +1342,8 @@ class AgentSession:
                 self._save('elevator_observation_start_failed',dict(error_type=type(error).__name__,
                     reason=str(error)[:240],automatically_retried=False))
             return s
-        self.navigation.want_follow_candidates=bool(stage and stage['requirement'].get('stage_type')=='follow')
+        self.navigation.want_follow_candidates=bool(stage and stage['requirement'].get('stage_type')=='follow' and
+                                                    self.skill.record['handle'] is None)
         association_epoch=self.skill.record['association_epoch']
         was_association_waiting=self.skill.record['association_waiting']
         changed = self.skill.tick()
@@ -1571,5 +1590,6 @@ class AgentSession:
                     meaning='用户指定的标准起点初值；参考图是历史观察，不能证明当前位置或定位成功。')
             attachments={}
         return dict(messages=messages,current_state=current,reference_map=None if ride else self.reference_map,
+                    model_reference_names=self.model_reference_names,
                     ride_inputs=ride.attachments() if ride else None,keyframes=attachments,
                     follow_reference_image=follow_image,input_status=copy.deepcopy(self.input_status))

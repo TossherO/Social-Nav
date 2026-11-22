@@ -1,11 +1,14 @@
 """Bounded search candidates never treat unknown geometry as free."""
 import unittest
+import math
 import numpy as np
 
+from decision.osnet.reid import ReidPolicy
+from decision.osnet.search import FollowSearch
 from navigation.planning.footprint import VehicleGeometry
 from navigation.search import candidates,check_pose,bounds_status,current_search_pose,follow_candidates
 from perception.environment.context import fingerprint
-from tests.navigation_fixtures import asset,bundle
+from tests.navigation_fixtures import asset,bundle,scene_at
 
 
 class FollowSearchGeometryTests(unittest.TestCase):
@@ -92,6 +95,138 @@ class FollowSearchGeometryTests(unittest.TestCase):
         result=gate.gate(proposal,request,scene,feedback,now=10.,clock_domain='synthetic',dt=.1)
         self.assertEqual(result['reason'],'follow_search_radius_exceeded')
         self.assertEqual(result['velocity'],[0.,0.])
+
+
+class LocalFollowLossTests(unittest.TestCase):
+    identity = ['tracker', 1, 'a']
+    lifecycle = 7
+
+    def setUp(self):
+        self.selector = FollowSearch()
+        self.last = None
+
+    def observe(self, stamp, *, reason='no_detections', box=None, position=None, score=None,
+                association=None, observed=False, confirmed=False, recovered=False):
+        scene = scene_at(stamp)
+        scene_binding = scene.record['input_fingerprint']
+        stamp_ns = round((stamp - .02) * 1e9)
+        candidates = [] if box is None else [dict(id=0, box=box, track=dict(support_stamp_s=stamp))]
+        source = dict(clock_domain='synthetic', local_identity=['test', 0, 'odom'], stamp_s=stamp,
+                      rgb_stamp_ns=stamp_ns, image_size=[256, 192], scene_binding=scene_binding,
+                      association_status='complete', candidates=candidates)
+        decision = dict(status='unconfirmed', reason=reason, score=score)
+        if confirmed:
+            decision.update(status='recovered' if recovered else 'same', reason='confirmed',
+                            candidate_id=0, identity=self.identity, lifecycle_generation=self.lifecycle)
+        loss = self.selector.observe(source, decision, last=self.last, positions={0: position}, pose_xy=[0., 0.],
+            observed={(tuple(self.identity), self.lifecycle)} if observed else set(),
+            association_tracks={} if association is None else {'a/g7': association}, policy=ReidPolicy())
+        if confirmed:
+            self.last = dict(clock_domain='synthetic', local_identity=['test', 0, 'odom'], stamp_s=stamp,
+                             scene_binding=scene_binding, identity=self.identity, position_xy_m=position,
+                             lifecycle_generation=self.lifecycle)
+            self.last['binding'] = fingerprint(self.last)
+        return loss
+
+    def edge_history(self):
+        self.observe(10., confirmed=True, recovered=True, box=[115, 50, 155, 140], position=[1., 0.])
+        self.observe(10.3, confirmed=True, box=[195, 50, 235, 140], position=[1., .4])
+        self.observe(10.6, confirmed=True, box=[223, 50, 256, 140], position=[1., .8])
+
+    def choose(self, stamp, *, pose=None, renewal=False, different_scene=False):
+        scene = scene_at(stamp)
+        options = dict(clock_domain='synthetic', source_stamp_s=stamp,
+                       scene_binding=scene.record['input_fingerprint'], candidates=[dict(id=0, kind='wait', pose=None)])
+        if pose is not None:
+            candidate = dict(id=1, kind='approach', pose=pose, check=dict(valid=True,
+                             clock_domain='synthetic', source_stamp_s=stamp))
+            if renewal:
+                candidate['continuation_id'] = self.selector.continuation['intent_id']
+            options['candidates'].append(candidate)
+        options['binding'] = fingerprint(options)
+        return self.selector.choose(options, last=self.last, scene=scene_at(stamp + .1) if different_scene else scene)
+
+    def test_edge_departure_waits_then_approaches_once_and_renews_same_target(self):
+        self.edge_history()
+        self.assertFalse(self.observe(10.8)['search_ready'])
+        self.assertFalse(self.observe(11.3)['search_ready'])
+        loss = self.observe(11.8)
+        self.assertEqual(loss['reason'], 'left_image_edge')
+        self.assertTrue(loss['search_ready'])
+        self.assertIsNone(loss['departure_yaw_rad'])
+        with self.assertRaisesRegex(ValueError, 'observation_mismatch'):
+            self.choose(11.8, different_scene=True)
+        self.assertEqual(self.choose(11.8)['kind'], 'wait')
+        self.assertFalse(self.selector.attempted)
+        point = self.last['position_xy_m']
+        self.assertEqual(self.choose(11.8, pose=point)['pose'], point)
+        original = self.selector.continuation.copy()
+        self.assertTrue(self.observe(12.)['search_ready'])
+        refreshed = self.choose(12., pose=point, renewal=True)
+        self.assertEqual(refreshed['continuation_id'], original['intent_id'])
+        self.assertEqual(self.selector.continuation, original)
+        self.assertEqual(self.choose(12.)['kind'], 'wait')
+        self.assertIsNone(self.selector.continuation)
+        for stamp in (12.2, 12.7, 13.2, 13.7):
+            self.assertFalse(self.observe(stamp)['search_ready'])
+
+    def test_occlusion_missing_frames_and_an_unconfirmed_reappearance_interrupt_loss(self):
+        self.edge_history()
+        self.observe(10.8)
+        self.assertEqual(self.observe(11., reason='below_similarity', score=.2, box=[220, 40, 256, 150])['state'],
+                         'occluded')
+        self.assertEqual(self.observe(11.3)['loss_count'], 1)
+        self.assertEqual(self.observe(11.8)['loss_count'], 2)
+        self.assertEqual(self.observe(12.4)['reason'], 'loss_onset_unobserved')
+        self.assertEqual(self.observe(12.6, reason='awaiting_confirmation')['state'], 'recovering')
+        self.assertEqual(self.observe(12.7)['loss_count'], 0)
+        self.assertEqual(self.observe(12.7, reason='source_not_new')['loss_count'], 0)
+        self.assertEqual(self.observe(13., reason='awaiting_confirmation')['state'], 'recovering')
+        self.assertFalse(self.observe(13.3)['search_ready'])
+        self.observe(13.5, confirmed=True, recovered=True, box=[225, 50, 256, 140], position=[1., .85])
+        self.assertEqual(self.observe(13.6)['state'], 'unknown')
+
+    def test_corner_direction_requires_two_actual_outbound_displacements(self):
+        for stamp, x_box, position in [(10., 110, [1., 0.]), (10.2, 114, [1.3, 0.]),
+                                       (10.4, 145, [1.3, .2]), (10.6, 170, [1.3, .4])]:
+            self.observe(stamp, confirmed=True, recovered=stamp == 10., box=[x_box, 50, x_box + 40, 140],
+                         position=position)
+        loss = self.observe(10.7)
+        self.assertEqual(loss['reason'], 'turned_toward_image_side')
+        self.assertAlmostEqual(loss['departure_yaw_rad'], math.pi / 2)
+        evidence = loss['departure_evidence']
+        self.assertEqual([item['support_stamp_s'] for item in evidence], [10., 10.2, 10.4, 10.6])
+        self.assertEqual(evidence[-1]['scene_binding'], self.last['scene_binding'])
+        self.assertEqual(evidence[-1]['position_xy_m'], self.last['position_xy_m'])
+
+    def test_corner_with_only_one_outbound_displacement_targets_position_only(self):
+        self.observe(10., confirmed=True, recovered=True, box=[100, 50, 140, 140], position=[1., 0.])
+        self.observe(10.2, confirmed=True, box=[105, 50, 145, 140], position=[1.3, 0.])
+        self.observe(10.4, confirmed=True, box=[166, 50, 206, 140], position=[1.3, .35])
+        loss = self.observe(10.7)
+        self.assertEqual(loss['reason'], 'turned_toward_image_side')
+        self.assertIsNone(loss['departure_yaw_rad'])
+        self.assertIsNone(loss['departure_evidence'])
+
+    def test_receding_track_can_be_lost_to_small_fragments_or_empty_image(self):
+        for stamp, height, position in [(10., 120, [1., 0.]), (10.2, 75, [1.22, 0.]), (10.4, 42, [1.42, 0.])]:
+            self.observe(stamp, confirmed=True, recovered=stamp == 10., box=[105, 48, 145, 48 + height],
+                         position=position)
+        small = self.observe(10.8, reason='appearance_low_quality', box=[115, 55, 128, 82])
+        self.assertEqual(small['reason'], 'receding_in_view')
+        self.assertEqual(small['loss_count'], 1)
+        self.assertFalse(self.observe(11.3)['search_ready'])
+        self.assertTrue(self.observe(11.8)['search_ready'])
+
+    def test_single_range_or_size_change_and_low_score_alone_do_not_prove_loss(self):
+        for stamp, height, position in [(10., 120, [1., 0.]), (10.2, 120, [1., 0.]), (10.4, 42, [1.5, 0.])]:
+            self.observe(stamp, confirmed=True, recovered=stamp == 10., box=[105, 48, 145, 48 + height],
+                         position=position)
+        self.assertEqual(self.observe(10.8, reason='appearance_low_quality', box=[115, 55, 128, 82])['state'], 'occluded')
+        self.assertEqual(self.observe(11., observed=True)['state'], 'holding')
+        self.assertEqual(self.observe(11.3, reason='below_similarity', score=.1, box=[10, 35, 50, 110])['state'], 'unknown')
+        for stamp in (11.5, 12., 12.5, 13.):
+            self.assertEqual(self.observe(stamp)['state'], 'unknown')
 
 
 if __name__=='__main__':unittest.main()

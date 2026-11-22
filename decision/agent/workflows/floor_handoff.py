@@ -80,21 +80,33 @@ def follow_runtime_options(socket_path):
     if not isinstance(command,list) or not all(isinstance(x,str) for x in command):
         raise ValueError('Source runtime command is invalid')
     result=[]
-    for flag in ('--t2-backend','--t2-jpeg-quality'):
+    for flag in ('--t2-backend','--t2-jpeg-quality','--t2-reid-weights'):
         indexes=[i for i,value in enumerate(command) if value==flag]
         if len(indexes)>1 or indexes and indexes[0]+1>=len(command):
             raise ValueError('Source T2 option is ambiguous')
         if indexes:
             value=command[indexes[0]+1]
-            if flag=='--t2-backend' and value not in ('dspark','hosted'):
+            if flag=='--t2-backend' and value not in ('dspark','hosted','reid'):
                 raise ValueError('Source T2 backend is invalid')
             if flag=='--t2-jpeg-quality' and (not value.isdigit() or not 1<=int(value)<=95):
                 raise ValueError('Source T2 JPEG quality is invalid')
+            if flag=='--t2-reid-weights' and (not value.strip() or value.startswith('--')):
+                raise ValueError('Source T2 ReID weights path is invalid')
             result.extend((flag,value))
     if '--t2-backend' not in result:
         raise ValueError('Source T2 backend was not recorded; restart the observation with an explicit backend')
+    backend=result[1]
+    if (backend=='reid') != ('--t2-reid-weights' in result):
+        raise ValueError('Source T2 ReID weights do not match the backend')
     if command.count('--t2-raw-rgb')>1:raise ValueError('Source T2 mode is ambiguous')
-    if '--t2-raw-rgb' in command:result.append('--t2-raw-rgb')
+    if '--t2-raw-rgb' in command:
+        if backend=='reid':raise ValueError('Source reid T2 backend requires RGB-to-track association')
+        result.append('--t2-raw-rgb')
+    if backend=='reid':
+        from decision.vlm.t2.hosted import follow_settings
+        weights_index=result.index('--t2-reid-weights')+1
+        _,weights_path=follow_settings(backend,weights=result[weights_index])
+        result[weights_index]=weights_path
     return result
 
 

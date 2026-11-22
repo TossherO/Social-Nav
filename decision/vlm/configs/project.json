@@ -32,20 +32,23 @@
   },
   "tasks": {
     "groups": {
-      "prompt": "decision/vlm/configs/prompts/wheelchair_t1_groups.txt",
+      "prompt": "decision/vlm/t1/prompts/groups.txt",
       "response": "activity_groups"
     },
     "follow": {
-      "response": "single_token_choice",
+      "prompt": "decision/vlm/t2/prompts/follow.txt",
+      "raw_rgb_prompt": "decision/vlm/t2/prompts/follow_raw_rgb.txt",
+      "hosted_prompt_suffix": "decision/vlm/t2/prompts/follow_hosted_suffix.txt",
+      "response": "target_or_observation_json",
       "decision_deadline_s": 4.0,
       "visual_memory_s": 6.0
     },
     "seating": {
-      "prompt": "decision/vlm/configs/prompts/wheelchair_t3_seating.txt",
-      "window_prompt": "decision/vlm/configs/prompts/wheelchair_t3_seating_window.txt",
+      "prompt": "decision/vlm/t3/prompts/seating.txt",
+      "window_prompt": "decision/vlm/t3/prompts/seating_window.txt",
       "window_extent_m": [-4.0, 4.0, -4.0, 4.0],
-      "geometry_policy": "decision/vlm/configs/seating_geometry.json",
-      "adjustment_prompt": "decision/vlm/configs/prompts/wheelchair_t3_seating_adjustment.txt",
+      "geometry_policy": "decision/vlm/t3/configs/seating_geometry.json",
+      "adjustment_prompt": "decision/vlm/t3/prompts/seating_adjustment.txt",
       "adjustment_gate": {"distance_m": 0.15, "heading_deg": 15.0},
       "response": "candidate_selection",
       "max_tokens": 128

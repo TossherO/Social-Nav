@@ -47,7 +47,7 @@ def main():
             p.add_argument('--reuse-digest', help=argparse.SUPPRESS)
             p.add_argument('--auto-follow', action='store_true', help='回放定位就绪后自动启动已登记的第一项跟随任务')
             p.add_argument('--auto-follow-single-person',action='store_true',
-                           help='回放时用当前唯一具有可靠二维与三维关联的行人启动跟随')
+                           help='回放画面只有一人且具备三维轨迹时直接跟随，多人时由 Agent 选人')
         else:
             p.add_argument('--runtime-socket', required=True)
             p.add_argument('--duration', type=float, default=600)
