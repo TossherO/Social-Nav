@@ -94,6 +94,48 @@ class PlanningRecordTests(unittest.TestCase):
             self.assertGreater(result['start_evidence']['unknown'],0)
             self.assertIsNone(reference.worker.job)
 
+    def test_occupied_start_withdraws_reference_until_a_new_scan_is_planned(self):
+        from navigation.planning.reference import ReferenceRuntime
+        from navigation.planning.continuity import reference_envelope
+        from navigation.planning.planner import Planner
+        from perception.environment.layers import GridSnapshot, load_config
+        from perception.environment.scene import assemble_scene
+        from tests.navigation_fixtures import FakeWorker, scene_at
+
+        f=fixtures.DwaTests();f.setUp()
+        geometry=scene_at(10.1).geometry
+        occupied=geometry.layers['occupancy'].copy()
+        occupied[20,20]=100
+        scene=assemble_scene(GridSnapshot(geometry.metadata,dict(occupancy=occupied)),
+                             clock_domain='synthetic',settings=load_config()['scene'])
+        clear=scene_at(10.2)
+        with ReferenceRuntime(f.cfg,f.motion,f.geometry,worker_factory=FakeWorker) as reference:
+            reference.update(f.req,f.scene,None,now=10.)
+            reference.tick(now=10.,clock_domain='synthetic')
+            job=reference.worker.job
+            reference.worker.reply(f.reference)
+            self.assertEqual(reference.tick(now=10.,clock_domain='synthetic')['status'],'reference_ready')
+
+            reference.worker.send(job)
+            reference.update(f.req,scene,None,now=10.1)
+            blocked=reference.tick(now=10.1,clock_domain='synthetic')
+            self.assertIsNone(blocked['result'])
+            self.assertEqual(blocked['planning_observation']['reason'],'start_footprint_occupied')
+            self.assertEqual(blocked['start_evidence']['occupied_cells']['measured_occupancy'],[100])
+            self.assertEqual(blocked['start_evidence']['source_stamp_s'],10.1)
+
+            reference.worker.reply(f.reference)
+            reference.last_sent=float('-inf')
+            reference.update(f.req,clear,None,now=10.2)
+            self.assertIsNone(reference.tick(now=10.2,clock_domain='synthetic')['result'])
+            self.assertEqual(reference.worker.job['scene'].record['as_of'],10.2)
+            planner=Planner(f.cfg,f.geometry)
+            result=planner.query(f.req,scene=clear,now=10.2,clock_domain='synthetic')
+            reference.worker.reply(reference_envelope(result,f.req,clear,None))
+            restored=reference.tick(now=10.2,clock_domain='synthetic')
+            self.assertEqual(restored['status'],'reference_ready')
+            self.assertEqual(restored['planning_observation']['source_stamp_s'],10.2)
+
     def test_sampling_diagnostic_identifies_speed_recovery_without_changing_proposal(self):
         f=fixtures.DwaTests();f.setUp();feedback=dict(f.feedback,velocity=[.95,0.])
         plain=f.controller.command(f.req,f.scene,feedback,f.reference,now=10.,clock_domain='synthetic')

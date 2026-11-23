@@ -6,8 +6,11 @@ import numpy as np
 from navigation.planning.footprint import VehicleGeometry
 from navigation.planning.inputs import load_config
 from navigation.planning.motion import load_motion_config
-from navigation.planning.runtime import Worker
-from tests.navigation_fixtures import bundle, request
+from navigation.planning.reference import ReferenceRuntime
+from navigation.planning.runtime import ReferenceQuery, Worker
+from perception.environment.layers import load_config as environment_config
+from perception.environment.scene import assemble_scene
+from tests.navigation_fixtures import FakeWorker, asset, bundle, request
 
 
 def reference_fixture():
@@ -22,7 +25,6 @@ def reference_fixture():
 
 class SharedReferenceTests(unittest.TestCase):
     def test_standalone_reference_runtime_uses_shared_worker(self):
-        from navigation.planning.reference import ReferenceRuntime
         fixture=reference_fixture()
         runtime=ReferenceRuntime(fixture.cfg,fixture.motion,fixture.geometry)
         try:
@@ -98,4 +100,81 @@ class SharedReferenceTests(unittest.TestCase):
         from navigation.planning.runtime import query_time
         for rate in (.5,1.,2.):self.assertAlmostEqual(query_time(dict(now=100.,sent_mono=10.,clock_rate=rate),mono=10.4),100.+.4*rate)
         with self.assertRaises(ValueError):query_time(dict(now=100.,sent_mono=10.,clock_rate=0),mono=10.4)
+
+    def test_local_approach_rechecks_active_and_inflight_paths(self):
+        fixture = reference_fixture()
+        transform = np.array([[0., -1., 0., 5.], [1., 0., 0., .4], [0., 0., 1., 0.], [0., 0., 0., 1.]])
+        req = request('mapped', use_local_approach=True, goal=[3., 4.6, np.pi/2], goal_behavior='stop')
+
+        def scene_at(stamp, hit=None, *, map_dx=0.):
+            cells = np.zeros((60, 60), np.int8)
+            if hit is not None:
+                cells[hit] = 100
+            local = bundle(cells).geometry
+            association = transform.copy()
+            association[0, 3] += map_dx
+            local.metadata.update(stamp_s=stamp, association=dict(
+                local.metadata['association'], stamp_s=stamp, measurement_stamp_s=stamp-.1,
+                map_from_local=association.tolist()))
+            return assemble_scene(local, clock_domain='synthetic', settings=environment_config()['scene'])
+
+        first = scene_at(10.)
+        for mode in ('retained', 'local_only', 'off_path', 'mapped', 'no_map'):
+            for inflight in (False, True):
+                with self.subTest(mode=mode, inflight=inflight):
+                    static = np.zeros((60, 60), np.int8)
+                    if mode in ('local_only', 'mapped'):
+                        # The new local hit lies over unknown static cells.
+                        static[35:39, 28:32] = -1
+                    source = None if mode == 'no_map' else asset(static)
+                    goal = req
+                    if mode == 'no_map':
+                        goal = request('local', goal=[4.2, 2., 0.], goal_behavior='stop')
+                    elif mode == 'mapped':
+                        goal = dict(req)
+                        goal.pop('use_local_approach')
+                    with ReferenceRuntime(fixture.cfg, fixture.motion, fixture.geometry,
+                                          worker_factory=FakeWorker) as runtime:
+                        query = ReferenceQuery(runtime.planning, fixture.geometry)
+
+                        def observe(scene):
+                            stamp = scene.record['as_of']
+                            runtime.observe(scene, source, now=stamp)
+                            self.assertTrue(runtime.update(goal, scene, None, source, now=stamp, clock_rate=.001))
+                            return runtime.tick(now=stamp, clock_domain='synthetic')
+
+                        observe(first)
+                        job = runtime.worker.job
+                        envelope = query.query(job, first, source)
+                        result = envelope['result']
+                        self.assertEqual('path_found', result['status'], result['reason'])
+                        if goal.get('use_local_approach'):
+                            self.assertEqual(('odom', 'map'), (result['reference_search_frame'], result['frame_id']))
+                            np.testing.assert_allclose(result['path'][-1], req['goal'])
+                        if not inflight:
+                            runtime.worker.reply(envelope)
+                            clear = runtime.tick(now=10., clock_domain='synthetic')
+                            self.assertEqual('clear', clear['planning_observation']['status'])
+                        if mode == 'retained':
+                            runtime.observe(scene_at(10.1, hit=(20, 32)), source, now=10.1)
+                            if not inflight:
+                                self.assertIsNone(runtime.current)
+                            second = scene_at(10.2)
+                        elif mode == 'local_only':
+                            second = scene_at(10.2, hit=(25, 32), map_dx=.5)
+                        else:
+                            second = scene_at(10.2, hit=(40, 40) if mode == 'off_path' else (20, 32))
+                        if inflight:
+                            runtime.worker.reply(envelope)
+                        status = observe(second)
+                        if mode in ('local_only', 'mapped', 'no_map'):
+                            self.assertEqual(job['reference_obstacle_version'], runtime.obstacles.version)
+                        elif mode == 'retained':
+                            self.assertGreater(runtime.obstacles.version, job['reference_obstacle_version'])
+                        if mode in ('retained', 'local_only'):
+                            self.assertIsNone(status['result'])
+                            self.assertIsNone(status['planning_observation'])
+                            self.assertEqual('reference_obstructed_by_new_observation', status['reason'])
+                        else:
+                            self.assertEqual(envelope, status['result'])
 

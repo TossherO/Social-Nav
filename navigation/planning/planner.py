@@ -8,7 +8,7 @@ from perception.environment.changes import PriorRevisions, reference_grid
 from perception.environment.navigation import navigation_geometry
 from .backend import GlobalPlanner
 from .footprint import footprint_status, footprint_details, goal_obstruction, path_poses, swept_check, wrap
-from .inputs import association_status, scene_status, cell_of, validate_grid,request_status
+from .inputs import association_status, scene_status, cell_of, validate_grid,request_status,validate_map_keepout_circle
 from .curvature import motion_valid,reference_tails
 
 
@@ -89,11 +89,14 @@ class Planner:
         scene.verify()
         reason=scene_status(scene,now,clock_domain,self.config) or association_status(scene,asset,self.config)
         if reason:raise ValueError(reason)
+        from perception.environment.free_memory import remembered_free
         self._reference_work=None
         return self._prior_revisions.apply(asset.snapshot,scene.geometry,scene.record['prior'],
-            scene_binding=scene.record['input_fingerprint'],bounds=bounds,overlay_current=False,geometry_only=geometry_only)
+            scene_binding=scene.record['input_fingerprint'],bounds=bounds,overlay_current=False,geometry_only=geometry_only,
+            confirmed_free=remembered_free(scene,asset=asset,now=now))
 
     def _mapped_reference(self, scene, asset, contact, local_from_map, blocked, follow_last_position, timing):
+        from perception.environment.free_memory import remembered_free
         from .overlay import reference_overlay,retain_obstacles
         source=asset.snapshot
         r=scene.record
@@ -112,7 +115,8 @@ class Planner:
             self._mapped_cost_input=None
         began=time.perf_counter()
         revised=self._prior_revisions.apply(source,scene.geometry,r['prior'],
-            scene_binding=r['input_fingerprint'],overlay_current=False,geometry_only=True)
+            scene_binding=r['input_fingerprint'],overlay_current=False,geometry_only=True,
+            confirmed_free=remembered_free(scene,asset=asset))
         timing['reference_prior_revision']=(time.perf_counter()-began)*1000
         began=time.perf_counter()
         retained=retain_obstacles(revised,blocked)
@@ -176,11 +180,17 @@ class Planner:
         if type(r['goal_revision']) is not int or r['goal_revision'] < 0: raise ValueError('Invalid goal_revision')
         if r.get('target_reference') != 'base_link': raise ValueError('Goal reference must explicitly be base_link')
         mode = r['mode']
+        circle = r.get('map_keepout_circle')
+        if 'map_keepout_circle' in r:
+            validate_map_keepout_circle(circle)
         follow_last_position='follow_last_evidence_binding' in r
         mapped_local=False
+        local_approach=r.get('use_local_approach') is True
         if mode not in ('static', 'mapped', 'local'): raise ValueError('Unknown planning mode')
         goal = np.asarray(r['goal'], dtype=float)
         if goal.shape not in [(2,), (3,)] or not np.isfinite(goal).all(): raise ValueError('Invalid goal')
+        if local_approach and (mode!='mapped' or len(goal)!=3 or r.get('goal_behavior')!='stop'):
+            raise ValueError('Local approach requires a mapped stopping pose with heading')
         selection=r.get('route_goal_selection');search_budget=None
         if selection is not None:
             search_budget=selection['search_budget_s'];detour_limit=selection['max_path_length_m']
@@ -202,13 +212,13 @@ class Planner:
         else:
             if scene is None: raise ValueError('Local/mapped query needs a complete scene')
             from .people import PeopleModel
-            local_grid,_,dynamic=PeopleModel(scene,self.config['people']).navigation_grid(scene)
+            local_grid,_,dynamic=PeopleModel(scene,self.config['people']).navigation_grid(scene,include_confirmed_free=True)
             out['dynamic_geometry']=dynamic
             reason = scene_status(scene, now, clock, self.config) or request_status(r,scene,now,clock)
             if reason:
                 out.update(status='unavailable', reason=reason); return
             local_pose = self.geometry.pose(scene.record['localization']['world_from_lidar'])
-            contact_grid=navigation_geometry(scene,now=now,asset=asset,check_asset=True)
+            contact_grid=navigation_geometry(scene,now=now,asset=asset,check_asset=True,include_confirmed_free=True)
             out['navigation_geometry']=scene.geometry.metadata.get('navigation_fusion')
             out['local_start_footprint'] = footprint_status(contact_grid, self.geometry, local_pose,
                                                            self.config['safety_margin_m'])
@@ -224,12 +234,42 @@ class Planner:
                 grid = asset.snapshot
                 transform = np.asarray(scene.record['prior']['map_from_local'])
                 start = self.geometry.pose(transform @ np.asarray(scene.record['localization']['world_from_lidar']))
+                if local_approach:
+                    if r['frame_id']!=grid.metadata['frame_id'] or r.get('map_snapshot_id')!=asset.manifest['snapshot_id']:
+                        raise ValueError('Goal static map identity mismatch')
+                    map_from_local = se2(start) @ np.linalg.inv(se2(local_pose))
+                    global_start = start
+                    goal = transform_poses([goal],np.linalg.inv(map_from_local))[0]
+                    grid, start, mode = contact_grid, local_pose, 'local'
                 if mapped_local:
                     map_from_local=se2(start)@np.linalg.inv(se2(local_pose))
                     goal=transform_poses([[*goal[:2],goal[2] if len(goal)==3 else 0.]],map_from_local)[0,:len(goal)]
                     mode='mapped'
             else:
                 grid = local_grid; start = local_pose
+        # This obstacle is fixed in the selected map even when the lidar sees free
+        # space under a tabletop. Insert it before search and swept-footprint checks.
+        retained_count = len(reference_obstacles)
+        if circle is not None:
+            from perception.environment.person_objects import circle_indices
+            from .overlay import retain_obstacles
+            centre = circle['center_xy_m']
+            if mode=='local':
+                reason = association_status(scene,asset,self.config)
+                if reason:
+                    out.update(status='unavailable',reason=reason);return
+                world = np.asarray(scene.record['localization']['world_from_lidar'])
+                mapped_pose = self.geometry.pose(np.asarray(scene.record['prior']['map_from_local'])@world)
+                local_from_map = se2(local_pose) @ np.linalg.inv(se2(mapped_pose))
+                centre = (local_from_map @ [*centre,1.])[:2]
+            blocked = circle_indices(grid,centre,circle['radius_m']).tolist()
+            out['map_keepout_cells'] = len(blocked)
+            if mode=='mapped':
+                # The mapped pipeline preserves retained obstacles when applying
+                # new evidence and removes their conditional-free designation.
+                reference_obstacles = tuple(dict.fromkeys([*reference_obstacles,*blocked]))
+            else:
+                grid = retain_obstacles(grid,blocked)
         validate_grid(grid)
         measured_grid=grid
         if mode=='mapped':
@@ -239,7 +279,7 @@ class Planner:
                 scene,asset,contact_grid,local_from_map,reference_obstacles,follow_last_position,timing)
             out['prior_revision']=copy.deepcopy(measured_grid.metadata['prior_revision'])
             out['reference_overlay']=copy.deepcopy(overlay)
-            out['reference_overlay']['retained_occupied_cells']=len(reference_obstacles)
+            out['reference_overlay']['retained_occupied_cells']=retained_count
             out['reference_work_reused']=reused
             out['reference_search_frame']=grid.metadata['frame_id']
             timing['reference_work']=(time.perf_counter()-reference_begin)*1000
@@ -259,7 +299,7 @@ class Planner:
                                         out['manual_free_present'])
         out['reference_policy']=grid.metadata.get('reference_policy',
             'unobserved_cells_assumed_free' if out['unobserved_free_assumed'] else 'observed_free_only')
-        if r['frame_id'] != (scene.record['frame_id'] if mapped_local else grid.metadata['frame_id']):
+        if not local_approach and r['frame_id'] != (scene.record['frame_id'] if mapped_local else grid.metadata['frame_id']):
             raise ValueError('Goal frame does not match planning frame')
         if mode in ('static', 'mapped') and not mapped_local and r.get('map_snapshot_id') != asset.manifest['snapshot_id']:
             raise ValueError('Goal static map identity mismatch')
@@ -268,6 +308,9 @@ class Planner:
                    safety_margin_m=self.config['safety_margin_m'])
         if mapped_local:
             out.update(start=local_pose.tolist(),goal=r['goal'],frame_id=r['frame_id'])
+        if local_approach:
+            out.update(start=global_start.tolist(),goal=r['goal'],frame_id=r['frame_id'],
+                       reference_search_frame=grid.metadata['frame_id'],reference_policy='local_navigation_approach')
         out['timing_ms']['input_and_prior']=(time.perf_counter()-prepare_begin)*1000
         costs_begin = time.perf_counter()
         endpoints=[('start',start)]
@@ -349,6 +392,7 @@ class Planner:
             if previous['context']==context_binding(r,scene,asset) and previous['verified_as_of']<=scene.record['as_of']:
                 previous_path=previous['path']
                 if mapped_local:previous_path=transform_poses(previous_path,map_from_local)
+                if local_approach:previous_path=transform_poses(previous_path,np.linalg.inv(map_from_local))
                 tails=reference_tails(previous_path,start,self.config['motion_constraints']) if (
                     np.linalg.norm(np.asarray(previous_path[-1])[:2]-goal[:2])<=1e-6) else ()
                 for candidate in tails:
@@ -491,7 +535,9 @@ class Planner:
                         reference_path_fingerprint=fingerprint(poses.tolist()),reference_distance_m=travel,
                         reference_heading_rad=float(target[2]),
                         association_binding=fingerprint(scene.record['prior']))
-                    local=self._local_planner.query(child,scene=scene,now=now,clock_domain=clock)
+                    if circle is not None:
+                        child['map_keepout_circle'] = circle
+                    local=self._local_planner.query(child,scene=scene,asset=asset,now=now,clock_domain=clock)
                     out['local_replan']=local
                     if local['status']=='path_found':
                         out['current_local_path'].update(poses=local['path'],valid=True,source='local_replan',
@@ -499,6 +545,8 @@ class Planner:
                 out['timing_ms']['local_replan']=(time.perf_counter()-began)*1000
         else:
             out['local_check'] = dict(status='not_applicable' if mode == 'static' else 'free')
+            if local_approach:
+                out['path'] = transform_poses(out['path'],map_from_local).tolist()
 
 
 class PlanningSession:

@@ -240,12 +240,13 @@ def freeze_window(observations, candidate_path, output, *, current_only=False):
     return record
 
 
-def render_scene(scene,candidate_set,path,*,observation=None):
+def render_scene(scene,candidate_set,path,*,observation=None,vehicle=None,view_prior=None):
     """Neutral RGB+BEV, known/unknown geometry retained; no answers or endpoint."""
     from .inference import validate_candidate_set
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.colors import ListedColormap
+    from matplotlib.patches import Circle, Polygon
     scene.verify();validate_candidate_set(candidate_set)
     record=scene.record
     for name in ['observation_id','frame_id','clock_domain','session_id','generation']:
@@ -267,20 +268,71 @@ def render_scene(scene,candidate_set,path,*,observation=None):
             pixels=np.asarray(image.convert('RGB'))
     fig=Figure(figsize=(12,5),dpi=130,constrained_layout=True);FigureCanvasAgg(fig)
     rgb,bev=fig.subplots(1,2);rgb.imshow(pixels);rgb.axis('off');rgb.set_title('Current RGB')
-    meta=scene.geometry.metadata;cells=scene.geometry.layers['occupancy'];h,w=cells.shape;x,y=meta['origin_xy'];r=meta['resolution']
-    bev.imshow(np.where(cells==-1,0,np.where(cells==0,1,2)),origin='lower',extent=[x,x+w*r,y,y+h*r],
-               cmap=ListedColormap(['#b6c0c9','#f8f8f8','#34414d']),vmin=0,vmax=2,interpolation='nearest')
+    grid=scene.geometry
+    if 'view_search' in candidate_set:
+        from perception.environment.navigation import navigation_geometry
+        grid=navigation_geometry(scene,asset=view_prior,check_asset=view_prior is not None,include_confirmed_free=True)
+    meta=grid.metadata;cells=grid.layers['occupancy'];h,w=cells.shape;x,y=meta['origin_xy'];r=meta['resolution']
+    pixels_bev=np.where(cells==-1,0,np.where(cells==0,1,2))
+    colors=['#b6c0c9','#f8f8f8','#34414d']
+    if view_prior is not None:
+        from navigation.planning.planner import se2
+        from perception.environment.navigation import association_reason
+        from perception.environment.layers import load_config
+        if association_reason(scene.geometry,view_prior,load_config()['association_max_age_s']) is None:
+            transform=np.asarray(record['prior']['map_from_local'])
+            lidar=np.asarray(record['localization']['world_from_lidar'])
+            map_from_local=se2(vehicle.pose(transform @ lidar)) @ np.linalg.inv(se2(vehicle.pose(lidar)))
+            yy,xx=np.nonzero(cells==-1)
+            points=np.column_stack((x+(xx+.5)*r,y+(yy+.5)*r))
+            xy=points @ map_from_local[:2,:2].T+map_from_local[:2,2]
+            prior=view_prior.snapshot
+            indices=np.floor((xy-prior.metadata['origin_xy'])/prior.metadata['resolution']).astype(int)
+            p=prior.layers['occupancy']
+            inside=((indices>=0)&(indices<np.asarray(p.shape[::-1]))).all(axis=1)
+            ix,iy=indices[inside].T
+            pixels_bev[yy[inside],xx[inside]]=np.where(p[iy,ix]==0,3,0)
+        colors.append('#c9e8de')
+    bev.imshow(pixels_bev,origin='lower',extent=[x,x+w*r,y,y+h*r],
+               cmap=ListedColormap(colors),vmin=0,vmax=len(colors)-1,interpolation='nearest')
     pose=np.asarray(meta['world_from_lidar']);ex,ey=pose[:2,3]
     bev.plot(ex,ey,'o',color='#df531b',ms=6);bev.arrow(ex,ey,pose[0,0]*.5,pose[1,0]*.5,width=.035,color='#df531b')
-    for candidate in candidate_set['candidates']:
-        px,py,yaw=candidate['pose'];bev.plot(px,py,'o',color='#145dc0',ms=5)
-        bev.arrow(px,py,.3*math.cos(yaw),.3*math.sin(yaw),width=.02,color='#145dc0')
-        bev.annotate('C'+str(candidate['id']),(px,py),xytext=(6,5),textcoords='offset points',fontsize=11,
-                     bbox=dict(facecolor='white',edgecolor='#145dc0',pad=1.5),zorder=10)
+    if table := candidate_set.get('round_table'):
+        bev.add_patch(Circle(table['center_xy_m'], table['radius_m'], fill=False, color='#168a55', linewidth=2))
+        if vehicle is not None:
+            bev.add_patch(Polygon(vehicle.polygon(vehicle.pose(pose)), fill=False, edgecolor='#df531b'))
+    visible = [candidate for candidate in candidate_set['candidates']
+               if candidate['geometry'] in ('feasible','unknown')]
+    dense_round = table and len(visible)>8
+    for candidate in visible:
+        color = '#168a55' if candidate['geometry']=='feasible' else '#145dc0'
+        px,py,yaw=candidate['pose'];bev.plot(px,py,'o',color=color,ms=5)
+        if table and vehicle is not None:
+            bev.add_patch(Polygon(vehicle.polygon(candidate['pose']), fill=False, edgecolor=color,
+                                  linewidth=.7 if dense_round else 1., alpha=.65))
+        bev.arrow(px,py,.3*math.cos(yaw),.3*math.sin(yaw),width=.02,color=color)
+        if dense_round:
+            offset=(-13*math.cos(yaw),-13*math.sin(yaw))
+            bev.annotate(f"C{candidate['id']}",(px,py),xytext=offset,textcoords='offset points',
+                         fontsize=8,ha='center',va='center',
+                         bbox=dict(facecolor='white',edgecolor=color,pad=.7),zorder=10)
+        else:
+            bev.annotate('C'+str(candidate['id']),(px,py),xytext=(6,5),textcoords='offset points',fontsize=11,
+                         bbox=dict(facecolor='white',edgecolor=color,pad=1.5),zorder=10)
     positions=np.array([[ex,ey]]+[c['pose'][:2] for c in candidate_set['candidates']])
     low=positions.min(axis=0)-2;high=positions.max(axis=0)+2
+    if search := candidate_set.get('view_search'):
+        low,high=np.asarray(search['bounds_xy_m']).reshape(2,2)
+        bev.grid(True,alpha=.22)
+        for xy in search['visited_xy_m']:
+            bev.plot(*xy, 's', color='#9864a8', ms=5)
+        for failure in search['rejected_views']:
+            bev.plot(*failure['pose'][:2], 'x', color='#9c3a3a', ms=6)
     bev.set_xlim(low[0],high[0]);bev.set_ylim(low[1],high[1]);bev.set_aspect('equal');bev.set_facecolor('#b6c0c9')
-    bev.set_title('C: candidate pose | gray: unknown');bev.set_xlabel(candidate_set['frame_id']+' x (m)');bev.set_ylabel('y (m)')
+    title='C: candidate pose | gray: unknown'
+    if table: title='Green C: footprint clear | blue C: unverified | gray: unknown cells'
+    if view_prior is not None:title+=' | pale green: static free for view planning'
+    bev.set_title(title);bev.set_xlabel(candidate_set['frame_id']+' x (m)');bev.set_ylabel('y (m)')
     fig.savefig(path)
 
 
@@ -298,6 +350,10 @@ def freeze_scene(scene_directory,candidate_path,output):
     pose=scene.geometry.metadata['world_from_lidar']
     fields=dict(instruction=data['instruction'],units=dict(position='m',yaw='rad'),
                 frame_id=data['frame_id'],ego_pose=pose,candidates=data['candidates'])
+    if table := data.get('round_table'):
+        fields['round_table'] = {key: table[key] for key in ('center_xy_m', 'radius_m')}
+    if search := data.get('view_search'):
+        fields['view_search'] = search
     record=dict(candidate_set=data,candidate_binding=binding(data),scene_input_fingerprint=scene.record['input_fingerprint'],
                 scene_source=str(Path(scene_directory).resolve()),image_sha256=hashlib.sha256((output/'image.png').read_bytes()).hexdigest(),
                 fields=fields,response_schema=selection_schema(data))

@@ -6,6 +6,7 @@ import time
 import numpy as np
 import yaml
 from perception.environment.context import fingerprint
+from perception.environment.layers import GridSnapshot
 from .continuity import context_binding,check_reference,goal_binding,local_goal
 from .inputs import association_status,scene_status,request_status
 from .footprint import footprint_status,swept_check
@@ -83,6 +84,7 @@ class ReferenceRuntime:
         self.failure=None
         self.planning_observation=None
         self.start_status=None
+        self.start_occupied_stamp_s=None
         self.display_enabled=False
         self._display_reference_map=None
         self._display_failure_map=None
@@ -124,6 +126,7 @@ class ReferenceRuntime:
         self.failure=None
         self.planning_observation=None
         self.start_status=None
+        self.start_occupied_stamp_s=None
         self._display_reference_map=self._display_failure_map=None
         self.retry_after_observation=None
         self.control_blocked_since=None
@@ -178,24 +181,65 @@ class ReferenceRuntime:
         blocked=self._retained_obstacles(scene,asset)
         if not blocked:return True
         result=envelope['result']
-        if result.get('reference_search_frame',result['frame_id'])!=asset.snapshot.metadata['frame_id']:
+        frame=asset.snapshot.metadata['frame_id']
+        local_approach=result['request'].get('use_local_approach') is True
+        if result.get('reference_search_frame',result['frame_id'])!=frame and not local_approach:
             return True
         # Recheck just the new reference exclusions. The original result and the
         # controller still perform their own complete geometry checks.
-        from perception.environment.layers import GridSnapshot
-        from .planner import se2,transform_poses
-        poses=np.asarray(result['path'])
-        if result['frame_id']!=asset.snapshot.metadata['frame_id']:
-            r=scene.record
-            world=np.asarray(r['localization']['world_from_lidar'])
-            matrix=np.asarray(r['prior']['map_from_local'])
-            poses=transform_poses(poses,se2(self.geometry.pose(matrix@world))@
-                                  np.linalg.inv(se2(self.geometry.pose(world))))
+        poses=self._path_in_frame(result,scene,frame)
         empty=GridSnapshot(asset.snapshot.metadata,dict(occupancy=np.zeros(
             asset.snapshot.metadata['shape'],np.int8)))
         excluded=retain_obstacles(empty,blocked)
+        if local_approach:
+            return self._avoids_grid_occupancy(poses,excluded)
         check=swept_check(excluded,self.geometry,poses,self.planning['safety_margin_m'],
                           self.planning['max_path_samples'],prefix=False)
+        return check['status']=='free'
+
+    def _path_in_frame(self,result,scene,frame):
+        poses=np.asarray(result['path'])
+        if result['frame_id']==frame:return poses
+        from .planner import se2,transform_poses
+        record=scene.record
+        world=np.asarray(record['localization']['world_from_lidar'])
+        matrix=np.asarray(record['prior']['map_from_local'])
+        map_from_local=se2(self.geometry.pose(matrix@world))@np.linalg.inv(se2(self.geometry.pose(world)))
+        transform=np.linalg.inv(map_from_local) if frame==record['frame_id'] else map_from_local
+        return transform_poses(poses,transform)
+
+    def _avoids_local_occupancy(self,envelope,scene,asset,now,*,grid=None):
+        result=envelope['result']
+        if (result['request'].get('use_local_approach') is not True or
+                scene.record['as_of']<=envelope['as_of']):
+            return True
+        if grid is None:
+            grid=navigation_geometry(scene,now=now,asset=asset,check_asset=True)
+        return self._avoids_grid_occupancy(self._path_in_frame(result,scene,grid.metadata['frame_id']),grid)
+
+    def _avoids_grid_occupancy(self,poses,grid):
+        cells=grid.layers['occupancy']
+        margin=self.planning['safety_margin_m']
+        bounds=self.geometry.radius+margin
+        resolution=grid.metadata['resolution']
+        origin=np.asarray(grid.metadata['origin_xy'])
+        lower=np.floor((poses[:,:2].min(axis=0)-bounds-origin)/resolution).astype(int)-1
+        upper=np.floor((poses[:,:2].max(axis=0)+bounds-origin)/resolution).astype(int)+2
+        lo=np.maximum(lower,0)
+        hi=np.minimum(upper,cells.shape[::-1])
+        if (lo>=hi).any():return True
+        occupied=cells[lo[1]:hi[1],lo[0]:hi[0]]==100
+        if not occupied.any():return True
+        # An exclusion-only recheck can ignore areas outside this grid. A
+        # local approach can extend beyond static coverage or the moving grid.
+        shape=upper-lower
+        if np.prod(shape,dtype=np.float64)>self.planning['max_cells']:return False
+        exclusions=np.zeros(shape[::-1],np.int8)
+        x,y=lo-lower
+        exclusions[y:y+occupied.shape[0],x:x+occupied.shape[1]]=100*occupied
+        snapshot=GridSnapshot(dict(grid.metadata,shape=list(exclusions.shape),
+            origin_xy=(origin+lower*resolution).tolist()),dict(occupancy=exclusions))
+        check=swept_check(snapshot,self.geometry,poses,margin,self.planning['max_path_samples'],prefix=False)
         return check['status']=='free'
 
     def cancel(self,request=None):
@@ -240,10 +284,11 @@ class ReferenceRuntime:
                 self.planning_observation=None
                 self._event('follow_goal_pending',goal_revision=request['goal_revision'],
                             goal=request['goal'],as_of=scene.record['as_of'])
+            new_scene=self.latest is None or self.latest['scene'] is not scene
             self.latest=dict(request=copy.deepcopy(request),scene=scene,asset=asset,context=context,
                 received_mono=time.monotonic(),clock_rate=clock_rate,locked_follow_goal=locked_follow_goal)
             pose=self.geometry.pose(scene.record['localization']['world_from_lidar'])
-            grid=navigation_geometry(scene,now=now,asset=asset,check_asset=True)
+            grid=navigation_geometry(scene,now=now,asset=asset,check_asset=True,include_confirmed_free=True)
             start_status=footprint_status(grid,self.geometry,pose,self.planning['safety_margin_m'])
             self.start_status=start_status
             can_use_static=(request['mode']=='mapped' or request.get('completion_policy')=='continuous') and (
@@ -252,11 +297,25 @@ class ReferenceRuntime:
             # reference grid. Only the local execution checks require fresh
             # local free evidence under the entire vehicle.
             self.blocked=start_status!='free' and not (can_use_static and start_status=='unknown')
-            if self.diagnostics:
+            if start_status=='occupied':
+                self.start_occupied_stamp_s=scene.record['as_of']
+            if self.diagnostics or start_status=='occupied':
                 from .footprint import footprint_details
-                self.start_evidence=footprint_details(grid,self.geometry,pose,self.planning['safety_margin_m'])
-                self.start_evidence.update(status=start_status,pose=pose.tolist(),scene_binding=scene.record['input_fingerprint'])
-            self.reason='start_footprint_not_free' if self.blocked else None
+                self.start_evidence=footprint_details(grid,self.geometry,pose,self.planning['safety_margin_m'],
+                    source_snapshot=scene.geometry if start_status=='occupied' else None)
+                self.start_evidence.update(status=start_status,pose=pose.tolist(),scene_binding=scene.record['input_fingerprint'],
+                    frame_id=grid.metadata['frame_id'],source_stamp_s=scene.record['as_of'])
+            if self.blocked:
+                self.reason='start_footprint_not_free'
+            elif self.reason!='reference_obstructed_by_new_observation':
+                self.reason=None
+            if (new_scene and self.reference is not None and
+                    not self._avoids_local_occupancy(self.reference,scene,asset,now,grid=grid)):
+                self.reference=self.current=self.planning_observation=None
+                self._display_reference_map=None
+                self.reason='reference_obstructed_by_new_observation'
+                self.need_replan=True
+                self.next_retry=-np.inf
             self._event('observation',as_of=scene.record['as_of'],scene=scene.record['input_fingerprint'])
             return True
         except (ValueError,KeyError,TypeError) as error:
@@ -308,7 +367,8 @@ class ReferenceRuntime:
                     fields['follow_goal_adjustment']=result['follow_goal_adjustment']
                 if 'reference_search_frame' in result:
                     fields['reference_search_frame']=result['reference_search_frame']
-                    fields['retained_occupied_cells']=result['reference_overlay']['retained_occupied_cells']
+                    if 'reference_overlay' in result:
+                        fields['retained_occupied_cells']=result['reference_overlay']['retained_occupied_cells']
             try:
                 same_context=(self.latest is not None and job['epoch']==self.epoch and job['context']==self.context)
                 if same_context and job['request']['request_id']==self.latest['request']['request_id']:
@@ -318,6 +378,10 @@ class ReferenceRuntime:
                     self._display_failure_map=None
                 if reply['error']:raise ValueError(reply['error'])
                 if not same_context:raise ValueError('superseded_context')
+                if (self.start_occupied_stamp_s is not None and
+                        job['scene'].record['as_of']<=self.start_occupied_stamp_s):
+                    transient_input=True
+                    raise ValueError('reference_predates_occupied_start')
                 requested=self.latest['request'] if self.follow_key is None else job['request']
                 check_reference(envelope,requested,self.latest['scene'],self.latest['asset'],self.settings['max_age_s'],require_path=False)
                 requested_goal=goal_binding(requested)
@@ -368,6 +432,9 @@ class ReferenceRuntime:
                         not self._avoids_obstacles(envelope,self.latest['scene'],self.latest['asset'])):
                     transient_input=True
                     raise ValueError('reference_obstructed_by_new_observation')
+                if not self._avoids_local_occupancy(envelope,self.latest['scene'],self.latest['asset'],now):
+                    transient_input=True
+                    raise ValueError('reference_obstructed_by_new_observation')
                 if self.follow_key is not None:
                     if not self._compatible_follow(requested,self.latest):
                         transient_input=True
@@ -400,6 +467,11 @@ class ReferenceRuntime:
             self._display_failure_map=None
             self.planning_observation=None
             self.start_status=None
+            return self.status(now=now,clock_domain=clock_domain)
+        if self.blocked and self.start_status=='occupied':
+            self.reference=self.current=self.planning_observation=None
+            self._display_reference_map=self._display_failure_map=None
+            self.reason='start_footprint_not_free'
             return self.status(now=now,clock_domain=clock_domain)
         # A transient input outage must not permanently hide a retained valid
         # reference. Restore only after checking the original source time and

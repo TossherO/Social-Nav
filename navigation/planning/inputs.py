@@ -46,7 +46,10 @@ def load_config(path=None):
     if (type(local['enabled']) is not bool or type(local['reuse_free_reference']) is not bool or not np.isfinite(local['lookahead_m'])
             or not 0<local['lookahead_m']<=5.):
         raise ValueError('Local replanning needs a finite lookahead in (0,5] metres')
-    for key in ('safety_margin_m', 'clearance_cost_scale_m', 'max_geometry_age_s', 'max_association_age_s'):
+    margin = cfg['safety_margin_m']
+    if type(margin) not in (int,float) or not np.isfinite(margin) or margin<0:
+        raise ValueError('Invalid safety_margin_m')
+    for key in ('clearance_cost_scale_m', 'max_geometry_age_s', 'max_association_age_s'):
         if not np.isfinite(cfg[key]) or cfg[key] <= 0: raise ValueError('Invalid '+key)
     for key in ('max_cells', 'max_path_samples'):
         if type(cfg[key]) is not int or cfg[key] <= 0: raise ValueError('Invalid '+key)
@@ -142,3 +145,13 @@ def load_input(*, scene=None, static_map=None):
     if asset: validate_grid(asset.snapshot)
     if bundle is None and asset is None: raise ValueError('A static map or complete scene is required')
     return bundle, asset
+
+
+def validate_map_keepout_circle(circle):
+    if not isinstance(circle,dict) or set(circle)!={'center_xy_m','radius_m'}:
+        raise ValueError('Invalid map keepout circle')
+    center = circle['center_xy_m']
+    if (not isinstance(center,list) or len(center)!=2 or
+            not all(type(v) in (int,float) and np.isfinite(v) for v in [*center,circle['radius_m']]) or
+            circle['radius_m']<=0):
+        raise ValueError('Map keepout circle requires a finite center and a positive radius')

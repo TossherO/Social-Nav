@@ -69,20 +69,28 @@ def observed_objects(snapshot):
     return objects
 
 
+def circle_indices(grid, centre, radius):
+    """Flat indices of raster cells touched by a circle in the grid frame."""
+    height,width = grid.layers['occupancy'].shape
+    resolution = grid.metadata['resolution']
+    origin = np.asarray(grid.metadata['origin_xy'])
+    centre = np.asarray(centre)
+    low = np.maximum(0,np.floor((centre-radius-origin)/resolution).astype(int))
+    high = np.minimum([width,height],np.ceil((centre+radius-origin)/resolution).astype(int))
+    if np.any(high<=low):
+        return np.empty(0, dtype=np.intp)
+    y,x = np.mgrid[low[1]:high[1],low[0]:high[0]]
+    xy = np.stack((x+.5,y+.5),axis=-1)*resolution+origin
+    gap = np.maximum(abs(xy-centre)-resolution/2,0.)
+    return (y*width+x)[(gap**2).sum(axis=-1)<=radius**2]
+
+
 def circle_view(grid, objects):
     """Whole-cell intersection with currently observed circles; no free-space writes."""
     if not objects:return grid
     from .layers import GridSnapshot
-    m=grid.metadata;cells=grid.layers['occupancy'].copy();height,width=cells.shape
-    resolution=m['resolution'];origin=np.asarray(m['origin_xy'])
+    m=grid.metadata;cells=grid.layers['occupancy'].copy()
     for obj in objects:
-        centre=np.asarray(obj['xy']);radius=obj['radius_m']
-        low=np.maximum(0,np.floor((centre-radius-origin)/resolution).astype(int))
-        high=np.minimum([width,height],np.ceil((centre+radius-origin)/resolution).astype(int))
-        if np.any(high<=low):continue
-        y,x=np.indices(tuple((high-low)[::-1]))
-        xy=np.stack([x+low[0]+.5,y+low[1]+.5],axis=-1)*resolution+origin
-        gap=np.maximum(abs(xy-centre)-resolution/2,0.)
-        patch=cells[low[1]:high[1],low[0]:high[0]];patch[(gap**2).sum(-1)<=radius**2]=100
+        cells.flat[circle_indices(grid,obj['xy'],obj['radius_m'])]=100
     cells.flags.writeable=False
     return GridSnapshot(dict(m,navigation_view='background_with_current_person_circles'),dict(occupancy=cells))

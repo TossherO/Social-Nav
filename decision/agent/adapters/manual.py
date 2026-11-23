@@ -53,6 +53,10 @@ class ManualNavigation(RuntimeShadowNavigation):
         requirement=place.get('requirement') or {}
         require_yaw=goal_requires_heading(requirement)
         self.request=dict(place_id=place['place_id'],pose=copy.deepcopy(place['pose']),require_yaw=require_yaw)
+        if place.get('use_local_approach') is True:
+            self.request['use_local_approach'] = True
+        if 'map_keepout_circle' in place:
+            self.request['map_keepout_circle'] = copy.deepcopy(place['map_keepout_circle'])
         self.detour_check=copy.deepcopy(place.get('route_blocked_position_check'))
         self.last_detour_result=None
         self.confirmation=None
@@ -269,7 +273,9 @@ class ManualNavigation(RuntimeShadowNavigation):
         if self.status=='running' and self.handle is not None and not self.waiting_for_association:
             from ..workflows.manual_reference import reference_request
             request=reference_request(self.handle,self.request['pose'],self.route,self.route_index,
-                                      self.catalog,require_yaw=self.request['require_yaw'])
+                                      self.catalog,require_yaw=self.request['require_yaw'],
+                                      use_local_approach=self.request.get('use_local_approach') is True,
+                                      map_keepout_circle=self.request.get('map_keepout_circle'))
             preview=control.get('manual_preview') or {}
             if preview.get('owner')==self.handle['call_id']:
                 observation=bound_planning_observation(preview.get('planning_observation'),request,state)

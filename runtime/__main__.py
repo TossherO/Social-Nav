@@ -274,7 +274,9 @@ def _run(args, resources, handles):
               file=sys.stderr,flush=True)
     from perception.environment.navigation import CAPSULE_FIELDS, safety_capsule
     from perception.environment.support import NavigationSupport, finalize
+    from perception.environment.free_memory import ConfirmedFreeMemory
     navigation_support=NavigationSupport(env_config,library=ROOT/settings['environment_library'])
+    free_memory=ConfirmedFreeMemory() if support_enabled and asset is not None else None
     route_replay=None
     if args.route:
         from navigation.planning.route_replay import RouteReplay
@@ -320,7 +322,7 @@ def _run(args, resources, handles):
         commands.agent_state.enable_goal_observations()
         if args.agent_seating:
             from .seating import SeatingWorker
-            commands.agent_state.seating=resources['seating']=SeatingWorker(geometry,planning,motion,clock_rate=args.rate)
+            commands.agent_state.seating=resources['seating']=SeatingWorker(geometry,planning,motion,clock_rate=args.rate,asset=asset)
         agent_observer = resources['agent_observations'] = ObservationWorker(commands.agent_state.publish_observation,
             metrics=metrics,geometry=geometry,seating=commands.agent_state.seating)
     if args.agent_follow_candidates:
@@ -369,6 +371,7 @@ def _run(args, resources, handles):
     last_environment_fault=None;recovering_environment=False
     def reset_map():
         environment.reset();navigation_support.reset()
+        if free_memory is not None:free_memory.reset()
     def compute_map(job):
         nonlocal map_stream,recovering_environment
         metrics.trace('map_start',measurement_stamp_s=job['stamp'])
@@ -393,12 +396,16 @@ def _run(args, resources, handles):
             with metrics.span('safety_capsule_materialize'):
                 fields=CAPSULE_FIELDS if support_enabled else ('occupancy','person_background_free')
                 reference_fields=('last_observed','near_field_free') if asset is not None else ()
+                if free_memory is not None or args.agent_seating and not args.execute:
+                    reference_fields+=('coverage','ground_support')
                 fields+=reference_fields
                 capsule=grid.materialize(consumer='safety_capsule',fields=[k for k in fields if k in grid._layers],metrics=metrics)
                 if support_enabled:
                     from perception.environment.device import DeviceGridSnapshot
                     capsule=safety_capsule(finalize(capsule),extra_fields=reference_fields)
                     grid=DeviceGridSnapshot.seal(capsule.metadata,grid.consume())
+                if free_memory is not None:
+                    capsule=free_memory.update(capsule,asset)
                 current=assemble_scene(capsule,clock_domain=clock_domain,people=job['options']['people'],
                                        stamp_ns=job['stamp_ns'],settings=env_config['scene'])
             metrics.trace('map_ready',measurement_stamp_s=job['stamp'],scene_binding=current.record['input_fingerprint'])

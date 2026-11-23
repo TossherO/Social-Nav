@@ -11,7 +11,42 @@ from navigation.planning.inputs import load_config
 from navigation.planning.planner import Planner
 from navigation.planning.reference import planning_config
 from perception.environment.layers import GridSnapshot
-from tests.navigation_fixtures import asset, request
+from tests.navigation_fixtures import asset, bundle, request
+
+
+class RoundTableReferenceTests(unittest.TestCase):
+    def test_approach_and_observation_replan_around_table_on_empty_lidar_grid(self):
+        from navigation.planning.continuity import goal_binding
+        from perception.environment.layers import load_config as environment_config
+        from perception.environment.scene import assemble_scene
+
+        geometry = VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]], np.eye(4), source='fixture')
+        planner = Planner(load_config(),geometry,require_actual_start=True)
+        scan, prior = bundle().geometry, asset()
+        transform = np.eye(4)
+        transform[1,3] = 1.
+        scan.metadata['association']['map_from_local'] = transform.tolist()
+        scene = assemble_scene(scan,clock_domain='synthetic',settings=environment_config()['scene'])
+        # Independent map of the tabletop for checking the entire returned footprint.
+        y,x = np.indices((60,60))
+        table = ((x+.5)*.1-2.9)**2 + ((y+.5)*.1-3.)**2 <= .28**2
+        audit_grid = GridSnapshot(prior.snapshot.metadata,dict(occupancy=(100*table).astype(np.int8)))
+        circle = dict(center_xy_m=[2.9,3.],radius_m=.28)
+        for parking in (False,True):
+            with self.subTest(parking=parking):
+                goal = request('mapped',goal=[3.8,3.,0.],goal_behavior='stop')
+                if parking:
+                    goal['use_local_approach'] = True
+                def query(fields):
+                    result = planner.query(fields,scene=scene,asset=prior,now=10.,clock_domain='synthetic')
+                    self.assertEqual(result['status'],'path_found',result['reason'])
+                    return swept_check(audit_grid,geometry,result['path'],0.,10000,prefix=False)['status']
+                self.assertEqual(query(goal),'occupied')
+                constrained = dict(goal,map_keepout_circle=circle)
+                self.assertNotEqual(goal_binding(goal),goal_binding(constrained))
+                self.assertEqual(query(constrained),'free')
+        self.assertFalse(scene.geometry.layers['occupancy'].any())
+        self.assertFalse(prior.snapshot.layers['occupancy'].any())
 
 
 class SearchCacheTests(unittest.TestCase):

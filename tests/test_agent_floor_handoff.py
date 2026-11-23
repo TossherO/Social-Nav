@@ -18,7 +18,7 @@ class FloorHandoffTests(unittest.TestCase):
     def test_floor1_same_frame_update_only_rebinds_the_provisional_seed(self):
         standard=json.loads((CONFIG_DIR/'elevator_standard_starts.json').read_text())['floor1']
         old_id=standard['map_id']
-        new_id,=standard['same_frame_map_ids']
+        same_frame_ids=standard['same_frame_map_ids']
         rgb=b'\xff\xd8reference\xff\xd9'
         lidar=b'\x89PNG\r\n\x1a\nreference'
         meta=dict(map_id=old_id, rgb=dict(stamp_s=1.),lidar=dict(stamp_s=1.),
@@ -29,7 +29,7 @@ class FloorHandoffTests(unittest.TestCase):
             reference.write_text(json.dumps(meta))
             (reference.parent/'rgb.jpg').write_bytes(rgb)
             (reference.parent/'lidar.png').write_bytes(lidar)
-            for map_id in (old_id,new_id):
+            for map_id in (old_id,*same_frame_ids):
                 with self.subTest(map_id=map_id):
                     target=SimpleNamespace(value=dict(localization_map_id=map_id,frame_id='map'))
                     pose,observation=load_standard_start(target,'floor1')
@@ -47,14 +47,18 @@ class FloorHandoffTests(unittest.TestCase):
                     self.assertEqual(seed['destination']['to_map_id'],map_id)
                     self.assertEqual(seed['lidar_pose_rpy_xyz'],standard['pose_rpy_xyz'])
                     self.assertIs(seed['verified_localization'],False)
-            for map_id,frame_id in (('unrelated','map'),(new_id,'other_frame')):
-                target=SimpleNamespace(value=dict(localization_map_id=map_id,frame_id=frame_id))
-                with self.assertRaisesRegex(ValueError,'does not match the destination map'):
-                    load_standard_start(target,'floor1')
-            reference.write_text(json.dumps(dict(meta,map_id=new_id)))
-            target=SimpleNamespace(value=dict(localization_map_id=new_id,frame_id='map'))
-            with self.assertRaisesRegex(ValueError,'reference is missing or changed'):
-                load_standard_start(target,'floor1')
+                    wrong_frame=SimpleNamespace(value=dict(localization_map_id=map_id,frame_id='other_frame'))
+                    with self.assertRaisesRegex(ValueError,'does not match the destination map'):
+                        load_standard_start(wrong_frame,'floor1')
+            unknown_map=SimpleNamespace(value=dict(localization_map_id='roll:'+'0'*64,frame_id='map'))
+            with self.assertRaisesRegex(ValueError,'does not match the destination map'):
+                load_standard_start(unknown_map,'floor1')
+            for map_id in same_frame_ids:
+                with self.subTest(reference_map_id=map_id):
+                    reference.write_text(json.dumps(dict(meta,map_id=map_id)))
+                    target=SimpleNamespace(value=dict(localization_map_id=map_id,frame_id='map'))
+                    with self.assertRaisesRegex(ValueError,'reference is missing or changed'):
+                        load_standard_start(target,'floor1')
 
     def test_real_handoff_accepts_standard_seed_and_rejects_mismatched_inputs(self):
         from decision.agent.core.elevator_links import standard_destination_seed

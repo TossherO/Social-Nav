@@ -96,7 +96,7 @@ class PeopleModel:
             return centre,radius,dict(covariance=zeros,acceleration=zeros,unknown_velocity=zeros)
         return centre,radius
 
-    def navigation_grid(self,scene):
+    def navigation_grid(self,scene,*,include_confirmed_free=False):
         """A separate collision view; the bound perception map stays unchanged.
 
         Only exclusive person hits over previously certified free background
@@ -111,7 +111,7 @@ class PeopleModel:
         status=raw.metadata.get('dynamic_filter',{})
         report=dict(status='raw_geometry',restored_cells=0,source_scene=scene.record['input_fingerprint'],
             source_layers=scene.record['geometry']['layer_binding'],people_source=self.source)
-        grid=navigation_geometry(scene,include_people=False)
+        grid=navigation_geometry(scene,include_people=False,include_confirmed_free=include_confirmed_free)
         binding=scene.record['geometry']['layer_binding'] if grid is raw else layer_binding(grid)
         if grid is not raw:
             report.update(status='static_prior_fusion',prior_fusion=raw.metadata['navigation_fusion'])

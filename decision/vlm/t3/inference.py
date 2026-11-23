@@ -18,17 +18,25 @@ def binding(candidate_set):
 
 def validate_candidate_set(data):
     required={'instruction','observation_id','stamp_s','frame_id','clock_domain','session_id','generation','revision','candidates'}
-    if set(data) not in (required, required|{'context'}):raise ValueError('Unexpected candidate-set fields')
+    if set(data) not in (required, required|{'context'}, required|{'round_table'},
+                         required|{'round_table','view_search'}):
+        raise ValueError('Unexpected candidate-set fields')
     if any(not isinstance(data[k],str) or not data[k].strip() for k in ['instruction','observation_id','frame_id','clock_domain','session_id']):
         raise ValueError('Explicit instruction and observation identity required')
     if type(data['stamp_s']) not in (int,float) or not math.isfinite(data['stamp_s']):raise ValueError('Invalid time')
     if any(type(data[k]) is not int or data[k]<0 for k in ['generation','revision']):raise ValueError('Invalid lifecycle')
     candidates=data['candidates']
-    if not isinstance(candidates,list) or len(candidates)>8:raise ValueError('At most eight candidates')
+    limit=8
+    if 'round_table' in data:
+        from .geometry import ROUND_CANDIDATE_LIMIT, validate_round_table
+        validate_round_table(data['round_table'])
+        limit=ROUND_CANDIDATE_LIMIT
+    if not isinstance(candidates,list) or len(candidates)>limit:
+        raise ValueError(f'At most {limit} candidates')
     ids=[]
     for c in candidates:
         if set(c)!={'id','pose','motion','geometry'}:raise ValueError('Unexpected candidate fields')
-        if type(c['id']) is not int or not 0<=c['id']<=7:raise ValueError('Invalid candidate ID')
+        if type(c['id']) is not int or not 0<=c['id']<limit:raise ValueError('Invalid candidate ID')
         if (not isinstance(c['pose'],list) or len(c['pose'])!=3 or
                 any(type(v) not in (int,float) or not math.isfinite(v) for v in c['pose'])):raise ValueError('Expected x/y/yaw')
         if c['motion'] not in {'forward','reverse','wait'} or c['geometry'] not in {'unknown','feasible','blocked'}:
@@ -38,6 +46,16 @@ def validate_candidate_set(data):
     if 'context' in data:
         from .geometry import validate_context
         validate_context(data['context'],data)
+    if 'view_search' in data:
+        view = data['view_search']
+        if not isinstance(view, dict) or set(view) != {
+                'bounds_xy_m','visited_xy_m','rejected_views','can_propose'} or type(view['can_propose']) is not bool:
+            raise ValueError('Invalid T3 observation search context')
+        bounds = view['bounds_xy_m']
+        if (not isinstance(bounds,list) or len(bounds)!=4 or
+                any(type(v) not in (int,float) or not math.isfinite(v) for v in bounds) or
+                bounds[2]<=bounds[0] or bounds[3]<=bounds[1]):
+            raise ValueError('Invalid T3 displayed bounds')
 
 
 def selection_schema(candidate_set):
@@ -49,12 +67,25 @@ def selection_schema(candidate_set):
                     properties=dict(p=dict(type='integer',enum=values),s=dict(type='string',enum=states)))
     if ids:branches.append(branch(ids,['v']))
     branches.append(branch([-1],['n','u']))
+    search = candidate_set.get('view_search')
+    if search is not None:
+        branches[-1]['properties']['reason'] = {'type':'string','minLength':1,'maxLength':256}
+        branches[-1]['required'].append('reason')
+        if search['can_propose']:
+            branches.append(dict(type='object',additionalProperties=False,required=['s','pose','focus'],
+                properties=dict(s={'type':'string','enum':['o']},
+                                pose={'type':'array','items':{'type':'number'},'minItems':3,'maxItems':3},
+                                focus={'type':'string','minLength':1,'maxLength':256})))
     return dict(oneOf=branches)
 
 
 def validate_selection(response,candidate_set):
     Draft202012Validator(selection_schema(candidate_set)).validate(response)
-    if type(response['p']) is not int:raise ValueError('Candidate ID must be an integer')
+    if response['s']=='o':
+        if not all(math.isfinite(v) for v in response['pose']) or not response['focus'].strip():
+            raise ValueError('A finite observation pose and a specific observation focus are required')
+    elif type(response['p']) is not int:
+        raise ValueError('Candidate ID must be an integer')
 
 
 def run(directory,base_url,*,prompt_path=None,result_name='remote'):

@@ -2,8 +2,8 @@
 algorithm: dijkstra
 # 搜索时使用的几何模型。
 search_geometry: footprint
-# 碰撞检查的安全余量，单位为米。
-safety_margin_m: 0.05
+# 在配置的车体轮廓之外追加的固定余量，单位为米。
+safety_margin_m: 0.0
 # 障碍净距代价的距离尺度，单位为米。
 clearance_cost_scale_m: 0.8
 # 障碍净距代价增益。

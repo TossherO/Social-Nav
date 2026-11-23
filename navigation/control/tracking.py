@@ -47,7 +47,11 @@ def goal_feedback(request,scene,feedback,settings,*,now,clock_domain,active,geom
             if geometry is not None:
                 from navigation.planning.footprint import footprint_status
                 from perception.environment.navigation import navigation_geometry
-                if footprint_status(navigation_geometry(scene,now=now,asset=asset,check_asset=True),geometry,pose,(planning or {}).get('safety_margin_m',.05))!='free':return result
+                if planning is None:
+                    from navigation.planning.inputs import load_config as load_planning
+                    planning = load_planning()
+                if footprint_status(navigation_geometry(scene,now=now,asset=asset,check_asset=True),
+                                    geometry,pose,planning['safety_margin_m'])!='free':return result
         except (ValueError,KeyError,TypeError):return result
     return dict(result,status='criteria_met' if complete else 'running',criteria_met=complete,
         reached_xy=bool(reached),yaw_aligned=bool(aligned),stopped=bool(stopped),feedback_stamp_s=feedback['stamp_s'])

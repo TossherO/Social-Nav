@@ -394,6 +394,8 @@ class RuntimeShadowNavigation:
         request = dict(request_id=handle['call_id'], task_id=handle['task_id'], goal_revision=handle['goal_revision'],
                        mode='mapped', frame_id=self.catalog.value['frame_id'], target_reference='base_link', goal=place['pose'], goal_behavior='stop',
                        map_snapshot_id=self.catalog.value['map_snapshot_id'])
+        if 'map_keepout_circle' in place:
+            request['map_keepout_circle'] = copy.deepcopy(place['map_keepout_circle'])
         if 'search_bounds' in place:
             request['search_bounds']=copy.deepcopy(place['search_bounds'])
             request['valid_until_s']=place['valid_until_s']

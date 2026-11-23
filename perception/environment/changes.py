@@ -8,7 +8,7 @@ from .layers import GridSnapshot, finish_evidence
 from .geometry import distance_to_zero
 
 
-def cell_evidence(points, rotation, target_resolution, local):
+def cell_evidence(points, rotation, target_resolution, local, *, confirmed_free=None):
     """Exact SAT overlap of target squares with the local axis-aligned raster."""
     m, layers=local.metadata,local.layers
     cells=layers['occupancy'];res=m['resolution'];a=target_resolution/2;b=res/2
@@ -18,23 +18,31 @@ def cell_evidence(points, rotation, target_resolution, local):
     span=(upper-lower).max(axis=0)+1
     if int(np.prod(span))>81:raise ValueError('Prior/local cell scale ratio exceeds the overlap budget')
     free=np.ones(len(points),bool);hit=np.zeros(len(points),bool);seen=np.full(len(points),np.nan)
-    supported=layers.get('ground_support',np.zeros_like(cells,bool))
-    valid_free=(cells==0)&supported&(layers['coverage']>=1.-1e-6)
-    # Reused background is useful locally but cannot become new negative
-    # evidence that permanently clears a separate historical map asset.
-    if 'near_field_free' in layers:valid_free&=~layers['near_field_free']
+    occupied_overlap=np.zeros(len(points),bool)
+    if confirmed_free is None:
+        supported=layers.get('ground_support',np.zeros_like(cells,bool))
+        valid_free=(cells==0)&supported&(layers['coverage']>=1.-1e-6)
+        if 'near_field_free' in layers:valid_free&=~layers['near_field_free']
+        observed=layers['last_observed']
+    else:
+        valid_free=np.isfinite(confirmed_free)&(cells!=100)
+        observed=confirmed_free
     for dy in range(span[1]):
         for dx in range(span[0]):
             ij=lower+[dx,dy];centres=(ij+.5)*res+m['origin_xy'];delta=centres-points
-            overlap=((np.abs(delta)<=extent+b+1e-9).all(axis=1)&
-                     (np.abs(delta@rotation.T)<=a+b*np.abs(rotation).sum(axis=1)+1e-9).all(axis=1))
+            local_gap=extent+b-np.abs(delta)
+            target_gap=a+b*np.abs(rotation).sum(axis=1)-np.abs(delta@rotation.T)
+            overlap=((local_gap>=-1e-9)&(target_gap>=-1e-9)).all(axis=1)
             inside=((ij>=0)&(ij<np.asarray(cells.shape[::-1]))).all(axis=1)
             free[overlap & ~inside]=False
             rows=np.flatnonzero(overlap & inside);x,y=ij[rows].T
-            free[rows]&=valid_free[y,x];hit[rows]|=cells[y,x]==100
-            seen[rows]=np.fmax(seen[rows],layers['last_observed'][y,x])
+            occupied=cells[y,x]==100
+            free[rows]&=valid_free[y,x];hit[rows]|=occupied
+            hits=rows[occupied]
+            occupied_overlap[hits]|=((local_gap[hits]>1e-9)&(target_gap[hits]>1e-9)).all(axis=1)
+            seen[rows]=np.fmin(seen[rows],observed[y,x])
     free &= np.isfinite(seen)&(seen<=m['stamp_s']+1e-6)
-    return free,hit,seen
+    return free,hit,seen,occupied_overlap
 
 
 def conditional_obstacles(layers, config):
@@ -64,8 +72,10 @@ class PriorRevisions:
 
     def reset(self):
         self.key = self.cleared = self.stamps = self.last = self.source = None
+        self.has_confirmed_free = False
 
-    def apply(self, prior, local, association, *, scene_binding, bounds=None, overlay_current=True, geometry_only=False):
+    def apply(self, prior, local, association, *, scene_binding, bounds=None, overlay_current=True,
+              geometry_only=False, confirmed_free=None):
         from perception.detection_tracking.inference.geometry import validate_transform
         if bounds is not None:
             bounds=np.asarray(bounds,dtype=float)
@@ -85,12 +95,14 @@ class PriorRevisions:
                 source_snapshot_id=prior.metadata['snapshot_id'],scene_binding=scene_binding)),prior.layers)
         stamp = float(local.metadata['stamp_s'])
         key = (prior.metadata['snapshot_id'], local.metadata['session_id'], local.metadata['generation'],
-               association.get('association_session'), association.get('association_generation'))
+               association.get('association_session'), association.get('association_generation'),
+               association.get('map_revision'),local.metadata['frame_id'])
         if prior is not self.source or key != self.key or (self.last is not None and stamp < self.last):
             self.reset(); self.key = key; self.source = prior
             self.cleared = np.zeros_like(prior.layers['occupancy'], bool)
             self.stamps = np.full(self.cleared.shape, np.nan)
         self.last = stamp
+        self.has_confirmed_free |= confirmed_free is not None
         cells = local.layers['occupancy']; lm, pm = local.metadata, prior.metadata
         # Only local cells intersecting this raster need projection. Bounding
         # target cells by a half diagonal covers arbitrary sub-cell alignment.
@@ -109,11 +121,25 @@ class PriorRevisions:
             y,x = np.mgrid[low[1]:high[1],low[0]:high[0]]
             xy = np.stack((x.ravel()+.5,y.ravel()+.5),axis=1)*pm['resolution']+pm['origin_xy']
             sample = (xy-map_pose) @ rotation+local_pose
-            certified,occupied,seen=cell_evidence(sample,rotation,pm['resolution'],local)
-            current_free[y.ravel()[certified],x.ravel()[certified]]=True
+            certified,occupied,seen,occupied_overlap=cell_evidence(
+                sample,rotation,pm['resolution'],local,confirmed_free=confirmed_free)
+            if confirmed_free is not None or not self.has_confirmed_free:
+                current_free[y.ravel()[certified],x.ravel()[certified]]=True
             current_hit[y.ravel()[occupied],x.ravel()[occupied]]=True
+            # A partial view can revoke a correction when occupied cells
+            # intersect its interior. Unknown space requires full coverage.
+            forget=occupied_overlap if self.has_confirmed_free else np.zeros(len(sample),bool)
+            if confirmed_free is not None:
+                extent=pm['resolution']/2*np.abs(rotation).sum(axis=0)
+                origin=np.asarray(lm['origin_xy'])
+                upper=origin+np.asarray(lm['shape'][::-1])*lm['resolution']
+                observable=((sample-extent>=origin)&(sample+extent<=upper)).all(axis=1)
+                forget|=observable&~certified
+            self.cleared[y.ravel()[forget],x.ravel()[forget]]=False
+            self.stamps[y.ravel()[forget],x.ravel()[forget]]=np.nan
         current_free &= ~current_hit
-        newly_free = current_free & (prior.layers['occupancy']==100)
+        eligible = prior.layers['occupancy']!=0 if confirmed_free is not None else prior.layers['occupancy']==100
+        newly_free = current_free & eligible
         self.cleared |= newly_free
         if (high>low).all():
             selected=newly_free[y.ravel(),x.ravel()]

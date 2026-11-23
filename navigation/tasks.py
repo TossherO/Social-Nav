@@ -269,6 +269,11 @@ class TaskPolicy:
         candidates=ticket['candidates']
         if candidates is None:raise ValueError('Missing seating candidate set')
         validate_selection(response,candidates);self.raw=copy.deepcopy(response)
+        if response['s']=='o':
+            request=self._goal(response['pose'],scene,source=ticket['binding'],stop=True)
+            request.update(candidate_binding=binding(candidates),candidate_id=None)
+            return dict(operation='observe',request=request,focus=response['focus'],
+                        requires_geometry_verification=True,task_completed=False,executable=False)
         if response['s']!='v':return self._stop('no_suitable_seating_candidate')
         chosen=next(c for c in candidates['candidates'] if c['id']==response['p'])
         if chosen['geometry']=='blocked':return self._stop('selected_candidate_blocked')

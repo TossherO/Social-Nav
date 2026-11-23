@@ -11,17 +11,23 @@ def request_preview(path, owner, request):
     return result
 
 
-def reference_request(handle, pose, route, route_index, catalog, *, require_yaw=False):
+def reference_request(handle, pose, route, route_index, catalog, *, require_yaw=False, use_local_approach=False,
+                      map_keepout_circle=None):
     index=0 if route is None else route_index
     if index is None:return None
     target=(pose if require_yaw else pose[:2]) if route is None else route['waypoints'][index]
     final=route is None or index==len(route['waypoints'])-1
     if route is not None and final and require_yaw:target=[*target,route['final_yaw']]
-    return dict(request_id=handle['call_id']+':'+str(index),
+    request = dict(request_id=handle['call_id']+':'+str(index),
         task_id='manual-preview:'+handle['task_id']+':'+handle['call_id'],
         goal_revision=handle['goal_revision']*100+index,mode='mapped',
         frame_id=catalog.value['frame_id'],target_reference='base_link',goal=copy.deepcopy(target),
         goal_behavior='stop' if final else 'pass_through',map_snapshot_id=catalog.value['map_snapshot_id'])
+    if use_local_approach:
+        request['use_local_approach'] = True
+    if map_keepout_circle is not None:
+        request['map_keepout_circle'] = copy.deepcopy(map_keepout_circle)
+    return request
 
 
 class ManualReference:

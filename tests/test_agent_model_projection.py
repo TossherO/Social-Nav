@@ -168,6 +168,28 @@ class ModelProjectionTests(unittest.TestCase):
         uncertain.allow(state)
         self.assertEqual(uncertain.available_tools(EXECUTION_TOOLS), EXECUTION_TOOLS)
 
+    def test_registered_round_table_offers_bound_t3_start_only_when_ready(self):
+        state = self.state()
+        state['completion_evidence'] = dict(
+            requirement=dict(goal_id='g1', stage_type='seating', kind='skill', table_id='p-03-2'))
+        state['seating_start'] = dict(table_id='p-03-2', stopped=True)
+        projection = ModelProjection()
+        projection.allow(state)
+        offered = projection.available_tools(EXECUTION_TOOLS)
+        self.assertIn('start_local_task', offered)
+        self.assertNotIn('check_candidate', offered)
+        self.assertNotIn('navigate', offered)
+        tool, = projection.tools(native_tools(['start_local_task']))
+        self.assertEqual(tool['function']['parameters']['properties'], {})
+        action = projection.validate_action(dict(tool='start_local_task', arguments={}))
+        self.assertEqual(action['arguments'], dict(goal_id='g1', task_type='seating'))
+
+        state['seating_start']['stopped'] = False
+        moving = ModelProjection()
+        moving.allow(state)
+        self.assertNotIn('start_local_task', moving.available_tools(EXECUTION_TOOLS))
+        self.assertIn('wait_for_event', moving.available_tools(EXECUTION_TOOLS))
+
     def test_single_visual_priority_is_bound_only_for_unambiguous_post_stop_review(self):
         state = self.state(visual_adjustment=dict(review=None))
         requirement = dict(goal_id='g1', kind='point', semantic_conditions=['入口可见'])

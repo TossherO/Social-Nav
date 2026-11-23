@@ -111,7 +111,7 @@ def polygon_cells(polygon, centres, half_size):
     return overlap
 
 
-def footprint_details(snapshot, geometry, pose, margin):
+def footprint_details(snapshot, geometry, pose, margin, *, source_snapshot=None):
     """Explain unavailable evidence without relabeling any unknown cell."""
     polygon=geometry.polygon(pose);m=snapshot.metadata;r=m['resolution'];origin=np.asarray(m['origin_xy'])
     low=np.floor((polygon.min(0)-margin-origin)/r).astype(int)
@@ -126,6 +126,18 @@ def footprint_details(snapshot, geometry, pose, margin):
     physical=polygon_cells(polygon,centres,r/2)
     result['occupied_intersecting_footprint']=int(((values==100)&physical).sum())
     result['occupied_only_in_margin']=int(((values==100)&~physical).sum())
+    if source_snapshot is not None:
+        occupied=values==100
+        iy,ix=y[occupied],x[occupied]
+        background=source_snapshot.layers.get('navigation_occupancy',source_snapshot.layers['occupancy'])
+        source=source_snapshot.layers.get('navigation_source')
+        stamps=source_snapshot.layers.get('navigation_source_stamp')
+        result['occupied_cells']=dict(xy_m=centres[occupied].tolist(),intersects_body=physical[occupied].tolist(),
+            measured_occupancy=source_snapshot.layers['occupancy'][iy,ix].tolist(),
+            background_occupancy=background[iy,ix].tolist(),
+            navigation_source=None if source is None else source[iy,ix].tolist(),
+            navigation_source_stamp_s=None if stamps is None else
+                [float(value) if np.isfinite(value) else None for value in stamps[iy,ix]])
     # This is a geometric diagnostic, never permission to clear the robot area.
     edges=np.roll(polygon,-1,axis=0)-polygon
     sign=np.sign(np.cross(edges[0],edges[1]))

@@ -154,11 +154,22 @@ def prior_floor(snapshot, prior, transform, map_plane, *, selected=None):
     return output
 
 
-def navigation_geometry(scene, *, now=None, asset=None, check_asset=False, _layer_binding=None, include_people=True):
+def navigation_geometry(scene, *, now=None, asset=None, check_asset=False, _layer_binding=None,
+                        include_people=True, include_confirmed_free=False):
     """Default consumers retain current contact, even without a people packet."""
     from .person_objects import observed_objects,circle_view
     objects=observed_objects(scene.geometry)
     grid=_background_geometry(scene,now=now,asset=asset,check_asset=check_asset,_layer_binding=_layer_binding)
+    if include_confirmed_free:
+        from .free_memory import remembered_free
+        dates=remembered_free(scene,asset=asset,now=now)
+        if dates is not None:
+            cells=grid.layers['occupancy']
+            restored=(cells==-1)&np.isfinite(dates)
+            if restored.any():
+                cells=cells.copy();cells[restored]=0;cells.flags.writeable=False
+                grid=GridSnapshot(dict(grid.metadata,navigation_view='confirmed_free_memory'),
+                                  dict(occupancy=cells))
     return circle_view(grid,objects) if include_people else grid
 
 

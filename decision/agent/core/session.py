@@ -775,17 +775,27 @@ class AgentSession:
         return dict(status='selected',reference_id=record['reference_id'],candidate_id=candidate_id,
                     has_3d_track=record['track'] is not None,executable=False,execution_completed=False)
 
-    def start_local_task(self, goal_id, task_type, target_description=None, table_roi=None, reference_id=None):
+    def start_local_task(self, goal_id, task_type, target_description=None, table_roi=None, reference_id=None,
+                         table_id=None):
         current=self.task_goals.current(goal_id)
         if current['requirement'].get('stage_type')!=task_type:
             return dict(status='refused',reason='local_task_type_does_not_match_stage')
         if task_type=='seating':
+            requirement = current['requirement']
+            if registered_table := requirement.get('table_id'):
+                if table_roi is not None or table_id not in (None, registered_table):
+                    return dict(status='refused',reason='seating_use_registered_table',table_id=registered_table)
+                table_id = registered_table
+                clauses = [requirement['description'], *requirement.get('semantic_conditions', ())]
+                target_description = '；'.join(dict.fromkeys(clauses))
             if not isinstance(target_description,str) or not target_description.strip():
                 return dict(status='refused',reason='seating_description_required')
             from .seating import start_selection
-            return start_selection(self,current,target_description.strip(),table_roi)
+            return start_selection(self,current,target_description.strip(),table_roi,table_id=table_id)
         if table_roi is not None:
             return dict(status='refused',reason='table_roi_only_applies_to_seating')
+        if table_id is not None:
+            return dict(status='refused',reason='table_id_only_applies_to_seating')
         ref=self.follow_reference
         if (not isinstance(ref,dict) or not isinstance(reference_id,str) or not reference_id or
                 reference_id!=ref.get('reference_id') or ref.get('goal_id')!=goal_id or
@@ -1769,11 +1779,14 @@ class AgentSession:
                 not self.skill.record['context_lost'] and s['status'] not in TERMINAL):
             return s
         if self.seating_active is not None:
+            seating_viewpoint = 'observation_pose' in self.seating_active
             from .seating import poll_updates
             try:poll_updates(self)
             except (ValueError,KeyError,TypeError,OSError,EOFError) as error:
                 self.stop('needs_clarification','seating_update_unavailable')
                 self._save('seating_update_unavailable',dict(error_type=type(error).__name__))
+            if seating_viewpoint:
+                return s
         if self.seating_pending is not None:
             if s['status']=='waiting_seating' and self.skill.record['connected'] and not self.skill.record['context_lost']:
                 from .seating import poll_selection
@@ -1963,6 +1976,8 @@ class AgentSession:
                     selection['route'] = {k:selected['route'].get(k) for k in ('waypoints','final_yaw','waypoint_reason')}
             current['selected_goal'] = dict(goal_id=current['next_goal_id'],selection=selection,
                 allowed_orientation_sources=self.task_goals.orientation_sources(requirement,visual_adjustment=after_initial))
+            if requirement.get('stage_type') == 'seating' and requirement.get('table_id') and selection is None:
+                current['seating_start'] = dict(table_id=requirement['table_id'], stopped=self.observation_stop(now))
             if stage.get('route_attempts'):
                 current['selected_goal']['route_attempts'] = [dict(handle=item['handle'],
                     waypoints=item['route']['waypoints'],final_yaw=item['route']['final_yaw'],

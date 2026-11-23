@@ -17,6 +17,86 @@ from runtime.seating import SeatingWorker
 
 
 class LocalTaskTests(unittest.TestCase):
+    def test_round_table_model_proposes_and_revises_observation_pose(self):
+        import json
+        scene = bundle()
+        geometry = VehicleGeometry([[-.15,-.15],[.2,-.15],[.2,.15],[-.15,.15]],
+                                   np.eye(4), source='synthetic', assumed=False)
+        worker = SeatingWorker(geometry,load_config(),load_motion_config())
+        circle = dict(id='p-03-1',map_id=scene.record['prior']['map_id'],
+                      center_xy_m=[1.5,0.],radius_m=.35)
+        rgb = np.full((32,48,3),170,np.uint8)
+        obs = Observation.from_scene(scene,geometry=geometry,rgb=dict(pixels=rgb,stamp_s=10.,frame_id='camera'))
+        clock = (10.,1_000_000.)
+        sent = []
+        def infer(body, **_):
+            fields = json.loads(body['messages'][1]['content'][-1]['text'])
+            sent.append(fields)
+            pose = [99.,0.,0.] if len(sent)==1 else [0.,.65,-.45]
+            return dict(status='complete',raw_content=json.dumps(dict(s='o',pose=pose,focus='See the side of the table')))
+        with patch('runtime.seating.time.monotonic',return_value=clock[1]), \
+             patch.object(worker,'_route',return_value=(None,False)) as route, \
+             patch('decision.vlm.online.request_dspark',side_effect=infer):
+            try:
+                worker.observe(scene,obs,rgb,np.empty((0,3)),{},clock)
+                worker.update_scene(scene,clock)
+                worker.select(dict(selection_id='view',instruction='Park beside the round table',
+                                   round_table=circle,observation_binding=obs.record['input_fingerprint'],
+                                   manual_observation=dict(after_s=0.,visited_xy_m=[])))
+                worker.thread.join(6.)
+                result = worker.snapshot()
+                self.assertEqual(result['status'],'observation',result)
+                self.assertEqual(result['observation_focus'],'See the side of the table')
+                self.assertEqual(sent[1]['view_search']['rejected_views'][0]['reason'],
+                                 'seating_view_outside_displayed_area')
+                self.assertEqual(len(result['view_checks']),2)
+                route.assert_called_once()
+            finally:
+                worker.close()
+
+    def test_round_table_reselects_after_path_rejection(self):
+        from decision.vlm.t3.geometry import round_candidates, round_clearance
+        scene = bundle()
+        geometry = VehicleGeometry([[-.15,-.15],[.2,-.15],[.2,.15],[-.15,.15]],
+                                   np.eye(4), source='synthetic', assumed=False)
+        worker = SeatingWorker(geometry, load_config(), load_motion_config())
+        table = dict(id='p-03-1', map_id=scene.record['prior']['map_id'],
+                     center_xy_m=[1.5, 0.0], radius_m=.4)
+        gap = worker.seating['table_clearance_m']
+        self.assertEqual(worker.planning['safety_margin_m'],0.)
+        self.assertEqual(gap,.10)
+        for candidate in round_candidates(table, geometry.footprint, gap):
+            self.assertAlmostEqual(round_clearance(table, geometry.polygon(candidate['pose'])), gap)
+        self.assertLess(round_clearance(table, geometry.polygon([1.5, 0., 0.])), 0.)
+        rgb = np.full((32, 48, 3), 170, np.uint8)
+        obs = Observation.from_scene(scene, geometry=geometry,
+                                     rgb=dict(pixels=rgb, stamp_s=10., frame_id='camera'))
+        selection = dict(selection_id='round-table', instruction='Park beside the round table',
+                         round_table=table, observation_binding=obs.record['input_fingerprint'])
+        clock = (10., 1_000_000.)
+        denied = dict(status='no_path', current_path_valid=False, reason='synthetic_obstruction')
+        allowed = dict(status='path_found', current_path_valid=True)
+        replies = [dict(status='complete', raw_content='{"p":0,"s":"v"}'),
+                   dict(status='complete', raw_content='{"p":1,"s":"v"}')]
+        with patch('runtime.seating.time.monotonic', return_value=clock[1]), \
+             patch('navigation.planning.footprint.footprint_status', return_value='free'), \
+             patch('navigation.planning.planner.Planner.query', side_effect=[denied, allowed]), \
+             patch('decision.vlm.online.request_dspark', side_effect=replies):
+            try:
+                worker.observe(scene, obs, rgb, np.empty((0, 3)), {}, clock)
+                worker.update_scene(scene, clock)
+                worker.select(selection)
+                worker.thread.join(6.)
+                result = worker.snapshot()
+                self.assertEqual(result['status'], 'selected', result)
+                self.assertEqual(result['candidate_id'], 1)
+                self.assertEqual(result['mapped_round_table']['center_xy_m'], table['center_xy_m'])
+                first, second = result['attempts']
+                self.assertEqual(first['rejection'], 'synthetic_obstruction')
+                self.assertEqual(second['candidates'][0]['geometry'], 'blocked')
+            finally:
+                worker.close()
+
     def test_manual_follow_only_updates_preview_even_on_cancel(self):
         inbox=object.__new__(CommandInbox)
         inbox.session=SimpleNamespace(live=True,execute=False)

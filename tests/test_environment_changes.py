@@ -26,6 +26,121 @@ class ChangeTests(unittest.TestCase):
         self.config=load_config()
         self.association=dict(map_from_local=np.eye(4).tolist(),association_session='a',association_generation=0)
 
+    def test_confirmed_free_keeps_its_measurement_and_new_hits_revoke_it(self):
+        from perception.environment.free_memory import ConfirmedFreeMemory, LAYER
+
+        memory=ConfirmedFreeMemory()
+        source=asset()
+        def snapshot(stamp, value, *, source_stamp=None, x=0., generation=0, inherited=False):
+            cells=np.full((60,60),-1,np.int8)
+            ix=30-round(x/.1)
+            if 0<=ix<60:
+                cells[30,ix]=value
+            grid=evidence(cells,stamp,generation)
+            grid.metadata.update(origin_xy=[x,0.],navigation_fusion={'test':True},association=dict(
+                self.association,valid=True,map_id='map-a',map_frame='map'))
+            grid.layers.update(navigation_occupancy=cells,near_field_free=np.full(cells.shape,inherited))
+            if source_stamp is not None:
+                grid.layers['last_observed'][:]=source_stamp
+            return grid
+
+        first=memory.update(snapshot(10.,0),source)
+        memory.update(snapshot(30.,-1,x=4.),source)
+        returned=memory.update(snapshot(40.,-1),source)
+        self.assertEqual(returned.layers[LAYER][30,30],10.)
+        hit=memory.update(snapshot(41.,100),source)
+        self.assertFalse(np.isfinite(hit.layers[LAYER][30,30]))
+        stale=memory.update(snapshot(42.,0,source_stamp=40.5),source)
+        self.assertFalse(np.isfinite(stale.layers[LAYER][30,30]))
+        inherited=memory.update(snapshot(43.,0,inherited=True),source)
+        self.assertFalse(np.isfinite(inherited.layers[LAYER][30,30]))
+        cleared=memory.update(snapshot(44.,0),source)
+        self.assertEqual(cleared.layers[LAYER][30,30],44.)
+        self.assertEqual(first.layers[LAYER][30,30],10.)
+        reset=memory.update(snapshot(45.,-1,generation=1),source)
+        self.assertFalse(np.isfinite(reset.layers[LAYER][30,30]))
+
+    def test_confirmed_free_rejects_old_measurements_after_a_raw_hit_without_fusion(self):
+        from perception.environment.free_memory import ConfirmedFreeMemory, LAYER
+
+        def snapshot(stamp, cell, *, fusion=True, measured=None):
+            cells = np.full((60, 60), -1, np.int8)
+            cells[30, 30] = cell
+            grid = evidence(cells, stamp)
+            grid.metadata['association'] = dict(self.association, valid=True, map_id='map-a', map_frame='map')
+            if fusion:
+                grid.metadata['navigation_fusion'] = {'test': True}
+                grid.layers['navigation_occupancy'] = cells
+            if measured is not None:
+                grid.layers['last_observed'][30, 30] = measured
+            return grid
+
+        memory, source = ConfirmedFreeMemory(), asset()
+        first = memory.update(snapshot(10., 0), source)
+        self.assertEqual(first.layers[LAYER][30, 30], 10.)
+        hit = memory.update(snapshot(11., 100, fusion=False), source)
+        self.assertNotIn(LAYER, hit.layers)
+        repeated_stamp = memory.update(snapshot(11., 0, measured=10.5), source)
+        self.assertEqual(repeated_stamp.layers[LAYER][30, 30], -np.inf)
+        recovered = memory.update(snapshot(12., -1), source)
+        self.assertEqual(recovered.layers[LAYER][30, 30], -np.inf)
+        stale = memory.update(snapshot(13., 0, measured=10.5), source)
+        self.assertEqual(stale.layers[LAYER][30, 30], -np.inf)
+        fresh = memory.update(snapshot(14., 0), source)
+        self.assertEqual(fresh.layers[LAYER][30, 30], 14.)
+
+    def test_working_map_applies_remembered_free_to_unknown_and_occupied(self):
+        cells=np.zeros((60,60),np.int8);cells[30,30]=-1;cells[34,34]=100
+        prior=evidence(cells)
+        local=evidence(np.full_like(cells,-1),30.)
+        ledger=np.full(cells.shape,10.)
+        state=PriorRevisions()
+        out=state.apply(prior,local,self.association,scene_binding='remembered',confirmed_free=ledger)
+        for y,x in ((30,30),(34,34)):
+            self.assertEqual(out.layers['occupancy'][y,x],0)
+            self.assertEqual(out.layers['revised_free_stamp'][y,x],10.)
+        ledger[30,30]=ledger[34,34]=-np.inf
+        out=state.apply(prior,local,self.association,scene_binding='revoked',confirmed_free=ledger)
+        self.assertEqual(out.layers['occupancy'][30,30],-1)
+        self.assertEqual(out.layers['occupancy'][34,34],100)
+
+    def test_working_map_revokes_partial_occupied_overlap_after_window_moves_away(self):
+        cells = np.zeros((60, 60), np.int8)
+        cells[30, 30] = cells[34, 30] = -1
+        prior = evidence(cells)
+        unknown = np.full_like(cells, -1)
+        missing = np.full(cells.shape, -np.inf)
+        for fusion in (True, False):
+            with self.subTest(fusion=fusion):
+                state = PriorRevisions()
+                first = state.apply(prior, evidence(unknown, 10.), self.association,
+                                    scene_binding='first', confirmed_free=np.full(cells.shape, 10.))
+                self.assertEqual(first.layers['occupancy'][30, 30], 0)
+                self.assertEqual(first.layers['occupancy'][34, 30], 0)
+
+                obstacle = unknown.copy()
+                obstacle[30, 0] = 100
+                partial = evidence(obstacle, 11.)
+                partial.metadata['origin_xy'] = [3.05, 0.]
+                state.apply(prior, partial, self.association, scene_binding='partial', overlay_current=False,
+                            confirmed_free=missing if fusion else None)
+
+                obstacle = unknown.copy()
+                obstacle[34, 0] = 100
+                touching = evidence(obstacle, 12.)
+                touching.metadata['origin_xy'] = [3.1, 0.]
+                state.apply(prior, touching, self.association, scene_binding='touching', overlay_current=False,
+                            confirmed_free=missing if fusion else None)
+
+                moved = evidence(unknown, 13.)
+                moved.metadata['origin_xy'] = [4., 0.]
+                result = state.apply(prior, moved, self.association, scene_binding='moved',
+                                     confirmed_free=missing)
+                self.assertEqual(result.layers['occupancy'][30, 30], -1)
+                self.assertTrue(np.isnan(result.layers['revised_free_stamp'][30, 30]))
+                self.assertEqual(result.layers['occupancy'][34, 30], 0)
+                self.assertEqual(result.layers['revised_free_stamp'][34, 30], 10.)
+
     def test_ordinary_obstacle_expires_but_free_rays_remain_and_observed_wall_refreshes(self):
         engine=OccupancyTree(.1);self.addCleanup(engine.close)
         bounds=[-3,-3,-3,3,3,3]; cloud=np.array([[1.05,.05,.55]],np.float32)

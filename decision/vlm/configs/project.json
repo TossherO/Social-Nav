@@ -44,6 +44,12 @@
       "visual_memory_s": 6.0
     },
     "seating": {
+      "manual_round_deadline_s": 6.0,
+      "manual_round_front_allowance_m": 0.20,
+      "manual_round_candidate_count": 16,
+      "table_clearance_m": 0.10,
+      "edge_end_guard_m": 0.05,
+      "edge_match_tolerance_m": 0.05,
       "prompt": "decision/vlm/t3/prompts/seating.txt",
       "window_prompt": "decision/vlm/t3/prompts/seating_window.txt",
       "window_extent_m": [-4.0, 4.0, -4.0, 4.0],

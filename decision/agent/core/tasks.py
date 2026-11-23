@@ -53,7 +53,7 @@ def normalize_registration(goal):
     if not navigation:result['stage_type']=stage
     for key in ('position','checkpoints'):
         if key in target:result[key]=copy.deepcopy(target[key])
-    for key in ('floor_id','to_floor','monitor','execution_notes'):
+    for key in ('floor_id','to_floor','table_id','monitor','execution_notes'):
         if key in goal:result[key]=copy.deepcopy(goal[key])
     conditions=goal.get('conditions',{})
     for key in ('initial_yaw','required_yaw','facing','max_distance_m','nearby_stop','robot_inside_region_id','wait_after'):
@@ -195,6 +195,11 @@ class TaskGoals:
         if goal.get('stage_type')=='elevator' and set(goal.get('monitor',{}))-{'focus','interval_s'}:
             raise ValueError('Elevator monitoring supports independent frame events and interval_s while localization is paused')
         target = goal['target_id']
+        if 'table_id' in goal:
+            if goal.get('stage_type') != 'seating':
+                raise ValueError('table_id is only available for a seating stage')
+            from .seating import round_table_for_catalog
+            round_table_for_catalog(catalog, goal['table_id'])
         if goal['kind'] != 'skill' and goal.get('stage_type', 'navigation') != 'navigation':
             raise ValueError('Non-navigation stage types require kind=skill')
         if goal['kind'] == 'skill':

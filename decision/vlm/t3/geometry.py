@@ -223,6 +223,72 @@ def edge_candidates(context, observation, *, stations=4):
     return segment_candidates(context['edge'], context['footprint_xy_m'], context['front_gaps_m'], context['end_guard_m'], stations)
 
 
+def validate_round_table(table):
+    if not isinstance(table, dict) or set(table) != {'id', 'map_id', 'center_xy_m', 'radius_m'}:
+        raise ValueError('Invalid round table geometry')
+    center = table['center_xy_m']
+    if (not all(isinstance(table[k], str) and table[k] for k in ('id', 'map_id')) or
+            not isinstance(center, list) or len(center) != 2 or
+            not all(type(n) in (int, float) and math.isfinite(n) for n in [*center, table['radius_m']]) or
+            table['radius_m'] <= 0):
+        raise ValueError('Round table requires a finite center and positive radius in metres')
+
+
+ROUND_CANDIDATE_LIMIT = 16
+
+
+def round_candidates(table, footprint, gap, *, count=8):
+    """Sample evenly spaced map headings, with the front edge facing the table."""
+    validate_round_table(table)
+    if type(count) is not int or not 1 <= count <= ROUND_CANDIDATE_LIMIT:
+        raise ValueError('Invalid round-table candidate count')
+    center = np.array(table['center_xy_m'])
+    distance = table['radius_m'] + float(np.max(np.asarray(footprint)[:, 0])) + gap
+    return [dict(id=i, pose=[*(center - distance*np.array([math.cos(yaw), math.sin(yaw)])).tolist(), yaw],
+                 motion='forward', geometry='unknown')
+            for i, yaw in enumerate(i*math.tau/count for i in range(count))]
+
+
+def round_clearance(table, polygon):
+    """Return the minimum distance from the vehicle footprint to the tabletop perimeter."""
+    vertices = np.asarray(polygon) - np.asarray(table['center_xy_m'])
+    edges = np.roll(vertices, -1, axis=0) - vertices
+    cross = edges[:, 0]*vertices[:, 1] - edges[:, 1]*vertices[:, 0]
+    if (cross >= 0).all() or (cross <= 0).all():
+        return -table['radius_m']
+    fraction = np.clip(-(vertices*edges).sum(axis=1)/(edges*edges).sum(axis=1), 0, 1)
+    nearest = vertices + fraction[:, None]*edges
+    return float(np.linalg.norm(nearest, axis=1).min() - table['radius_m'])
+
+
+def round_parking_approach(snapshot, geometry, pose, margin, front_allowance):
+    """Use a clear standoff if a nominal pose is occupied only at the front."""
+    from navigation.planning.footprint import footprint_status, polygon_status
+
+    status = footprint_status(snapshot, geometry, pose, margin)
+    if status != 'occupied' or front_allowance <= 0.:
+        return pose, status, 0.
+    footprint = geometry.footprint
+    front_limit = footprint[:, 0].max() - front_allowance
+    if front_limit <= footprint[:, 0].min():
+        return pose, status, 0.
+    retained = []
+    for start, end in zip(footprint, np.roll(footprint, -1, axis=0)):
+        if start[0] <= front_limit:
+            retained.append(start)
+        if (start[0] < front_limit < end[0]) or (end[0] < front_limit < start[0]):
+            retained.append(start + (end-start)*(front_limit-start[0])/(end[0]-start[0]))
+    x, y, yaw = pose
+    c, s = math.cos(yaw), math.sin(yaw)
+    polygon = np.asarray(retained) @ np.array([[c, s], [-s, c]]) + [x, y]
+    if polygon_status(snapshot, polygon, margin) != 'free':
+        return pose, status, 0.
+    approach = [x-front_allowance*c, y-front_allowance*s, yaw]
+    if footprint_status(snapshot, geometry, approach, margin) != 'free':
+        return pose, status, 0.
+    return approach, 'free', front_allowance
+
+
 def segment_candidates(edge, footprint, gaps, end_guard, stations):
     """Sample base poses along a measured segment with the specified front clearance."""
     if type(stations) is not int or stations < 1 or stations*len(gaps) > 8:

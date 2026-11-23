@@ -15,6 +15,7 @@ from . import ROOT
 from .ui_data import ContextTimeline,blockage_text,connect_readonly,display_value,event_detail,event_summary,format_event_detail,goal_requirements,poll_session,request_context,select_detail
 
 STATUS={'ready':'准备决策','waiting_navigation':'等待人工驾驶和自动到达检查','waiting_observation':'等待新观察',
+        'waiting_seating':'正在选择停靠位或补充观测点',
         'waiting_monitor':'等待任务监控触发',
         'waiting_user':'等待用户继续','needs_clarification':'等待用户答复','paused':'已暂停',
         'stopping':'正在结束任务','cancelled':'已取消','succeeded':'已完成','partial':'部分完成','failed':'未完成',
@@ -869,6 +870,13 @@ class ManualWindow(QtWidgets.QMainWindow):
                 summary+='\n当前规划反馈：'+blockage_text(s['blockage'])
             elif s.get('detour_preview_conflict'):
                 summary+='\n当前参考路径仍经过上一次的阻点，请停稳核对。'
+            seating_hint={
+                'seating_observation_reference_waiting':'当前位置暂不可规划，保留观测目标，等待重新生成路线。',
+                'seating_observation_start_occupied':'车身范围持续被判为占据，请停稳核对当前位置。观测目标仍保留。',
+                'seating_observation_reselect_after_stop':'原观测路线持续受阻，停稳后将用新扫描和画面重新选点。',
+            }.get(s.get('reason'))
+            if seating_hint:
+                summary+='\n补充观测：'+seating_hint
             if conditional:
                 region_name=self.annotation_names.get(conditional.get('region_id'),conditional.get('region_id'))
                 region_label={'inside':'区域内','outside':'区域外','unknown':'定位不可用'}.get(conditional.get('region_state'),'未知')

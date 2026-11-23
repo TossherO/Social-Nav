@@ -254,7 +254,9 @@ def run(args):
             if active and not following and not association_waiting:
                 request=reference_request(handle,record['selected_pose'],navigation.route,
                                           navigation.route_index,session.catalog,
-                                          require_yaw=navigation.request['require_yaw'])
+                                          require_yaw=navigation.request['require_yaw'],
+                                          use_local_approach=navigation.request.get('use_local_approach') is True,
+                                          map_keepout_circle=navigation.request.get('map_keepout_circle'))
                 reference.set(handle['call_id'],request)
             else:reference.set(None,None)
             if active:

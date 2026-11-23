@@ -21,9 +21,16 @@ def planning_scene(snapshot,*,clock_domain,settings,people=None):
     return scene
 
 
-def goal_request(value):
+def goal_request(value, *, allow_local_approach=False):
     """Validate the wire envelope; the existing planner checks geometry and frames."""
     if not isinstance(value,dict):raise ValueError('Goal must be a JSON object')
+    if 'use_local_approach' in value and (not allow_local_approach or value['use_local_approach'] is not True):
+        raise ValueError('Local approach is reserved for manual previews')
+    if 'map_keepout_circle' in value:
+        from .inputs import validate_map_keepout_circle
+        if value.get('mode')!='mapped':
+            raise ValueError('A map keepout circle requires a mapped goal')
+        validate_map_keepout_circle(value['map_keepout_circle'])
     for key in ('request_id','task_id','frame_id'):
         if not isinstance(value.get(key),str) or not value[key]:raise ValueError('Missing '+key)
     if type(value.get('goal_revision')) is not int or value['goal_revision']<0:raise ValueError('Invalid goal_revision')

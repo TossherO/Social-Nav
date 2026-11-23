@@ -107,6 +107,7 @@ class ModelProjection:
         self.navigation_visual_goal = None
         self.default_visual_review = False
         self.visual_priority = None
+        self.registered_round_table = False
         self.hidden_tools = {}
 
     def reference(self, kind, value):
@@ -197,6 +198,17 @@ class ModelProjection:
             self.hidden_tools['read_keyframe'] = 'no_saved_keyframes'
         if adjustment is None and not conditional:
             self.hidden_tools['record_monitor_review'] = 'no_current_monitor_review'
+        if stage == 'seating' and requirement.get('table_id'):
+            self.registered_round_table = True
+            self.hidden_tools['check_candidate'] = 'round_table_candidates_selected_by_t3'
+            start = state.get('seating_start')
+            if start is None:
+                self.hidden_tools['start_local_task'] = 'seating_target_already_selected'
+            else:
+                self.hidden_tools['set_navigation_monitor'] = 'start_t3_before_navigation_monitor'
+                self.hidden_tools['complete_subtask'] = 'start_t3_before_completion'
+                if self.rgb is None or not start.get('stopped'):
+                    self.hidden_tools['start_local_task'] = 'seating_requires_stopped_vehicle_and_current_rgb'
 
     def available_tools(self, names):
         return tuple(name for name in names if name not in self.hidden_tools)
@@ -223,6 +235,9 @@ class ModelProjection:
                 hidden.update(('point_id', 'yaw'))
             if self.visual_priority and name == 'record_monitor_review':
                 hidden.add('visual_priority')
+            if self.registered_round_table and name == 'start_local_task':
+                hidden.update(('task_type', 'target_description', 'table_id', 'table_roi', 'reference_id'))
+                function['description'] = '立即用已登记的圆桌启动 T3。局部 VLM 负责从桌周挑选停靠位姿。'
             for key in hidden:
                 schema['properties'].pop(key, None)
             schema['required'] = [key for key in schema['required'] if key not in hidden]
@@ -246,6 +261,8 @@ class ModelProjection:
         args = copy.deepcopy(args)
         if self.goal_id and name in CURRENT_GOAL_TOOLS:
             args.setdefault('goal_id', self.goal_id)
+        if self.registered_round_table and name == 'start_local_task':
+            args.setdefault('task_type', 'seating')
         if self.view and name in CURRENT_VIEW_TOOLS:
             args.setdefault('view_id', self.reference('view', self.view))
         if self.visual_priority and name == 'record_monitor_review':

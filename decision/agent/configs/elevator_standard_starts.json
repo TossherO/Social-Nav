@@ -1,7 +1,11 @@
 {
   "floor1": {
     "map_id": "roll:51de0bede55ab952462cc5f02bd1d44b0db0347c1cb44f4704f9eb9ad63b20fd",
-    "same_frame_map_ids": ["roll:1d463d3fc4aabf4bd0e4bafe014212e8514427bf1d75d2917f1051b77279b717"],
+    "same_frame_map_ids": [
+      "roll:1d463d3fc4aabf4bd0e4bafe014212e8514427bf1d75d2917f1051b77279b717",
+      "roll:89110cd97e314032b914d10765aea3c421f9a96c5f34da70224ee5a9cc56c234",
+      "roll:f351d7a46cebefe567aa8867b3f4964ff6ee8513fe1f726ab8b33643bb65fc50"
+    ],
     "frame_id": "map",
     "reference": "rslidar",
     "reference_observation": "outputs/decision/agent/floor1_current/standard_start_reference_20261119/reference.json",

@@ -17,6 +17,32 @@ from tests.test_agent_conversation import wire
 
 
 class RegistrationTests(unittest.TestCase):
+    def test_round_table_registration_checks_configured_geometry(self):
+        from types import SimpleNamespace
+        from decision.agent.core.tasks import TaskGoals
+
+        catalog = SimpleNamespace(value=dict(floor_id='floor1', localization_map_id='map-test'),
+                                  places={'p-03-2': dict(pose=[1., 2.]), 'other': dict(pose=[2., 3.])},
+                                  regions={}, require_complete=lambda: None)
+        tasks = TaskGoals(catalog)
+        stage = dict(goal_id='g1', stage='seating', description='在小圆桌2旁停靠', table_id='other')
+        with self.assertRaisesRegex(ValueError, 'seating_table_radius_not_configured'):
+            tasks.record([stage])
+        stage['table_id'] = 'p-03-2'
+        requirement = tasks.record([stage])[0]['requirement']
+        self.assertEqual(requirement['table_id'], 'p-03-2')
+        self.assertEqual(requirement['target_id'], '')
+        from unittest.mock import patch
+
+        stub = SimpleNamespace(task_goals=tasks)
+        with patch('decision.agent.core.seating.start_selection') as start:
+            AgentSession.start_local_task(stub, 'g1', 'seating')
+            self.assertEqual(start.call_args.kwargs, {'table_id': 'p-03-2'})
+            self.assertEqual(start.call_args.args[2:], ('在小圆桌2旁停靠', None))
+            refusal = AgentSession.start_local_task(stub, 'g1', 'seating', table_id='p-03-1')
+            self.assertEqual(refusal['reason'], 'seating_use_registered_table')
+            self.assertEqual(start.call_count, 1)
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
         self.store=Store(self.root/'session.sqlite');self.budget=Budget(self.root/'budget.sqlite')

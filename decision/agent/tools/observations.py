@@ -176,6 +176,9 @@ class Observation:
 def local_grid_record(scene):
     """Capture a bounded, immutable occupancy-only projection of a sealed scene."""
     grid = scene.geometry
+    if 'confirmed_free_memory' in grid.metadata:
+        from perception.environment.navigation import navigation_geometry
+        grid = navigation_geometry(scene,include_confirmed_free=True)
     cells = np.asarray(grid.layers['occupancy'])
     if cells.dtype != np.int8 or cells.ndim != 2 or max(cells.shape) > 600:
         raise ValueError('Invalid Agent local occupancy source')

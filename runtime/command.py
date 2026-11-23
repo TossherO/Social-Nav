@@ -326,7 +326,8 @@ class CommandInbox:
             raise ValueError('Invalid manual preview envelope')
         owner=value['owner'];request=value['request']
         if request is not None:
-            request=validate('goal',request)
+            from navigation.planning.online import goal_request
+            request=goal_request(request,allow_local_approach=True)
             if (request.get('mode')!='mapped' or request['request_id'].split(':',1)[0]!=owner):
                 raise ValueError('Manual preview must be a bound mapped goal')
         now=time.monotonic()
@@ -437,7 +438,7 @@ class CommandInbox:
                     active.get('request_id')!=owner['request_id'] or active.get('goal_revision')!=previous or
                     request['request_id']!=owner['request_id'] or request['task_id']!=owner['task_id'] or
                     request['goal_revision']!=previous+1 or request['mode']!='mapped' or
-                    any(request.get(k)!=active.get(k) for k in ('frame_id','target_reference','map_snapshot_id','goal_behavior')) or
+                    any(request.get(k)!=active.get(k) for k in ('frame_id','target_reference','map_snapshot_id','goal_behavior','map_keepout_circle')) or
                     chassis.get('state')!='armed' or not chassis.get('status_fresh') or
                     chassis.get('arm_revision')!=owner['arm_revision'] or
                     state.get('received_age_s') is None or state['received_age_s']>.5 or
@@ -710,6 +711,9 @@ class CommandInbox:
                     connection.send(self.manual_preview(request['value']));continue
                 if request['kind']=='agent_seating_select':
                     if self.agent_state.seating is None:raise ValueError('seating_observations_not_enabled')
+                    if ('manual_observation' in request['value'] and
+                            (self.session is None or not self.session.live or self.session.execute)):
+                        raise ValueError('seating_viewpoint_requires_manual_observation')
                     connection.send(self.agent_state.seating.select(request['value']));continue
                 if request['kind']=='agent_seating_cancel':
                     if self.agent_state.seating is None:raise ValueError('seating_observations_not_enabled')

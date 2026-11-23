@@ -55,6 +55,26 @@ class ManualReferenceTests(unittest.TestCase):
         self.assertEqual(reference_request(handle,[3.,4.,.4],route,1,catalog)['goal'],[3.,4.])
         self.assertEqual(reference_request(handle,[3.,4.,.4],None,None,catalog)['goal'],[3.,4.])
 
+    def test_table_exclusion_survives_manual_start_retarget_and_preview_lease(self):
+        from decision.agent.adapters.manual import ManualNavigation
+
+        catalog = SimpleNamespace(value=dict(frame_id='map',map_snapshot_id='map-id'))
+        nav = object.__new__(ManualNavigation)
+        nav.handle = None
+        handle = dict(call_id='call',task_id='task',goal_revision=1)
+        circle = dict(center_xy_m=[2.,1.],radius_m=.35)
+        place = dict(place_id='seat',pose=[1.,1.,0.],requirement={'stage_type':'seating'},
+                     use_local_approach=True,map_keepout_circle=circle)
+        nav.start(place,handle)
+        next_handle = dict(handle,goal_revision=2)
+        nav.retarget(dict(place,pose=[1.,.9,.1]),handle,next_handle)
+        preview = reference_request(next_handle,nav.request['pose'],None,None,catalog,
+            require_yaw=nav.request['require_yaw'],use_local_approach=nav.request['use_local_approach'],
+            map_keepout_circle=nav.request['map_keepout_circle'])
+        inbox = self.inbox()
+        self.assertTrue(inbox.manual_preview(dict(owner='call',request=preview))['accepted'])
+        self.assertEqual(inbox.manual_preview_snapshot()['request']['map_keepout_circle'],circle)
+
     def test_worker_changes_and_clears_lease_without_chassis_commands(self):
         calls=[];first=threading.Event();cleared=threading.Event()
         def send(_path,owner,request):

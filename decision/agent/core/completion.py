@@ -117,6 +117,17 @@ def stage_evidence(session, goal):
             selection=selected.get('seating')
             if not selection or not same_pose(pose,selected.get('pose'),settings):
                 missing.append('seating_selected_pose')
+            elif table := selection.get('mapped_round_table'):
+                from decision.vlm.t3.geometry import round_clearance
+                geometry=session.navigation.geometry
+                gap=round_clearance(table,geometry.polygon(pose))
+                x,y=table['center_xy_m']
+                yaw_error=angle_error(pose[2],math.atan2(y-pose[1],x-pose[0]))
+                clearance_ok=0 <= gap <= table['target_gap_m']+settings['goal_position_tolerance_m']
+                facts['table_selection']=dict(mapped_round_table=table,footprint_gap_m=gap,
+                                              facing_error_rad=yaw_error,source_stamp_s=selection['source_stamp_s'])
+                if not clearance_ok or yaw_error>settings['goal_yaw_tolerance_rad']:
+                    missing.append('seating_round_table_clearance_or_facing')
             else:
                 import numpy as np
                 edge=selection['mapped_edge']

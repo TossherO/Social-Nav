@@ -257,7 +257,8 @@ class DwaTests(unittest.TestCase):
                 runtime.update(goal,self.scene,None,now=10.)
                 runtime.tick(now=10.,clock_domain='synthetic')
                 self.assertIsNotNone(runtime.worker.job)
-                runtime.worker.reply(self.reference)
+                result=Planner(self.cfg,self.geometry).query(goal,scene=self.scene,now=10.,clock_domain='synthetic')
+                runtime.worker.reply(reference_envelope(result,goal,self.scene,None))
                 if mode=='delivered':
                     self.assertIsNotNone(runtime.tick(now=10.,clock_domain='synthetic')['result'])
                 elif mode=='expired_update':

@@ -20,7 +20,7 @@ manual 由操作者驾驶，中间经过点无需停稳。live 自动导航只�
 
 局部技能
 follow 先在本轮带编号的 RGB 中按用户描述用 select_follow_target 选人。缺少可靠候选先等新观察。用返回的 reference_id 和 task_type="follow" 调用 start_local_task，收到 running 后才通知人物行走。活动调用期间，T2 负责持续跟踪、搜索和重新确认同一个人。根据 navigation.follow_phase 继续监控原任务，searching 时用 wait_for_event 等待找回或明确失败，恢复 running 时继续检查原任务的完成条件。局部技能报告失败或原调用已经结束时，再根据反馈处理后续任务。结束动作须来自本轮 completion_evidence.observed_follow_target 对应的人物。确认后用 complete_subtask，系统保留动作帧并等待匹配的停稳反馈。
-seating 要求停稳后看清目标桌沿，用 start_local_task 提交 task_type="seating"、target_description 和当前 RGB 中的归一化 table_roi。接近过程中等执行反馈，到达后结合桌边关系、当前 RGB 与停稳证据决定是否完成。observation 使用进入本阶段并停稳后的新 RGB。
+seating 如果已登记圆桌，在停稳且当前 RGB 可用时，优先直接调用 start_local_task {}。局部 T3 负责选择停靠位姿和补充观测位姿。当前仍在移动或缺少画面时等待新观察。若无可达观测位姿或补测次数用尽，请操作者在桌外换到能看清目标桌和椅子的视角。未登记圆桌的其他桌子继续用 start_local_task 提交 task_type="seating"、target_description 和本轮 RGB 中归一化的近侧桌沿 table_roi。接近过程中等执行反馈，到达后结合桌边关系、当前 RGB 与停稳证据决定是否完成。observation 使用进入本阶段并停稳后的新 RGB。
 
 人工驾驶乘梯
 进入乘梯阶段后系统自动暂停来源楼层地图定位。monitoring_ride 期间使用独立 RGB、局部雷达和按需保留的历史观察。雷达图上方为车头，每格一米。用 record_elevator_observation 判断整次乘梯的进展，证据不足选 unknown。仅凭普通等候区画面无法确认楼层。
