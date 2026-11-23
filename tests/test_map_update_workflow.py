@@ -11,7 +11,8 @@ class MapUpdateWorkflowTests(unittest.TestCase):
     def test_stages_share_bag_and_use_selected_coverage(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            bag, old_map, coverage, out = (root/'input.bag', root/'old map', root/'coverage.yaml', root/'output')
+            bag, old_map, coverage, static, out = (root/'input.bag', root/'old map', root/'coverage.yaml',
+                                                   root/'static map', root/'output')
             calls = []
 
             def execute(command, **kwargs):
@@ -19,8 +20,8 @@ class MapUpdateWorkflowTests(unittest.TestCase):
                 if 'pick_start.sh' in command[1]:
                     (out/'initial_pose.json').write_text('{}')
 
-            args = workflow.arguments(['--bag', str(bag), '--gpu', '0'])
-            with patch.object(workflow, 'prepare', return_value=(bag, old_map, coverage, out)), \
+            args = workflow.arguments(['--bag', str(bag), '--gpu', '0', '--max-voxels', '20000000'])
+            with patch.object(workflow, 'prepare', return_value=(bag, old_map, coverage, static, out)), \
                     patch.object(workflow.subprocess, 'run', side_effect=execute):
                 result = workflow.run(args)
             self.assertEqual(result, out/'candidate')
@@ -29,7 +30,10 @@ class MapUpdateWorkflowTests(unittest.TestCase):
                 self.assertEqual(command[command.index('--bag')+1], str(bag))
             self.assertEqual(calls[2][calls[2].index('--coverage')+1], str(coverage))
             self.assertEqual(calls[2][calls[2].index('--pose-file')+1], str(out/'initial_pose.json'))
+            self.assertEqual(calls[2][calls[2].index('--source-run')+1], str(out/'local_mapping'))
             self.assertEqual(calls[3][calls[3].index('--localization-run')+1], str(out/'local_reference'))
+            self.assertEqual(calls[3][calls[3].index('--static-map')+1], str(static))
+            self.assertEqual(calls[3][calls[3].index('--max-voxels')+1], '20000000')
             self.assertEqual(calls[1][calls[1].index('--pipeline')+1], 'raw')
             self.assertIn('--gpu', calls[1])
             self.assertIn('--gpu', calls[2])
@@ -39,7 +43,7 @@ class MapUpdateWorkflowTests(unittest.TestCase):
             root = Path(tmp)
             args = workflow.arguments(['--bag', str(root/'input.bag')])
             with patch.object(workflow, 'prepare', return_value=(root/'input.bag', root/'map',
-                                                                  root/'coverage', root/'out')), \
+                                                                  root/'coverage', None, root/'out')), \
                     patch.object(workflow.subprocess, 'run') as execute:
                 with self.assertRaisesRegex(RuntimeError, '人工选择'):
                     workflow.run(args)
@@ -71,10 +75,29 @@ class MapUpdateWorkflowTests(unittest.TestCase):
             (old/'COMPLETE').touch(); (old/'GlobalMap.pcd').touch()
             args = workflow.arguments(['--bag', str(bag), '--map', str(old), '--out', str(root/'out')])
             with patch.object(workflow, 'full_map_coverage') as auto:
-                _, selected, coverage, _ = workflow.prepare(args)
+                _, selected, coverage, static, _ = workflow.prepare(args)
             self.assertEqual(selected, old)
             self.assertIsNone(coverage)
+            self.assertIsNone(static)
             auto.assert_called_once_with(old)
+
+    def test_configured_static_matches_selected_map_before_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bag = root/'data.bag'; bag.write_bytes(b'bag')
+            old = root/'map'; old.mkdir()
+            (old/'COMPLETE').touch(); (old/'GlobalMap.pcd').touch()
+            static = root/'static'
+            config = root/'interactive.yaml'
+            config.write_text(f'map: {old}\nstatic_map: {static}\n')
+            common = ['--bag', str(bag), '--config', str(config), '--out', str(root/'out')]
+            with patch.object(workflow, 'full_map_coverage'), \
+                    patch('perception.environment.incremental.validate_static_parent') as validate:
+                self.assertEqual(workflow.prepare(workflow.arguments(common))[3], static)
+                validate.assert_called_once_with(static, old)
+                validate.reset_mock()
+                self.assertIsNone(workflow.prepare(workflow.arguments([*common, '--3d-only']))[3])
+                validate.assert_not_called()
 
 
 if __name__ == '__main__':

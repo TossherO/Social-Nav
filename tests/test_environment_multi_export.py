@@ -12,28 +12,10 @@ from types import SimpleNamespace
 import numpy as np
 
 from perception.environment.layers import GridSnapshot
-from perception.environment.multi_export import _merge_session, _registered_source
+from perception.environment.multi_export import _registered_source
 
 
 class MultiSurveyTests(unittest.TestCase):
-    def test_only_classified_measured_newer_cells_replace_existing(self):
-        shape = (1, 5)
-        layers = dict(occupancy=np.array([[100, 0, 100, 0, -1]],np.int8),
-            observed=np.ones(shape,bool), last_observed=np.full(shape,10.),
-            coverage=np.ones(shape,np.float32), obstacle_min_z=np.ones(shape,np.float32),
-            obstacle_max_z=np.ones(shape,np.float32), endpoint_count=np.ones(shape,np.int32),
-            survey_index=np.zeros(shape,np.int16))
-        newer = dict(occupancy=np.array([[0, 100, -1, 0, 100]],np.int8),
-            observed=np.array([[1,1,1,0,1]],bool), last_observed=np.array([[20.,20.,20.,20.,np.nan]]),
-            coverage=np.ones(shape,np.float32), obstacle_min_z=np.full(shape,np.nan,np.float32),
-            obstacle_max_z=np.full(shape,np.nan,np.float32), endpoint_count=np.zeros(shape,np.int32))
-        counts = _merge_session(layers, GridSnapshot({},newer), 1)
-        np.testing.assert_array_equal(layers['occupancy'], [[0,100,100,0,-1]])
-        np.testing.assert_array_equal(layers['survey_index'], [[1,1,0,0,0]])
-        self.assertEqual(counts['cleared_occupied'],1)
-        self.assertEqual(counts['newly_occupied'],1)
-        self.assertEqual(layers['last_observed'][0,2],10.)
-
     def test_reference_must_match_selected_map_and_source_bag(self):
         from tests.test_local_map_update import LocalMapUpdateTests
         from perception.environment.layers import load_config
@@ -49,20 +31,6 @@ class MultiSurveyTests(unittest.TestCase):
             ref.write_text(json.dumps(record))
             with self.assertRaisesRegex(ValueError,'different sensor extrinsics or IMU timing'):
                 _registered_source(mapping,reference,map_fingerprint(old),'map',load_config())
-
-    def test_old_free_cannot_clear_newer_or_undated_final_map_feature(self):
-        shape=(1,3)
-        layers=dict(occupancy=np.full(shape,100,np.int8),observed=np.ones(shape,bool),
-            last_observed=np.full(shape,np.nan),coverage=np.zeros(shape,np.float32),
-            obstacle_min_z=np.ones(shape,np.float32),obstacle_max_z=np.ones(shape,np.float32),
-            endpoint_count=np.ones(shape,np.int32),survey_index=np.full(shape,-1,np.int16))
-        newer=dict(occupancy=np.zeros(shape,np.int8),observed=np.ones(shape,bool),
-            last_observed=np.full(shape,12.),coverage=np.ones(shape,np.float32),
-            obstacle_min_z=np.full(shape,np.nan,np.float32),obstacle_max_z=np.full(shape,np.nan,np.float32),
-            endpoint_count=np.zeros(shape,np.int32))
-        _merge_session(layers,GridSnapshot({},newer),0,baseline_occupied=np.ones(shape,bool),
-                       feature_times=np.array([[15.,5.,np.nan]]),survey_start=10.)
-        np.testing.assert_array_equal(layers['occupancy'],[[100,0,100]])
 
     def test_overlapping_surveys_are_not_given_an_invented_time_order(self):
         from perception.environment.layers import load_config
@@ -88,7 +56,7 @@ class MultiSurveyTests(unittest.TestCase):
             bundle_main(['export','--localization-map','map','--evidence-run','one',
                          '--evidence-run','two','--reference-run','one-ref','--out','output'])
 
-    def test_full_export_sorts_surveys_and_persists_latest_known_state(self):
+    def test_full_export_adopts_supported_ground_and_protects_final_features(self):
         from perception.environment.layers import load_config
         from perception.environment.multi_export import export_registered_multi_environment
         from perception.environment.storage import StaticEnvironmentMap
@@ -96,12 +64,16 @@ class MultiSurveyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); old,_,_=LocalMapUpdateTests().fixture(root)
             shape=(3,3); ground=np.zeros(shape,np.float32); support=np.ones(shape,bool)
+            ground[2,1:]=np.nan; support[2,1:]=False
             layers=dict(occupancy=np.full(shape,-1,np.int8),observed=np.zeros(shape,bool),
                 last_observed=np.full(shape,np.nan),coverage=np.zeros(shape,np.float32),
                 obstacle_min_z=np.full(shape,np.nan,np.float32),obstacle_max_z=np.full(shape,np.nan,np.float32),
                 endpoint_count=np.zeros(shape,np.int32),ground_z=ground,ground_support=support,
                 clearance=np.full(shape,np.nan,np.float32),unknown_distance=np.zeros(shape,np.float32),
                 frontier=np.zeros(shape,bool))
+            for cell in ((0,0),(0,1),(2,0)):
+                layers['occupancy'][cell]=100;layers['observed'][cell]=True
+                layers['obstacle_min_z'][cell]=.4;layers['obstacle_max_z'][cell]=.6
             meta=dict(snapshot_id='candidate',map_id='test',frame_id='map',shape=list(shape),origin_xy=[0.,0.],
                       resolution=.1,stamp_s=1.,entity_type='map',map_type='static_environment_map')
             candidate=GridSnapshot(meta,layers)
@@ -115,21 +87,44 @@ class MultiSurveyTests(unittest.TestCase):
                     evidence_run_fingerprint=fingerprint,evidence_records_fingerprint=fingerprint,
                     reference_run_fingerprint=fingerprint,reference_records_fingerprint=fingerprint,
                     evidence_run={'path':evidence}))
-            def fusion(candidate, path, *unused, **kwargs):
-                result={k:v.copy() for k,v in candidate.layers.items()}
-                result['occupancy'].fill(-1);result['observed'].fill(False);result['last_observed'].fill(np.nan)
-                result['occupancy'][1,1]=100 if str(path)=='old' else 0
-                result['observed'][1,1]=True;result['last_observed'][1,1]=10. if str(path)=='old' else 20.
+            def ground_scan(candidate, path, *unused, **kwargs):
+                floor=ground.copy(); valid=support.copy()
+                if str(path)=='new':floor[2,2]=.03; valid[2,2]=True
+                return GridSnapshot(dict(candidate.metadata,ground_scan_diagnostics={}),
+                                    dict(ground_z=floor,ground_support=valid))
+            def fusion(seed, path, *unused, **kwargs):
+                self.assertTrue(kwargs['require_repeated_evidence'])
+                self.assertEqual(len(kwargs['candidate_points']),0)
+                np.testing.assert_array_equal(seed.layers['occupancy'],-1)
+                result={k: v.copy() for k,v in seed.layers.items()}
+                result['last_observed']=np.full(shape,np.nan);result['coverage']=np.zeros(shape,np.float32)
+                old=str(path)=='old'
+                for cell in ((0,0),(0,1),(1,1),(2,0)):
+                    result['occupancy'][cell]=100 if (old and cell==(1,1)) else 0
+                    result['observed'][cell]=True;result['last_observed'][cell]=10. if old else 20.
+                    result['coverage'][cell]=.5 if cell==(2,0) else 1.
+                if old:
+                    result['obstacle_min_z'][1,1]=.4;result['obstacle_max_z'][1,1]=.6
                 return GridSnapshot(dict(fusion={},evidence_scans=4,unbound_scans=0,ray_scans=4),result)
+            feature_times=np.full(shape,np.nan);feature_times[0,0]=25.;feature_times[2,0]=5.
             with patch('perception.environment.multi_export._registered_source',side_effect=source), \
                     patch('perception.environment.multi_export.static_geometry',return_value=candidate), \
+                    patch('perception.environment.multi_export._map_feature_times',return_value=feature_times), \
                     patch('perception.environment.multi_export.file_fingerprint',side_effect=lambda path:{'id':'old' if 'old' in str(path) else 'new'}), \
-                    patch('perception.environment.fusion.fuse_scans_tiled',side_effect=fusion):
+                    patch('perception.environment.incremental.scan_ground',side_effect=ground_scan), \
+                    patch('perception.environment.incremental.fuse_scans_tiled',side_effect=fusion):
                 export_registered_multi_environment(old,['new','old'],['nr','or'],root/'out',config=load_config())
             result=StaticEnvironmentMap(root/'out')
-            self.assertEqual(result.snapshot.layers['occupancy'][1,1],0)
-            self.assertEqual(result.snapshot.layers['survey_index'][1,1],1)
-            self.assertEqual(result.snapshot.layers['last_observed'][1,1],20.)
+            merged=result.snapshot.layers
+            self.assertEqual(merged['occupancy'][1,1],0)
+            self.assertEqual(merged['survey_index'][1,1],1)
+            self.assertEqual(merged['last_observed'][1,1],20.)
+            for cell in ((0,0),(0,1),(2,0)):
+                self.assertEqual(merged['occupancy'][cell],100)
+                self.assertTrue(np.isnan(merged['last_observed'][cell]))
+            self.assertTrue(merged['ground_support'][2,2])
+            self.assertAlmostEqual(merged['ground_z'][2,2],.03)
+            self.assertFalse(merged['ground_support'][2,1])
             self.assertEqual([s['evidence_run']['path'] for s in result.manifest['source']['surveys']],['old','new'])
 
     def test_workflow_selects_all_poses_then_inherits_each_source_configuration(self):

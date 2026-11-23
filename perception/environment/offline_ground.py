@@ -12,11 +12,13 @@ from .scans import read_scans
 
 
 def scan_ground(candidate, scan_path, timeline, config, scan_fingerprint, *, interval_s=.2,
-                min_scans=2, max_height_spread_m=.2, progress=None):
+                min_scans=2, max_height_spread_m=.2, progress=None, allow_empty=False):
     """Build a new ground candidate from source-bound, consecutive deskewed scans.
 
     Each scan contributes at most one median per cell. Conflicting heights
     withdraw support; a missing fit never borrows the legacy global-map ground.
+    For a partial survey, allow_empty returns empty measured support if needed
+    and exposes the reliable direct-sample mask for comparison with older ground.
     """
     if interval_s <= 0 or min_scans < 2 or max_height_spread_m <= 0:
         raise ValueError('Invalid offline scan-ground settings')
@@ -49,8 +51,9 @@ def scan_ground(candidate, scan_path, timeline, config, scan_fingerprint, *, int
         if not inside.any():continue
         cell,median,_,_=ground_cell_statistics(points[inside],origin,res,shape[1])
         keys.append(cell);heights.append(median);stats['cell_scan_samples']+=len(cell)
-    if not keys:raise ValueError('No tracked scan ground is available for this candidate')
-    flat=np.concatenate(keys);values=np.concatenate(heights)
+    if not keys and not allow_empty:raise ValueError('No tracked scan ground is available for this candidate')
+    flat=np.concatenate(keys) if keys else np.empty(0,np.int64)
+    values=np.concatenate(heights) if heights else np.empty(0,np.float32)
     order=np.lexsort((values,flat));flat=flat[order];values=values[order]
     cells,start,count=np.unique(flat,return_index=True,return_counts=True)
     median=(values[start+(count-1)//2]+values[start+count//2])/2
@@ -59,11 +62,13 @@ def scan_ground(candidate, scan_path, timeline, config, scan_fingerprint, *, int
     high=values[start+np.ceil((count-1)*.9).astype(int)]
     reliable=(count>=min_scans)&((high-low)<=max_height_spread_m)
     seed=np.zeros(shape,bool);seed.ravel()[cells[reliable]]=True
-    if not seed.any():raise ValueError('No scan-ground cells satisfy the evidence requirements')
+    if not seed.any() and not allow_empty:raise ValueError('No scan-ground cells satisfy the evidence requirements')
     ground=np.full(shape,np.nan,np.float32);ground.ravel()[cells[reliable]]=median[reliable]
-    distance,nearest=nearest_support(seed)
-    support=distance*res<=config['ground_support_radius_m']
-    ground=ground[nearest].copy();ground[~support]=np.nan
+    support=seed.copy()
+    if seed.any():
+        distance,nearest=nearest_support(seed)
+        support=distance*res<=config['ground_support_radius_m']
+        ground=ground[nearest].copy();ground[~support]=np.nan
     undersampled=np.zeros(shape,bool);undersampled.ravel()[cells[count<min_scans]]=True
     conflict=np.zeros(shape,bool)
     conflict.ravel()[cells[(count>=min_scans)&((high-low)>max_height_spread_m)]]=True
@@ -85,7 +90,7 @@ def scan_ground(candidate, scan_path, timeline, config, scan_fingerprint, *, int
         discontinuous[first]|=jump;discontinuous[second]|=jump
     support[discontinuous]=False;ground[discontinuous]=np.nan
     conflict |= discontinuous
-    if not support.any():raise ValueError('No scan ground remains after discontinuity checks')
+    if not support.any() and not allow_empty:raise ValueError('No scan ground remains after discontinuity checks')
     stats.update(seed_cells=int(seed.sum()),undersampled_cells=int((count<min_scans).sum()),
                  conflicting_cells=int(((count>=min_scans)&((high-low)>max_height_spread_m)).sum()),
                  contradictory_sparse_cells=int(single.sum()),
@@ -101,6 +106,8 @@ def scan_ground(candidate, scan_path, timeline, config, scan_fingerprint, *, int
     layers={key:value.copy() for key,value in candidate.layers.items()}
     layers.update(ground_z=ground,ground_support=support,ground_scan_unreliable=conflict,
                   ground_scan_undersampled=undersampled)
+    if allow_empty:
+        layers['ground_scan_column_observed']=seed & support
     for value in layers.values():value.flags.writeable=False
     return GridSnapshot(updated,layers)
 

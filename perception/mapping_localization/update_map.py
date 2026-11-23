@@ -6,6 +6,8 @@ source maps and runs are read-only; this command never changes active assets.
 import argparse
 import json
 from pathlib import Path
+import shutil
+import sys
 import tempfile
 
 import numpy as np
@@ -15,7 +17,7 @@ from scipy.spatial import cKDTree
 
 from perception.environment.fusion import _scan_geometry
 from perception.environment.layers import load_config
-from perception.environment.occupancy import OccupancyTree
+from perception.environment.occupancy import OccupancyTree, VoxelBudgetExceeded
 from perception.environment.poses import PoseTimeline
 from perception.environment.scans import read_scans, sealed_scan_summary
 from perception.environment.storage import asset_reference, content_hash
@@ -123,7 +125,13 @@ def _pose_innovation(previous_map, previous_local, current_map, current_local):
     return float(np.linalg.norm(delta[:3,3])),float(Rotation.from_matrix(delta[:3,:3]).magnitude())
 
 
-def _evidence(data):
+def _validate_max_voxels(value):
+    if type(value) is not int or not 1 <= value <= np.iinfo(np.intc).max:
+        raise ValueError('--max-voxels must be a positive integer within the native occupancy limit')
+    return value
+
+
+def _evidence(data, *, max_voxels=None):
     config=data['config']; timeline=data['timeline']
     old_cloud=read_xyzi(data['old']/'GlobalMap.pcd')
     if not len(old_cloud):raise ValueError('Old map has no global geometry')
@@ -131,8 +139,9 @@ def _evidence(data):
     # implementation does not claim new rooms outside the original map.
     lo=old_cloud[:,:3].min(axis=0)-1.;hi=old_cloud[:,:3].max(axis=0)+1.
     bounds=[float(value) for value in (*lo,*hi)]
+    limit=config['static']['max_voxels'] if max_voxels is None else max_voxels
     settings=dict(config,voxel_ttl_s=max(config['voxel_ttl_s'],float(timeline.times[-1]-timeline.times[0]+1)),
-                  max_rays=config['static']['max_rays'],max_voxels=config['static']['max_voxels'],
+                  max_rays=config['static']['max_rays'],max_voxels=_validate_max_voxels(limit),
                   hit_invalidates_free=False)
     settings['obstacle_ttl_s']=settings['voxel_ttl_s']
     tree=OccupancyTree(config['resolution'],backend='cpu')
@@ -157,7 +166,10 @@ def _evidence(data):
                         f'dt_s={stamp-previous[0]:.3f}, position_innovation_m={distance:.3f}, '
                         f'angle_innovation_deg={np.degrees(angle):.2f}; limits are 0.5 m and 20.05 deg')
             previous=(stamp,final,local)
-            tree.update(points,final[:3,3],bounds,stamp,settings,rays=True,ray_origins=origins,read=False)
+            try:
+                tree.update(points,final[:3,3],bounds,stamp,settings,rays=True,ray_origins=origins,read=False)
+            except VoxelBudgetExceeded as error:
+                raise VoxelBudgetExceeded(f'{error}. 3D update voxel limit: {limit} (--max-voxels)') from error
             used+=1;rays+=len(points);positions.append(final[:3,3])
         if used<3 or used/(used+skipped)<.5:
             raise ValueError('At least three and half of the sealed scans need registered moving-origin evidence')
@@ -174,7 +186,7 @@ def _evidence(data):
                          trajectory_extent_m=float(np.linalg.norm(positions.max(axis=0)-positions.min(axis=0))),
                          bounds=bounds,observation_interval_s=config['dynamic']['static_observation_interval_s'],
                          max_pose_innovation_m=max_translation,max_pose_innovation_rad=max_rotation,
-                         stable_hit_voxels=len(supported),deletion_hit_guard_m=.25)
+                         retained_voxels=len(voxels),stable_hit_voxels=len(supported),deletion_hit_guard_m=.25)
     except BaseException:
         tree.close();raise
 
@@ -220,15 +232,23 @@ def _plot(path, before, removed, added):
     plt.close(fig)
 
 
-def update(old_map,mapping_run,reference_run,output):
+def update(old_map,mapping_run,reference_run,output,*,old_static=None,max_voxels=None,progress=None):
+    if max_voxels is not None:
+        _validate_max_voxels(max_voxels)
     output=Path(output).absolute()
     if output.exists() or output.is_symlink():raise FileExistsError('Output already exists')
     inputs=[Path(p).resolve() for p in (old_map,mapping_run,reference_run)]
+    old_static=Path(old_static).expanduser().resolve() if old_static is not None else None
     destination=output.resolve()
-    if any(destination==p or p in destination.parents or destination in p.parents for p in inputs):
+    protected=inputs+[old_static] if old_static is not None else inputs
+    if any(destination==p or p in destination.parents or destination in p.parents for p in protected):
         raise ValueError('Output must not contain or be inside an input')
+    if old_static is not None:
+        from perception.environment.incremental import export_incremental_environment, validate_static_parent
+        validate_static_parent(old_static,inputs[0])
     data=_prepare_evidence(*inputs)
-    tree,hit_tree,review=_evidence(data)
+    voxel_limit=data['config']['static']['max_voxels'] if max_voxels is None else max_voxels
+    tree,hit_tree,review=_evidence(data,max_voxels=voxel_limit)
     try:
         output.parent.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='.'+output.name+'-',dir=output.parent) as temp:
@@ -260,16 +280,23 @@ def update(old_map,mapping_run,reference_run,output):
                     world_parts.append(np.c_[world,cloud[:,3]]);added.append(world)
                     counts['new_kept']+=len(cloud)
                 rows.append(np.r_[stamp,pose,len(rows),indoor])
-            if not counts['old_removed'] and not counts['new_kept']:
+            tree.close()
+            feature_changes=bool(counts['old_removed'] or counts['new_kept'])
+            if not feature_changes and old_static is None:
                 raise ValueError('No changes have sufficient recorded evidence')
-            if sum(len(p) for p in world_parts)>8_000_000:raise ValueError('Map display reconstruction exceeds point budget')
             np.savetxt(keydir/'poses.txt',np.asarray(rows),fmt='%.17g')
-            write_xyzi(package/'map/GlobalMap.pcd',_voxel(np.concatenate(world_parts),resolution))
+            if feature_changes:
+                if sum(len(p) for p in world_parts)>8_000_000:
+                    raise ValueError('Map display reconstruction exceeds point budget')
+                write_xyzi(package/'map/GlobalMap.pcd',_voxel(np.concatenate(world_parts),resolution))
+            else:
+                shutil.copyfile(data['old']/'GlobalMap.pcd',package/'map/GlobalMap.pcd')
             _plot(package/'comparison.png',read_xyzi(data['old']/'GlobalMap.pcd'),removed,added)
             def combine(parts):
                 nonempty=[p for p in parts if len(p)]
                 return np.concatenate(nonempty).astype(np.float32) if nonempty else np.empty((0,3),np.float32)
             np.savez_compressed(package/'changes.npz',removed_map_xyz=combine(removed),added_map_xyz=combine(added))
+            del hit_tree,world_parts,removed,added
             report=dict(status='candidate_not_accepted',old_map=asset_reference(data['old']),
                 old_binding=data['old_binding'],local_mapping=asset_reference(data['source']),
                 fixed_localization=asset_reference(data['reference']),bag_fingerprint=data['run']['playback']['bag_fingerprint'],
@@ -280,13 +307,26 @@ def update(old_map,mapping_run,reference_run,output):
                     free_min_observations=data['config']['static']['free_min_observations'],
                     free_to_hit_ratio=data['config']['static']['free_to_hit_ratio'],
                     ray_end_margin_m=data['config']['static']['ray_end_margin_m'],
+                    max_voxels=voxel_limit,
                     max_rays_per_scan=data['config']['static']['max_rays']),
                 changes_sha256=content_hash(package/'changes.npz'),
                 limitations=['temporal_votes_do_not_prove_independent_viewpoints','dynamic_objects_may_persist',
-                             'global_registration_accuracy_not_independently_verified','static_map_and_annotations_not_migrated'])
+                             'global_registration_accuracy_not_independently_verified',
+                             'static_map_and_annotations_not_migrated' if old_static is None else 'annotations_not_migrated'])
             report_text=json.dumps(report,ensure_ascii=False,indent=2)+'\n'
-            (package/'report.json').write_text(report_text)
             (package/'map/update_source.json').write_text(report_text)
+            manifest=dict(format='roll_keyframes_v1',frame=data['manifest']['frame'],units='metres_radians',
+                          keyframes=len(rows),visualization_resolution=resolution,source='local_bag_update_candidate',
+                          update_source_sha256=content_hash(package/'map/update_source.json'))
+            (package/'map/manifest.yaml').write_text(yaml.safe_dump(manifest,sort_keys=False))
+            (package/'map/COMPLETE').write_text('roll_keyframes_v1\n')
+            if old_static is not None:
+                static_manifest=export_incremental_environment(
+                    old_static,data['old'],package/'map',data['source'],data['reference'],package/'static_map',
+                    candidate_map_reference=destination/'map',progress=progress)
+                report['static_map']=dict(path='static_map',snapshot_id=static_manifest['snapshot_id'],
+                                          frame_id=static_manifest['frame_id'],report='static_map/update_report.json')
+            (package/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
             old_id=source_binding(data['old'])
             if old_id!=data['old_binding']:raise ValueError('Source map changed during update')
             if source_binding(data['local'])!=data['local_binding']:raise ValueError('Local map changed during update')
@@ -296,11 +336,6 @@ def update(old_map,mapping_run,reference_run,output):
                 if file_fingerprint(path)!=data['inputs'][key]:raise ValueError('Input changed during update: '+key)
             if file_fingerprint(data['run']['bag'])!=data['run']['playback']['bag_fingerprint']:
                 raise ValueError('Input bag changed during update')
-            manifest=dict(format='roll_keyframes_v1',frame=data['manifest']['frame'],units='metres_radians',
-                          keyframes=len(rows),visualization_resolution=resolution,source='local_bag_update_candidate',
-                          update_source_sha256=content_hash(package/'map/update_source.json'))
-            (package/'map/manifest.yaml').write_text(yaml.safe_dump(manifest,sort_keys=False))
-            (package/'map/COMPLETE').write_text('roll_keyframes_v1\n')
             if output.exists() or output.is_symlink():raise FileExistsError('Output appeared during update')
             package.rename(output)
         return report
@@ -310,11 +345,20 @@ def update(old_map,mapping_run,reference_run,output):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--old-map',required=True)
+    parser.add_argument('--static-map',help='Old static package bound to --old-map; also produce a static candidate')
     parser.add_argument('--mapping-run',required=True,help='Same-bag local mapping with sealed scan journal')
     parser.add_argument('--localization-run',required=True,help='Same-bag fixed old-map localization')
+    parser.add_argument('--max-voxels',type=int,help='CPU voxel limit for the 3D update; defaults to the static settings')
     parser.add_argument('--out',required=True,help='New candidate directory; never the active map')
     args=parser.parse_args()
-    print(json.dumps(update(args.old_map,args.mapping_run,args.localization_run,args.out),ensure_ascii=False,indent=2))
+    if args.max_voxels is not None:
+        try:
+            _validate_max_voxels(args.max_voxels)
+        except ValueError as error:
+            parser.error(str(error))
+    report=update(args.old_map,args.mapping_run,args.localization_run,args.out,old_static=args.static_map,
+                  max_voxels=args.max_voxels,progress=lambda message: print(message,file=sys.stderr,flush=True))
+    print(json.dumps(report,ensure_ascii=False,indent=2))
 
 
 if __name__=='__main__':main()

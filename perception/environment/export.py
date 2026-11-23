@@ -196,7 +196,7 @@ def export_registered_environment(map_path, evidence_run, reference_run, output,
          'not_independent_of_evidence_and_reference_recordings'])
 
 
-def _save_package(snapshot, output, source, config, frame, bound_keyframes, export_pgm, limitations):
+def _save_package(snapshot, output, source, config, frame, bound_keyframes, export_pgm, limitations, *, write_extras=None):
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.'+output.name+'-', dir=str(output.parent)) as temporary:
         target = Path(temporary)/'package'
@@ -207,10 +207,12 @@ def _save_package(snapshot, output, source, config, frame, bound_keyframes, expo
                     bound_final_keyframes=bound_keyframes,
                     layers_sha256=content_hash(target/'layers.npz'),
                     limitations=limitations)
+        if write_extras is not None:
+            data['artifacts'] = write_extras(target)
         (target/'manifest.yaml').write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
         if export_pgm:
             export_map_server_grid(snapshot, target)
-        if output.exists():
+        if output.exists() or output.is_symlink():
             raise FileExistsError('Output appeared during export; refusing to replace it')
         target.rename(output)
     return data

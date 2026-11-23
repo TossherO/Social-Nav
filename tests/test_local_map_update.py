@@ -3,15 +3,18 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import yaml
 
 from perception.environment.layers import load_config
+from perception.environment.occupancy import VoxelBudgetExceeded
 from perception.environment.scans import ScanJournal
+from perception.environment.storage import StaticEnvironmentMap, content_hash
 from perception.mapping_localization.context import pose_matrix
 from perception.mapping_localization.manual_edit import read_xyzi,write_xyzi
-from perception.mapping_localization.results import file_fingerprint,map_fingerprint
+from perception.mapping_localization.results import file_fingerprint,map_fingerprint,read_pcd
 from perception.mapping_localization.update_map import update
 
 
@@ -90,6 +93,7 @@ class LocalMapUpdateTests(unittest.TestCase):
             before=map_fingerprint(old);report=update(old,mapping,reference,root/'candidate')
             self.assertEqual(map_fingerprint(old),before)
             self.assertEqual(report['status'],'candidate_not_accepted')
+            self.assertEqual(report['evidence_policy']['max_voxels'],load_config()['static']['max_voxels'])
             self.assertGreater(report['counts']['old_removed'],0)
             self.assertGreater(report['counts']['new_kept'],0)
             cloud=read_xyzi(root/'candidate/map/keyframes/surf0.pcd')
@@ -102,6 +106,22 @@ class LocalMapUpdateTests(unittest.TestCase):
                 self.assertEqual(len(changes['added_map_xyz']),report['counts']['new_kept'])
             self.assertTrue((root/'candidate/map/update_source.json').is_file())
 
+    def test_custom_3d_voxel_budget_bounds_evidence_and_is_recorded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);old,mapping,reference=self.fixture(root)
+            output=root/'candidate'
+            with self.assertRaisesRegex(ValueError,'positive integer'):
+                update(old,mapping,reference,output,max_voxels=0)
+            with self.assertRaisesRegex(VoxelBudgetExceeded,'3D update voxel limit: 1'):
+                update(old,mapping,reference,output,max_voxels=1)
+            self.assertFalse(output.exists())
+            result=update(old,mapping,reference,output,max_voxels=1000)
+            self.assertGreater(result['evidence']['retained_voxels'],1)
+            self.assertLessEqual(result['evidence']['retained_voxels'],1000)
+            for name in ('report.json','map/update_source.json'):
+                report=json.loads((output/name).read_text())
+                self.assertEqual(report['evidence_policy']['max_voxels'],1000)
+
     def test_different_bag_and_overwrite_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);old,mapping,reference=self.fixture(root)
@@ -110,6 +130,38 @@ class LocalMapUpdateTests(unittest.TestCase):
             with self.assertRaises(ValueError):update(old,mapping,reference,root/'candidate')
             self.assertFalse((root/'candidate').exists())
             with self.assertRaises(FileExistsError):update(old,mapping,reference,old)
+
+    def test_static_candidate_uses_final_map_binding_and_publishes_together(self):
+        from perception.environment.export import _save_package
+        from perception.environment.maps import static_geometry
+
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);old,mapping,reference=self.fixture(root)
+            static=root/'old_static';output=root/'candidate';config=load_config()
+            geometry=static_geometry(read_pcd(old/'GlobalMap.pcd'),[[0.,0.,0.]],config,
+                                     map_id='parent',frame='map',stamp=101.)
+            _save_package(geometry,static,dict(map_fingerprint=map_fingerprint(old)),config,'map',2,False,[])
+            source_hashes={name:content_hash(static/name) for name in ('manifest.yaml','layers.npz')}
+            with patch('perception.mapping_localization.update_map._masks',
+                       side_effect=lambda tree,world,*args,**kwargs: np.zeros(len(world),bool)):
+                with self.assertRaisesRegex(ValueError,'inside an input'):
+                    update(old,mapping,reference,static/'bad-output',old_static=static)
+                with patch('perception.environment.incremental.export_incremental_environment',
+                           side_effect=ValueError('failed static fusion')):
+                    with self.assertRaisesRegex(ValueError,'failed static fusion'):
+                        update(old,mapping,reference,output,old_static=static)
+                self.assertFalse(output.exists())
+                result=update(old,mapping,reference,output,old_static=static)
+            self.assertEqual(result['counts']['old_removed'],0)
+            self.assertEqual(result['counts']['new_kept'],0)
+            self.assertEqual(content_hash(output/'map/GlobalMap.pcd'),content_hash(old/'GlobalMap.pcd'))
+            self.assertTrue((output/result['static_map']['report']).is_file())
+            candidate=StaticEnvironmentMap(output/'static_map')
+            self.assertEqual(candidate.manifest['source']['map']['path'],str(output/'map'))
+            self.assertEqual(candidate.manifest['source']['map_fingerprint'],map_fingerprint(output/'map'))
+            self.assertEqual(candidate.snapshot.metadata['frame_id'],'map')
+            for name,digest in source_hashes.items():
+                self.assertEqual(content_hash(static/name),digest)
 
     def test_registration_jump_and_overlapping_session_time_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

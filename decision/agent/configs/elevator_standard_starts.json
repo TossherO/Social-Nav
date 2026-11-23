@@ -1,6 +1,7 @@
 {
   "floor1": {
     "map_id": "roll:51de0bede55ab952462cc5f02bd1d44b0db0347c1cb44f4704f9eb9ad63b20fd",
+    "same_frame_map_ids": ["roll:1d463d3fc4aabf4bd0e4bafe014212e8514427bf1d75d2917f1051b77279b717"],
     "frame_id": "map",
     "reference": "rslidar",
     "reference_observation": "outputs/decision/agent/floor1_current/standard_start_reference_20261119/reference.json",

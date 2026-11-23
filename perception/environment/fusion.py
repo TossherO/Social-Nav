@@ -66,7 +66,7 @@ def _count_mask(counts, mask, points, floor, origin, config, geometric):
 
 def fuse_scans(candidate, path, timeline, config, fingerprint, *, people=None, filter_mode='none', candidate_points=None,
                scan_stamps=None, global_candidate=None, global_totals=None, z_bounds=None, defer_derived=False,
-               scan_masks=None, grid_offset=None):
+               scan_masks=None, grid_offset=None, require_repeated_evidence=False):
     config = dict(config, free_probability=config['static'].get('free_probability',config['free_probability']))
     if filter_mode not in STATIC_FILTER_MODES:
         raise ValueError('Unknown static dynamic-filter mode')
@@ -103,7 +103,7 @@ def fuse_scans(candidate, path, timeline, config, fingerprint, *, people=None, f
     tree = OccupancyTree(config['resolution'], backend='cpu')
     try:
         tree.enable_static_retention()
-        if geometric:
+        if geometric or require_repeated_evidence:
             tree.enable_static_review(config['dynamic']['static_observation_interval_s'],
                                       config['static']['ray_end_margin_m'])
         for record, data in read_scans(path, stamps=scan_stamps):
@@ -138,6 +138,8 @@ def fuse_scans(candidate, path, timeline, config, fingerprint, *, people=None, f
         if not count:
             raise ValueError('No scan could be bound to a final-map pose')
         voxels = tree.snapshot(last_stamp)
+        if require_repeated_evidence and not geometric:
+            voxel_votes = tree.static_votes(voxels[:, :3])
         if geometric:
             voxel_votes, endpoint_votes = tree.static_votes(voxels[:, :3]), tree.static_votes(candidate_points)
     finally:
@@ -181,8 +183,18 @@ def fuse_scans(candidate, path, timeline, config, fingerprint, *, people=None, f
         filter_metadata['geometric_settings']['observation_interval_s'] = config['dynamic']['static_observation_interval_s']
         retained &= ~(rejected_voxels & (voxels[:, 3] >= config['occupied_probability']))
         keep &= ~rejected_endpoints
-    if filter_metadata is not None:
+    if require_repeated_evidence:
+        hits, free = voxel_votes.T
+        minimum = config['static']['free_min_observations']
+        ratio = config['static']['free_to_hit_ratio']
+        retained &= (((voxels[:, 3] >= config['occupied_probability']) &
+                      (hits >= minimum) & (hits >= np.maximum(free, 1)*ratio)) |
+                     ((voxels[:, 3] <= config['free_probability']) &
+                      (free >= minimum) & (free >= np.maximum(hits, 1)*ratio)))
         voxels = voxels[retained]
+    if filter_metadata is not None:
+        if not require_repeated_evidence:
+            voxels = voxels[retained]
         candidates = endpoint_layers(candidate_points[keep], floor, origin, config,
             grid_origin=reference_origin if grid_offset is not None else None, grid_offset=grid_offset)
         filter_metadata.update(candidate_cells_before=int((candidate.layers['occupancy'] == 100).sum()),
@@ -218,7 +230,7 @@ def fuse_scans(candidate, path, timeline, config, fingerprint, *, people=None, f
 
 
 def fuse_scans_tiled(candidate, path, timeline, config, fingerprint, *, people=None, filter_mode='none', candidate_points,
-                     progress=None):
+                     progress=None, require_repeated_evidence=False):
     """Fuse bounded tiles using the same global ground and original scan order."""
     from .changes import conditional_obstacles
     from .layers import finish_evidence
@@ -232,7 +244,8 @@ def fuse_scans_tiled(candidate, path, timeline, config, fingerprint, *, people=N
         try:
             if progress:progress('正在融合整块地图；超过体素预算时会自动细分。')
             result = fuse_scans(candidate, path, timeline, config, fingerprint, people=people,
-                                filter_mode=filter_mode, candidate_points=candidate_points)
+                                filter_mode=filter_mode, candidate_points=candidate_points,
+                                require_repeated_evidence=require_repeated_evidence)
             details = dict(strategy='single_tile', tile_size_m=config['static']['tile_size_m'], initial_tiles=1,
                            completed_tiles=1, adaptive_splits=0, peak_tile_voxels=result.metadata['voxel_count'])
             return GridSnapshot(dict(result.metadata, fusion=details), result.layers)
@@ -316,7 +329,7 @@ def fuse_scans_tiled(candidate, path, timeline, config, fingerprint, *, people=N
             result = fuse_scans(tile, path, timeline, config, fingerprint, people=people, filter_mode=filter_mode,
                 candidate_points=points[use_points], scan_stamps=stamps, global_candidate=candidate,
                 global_totals=totals, z_bounds=z_bounds, defer_derived=True, scan_masks=scan_masks,
-                grid_offset=np.array([x0, y0]))
+                grid_offset=np.array([x0, y0]), require_repeated_evidence=require_repeated_evidence)
         except (RuntimeError, ValueError) as error:
             if str(error) not in budget_errors or (x1-x0 == 1 and y1-y0 == 1):
                 raise

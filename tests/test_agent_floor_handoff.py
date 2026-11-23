@@ -1,4 +1,5 @@
 """Mocked observation-only floor handoff; never starts a real runtime."""
+import hashlib
 import tempfile
 import json
 import copy
@@ -8,11 +9,53 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock,patch
 
 import numpy as np
+from decision.agent import CONFIG_DIR
 from decision.agent.core.elevator_transition import ElevatorTransition
-from decision.agent.workflows.floor_handoff import FloorHandoff,ElevatorRide,follow_runtime_options
+from decision.agent.workflows.floor_handoff import FloorHandoff,ElevatorRide,follow_runtime_options,load_standard_start
 
 
 class FloorHandoffTests(unittest.TestCase):
+    def test_floor1_same_frame_update_only_rebinds_the_provisional_seed(self):
+        standard=json.loads((CONFIG_DIR/'elevator_standard_starts.json').read_text())['floor1']
+        old_id=standard['map_id']
+        new_id,=standard['same_frame_map_ids']
+        rgb=b'\xff\xd8reference\xff\xd9'
+        lidar=b'\x89PNG\r\n\x1a\nreference'
+        meta=dict(map_id=old_id, rgb=dict(stamp_s=1.),lidar=dict(stamp_s=1.),
+                  rgb_sha256=hashlib.sha256(rgb).hexdigest(),lidar_sha256=hashlib.sha256(lidar).hexdigest())
+        with tempfile.TemporaryDirectory() as root,patch('decision.agent.workflows.floor_handoff.ROOT',Path(root)):
+            reference=Path(root)/standard['reference_observation']
+            reference.parent.mkdir(parents=True)
+            reference.write_text(json.dumps(meta))
+            (reference.parent/'rgb.jpg').write_bytes(rgb)
+            (reference.parent/'lidar.png').write_bytes(lidar)
+            for map_id in (old_id,new_id):
+                with self.subTest(map_id=map_id):
+                    target=SimpleNamespace(value=dict(localization_map_id=map_id,frame_id='map'))
+                    pose,observation=load_standard_start(target,'floor1')
+                    self.assertEqual(observation,(meta,rgb,lidar))
+                    self.assertEqual(json.loads(reference.read_text()),meta)
+                    ride=ElevatorRide({},'unused','unused')
+                    ride.standard=pose
+                    ride.transition=SimpleNamespace(status='awaiting_destination_localization',to_floor='floor1',
+                        from_floor='floor2',destination_map_id=map_id,last_observation_stamp_s=10.,task_id='t',goal_id='lift')
+                    ride.frame=dict(scan_record=dict(source='local_lidar_returns',clock_domain='ros_time',
+                                                    frame_id='rslidar',stamp_s=11.))
+                    with patch.object(ride,'_new_handoff') as handoff:
+                        ride.restart_standard(None)
+                    seed=handoff.call_args.args[1]
+                    self.assertEqual(seed['destination']['to_map_id'],map_id)
+                    self.assertEqual(seed['lidar_pose_rpy_xyz'],standard['pose_rpy_xyz'])
+                    self.assertIs(seed['verified_localization'],False)
+            for map_id,frame_id in (('unrelated','map'),(new_id,'other_frame')):
+                target=SimpleNamespace(value=dict(localization_map_id=map_id,frame_id=frame_id))
+                with self.assertRaisesRegex(ValueError,'does not match the destination map'):
+                    load_standard_start(target,'floor1')
+            reference.write_text(json.dumps(dict(meta,map_id=new_id)))
+            target=SimpleNamespace(value=dict(localization_map_id=new_id,frame_id='map'))
+            with self.assertRaisesRegex(ValueError,'reference is missing or changed'):
+                load_standard_start(target,'floor1')
+
     def test_real_handoff_accepts_standard_seed_and_rejects_mismatched_inputs(self):
         from decision.agent.core.elevator_links import standard_destination_seed
         transition=ElevatorTransition(task_id='t',goal_id='lift',from_floor='floor2',to_floor='floor1',destination_map_id='m')

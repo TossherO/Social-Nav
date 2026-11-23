@@ -111,11 +111,13 @@ def follow_runtime_options(socket_path):
 
 
 def load_standard_start(target,floor):
+    """Load the historical observation and bind its provisional pose to the target map."""
     standards=json.loads((CONFIG_DIR/'elevator_standard_starts.json').read_text())
     standard=standards.get(floor)
     if standard is None:return None,None
     pose=standard.get('pose_rpy_xyz')
-    if (standard.get('map_id')!=target.value['localization_map_id'] or
+    map_id=target.value['localization_map_id']
+    if (map_id not in [standard['map_id'], *standard.get('same_frame_map_ids', [])] or
             standard.get('frame_id')!=target.value['frame_id'] or standard.get('reference')!='rslidar' or
             not isinstance(pose,list) or len(pose)!=6 or not np.isfinite(pose).all()):
         raise ValueError('Standard elevator start does not match the destination map')
@@ -127,7 +129,8 @@ def load_standard_start(target,floor):
             not rgb.startswith(b'\xff\xd8') or not rgb.endswith(b'\xff\xd9') or
             not scan.startswith(b'\x89PNG\r\n\x1a\n')):
         raise ValueError('Standard elevator reference is missing or changed')
-    return copy.deepcopy(standard),(meta,rgb,scan)
+    seed_pose=dict(map_id=map_id, frame_id=standard['frame_id'], reference=standard['reference'], pose_rpy_xyz=pose)
+    return seed_pose,(meta,rgb,scan)
 
 
 class ElevatorRide:

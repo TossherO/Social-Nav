@@ -91,35 +91,12 @@ def _map_feature_times(map_path, keys, candidate, config):
     return result
 
 
-def _merge_session(layers, session, index, *, baseline_occupied=None, feature_times=None, survey_start=None):
-    """Replace only cells with classified, timestamped measurements from this survey."""
-    values = session.layers
-    valid = (np.isin(values['occupancy'], [0, 100]) & values['observed'] &
-             np.isfinite(values['last_observed']))
-    if baseline_occupied is not None:
-        # Endpoints from the final map may be newer than this whole survey.
-        # Only clear one if every measurement in the survey is later than its
-        # latest contributing keyframe. Unknown endpoint ages remain occupied.
-        blocked=(baseline_occupied & (values['occupancy']==0) &
-                 (~np.isfinite(feature_times) | (feature_times >= survey_start)))
-        valid &= ~blocked
-    # Session evidence without enough vertical free support remains unknown.
-    previous = layers['occupancy'].copy()
-    for name in ('occupancy', 'observed', 'last_observed', 'coverage', 'obstacle_min_z', 'obstacle_max_z'):
-        layers[name][valid] = values[name][valid]
-    layers['endpoint_count'][valid] = values['endpoint_count'][valid]
-    layers['survey_index'][valid] = index
-    return dict(classified_cells=int(valid.sum()), changed_cells=int((valid & (previous != layers['occupancy'])).sum()),
-                cleared_occupied=int((valid & (previous == 100) & (layers['occupancy'] == 0)).sum()),
-                newly_occupied=int((valid & (previous != 100) & (layers['occupancy'] == 100)).sum()))
-
-
 def export_registered_multi_environment(map_path, evidence_runs, reference_runs, output, *, config=None,
                                         bounds=None, export_pgm=False, progress=None):
     """Fuse distinct, nonoverlapping surveys from old to new without rewriting times."""
     from .changes import conditional_obstacles
     from .export import _save_package
-    from .fusion import fuse_scans_tiled
+    from .incremental import measure_registered_survey, merge_survey_evidence
 
     map_path, output = Path(map_path), Path(output)
     if output.exists() or output.is_symlink():
@@ -147,30 +124,29 @@ def export_registered_multi_environment(map_path, evidence_runs, reference_runs,
     candidate = static_geometry(points, sensors, config, map_id=map_id, frame=frame,
                                 stamp=float(surveys[-1]['timeline'].times[-1]), bounds=bounds)
     layers = {name: value.copy() for name,value in candidate.layers.items()}
+    layers['ground_weak_support'] = layers['ground_support'].copy()
     layers['survey_index'] = np.full(candidate.layers['occupancy'].shape, -1, dtype=np.int16)
     if progress: progress('正在核对最终地图关键帧时间，保护较新的障碍特征。')
     feature_times=_map_feature_times(map_path,keys,candidate,config)
     layers['map_feature_time_s']=feature_times
     baseline_occupied=candidate.layers['occupancy']==100
-    # The geometric baseline is separate: only measured session voxels can
-    # override an earlier session, never unstamped final-map endpoints.
-    empty_points = np.empty((0, 3), dtype=np.float32)
     for index, item in enumerate(surveys):
         if progress: progress(f'融合第 {index+1}/{len(surveys)} 次采集：{item["source"]["evidence_run"]["path"]}')
-        result = fuse_scans_tiled(candidate, item['path'], item['timeline'], config,
-                                  item['source']['scans_fingerprint'], filter_mode='geometric',
-                                  candidate_points=empty_points, progress=progress)
+        result, ground, masks, diagnostics = measure_registered_survey(candidate, layers, item, config,
+                                                                       progress=progress)
         bound, unbound, ray_count = (result.metadata[key] for key in ('evidence_scans','unbound_scans','ray_scans'))
-        if bound < 3 or bound/(bound+unbound) < .5 or ray_count < 3:
-            raise ValueError(f'Insufficient registered ray evidence in survey {index+1}: '
-                             f'bound={bound}, unbound={unbound}, ray_scans={ray_count}')
-        item['source']['fusion'] = result.metadata.get('fusion')
-        item['source']['evidence_scans'] = result.metadata['evidence_scans']
-        item['source']['unbound_scans'] = result.metadata['unbound_scans']
-        item['source']['ray_scans'] = result.metadata['ray_scans']
-        item['source']['merge'] = _merge_session(layers, result, index, baseline_occupied=baseline_occupied,
-                                                feature_times=feature_times,
-                                                survey_start=float(item['timeline'].times[0]))
+        for name, value in ground.items():
+            if name.startswith('ground_scan_') and name not in layers:
+                layers[name] = np.zeros_like(value)
+        survey_start = float(item['timeline'].times[0])
+        # A final-map endpoint may have originated during or after this survey.
+        # An unknown endpoint acquisition time also leaves it protected.
+        protected = baseline_occupied & (~np.isfinite(feature_times) | (feature_times >= survey_start))
+        _, counts = merge_survey_evidence(layers, result.layers, ground, masks, config,
+                                           survey_start=survey_start, survey_index=index,
+                                           protected_occupied=protected)
+        item['source'].update(fusion=result.metadata.get('fusion'), ground=diagnostics, evidence_scans=bound,
+                              unbound_scans=unbound, ray_scans=ray_count, merge=counts)
     layers.update(finish_evidence(layers['occupancy'], layers['observed'], layers['last_observed'],
         layers['coverage'], layers['obstacle_min_z'], layers['obstacle_max_z'], layers['ground_z'],
         layers['ground_support'], config['resolution']))
@@ -189,12 +165,14 @@ def export_registered_multi_environment(map_path, evidence_runs, reference_runs,
             if file_fingerprint(path) != expected:
                 raise ValueError('Survey input changed during static fusion: '+str(path))
     signature = hashlib.sha256(encoded([candidate.metadata['snapshot_id'], sources,
-                                        'latest_classified_survey_v1']).encode()).hexdigest()[:20]
+                                        'evidence_gated_registered_surveys']).encode()).hexdigest()[:20]
     metadata = dict(candidate.metadata, snapshot_id=map_id+':multi_survey:'+signature,
         geometry_status='STATIC_SCAN_OBSERVED', source_evidence='time_ordered_registered_surveys',
+        ground_estimator='compatible_registered_scan_ground_and_final_map_ground',
         rays_used=any(item['ray_scans'] for item in sources),
-        free_space_supported=any(item['ray_scans'] for item in sources),
-        per_cell_observation_time_available=True, occupancy_policy='latest_classified_survey',
+        free_space_supported=bool((layers['occupancy']==0).any()),
+        per_cell_observation_time_available=bool(np.isfinite(layers['last_observed']).any()),
+        occupancy_policy='evidence_gated_registered_surveys',
         survey_index_meaning='zero_based_manifest_sources_minus_one_final_map_endpoints',
         map_feature_time_semantics='latest_obstacle_keyframe_acquisition_time_not_ray_observation',
         evidence_scans=sum(item['evidence_scans'] for item in sources),
@@ -206,10 +184,10 @@ def export_registered_multi_environment(map_path, evidence_runs, reference_runs,
     snapshot = GridSnapshot(metadata, layers)
     source = dict(map=asset_reference(map_path), map_fingerprint=digest,
                   input_kind='time_ordered_registered_recorded_rays', surveys=sources,
-                  temporal_policy='latest_classified_survey_preserves_unobserved_and_newer_map_features',
+                  temporal_policy='evidence_gated_updates_preserve_unobserved_and_newer_map_features',
                   ordering_basis='recorded_sensor_timestamps_assumed_comparable')
     return _save_package(snapshot, output, source, config, frame, 0, export_pgm,
         ['not_navigation_reachability', 'cross_session_clock_comparability_not_independently_verified',
          'registration_and_dynamic_cleanup_not_independently_verified',
-         'only_classified_observations_supersede_earlier_sessions',
+         'only_supported_classified_observations_supersede_earlier_sessions',
          'same_session_feature_and_free_order_not_proven'])
