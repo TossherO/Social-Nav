@@ -13,8 +13,7 @@ from runtime.control import ControlLoop
 from runtime.decision import DecisionBuffer
 from runtime.follow import FollowRunner
 from runtime.follow_decision import FollowDecisionWorker
-from tests.test_decision_runtime import observation
-from tests.test_follow_decision_worker import factory,search
+from tests.decision_fixtures import follow_client, follow_search, observation
 
 
 class ControlT2Tests(unittest.TestCase):
@@ -24,8 +23,8 @@ class ControlT2Tests(unittest.TestCase):
         self.handle=dict(task_id='mission',plan_revision=1,goal_id='g',goal_revision=1,call_id='call')
         self.choice='P0'
         def infer(request):
-            return request.infer(client_factory=factory(self.choice))
-        self.worker=FollowDecisionWorker(search,inference=infer,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768))
+            return request.infer(client_factory=follow_client(self.choice))
+        self.worker=FollowDecisionWorker(follow_search,inference=infer,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768))
         from tests.test_follow_recovery import candidate_observation
         from decision.vlm.t2.target import reference
         obs=candidate_observation(10.)

@@ -16,7 +16,7 @@
     "association_cost_max": 1.5,
     "support_similarity_min": -0.5,
     "center_gate_m": 1.5,
-    "min_hits": 2,
+    "min_hits": 1,
     "max_unobserved_s": 1.5,
     "max_unsupported_s": 1.5,
     "reset_gap_s": 1.0,

@@ -10,35 +10,21 @@ import httpx
 from decision.vlm.t2.online import FollowRequest, prepare, selected_reference
 from decision.vlm.scene_inputs import model_eligible
 from perception.environment.context import fingerprint
-from tests.test_vlm_online import OnlineVlmTests
+from tests.decision_fixtures import dspark_client, observation, two_person_window
 
 
 class FollowOnlineTests(unittest.TestCase):
     def setUp(self):
-        self.scene,self.window,self.images=OnlineVlmTests().window()
+        _,self.window,self.images=two_person_window()
         self.search=dict(clock_domain=self.window['clock_domain'],source_stamp_s=self.window['stamp_s'],
             candidates=[dict(id=0,kind='wait',pose=None)])
         self.search['binding']=fingerprint(self.search)
-
-    def client(self, raw, *, finish='stop', tokens=None):
-        calls=[]
-        def handle(request):
-            calls.append(request)
-            if request.url.path=='/v1/models':
-                return httpx.Response(200,json={'data':[{'id':'qwen3.8-27b-fp8'}]})
-            if request.url.path=='/get_server_info':
-                return httpx.Response(200,json={'server_args':{'speculative_algorithm':'DSPARK'}})
-            event=dict(model='qwen3.8-27b-fp8',choices=[dict(index=0,delta=dict(content=raw),finish_reason=finish)])
-            if tokens is not None:event['usage']=dict(completion_tokens=tokens)
-            return httpx.Response(200,text='data: '+json.dumps(event)+'\n\ndata: [DONE]\n\n')
-        transport=httpx.MockTransport(handle)
-        return lambda **kw:httpx.Client(transport=transport,**kw),calls
 
     def test_frozen_mapping_and_structured_response(self):
         prepared=prepare(self.window,self.images,'red jacket',self.search)
         self.assertEqual(prepared['choices']['P0']['kind'],'person')
         self.assertEqual(prepared['choices']['A']['candidate']['kind'],'wait')
-        factory,calls=self.client('{"target":null,"observation":"A"}')
+        factory,calls=dspark_client('{"target":null,"observation":"A"}')
         result=FollowRequest(prepared).infer(client_factory=factory)
         self.assertEqual(result['choice']['candidate']['kind'],'wait')
         body=json.loads(next(c.content for c in calls if c.method=='POST'))
@@ -46,14 +32,13 @@ class FollowOnlineTests(unittest.TestCase):
         self.assertTrue(re.fullmatch(body['regex'],'{"target":null,"observation":"A"}'))
         self.assertFalse(re.fullmatch(body['regex'],'{"target":"P0","observation":"A"}'))
         self.assertEqual(body['max_tokens'],24)
-        factory,_=self.client('C')
+        factory,_=dspark_client('C')
         result=FollowRequest(prepared).infer(client_factory=factory)
         self.assertEqual(result['reason'],'invalid_t2_response')
         self.assertEqual(result['raw_content'],'C')
 
     def test_hosted_backend_uses_same_candidates_and_validates_raw_response(self):
         from decision.agent.core.store import Budget
-        from decision.vlm.t2.hosted import hosted_body
         prepared=prepare(self.window,self.images,'red jacket',self.search)
         with tempfile.TemporaryDirectory() as directory:
             config=Path(directory)/'config.json';config.write_text(json.dumps(dict(base_url='https://example.invalid/v1',api_key='fixture')))
@@ -130,7 +115,7 @@ class FollowOnlineTests(unittest.TestCase):
                            ('{"target":"P0","target":"P1","observation":null}','stop'),
                            ('{"target":"P0","observation":null,"other":1}','stop')]:
             with self.subTest(raw=raw,finish=finish):
-                factory,_=self.client(raw,finish=finish,tokens=5)
+                factory,_=dspark_client(raw,finish=finish,tokens=5)
                 self.assertEqual(FollowRequest(prepared).infer(client_factory=factory)['status'],'unavailable')
 
     def test_changed_inputs_and_source_are_rejected(self):
@@ -197,7 +182,7 @@ class FollowOnlineTests(unittest.TestCase):
     def test_single_request_and_source_bound_reference(self):
         prepared=prepare(self.window,self.images,'red jacket',self.search)
         request=FollowRequest(prepared)
-        factory,_=self.client('{"target":"P0","observation":null}')
+        factory,_=dspark_client('{"target":"P0","observation":null}')
         result=request.infer(client_factory=factory)
         ref=selected_reference(prepared,result,self.window,task_id='mission',revision=1,goal_id='g')
         self.assertEqual(ref['track']['identity'],prepared['choices']['P0']['identity'])
@@ -208,7 +193,6 @@ class FollowOnlineTests(unittest.TestCase):
     def test_render_window_includes_predicted_only_for_follow(self):
         from decision.vlm.observations import render_window
         from runtime.decision import DecisionBuffer
-        from tests.test_decision_runtime import observation
         from perception.environment.scene import assemble_scene
         from perception.environment.layers import load_config
         buffer=DecisionBuffer(max_frames=16,slot_bytes=32768)

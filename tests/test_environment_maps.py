@@ -52,6 +52,19 @@ class PoseTimelineTests(unittest.TestCase):
 
 
 class StaticMapTests(unittest.TestCase):
+    def test_indexed_ground_candidates_keep_radius_and_point_order(self):
+        config = load_config()
+        config['ground_fit_radius_m'] = 3.
+        points = np.array([[9, 0, -1], [3, 0, -1], [-3, 0, -1], [0, 0, -1],
+                           [3, .001, -1], [18, 0, -1], [3, 0, -2]], dtype=np.float32)
+        sensors = np.array([[0., 0., 0.], [6., 0., 0.], [12., 0., 0.], [18., 0., 0.]])
+        with patch('perception.environment.maps.ground_plane', return_value=None) as fit:
+            static_geometry(points, sensors, config, map_id='prior', frame='map', stamp=1.)
+        self.assertEqual(fit.call_count, len(sensors))
+        for call, sensor in zip(fit.call_args_list, sensors):
+            nearby = np.linalg.norm(points[:, :2]-sensor[:2], axis=1) <= config['ground_fit_radius_m']
+            np.testing.assert_array_equal(call.args[0], points[nearby])
+
     def test_ground_relative_defaults_preserve_sparse_clusters_without_changing_online_support(self):
         from perception.environment.projection import ground_relative_projection
         config=load_config()

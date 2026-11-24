@@ -2,7 +2,10 @@
 import numpy as np
 
 from perception.environment.context import fingerprint
+from perception.environment.geometry import square_overlaps
 from perception.environment.layers import GridSnapshot
+
+RECENT_PERSON_S = .5
 
 
 def overlap_states(points, rotation, target_resolution, local, raw, *, after=None, observed=None):
@@ -11,25 +14,14 @@ def overlap_states(points, rotation, target_resolution, local, raw, *, after=Non
     Only raw local FREE can supply missing prior evidence. Derived static support
     and predicted person background cannot recursively clear the static unknowns.
     """
-    m=local.metadata;cells=local.layers['occupancy'];r=m['resolution']
-    a=target_resolution/2;b=r/2;extent=a*np.abs(rotation).sum(axis=0)
-    low=np.floor((points-extent-m['origin_xy'])/r+1e-9).astype(int)
-    high=np.floor((points+extent-m['origin_xy'])/r-1e-9).astype(int)
-    span=(high-low).max(axis=0)+1
-    if np.prod(span)>81:raise ValueError('Reference/local projection exceeds overlap budget')
+    cells=local.layers['occupancy']
     free=np.ones(len(points),bool);hit=np.zeros(len(points),bool)
-    for dy in range(span[1]):
-        for dx in range(span[0]):
-            ij=low+[dx,dy];delta=(ij+.5)*r+m['origin_xy']-points
-            overlap=((np.abs(delta)<extent+b-1e-10).all(axis=1)&
-                (np.abs(delta@rotation.T)<a+b*np.abs(rotation).sum(axis=1)-1e-10).all(axis=1))
-            inside=((ij>=0)&(ij<np.asarray(cells.shape)[::-1])).all(axis=1)
-            free[overlap&~inside]=False
-            rows=np.flatnonzero(overlap&inside);x,y=ij[rows].T
-            free[rows]&=(cells[y,x]==0)&(raw[y,x]==0)
-            if after is not None:
-                free[rows]&=observed[y,x]>after[rows]
-            hit[rows]|=cells[y,x]==100
+    for rows,y,x,outside,_ in square_overlaps(points,rotation,target_resolution,local,include_contacts=False):
+        free[outside]=False
+        free[rows]&=(cells[y,x]==0)&(raw[y,x]==0)
+        if after is not None:
+            free[rows]&=observed[y,x]>after[rows]
+        hit[rows]|=cells[y,x]==100
     return free&~hit,hit
 
 
@@ -50,7 +42,12 @@ def projection(prior, local, transform):
 
 class ReferenceObstacles:
     """Keep observed obstructions on static free cells for one map association."""
-    def __init__(self):
+    def __init__(self, *, confirm_scans=2, confirm_window_s=.5, person_margin_m=.2):
+        if type(confirm_scans) is not int or confirm_scans < 2:
+            raise ValueError('Person-adjacent obstacle confirmation requires at least two scans')
+        self.confirm_scans=confirm_scans
+        self.confirm_window_s=confirm_window_s
+        self.person_margin_m=person_margin_m
         self.version=0
         self.key=None
         self.reset()
@@ -62,6 +59,61 @@ class ReferenceObstacles:
         self.last=None
         self.hits=None
         self.blocked=()
+        self.recent_people={}
+        self.pending={}
+
+    def _remember_people(self, scene, prior, transform, stamp):
+        from perception.environment.person_objects import circle_indices, observed_objects
+
+        self.recent_people={i:t for i,t in self.recent_people.items() if stamp-t<=RECENT_PERSON_S}
+        people=scene.record.get('people',{})
+        data=people.get('data',{})
+        current=people.get('status')=='valid' and data.get('stamp_s')==stamp
+        objects=observed_objects(scene.geometry)
+        circles=[(obj['xy'],max(.55,obj['radius_m'])) for obj in objects]
+        if current:
+            owned={obj['identity'][-1] for obj in objects}
+            for track in data['tracks']:
+                if (str(track.get('track_id')) in owned or not track.get('confirmed') or
+                        track.get('state') not in ('observed','predicted')):
+                    continue
+                age=stamp-track['last_observed_stamp_s']
+                box=np.asarray(track['box'],float)
+                if 0<=age<=RECENT_PERSON_S and box.shape==(8,) and np.isfinite(box).all() and box[7]>=.5:
+                    circles.append((box[:2],.55))
+        near=set()
+        for local_xy,radius in circles:
+            map_xy=(np.asarray(local_xy)-transform[:2,2])@transform[:2,:2]
+            near.update(circle_indices(prior,map_xy,radius+self.person_margin_m).tolist())
+        self.recent_people.update(dict.fromkeys(near,stamp))
+        return current,near
+
+    def _confirm_new(self, scene, prior, physical, points, indices, rotation, occupied, stamp, people_current, near):
+        """Count distinct scans within a bounded window, finalizing outside person coverage."""
+        delayed=np.flatnonzero([int(i) in self.recent_people or int(i) in self.pending for i in indices])
+        ready=np.ones(len(indices),bool)
+        if not len(delayed):
+            return ready
+        fresh=np.zeros(len(delayed),bool)
+        evidence=scene.geometry.layers.get('current_obstacle_hits')
+        if evidence is not None:
+            if evidence.dtype!=bool or evidence.shape!=occupied.shape:
+                raise ValueError('Invalid current obstacle hit raster')
+            for rows,y,x,_,_ in square_overlaps(points[delayed],rotation,prior.metadata['resolution'],
+                                                   physical,include_contacts=False):
+                fresh[rows]|=evidence[y,x]&occupied[y,x]
+        for row,has_hit in zip(delayed,fresh):
+            index=int(indices[row])
+            previous,_=self.pending.get(index,((),-np.inf))
+            scans=tuple(t for t in previous if 0<stamp-t<=self.confirm_window_s)
+            if has_hit:
+                scans=(*scans,stamp)[-self.confirm_scans:]
+            if has_hit and people_current and index not in near and len(scans)==self.confirm_scans:
+                self.pending.pop(index,None)
+            else:
+                ready[row]=False
+                self.pending[index]=(scans,stamp)
+        return ready
 
     def update(self, scene, prior, transform, key):
         stamp=scene.record['as_of']
@@ -72,6 +124,9 @@ class ReferenceObstacles:
         if self.last is not None and stamp<=self.last:return False
         local=scene.geometry
         layers=local.layers
+        people_current,near=self._remember_people(scene,prior,transform,stamp)
+        retention=max(self.confirm_window_s,local.metadata.get('obstacle_retention_s',2.))
+        self.pending={i:v for i,v in self.pending.items() if stamp-v[1]<=retention}
         occupied=layers['occupancy']==100
         if 'navigation_source' in layers:
             occupied|=layers['navigation_source']==10
@@ -96,7 +151,11 @@ class ReferenceObstacles:
         if len(rows):
             _,hit[rows]=overlap_states(points[rows],rotation,prior.metadata['resolution'],physical,cells)
         previous=self.hits[y,x]
-        added=hit&~np.isfinite(previous)
+        newly_occupied=np.flatnonzero(hit&~np.isfinite(previous))
+        indices=np.ravel_multi_index((y[newly_occupied],x[newly_occupied]),self.hits.shape)
+        confirmed=self._confirm_new(scene,prior,physical,points[newly_occupied],indices,rotation,occupied,
+                                    stamp,people_current,near)
+        added=newly_occupied[confirmed]
         # Every overlapping cell must be locally free and have a newer source
         # timestamp. Near-field restores cannot clear a hit.
         cleared=np.zeros(len(x),bool)
@@ -109,13 +168,15 @@ class ReferenceObstacles:
             if len(rows):
                 cleared[rows],_=overlap_states(points[rows],rotation,prior.metadata['resolution'],
                     physical,cells,after=previous[rows],observed=recent)
-        self.hits[y[hit],x[hit]]=stamp
+        retained=hit&np.isfinite(previous)
+        retained[added]=True
+        self.hits[y[retained],x[retained]]=stamp
         self.hits[y[cleared],x[cleared]]=-np.inf
         self.last=stamp
-        if added.any() or cleared.any():
+        if len(added) or cleared.any():
             self.version+=1
             self.blocked=tuple(np.flatnonzero(np.isfinite(self.hits)).tolist())
-        return bool(added.any())
+        return bool(len(added))
 
 
 def retain_obstacles(prior, blocked):

@@ -8,8 +8,6 @@ import threading
 import time
 from pathlib import Path
 
-from PIL import Image
-
 from decision.vlm.annotation.store import perception_view
 from decision.vlm.t2.online import FollowRequest, prepare
 from decision.vlm.observations import render_window
@@ -131,10 +129,6 @@ class FollowDecisionWorker:
             self.reference=self.crop=None
             self.reid_interrupted=False
 
-    def request_fresh(self):
-        """The next available observation is scheduled after result consumption."""
-        return None
-
     def interrupt_reid(self):
         """Require fresh consecutive confirmations after a rejected or missing source."""
         with self.lock:
@@ -176,6 +170,7 @@ class FollowDecisionWorker:
             return True
 
     def poll(self):
+        """Consume a result so the next eligible observation can be submitted."""
         with self.lock:
             value,self.result=self.result,None
             return value
@@ -321,7 +316,6 @@ class FollowDecisionWorker:
                         if self.metrics is not None:
                             self.metrics.transfer('host_copy',pixels.nbytes,'agent_follow_rgb')
                         self._publish_agent_observation(item,entry,pixels)
-                except (ValueError,KeyError,TypeError) as caught:error=type(caught).__name__
                 except Exception as caught:error=type(caught).__name__
                 with self.lock:
                     self.inflight=False
@@ -389,8 +383,7 @@ class FollowDecisionWorker:
                 if self.recorder is not None:self.recorder.submit(prepared['binding'],'result',result)
                 if result.get('status')=='complete':
                     request.accept(result)
-                outcome=dict(handle=item['task']['handle'],prepared=prepared,window=window,result=result,
-                             reference_proposal=None)
+                outcome=dict(handle=item['task']['handle'],prepared=prepared,window=window,result=result)
             except Exception as error:
                 outcome=dict(handle=item['task']['handle'],error=type(error).__name__,
                              transient=stage=='input' and isinstance(error,(ValueError,KeyError,TypeError)))

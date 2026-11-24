@@ -5,6 +5,8 @@ import ctypes as C
 import numpy as np
 
 from .near_field import HISTORY_DTYPES
+from .obstacle_memory import EXPIRY_LAYER, apply_obstacle_memory
+from .occupancy import UNCONFIRMED_HIT
 
 
 # Native channel order. Wire dtypes remain independent of double device scratch.
@@ -48,7 +50,7 @@ def _policy_inputs(tree, policy, metadata, config, stamp):
         settings['boundary_margin_m'], settings['max_sensor_tilt_rad'],
         settings['ground_change_m'], settings['remember_outside_ring'],
         settings['temporary_obstacle_overlay'], config['obstacle_ttl_s'],
-        config.get('dynamic', {}).get('transient_ttl_s', config['obstacle_ttl_s']),
+        config.get('dynamic', {}).get('transient_ttl_s', .2),
     ], np.float64)
     return pose, plane, native
 
@@ -80,7 +82,7 @@ def _decode_layers(out, *, policy, people, device):
 
 def native_view(tree, floor, support, origin, config, stamp, endpoints, *, required=None,
                 source_layers=None, metadata=None, policy=None, transient_mask=None,
-                device=None, metrics=None,ground_conflict=None):
+                device=None, metrics=None,ground_conflict=None,obstacle_projection=None):
     """Project evidence, decode layers and return the near-field description."""
     people = source_layers is None and policy is not None and transient_mask is not None
     if device is not None:
@@ -124,7 +126,7 @@ def native_view(tree, floor, support, origin, config, stamp, endpoints, *, requi
         pose, plane, settings = _policy_inputs(tree, policy, metadata, config, stamp)
     if transient_mask is not None:
         mask = np.ascontiguousarray(transient_mask, np.uint8)
-        if mask.shape != (len(points),) or not np.isin(mask, [0, 1]).all():
+        if mask.shape != (len(points),) or (mask > UNCONFIRMED_HIT).any():
             raise ValueError('Invalid transient view mask')
 
     shape = (17 if people else 16, *floor.shape)
@@ -184,7 +186,31 @@ def native_view(tree, floor, support, origin, config, stamp, endpoints, *, requi
         else:
             metrics.transfer('d2d', out.numel() * out.element_size(), 'environment_owned_device_layers')
 
+    if obstacle_projection is not None:
+        columns = {name:out[index] for index,name in enumerate(VIEW_DTYPES) if index<11 or policy is not None}
+        if people:
+            columns['person_background_free'] = out[16]
+        fresh_free = apply_obstacle_memory(columns,obstacle_projection,config['free_vertical_coverage'],device=device)
+        if device is None:
+            from .layers import view_distance_fields
+            for name,value in view_distance_fields(columns['occupancy'],config['resolution']).items():
+                np.copyto(columns[name],value)
+            tree.obstacle_fresh_free = fresh_free
+        else:
+            refresh = getattr(tree.lib,'sn_occupancy_refresh_view_distances',None)
+            if refresh is None:
+                raise RuntimeError('Rebuild the CUDA environment library for obstacle retention')
+            refresh.argtypes = [C.c_void_p,C.c_void_p,C.c_int,C.c_int,C.c_double,C.c_void_p]
+            if refresh(tree.ptr,out.data_ptr(),*floor.shape,config['resolution'],current.cuda_stream)<0:
+                raise RuntimeError(tree.lib.sn_occupancy_error().decode())
+            tree.obstacle_fresh_free = fresh_free.cpu().numpy() if obstacle_projection[2].any() else None
+            if metrics is not None:
+                metrics.transfer('h2d',sum(a.nbytes for a in obstacle_projection),'environment_obstacle_retention')
+                if tree.obstacle_fresh_free is not None:
+                    metrics.transfer('d2h',tree.obstacle_fresh_free.nbytes,'environment_newly_free_obstacles')
     layers = _decode_layers(out, policy=policy, people=people, device=device)
+    if obstacle_projection is not None:
+        layers[EXPIRY_LAYER] = columns[EXPIRY_LAYER]
     if ground_conflict is not None:
         value=ground_conflict.copy()
         if device is not None:

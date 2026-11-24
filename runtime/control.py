@@ -682,7 +682,7 @@ class ControlLoop:
                     search_reason=outcome.get('reason',outcome['error'])
                     self.record('reference',dict(event='follow_t2_input_unavailable',reason=search_reason))
                     if local:self._wait_reid(handle)
-                    worker.request_fresh();outcome=None
+                    outcome=None
                 elif outcome.get('error'):raise ValueError('follow_t2_'+outcome.get('reason',outcome['error']))
             if outcome is not None and local:
                 evidence=outcome['local'];source=evidence['source']
@@ -723,7 +723,6 @@ class ControlLoop:
                     self.record('reference',dict(event='follow_t2_rejected',reason=str(error),
                         request_binding=prepared['binding'],source_stamp_s=prepared['source_stamp_s'],apply_stamp_s=now,
                         current_scene_stamp_s=None if self.scene is None else self.scene.record['as_of']))
-                    worker.request_fresh()
                 else:
                     self.metrics.trace('t2_result_applied',measurement_stamp_s=prepared['source_stamp_s'],
                                        apply_stamp_s=now,accepted=True)
@@ -733,7 +732,7 @@ class ControlLoop:
                 self.follow_pending=None;self.follow_search_anchor=self.follow_search_choice=None
                 self.follow_search_intent=None
             elif action is not None and action['operation']=='continue':
-                worker.request_fresh();action=None
+                action=None
             elif action is not None and action['operation']=='wait':
                 search_reason=action['reason']
                 self._wait_reid(handle)
@@ -767,7 +766,6 @@ class ControlLoop:
                 except (ValueError,KeyError,TypeError) as error:
                     search_reason=str(error)
                     self._wait_reid(handle)
-                    worker.request_fresh()
                 else:
                     self.commands.agent_state.publish_follow(dict(status='running',handle=handle,
                         target_identity=list(self.follow.policy.target),target_generation=self.follow.policy.tracked_generation,
@@ -786,7 +784,7 @@ class ControlLoop:
                     self._pause_follow(handle)
                     with self.lock:self.follow.policy=None;self.follow.request=None
                     self.follow_search_choice=None
-                worker.request_fresh();action=None
+                action=None
             if action is not None and action['operation']=='plan':
                 from navigation.planning.continuity import goal_binding
 

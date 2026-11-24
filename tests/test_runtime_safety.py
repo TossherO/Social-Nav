@@ -4,6 +4,7 @@ import time
 import unittest
 from runtime.safety import SafetyProcess,SafetyTelemetry
 from runtime.transport import Connection
+from tests.navigation_fixtures import shadow_inputs, shadow_packet_fixture
 
 
 def delayed_gate_run(*arguments):
@@ -39,9 +40,9 @@ class SafetyIsolationTests(unittest.TestCase):
         import copy
         import json
         from unittest.mock import patch
-        from tests.test_navigation_shadow import ShadowTests
+        from perception.environment.layers import load_config as environment_config
         from perception.environment.scene import assemble_scene
-        from navigation.control.shadow import DwaShadowController
+        from navigation.control.shadow import DwaShadowController, load_config as shadow_config
         from navigation.planning.planner import Planner
         from navigation.planning.continuity import reference_envelope
 
@@ -54,16 +55,16 @@ class SafetyIsolationTests(unittest.TestCase):
                 self.remote.setblocking(False);self.process=Alive()
             def close(self):self.channel.close();self.remote.close()
 
-        fixture=ShadowTests();fixture.setUp();fixture.geometry.assumed=False
+        fixture=shadow_inputs();fixture.geometry.assumed=False
         motion=dict(fixture.motion,parameters_assumed=False,
             execution_max_longitudinal_speed_mps=fixture.motion['max_forward_mps'],
             execution_max_angular_rps=fixture.motion['max_angular_rps'])
-        scene=assemble_scene(fixture.scene.geometry,clock_domain='runtime_live',settings=fixture.safety.scene_settings)
+        scene=assemble_scene(fixture.scene.geometry,clock_domain='runtime_live',settings=environment_config()['scene'])
         planner=Planner(fixture.config,fixture.geometry,require_actual_start=True)
         reference=reference_envelope(planner.query(fixture.req,scene=scene,now=10.,clock_domain='runtime_live'),fixture.req,scene,None)
         packet=DwaShadowController(fixture.config,motion,fixture.geometry).step(
             fixture.req,scene,fixture.rows,reference,now=10.,clock_domain='runtime_live',mono=0.)
-        settings=dict(fixture.safety.settings,period_s=.2)
+        settings=dict(shadow_config(),period_s=.2)
         incoming,producer=socket.socketpair();sender=Connection(producer)
         with patch('navigation.control.chassis.ChassisProcess',FakeChassis):
             safety=SafetyProcess(incoming,fixture.config,motion,fixture.geometry,
@@ -113,10 +114,9 @@ class SafetyIsolationTests(unittest.TestCase):
         from unittest.mock import patch
         import os
         import copy
-        from tests.test_navigation_shadow import ShadowTests
         from perception.environment.scene import assemble_scene
         from perception.environment.layers import GridSnapshot,load_config
-        fixture=ShadowTests();fixture.setUp()
+        fixture=shadow_packet_fixture()
         incoming,producer=socket.socketpair();sender=Connection(producer)
         with tempfile.TemporaryDirectory() as temporary:
             marker=Path(temporary)/'started'
@@ -150,15 +150,16 @@ class SafetyIsolationTests(unittest.TestCase):
                 finally:sender.close();safety.close()
 
     def test_main_stall_does_not_block_independent_stop_decisions(self):
-        from tests.test_navigation_shadow import ShadowTests
-        fixture=ShadowTests();fixture.setUp()
         from tests.test_navigation_prediction import tracked_scene,track
+        from navigation.control.shadow import DwaShadowController
         from navigation.planning.planner import Planner
         from navigation.planning.continuity import reference_envelope
+        fixture=shadow_inputs()
         fixture.scene=tracked_scene([track(5.,5.)])
         planner=Planner(fixture.config,fixture.geometry,require_actual_start=True)
         result=reference_envelope(planner.query(fixture.req,scene=fixture.scene,now=10.,clock_domain='synthetic'),fixture.req,fixture.scene,None)
-        fixture.packet=fixture.controller.step(fixture.req,fixture.scene,fixture.rows,result,now=10.,clock_domain='synthetic',mono=0.)
+        controller=DwaShadowController(fixture.config,fixture.motion,fixture.geometry)
+        packet=controller.step(fixture.req,fixture.scene,fixture.rows,result,now=10.,clock_domain='synthetic',mono=0.)
         incoming,producer=socket.socketpair();sender=Connection(producer)
         safety=SafetyProcess(incoming,fixture.config,fixture.motion,fixture.geometry,clock_domain='synthetic');incoming.close()
         recorder=None;received=[]
@@ -172,7 +173,7 @@ class SafetyIsolationTests(unittest.TestCase):
             safety.command('goal',fixture.req);safety.scene(fixture.scene)
             for row in fixture.rows:
                 mono=time.monotonic();sender.send(dict(kind='state',state=row,clock_s=10.,clock_mono=mono,clock_rate=1.))
-            safety.packet(fixture.packet)
+            safety.packet(packet)
             # No parent work or packet refresh during this watchdog window.
             time.sleep(.45)
             rows=list(received);self.assertTrue(rows)

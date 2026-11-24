@@ -30,6 +30,7 @@ class AgentSession:
         self.store, self.navigation = store, navigation
         self.model_reference_names = ModelReferenceNames()
         self.elevator = None
+        self._pending_model_review = None
         self.memory = EvidenceMemory() if use_memory else None
         self.observation = None
         self.follow_reference = None
@@ -1562,6 +1563,7 @@ class AgentSession:
     def stop(self, target, reason):
         from .seating import cancel_selection
         cancel_selection(self)
+        self._pending_model_review = None
         self.seating_pending=None
         self.state.update(stop_target=target, reason=reason)
         if self.skill.record.get('pending_completion') is not None:
@@ -1609,6 +1611,7 @@ class AgentSession:
             self._history('task_monitor',event)
             self.conversation.notice('task_monitor',**event)
             self.store.event('task_monitor_event',event)
+            self.request_model_review()
         elif name == 'arrived' and self.navigation.scope == 'manual':
             goal=next_unfinished_goal(self.task_goals.goals)
             confirmation=self.navigation.confirm_arrival()
@@ -1877,6 +1880,8 @@ class AgentSession:
             self.monitor.note_trigger(trigger)
             self.conversation.notice('task_monitor',**trigger)
             self.store.event('task_monitor_event',trigger)
+            if r['status'] in ('succeeded', 'held'):
+                self.request_model_review()
         monitor_feedback = self.navigation.snapshot()
         if (s['status']=='waiting_monitor' and r['handle'] is None and
                 (self.monitor.settings or {}).get('goal_id') is not None):
@@ -1901,7 +1906,62 @@ class AgentSession:
             self._history('task_monitor',event)
             self.conversation.notice('task_monitor',**event)
             self._save('task_monitor_event',event)
+            stage = next_unfinished_goal(self.task_goals.goals)
+            if stage is not None and stage['requirement']['goal_id'] == event['goal_id']:
+                self.request_model_review()
         return True
+
+    def _model_review_binding(self, stage):
+        record = self.skill.record
+        return (self.state['revision'], stage['binding'], copy.deepcopy(record['handle']),
+                record['status'], record['association_epoch'], self.environment_epoch, self.monitor.region_epoch)
+
+    def request_model_review(self):
+        stage = next_unfinished_goal(self.task_goals.goals)
+        if stage is not None:
+            self._pending_model_review = self._model_review_binding(stage)
+
+    def take_model_phase(self, payload):
+        """Choose an effort using current task state and newly triggered reviews."""
+        pending, self._pending_model_review = self._pending_model_review, None
+        if not self.task_goals.goals:
+            return 'registration'
+        if payload.get('ride_inputs'):
+            return 'monitor'
+        stage = next_unfinished_goal(self.task_goals.goals)
+        if stage is None:
+            return 'execution'
+        if pending == self._model_review_binding(stage):
+            return 'monitor'
+        requirement = stage['requirement']
+        goal_id = requirement['goal_id']
+        if (self.monitor.review_phase == 'reviewing' and
+                (self.monitor.settings or {}).get('goal_id') == goal_id):
+            return 'monitor'
+        current = payload['current_state']
+        record = self.skill.record
+        if record['goal_id'] == goal_id and record['follow_ready'] and follow_supervision_active(record):
+            feedback = current['navigation']['feedback']
+            follow = feedback.get('follow_status') or {}
+            if (follow.get('handle') == record['handle'] and follow.get('status') in ('running', 'searching') and
+                    not feedback.get('input_stale') and feedback.get('localization_status', 'valid') == 'valid'):
+                return 'monitor'
+        evidence = current.get('completion_evidence', {})
+        if requirement.get('stage_type') == 'observation' and evidence.get('rgb'):
+            return 'monitor'
+        arrival_handle = evidence.get('handle')
+        review = stage.get('visual_review') or {}
+        required_review = stage.get('required_visual_review') or {}
+        if arrival_handle is not None and evidence.get('rgb'):
+            if requirement.get('semantic_conditions'):
+                if required_review.get('handle') != arrival_handle:
+                    return 'monitor'
+                if required_review['result'] != 'satisfied':
+                    return 'execution'
+            if requirement.get('visual_preferences') and (
+                    review.get('handle') != arrival_handle or review.get('priority') != 'preferred'):
+                return 'monitor'
+        return 'execution'
 
     def _follow_stop_confirmed(self,proof):
         state=self.navigation.snapshot()

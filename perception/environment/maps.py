@@ -77,14 +77,34 @@ def static_geometry(points, sensor_positions, config, *, map_id, frame, stamp, b
             selected.append(sensor)
     if len(selected) > settings['max_ground_poses']:
         raise ValueError('Ground-fit pose budget exceeded; split the map explicitly')
+    radius = config['ground_fit_radius_m']
+    indexed = len(selected) > 3
+    if indexed:
+        # Index the wider axis once. The widened search interval is only a
+        # prefilter for the original Euclidean comparison in float64.
+        span = points[:, :2].max(axis=0).astype(float)-points[:, :2].min(axis=0)
+        axis = np.argmax(span)
+        order = np.argsort(points[:, axis])
+        sorted_xy = points[order, :2]
+        coordinates = sorted_xy[:, axis].astype(float)
+        margin = radius + max(1e-12*radius, np.sqrt(np.finfo(float).tiny))
     for sensor in selected:
-        nearby = np.linalg.norm(points[:, :2]-sensor[:2], axis=1) <= config['ground_fit_radius_m']
-        local = points[nearby]
+        if indexed:
+            lower = np.nextafter(sensor[axis]-margin, -np.inf)
+            upper = np.nextafter(sensor[axis]+margin, np.inf)
+            lo = coordinates.searchsorted(lower)
+            hi = coordinates.searchsorted(upper, side='right')
+            nearby = np.linalg.norm(sorted_xy[lo:hi]-sensor[:2], axis=1) <= radius
+            # Ground fitting samples by index, so restore source point order.
+            candidate = np.sort(order[lo:hi][nearby])
+        else:
+            candidate = np.flatnonzero(np.linalg.norm(points[:, :2]-sensor[:2], axis=1) <= radius)
+        local = points[candidate]
         plane = ground_plane(local, sensor, config)
         if plane is None:
             continue
         ground = np.abs(local[:, 2]-np.c_[local[:, :2], np.ones(len(local))] @ plane) <= config['ground_tolerance_m']
-        ground_points[np.flatnonzero(nearby)[ground]]=True
+        ground_points[candidate[ground]]=True
     # A point can be selected by several nearby fitting poses. Count it once,
     # and do not let the last point or last pose choose the cell's elevation.
     samples=points[ground_points]

@@ -27,6 +27,17 @@ def scalar_ground_plane(points,sensor,config):
 
 
 class GroundBatchTests(unittest.TestCase):
+    def test_selected_support_cells_keep_full_raster_seeds_and_distances(self):
+        from perception.environment.geometry import nearest_support
+        mask = np.zeros((8, 12), bool)
+        mask[2, 2] = mask[2, 6] = mask[6, 6] = True
+        cells = (np.array([2, 2, 7, 4, 2]), np.array([4, 2, 11, 6, 4]))
+        distances, nearest = nearest_support(mask)
+        sampled_distances, sampled_nearest = nearest_support(mask, cells=cells)
+        np.testing.assert_array_equal(sampled_distances, distances[cells])
+        for actual, expected in zip(sampled_nearest, nearest):
+            np.testing.assert_array_equal(actual, expected[cells])
+
     def test_spatial_keys_preserve_signed_cell_order_and_first_low_point(self):
         from perception.environment.ground import spatial_floor_points
         config=load_config();settings=GroundTracker.DEFAULTS

@@ -116,6 +116,28 @@ class GeometryTests(unittest.TestCase):
 
 
 class SweepTests(unittest.TestCase):
+    def test_detector_returns_same_scan_digest_to_pipeline_without_hashing_again(self):
+        for max_sweeps in (1, 3):
+            with self.subTest(max_sweeps=max_sweeps):
+                detector = SimpleDet3dDetector.__new__(SimpleDet3dDetector)
+                detector.sweeps = CausalSweeps(max_sweeps)
+
+                def predict(observed):
+                    _, detector.last_input_context = detector.sweeps.prepare(observed)
+                    return np.array([box()])
+
+                detector.predict = predict
+                pipeline = PerceptionPipeline(detector, CONFIG['tracking'])
+                observations = [frame(), frame(1.1), frame(1.2, source='missing')]
+                for observed in observations:
+                    expected = observed.input_fingerprint()
+                    with patch.object(Frame, 'input_fingerprint', autospec=True,
+                                      side_effect=Frame.input_fingerprint) as digest:
+                        result = pipeline.step(observed)
+                    self.assertEqual(digest.call_count, 1)
+                    self.assertEqual(result['input_fingerprint'], expected)
+                    self.assertEqual(result['detection_input']['input_fingerprint'], expected)
+
     def test_scan_buffer_hash_matches_original_bytes_for_empty_and_strided_inputs(self):
         import hashlib
         from perception.sensors.pointcloud import input_fingerprint

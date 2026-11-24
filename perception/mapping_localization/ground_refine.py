@@ -72,16 +72,16 @@ def collect_floor(source, keys):
     from perception.environment.ground import GroundTracker
     from perception.environment.layers import load_config
     from perception.environment.poses import PoseTimeline
-    from perception.environment.scans import read_scans, sealed_scan_summary
-    journal = source/'environment/scans.sqlite'; sealed_scan_summary(journal)
+    from perception.environment.scans import read_scans, sampled_scan_stamps
+    journal = source/'environment/scans.sqlite'
+    _, sampled = sampled_scan_stamps(journal, .2)
     rows = [json.loads(line) for line in (source/'localization.jsonl').open() if line.strip()]
     config = load_config(); timeline = PoseTimeline(rows, config['poses'], keys)
-    tracker = GroundTracker(config['ground_tracking']); identity = None; previous = None; last = -np.inf
+    tracker = GroundTracker(config['ground_tracking']); identity = None; previous = None
     samples = []; count = 0
-    for record, data in read_scans(journal):
+    for record, data in read_scans(journal, stamps=sampled):
         stamp = record['stamp_ns']/1e9
-        if stamp-last < .2-1e-6: continue
-        last = stamp; count += 1; item = _scan_geometry(record, data, timeline)
+        count += 1; item = _scan_geometry(record, data, timeline)
         if item is None:
             tracker = GroundTracker(config['ground_tracking']); identity = previous = None
             continue

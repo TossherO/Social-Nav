@@ -4,16 +4,18 @@ from pathlib import Path
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import yaml
 
 from perception.environment.dynamic import people_boxes, person_points, StaticEvidence
 from perception.environment.fusion import fuse_scans
-from perception.environment.layers import load_config
+from perception.environment.layers import GridSnapshot, LocalEnvironmentMap, load_config
 from perception.environment.maps import static_geometry
 from perception.environment.occupancy import OccupancyTree
 from perception.environment.people import PeopleObservations
+from perception.environment.person_objects import point_owners
 from perception.environment.poses import PoseTimeline
 from perception.environment.scans import ScanJournal
 from perception.environment.storage import content_hash
@@ -29,18 +31,204 @@ def observation(stamp):
                      hits=5, last_observed_stamp_s=stamp)])
 
 
+def check_uniform_obstacle_confirmation(test, backend):
+    config = load_config()
+    config['compute']['backend'] = backend
+    config['dynamic']['enabled'] = False
+    config['near_field']['enabled'] = False
+    config['window_m'] = 4.
+    model = LocalEnvironmentMap(config)
+    test.addCleanup(model.close)
+    model.ground_conflict_view = None
+    ground = np.zeros((40, 40), np.float32)
+    support = np.ones(ground.shape, bool)
+    fixed, isolated, expired_vote = [[.55, .05, .5]], [[.85, .05, .5]], [[1.15, .05, .5]]
+
+    def scan(stamp, points, dx=0., generation=0):
+        pose = np.eye(4)
+        pose[0,3] = dx
+        local = np.asarray(points, dtype=float).reshape(-1,3) - pose[:3,3]
+        with patch.object(model, '_plane_ground', return_value=(ground,support,dict(status='synthetic'))):
+            return model.update(local, pose, stamp, ('test', generation))
+
+    def occupancy(grid, point):
+        x, y = np.floor((point[0][:2]-np.asarray(grid.metadata['origin_xy']))/.1).astype(int)
+        return grid.layers['occupancy'][y,x]
+
+    first = scan(10., fixed*3+isolated*3+expired_vote*3)
+    test.assertEqual(first.metadata['unconfirmed_obstacle_points'], 9)
+    test.assertEqual(occupancy(first, isolated), 100)
+    second = scan(10.15, fixed, dx=.2)
+    test.assertEqual(second.metadata['unconfirmed_obstacle_points'], 1)
+    third = scan(10.25, fixed, dx=.2)
+    test.assertEqual(third.metadata['unconfirmed_obstacle_points'], 0)
+    after = scan(10.5, [], dx=.2)
+    test.assertEqual(occupancy(after, isolated), -1)
+    test.assertEqual(occupancy(after, fixed), 100)
+    late = scan(10.6, expired_vote)
+    test.assertEqual(late.metadata['unconfirmed_obstacle_points'], 1)
+    test.assertEqual(occupancy(late, expired_vote), 100)
+    test.assertEqual(occupancy(scan(10.9, []), expired_vote), -1)
+    restarted = scan(11., fixed, generation=1)
+    test.assertEqual(restarted.metadata['unconfirmed_obstacle_points'], 1)
+
+
+def check_long_obstacle(test, backend, *, device=None):
+    from perception.environment.obstacle_memory import EXPIRY_LAYER
+
+    config = load_config()
+    config['compute']['backend'] = backend
+    config['dynamic']['enabled'] = False
+    config['near_field']['enabled'] = False
+    config['window_m'] = 4.
+    config['obstacle_ttl_s'] = .3
+    model = LocalEnvironmentMap(config)
+    test.addCleanup(model.close)
+    model.ground_conflict_view = None
+    ground = np.zeros((40,40),np.float32)
+    support = np.ones(ground.shape,bool)
+    point = [.55,.05,.5]
+    interrupted = [.85,.05,.5]
+    first,second = (20,25),(20,28)
+
+    def scan(stamp, points):
+        with patch.object(model,'_plane_ground',return_value=(ground,support,dict(status='synthetic'))):
+            snapshot = model.update(np.asarray(points).reshape(-1,3),np.eye(4),stamp,('test',0),device=device)
+        return snapshot if device is None else snapshot.materialize(consumer='test_long_obstacle')
+
+    for index in range(11):
+        snapshot=scan(10.+.2*index,[point,interrupted] if index!=5 else [point])
+    retained=scan(13.,[])
+    test.assertEqual(retained.layers['occupancy'][first],100)
+    test.assertEqual(retained.layers['last_observed'][first],12.)
+    test.assertEqual(retained.layers['occupancy'][second],-1)
+    renewed=scan(13.2,[point])
+    test.assertEqual(renewed.layers['last_observed'][first],13.2)
+    test.assertEqual(scan(15.2,[]).layers['occupancy'][first],100)
+    expired=scan(15.25,[])
+    test.assertEqual(expired.layers['occupancy'][first],-1)
+    test.assertTrue(expired.layers[EXPIRY_LAYER][first])
+    test.assertEqual(expired.layers['unknown_distance'][first],0.)
+    rehit=scan(15.4,[point])
+    test.assertEqual(rehit.layers['occupancy'][first],100)
+    test.assertFalse(rehit.layers[EXPIRY_LAYER][first])
+    test.assertTrue(scan(15.7,[]).layers[EXPIRY_LAYER][first])
+
+
+def check_near_short_obstacles(test, *, device=None):
+    from perception.environment.obstacle_memory import ObstacleMemory
+
+    memory = ObstacleMemory()
+    shape = (2,8)
+    origin = np.zeros(2)
+    resolution = .6
+    memory.align(origin,shape,resolution)
+    y = np.zeros(shape[1],int)
+    x = np.arange(shape[1])
+    old_free = np.array([[0,0,-1,-1,-1,0,-1,0],[-1]*shape[1]],np.int8)
+    person_y,person_x = y[[2,3]],x[[2,3]]
+    memory.remember_sources(person_y,person_x,9.9,near_short=np.zeros(2,bool),
+        unconfirmed=np.array([True,False]),person_cells=(person_y,person_x))
+    meta = dict(origin_xy=origin.tolist(),shape=list(shape),resolution=resolution,stamp_s=9.9,
+                rays_used=True,free_vertical_coverage_required=1.)
+    layers = dict(occupancy=old_free,ground_support=np.ones(shape,bool),coverage=np.ones(shape,np.float32),
+                  last_observed=np.full(shape,9.9),near_field_free=np.zeros(shape,bool),
+                  ground_conflict=np.zeros(shape,bool))
+    layers['near_field_free'][0,1] = True
+    layers['ground_conflict'][0,5] = True
+    previous = GridSnapshot(meta,layers)
+    if device is not None:
+        import torch
+        from perception.environment.device import DeviceGridSnapshot
+        previous = DeviceGridSnapshot.seal(meta,{k:torch.from_numpy(v).to(device) for k,v in layers.items()})
+
+    radius = load_config()['near_obstacle_radius_m']
+    test.assertEqual(radius,3.5)
+    def observe(stamp,snapshot):
+        short = memory.near_short_only(y,x,stamp,center=np.full(2,resolution/2),resolution=resolution,radius=radius,
+            evidence_age=.5,max_gap=.35,ordinary_ttl=2.,previous=snapshot)
+        provisional = memory.unconfirmed(y,x,stamp,.5)|short
+        memory.observe(y,x,stamp,max_gap=.35,min_span=2.,hold=2.)
+        memory.remember_sources(y,x,stamp,near_short=short,unconfirmed=provisional,person_cells=None)
+        return short,provisional
+
+    expected = [True,False,True,False,False,False,False,False]
+    short,provisional = observe(10.,previous)
+    np.testing.assert_array_equal(short,expected)
+    test.assertTrue(provisional.all())
+    observe(10.2,None)
+    short,provisional = observe(10.4,None)
+    np.testing.assert_array_equal(short,expected)
+    np.testing.assert_array_equal(provisional,expected)
+    for step in range(3,11):
+        observe(10.+step*.2,None)
+    test.assertTrue(memory.projection()[0][0,0])
+    test.assertTrue(memory.projection()[0][0,2])
+
+
 class DynamicTests(unittest.TestCase):
+    def test_obstacle_confirmation_without_people_uses_distinct_scans_and_world_cells(self):
+        check_uniform_obstacle_confirmation(self, 'cpu')
+
+    def test_long_obstacle_renews_then_expires_to_unknown(self):
+        check_long_obstacle(self, 'cpu')
+
+    def test_near_short_requires_measured_free_or_confirmed_person_without_existing_obstacle(self):
+        check_near_short_obstacles(self)
+
+    def test_current_owned_returns_seed_near_short_mode_for_later_unowned_hits(self):
+        config = load_config()
+        config['compute']['backend'] = 'cpu'
+        config['near_field']['enabled'] = False
+        config['window_m'] = 4.
+        model = LocalEnvironmentMap(config,lidar_from_base_xyz=np.zeros(3))
+        self.addCleanup(model.close)
+        model.ground_conflict_view = None
+        floor = np.zeros((40,40),np.float32)
+        body = np.array([[.44,.05,.5],[.45,.06,.5],[.46,.07,.5]])
+        people = dict(observation(10.),session_id='tracking',generation=0)
+        people['tracks'][0].update(track_id='pedestrian',box=[.45,.06,.6,.5,.5,1.2,0.,.99])
+
+        def scan(stamp,points,persons=None):
+            with patch.object(model,'_plane_ground',return_value=(floor,np.ones(floor.shape,bool),
+                              dict(status='tracked',plane_world=[0.,0.,0.]))):
+                return model.update(points,np.eye(4),stamp,('local',0),people=persons,clock_domain='synthetic')
+
+        scan(10.,body,people)
+        self.assertTrue((model.support_observation['person_owner']==0).all())
+        for stamp in (10.1,10.2,10.3):
+            local = scan(stamp,body)
+            self.assertEqual(local.metadata['near_short_obstacle_cells'],1)
+            self.assertEqual(local.layers['occupancy'][20,24],100)
+        self.assertEqual(scan(10.6,np.empty((0,3))).layers['occupancy'][20,24],-1)
+
+    def test_obstacle_expiry_rejects_historical_free_then_accepts_fresh_free(self):
+        from perception.environment.obstacle_memory import EXPIRY_LAYER, apply_obstacle_memory
+        shape=(1,3)
+        layers=dict(occupancy=np.zeros(shape,np.int8),coverage=np.ones(shape,np.float32),
+                    ground_support=np.ones(shape,bool),observed=np.ones(shape,bool),
+                    last_observed=np.array([[9.,11.,11.]]),near_field_free=np.array([[False,True,False]]),
+                    obstacle_min_z=np.full(shape,np.nan),obstacle_max_z=np.full(shape,np.nan))
+        no = np.zeros(shape,bool)
+        projection=(no,np.full(shape,-np.inf),~no,np.full(shape,10.),no)
+        fresh_free=apply_obstacle_memory(layers,projection,1.)
+        np.testing.assert_array_equal(layers['occupancy'],[[-1,-1,0]])
+        np.testing.assert_array_equal(layers[EXPIRY_LAYER],[[True,True,False]])
+        np.testing.assert_array_equal(fresh_free,[[False,False,True]])
+
     def setUp(self):
         self.config = load_config()
 
     def test_masks_require_current_observed_confirmed_people_and_same_clock_lifecycle(self):
         select = lambda row:people_boxes(row, 10., ('local', 0), 'odom', self.config['dynamic'], clock_domain='synthetic')
-        self.assertEqual(len(select(observation(10.))[0]), 1)
+        first_hit = observation(10.)
+        first_hit['tracks'][0]['hits'] = 1
+        self.assertEqual(len(select(first_hit)[0]), 1)
         for changes in (dict(stamp_s=10.1), dict(stamp_s=9.), dict(health='degraded'),
                         dict(clock_domain='other'), dict(localization_binding=dict(session_id='other'))):
             row = observation(10.); row.update(changes)
             self.assertEqual(len(select(row)[0]), 0)
-        for changes in (dict(state='predicted'), dict(confirmed=False), dict(hits=1),
+        for changes in (dict(state='predicted'), dict(confirmed=False), dict(hits=0),
                         dict(box=[1.5, 0, 0, 1.2, 1.2, 1.8, 0, .1])):
             row = observation(10.); row['tracks'][0].update(changes)
             self.assertEqual(len(select(row)[0]), 0)
@@ -53,6 +241,15 @@ class DynamicTests(unittest.TestCase):
         mask = person_points(points, boxes, floor, [-3, -3], self.config)
         np.testing.assert_array_equal(mask, [True, True, True, False, False, False, False])
         self.assertFalse(person_points(points, boxes, np.full_like(floor, np.nan), [-3, -3], self.config).any())
+
+    def test_person_ownership_keeps_radius_boundary_order_and_overlap_ties(self):
+        self.config['dynamic']['object_radius_limit_m'] = .5
+        box = np.array([0., 0., .5, 1., 1., 1., np.pi / 8, .99])
+        points = np.array([[.375, 0., .5], [5., 0., .5], [.4375, 0., .5],
+                           [.5, 0., .5], [.5001, 0., .5], [.375, 0., 0.]])
+        boxes = np.stack((box, box))
+        actual = point_owners(points, boxes, self.config, np.zeros(3), plane=[0., 0., 0.])
+        np.testing.assert_array_equal(actual, [0, -1, 0, 0, -1, -1])
 
     def test_removed_person_return_keeps_only_the_visible_ray_prefix(self):
         tree = OccupancyTree(.1); self.addCleanup(tree.close)

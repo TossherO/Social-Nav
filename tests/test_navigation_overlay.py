@@ -22,6 +22,85 @@ class ReferenceOverlayTests(unittest.TestCase):
         return reference_overlay(self.prior,local or self.local,self.local.layers['occupancy'],
             np.eye(3) if transform is None else transform,self.scene)
 
+    def person_observation(self, stamp, person_xy, target, hit, occupied):
+        from perception.environment.layers import load_config as environment_config
+        from perception.environment.scene import assemble_scene
+        from tests.test_environment_scene import person
+        from tests.test_navigation_prediction import track
+
+        local = bundle().geometry
+        people = person(stamp)
+        people['tracks'] = [dict(track(*person_xy,stamp=stamp),state='observed')]
+        people['localization_binding']['session_id'] = local.metadata['session_id']
+        local.metadata['stamp_s'] = stamp
+        local.metadata['association'].update(stamp_s=stamp,measurement_stamp_s=stamp-.05)
+        cells = local.layers['occupancy']
+        cells[target] = 100 if occupied else -1
+        evidence = np.zeros(cells.shape,bool)
+        evidence[target] = hit
+        local.layers['current_obstacle_hits'] = evidence
+        return assemble_scene(local,clock_domain='synthetic',settings=environment_config()['scene'],people=people)
+
+    def test_person_adjacent_reference_hit_needs_two_real_scans(self):
+        from navigation.planning.overlay import ReferenceObstacles
+
+        ledger=ReferenceObstacles()
+        target=(25,25)
+        index=np.ravel_multi_index(target,(60,60))
+        for stamp,person_xy,hit,occupied,retained in [
+                (10.0,(2.55,2.55),True,True,False),
+                (10.0,(4.55,2.55),True,True,False),  # Same scan cannot vote twice.
+                (10.1,(2.55,2.55),True,True,False),
+                (10.2,(4.55,2.55),False,True,False),  # Only the previous hit remains.
+                (10.8,(4.55,2.55),False,True,False),  # Person region is now stale.
+                (10.9,(4.55,2.55),True,True,False),  # The previous vote expired.
+                (11.1,(4.55,2.55),True,True,True),
+                (11.2,(4.55,2.55),False,False,True)]:
+            scene=self.person_observation(stamp,person_xy,target,hit,occupied)
+            cells=scene.geometry.layers['occupancy']
+            ledger.update(scene,self.prior,np.eye(3),('floor',0))
+            self.assertEqual(index in ledger.blocked,retained)
+            working,_=reference_overlay(self.prior,scene.geometry,cells,np.eye(3),scene)
+            self.assertEqual(working.layers['occupancy'][target],100 if occupied else 0)
+
+    def test_reference_does_not_keep_a_single_pedestrian_echo(self):
+        from navigation.planning.overlay import ReferenceObstacles
+
+        ledger=ReferenceObstacles()
+        target=(25,25)
+        for stamp,person_xy,hit,occupied in [
+                (10.0,(2.55,2.55),True,True),
+                (10.15,(4.55,2.55),False,True),
+                (10.7,(4.55,2.55),False,True),
+                (12.1,(4.55,2.55),False,False)]:
+            scene=self.person_observation(stamp,person_xy,target,hit,occupied)
+            ledger.update(scene,self.prior,np.eye(3),('floor',0))
+            self.assertFalse(ledger.blocked)
+
+    def test_five_scan_confirmation_counts_only_fresh_hits_in_the_window(self):
+        from navigation.planning.motion import load_motion_config
+        from navigation.planning.reference import ReferenceRuntime
+        from navigation.planning.overlay import ReferenceObstacles
+        from tests.navigation_fixtures import FakeWorker
+
+        geometry=VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],np.eye(4),source='synthetic')
+        with ReferenceRuntime(load_config(),load_motion_config(),geometry,worker_factory=FakeWorker) as runtime:
+            self.assertEqual((runtime.obstacles.confirm_scans,runtime.obstacles.confirm_window_s),(2,.5))
+            ledger=ReferenceObstacles(confirm_scans=5,confirm_window_s=1.)
+            for stamp,near,hit,retained in [
+                    (10.0,True,True,False),
+                    (10.2,True,True,False),
+                    (10.4,False,True,False),
+                    (10.6,False,True,False),
+                    (10.6,False,True,False),
+                    (10.9,False,False,False),
+                    (11.1,False,True,False),  # The hit at 10.0 has expired.
+                    (11.15,False,True,True)]:
+                xy=(2.55,2.55) if near else (4.55,2.55)
+                scene=self.person_observation(stamp,xy,(25,25),hit,True)
+                ledger.update(scene,self.prior,np.eye(3),('floor',0))
+                self.assertEqual(bool(ledger.blocked),retained)
+
     def test_existing_local_free_complements_unknown_without_mutating_evidence(self):
         original=self.prior.layers['occupancy'].copy()
         result,report=self.apply()

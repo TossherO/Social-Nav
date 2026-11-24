@@ -31,6 +31,8 @@ display:
   height_mode: ground  # ground 跟随地面；plane 使用固定平面诊断。
   # ground 模式下的地面高度偏移，plane 模式下的绝对高度，单位为米。
   path_z_m: 0.03  # 地面上方的偏移；plane 模式中为绝对高度。
+  # RViz 车体轮廓和朝向箭头相对可见地面的显示间距，单位为米。
+  vehicle_clearance_m: 0.12
   # 仅用于显示的近车地面拟合延伸半径，单位为米。
   ground_plane_radius_m: 1.5  # 仅用于显示近车盲区附近的地面拟合延伸。
 # 录制路线回放的目标更新设置。

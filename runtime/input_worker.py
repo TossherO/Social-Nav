@@ -47,7 +47,7 @@ def main():
     if args.playback_fd is not None:
         if args.live:raise ValueError('Live input cannot use bag playback control')
         from .playback import BagPlayback
-        playback=BagPlayback(socket.socket(fileno=args.playback_fd),rate=args.rate,pause_at=args.pause_at)
+        playback=BagPlayback(socket.socket(fileno=args.playback_fd),pause_at=args.pause_at)
     pending={};first=None;anchor=None;count=0;cpu_start=time.process_time();positions=deque(maxlen=64)
     trace_written=False
     def release():

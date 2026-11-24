@@ -8,6 +8,7 @@ import numpy as np
 
 from .context import fingerprint
 from .geometry import shift_array
+from .occupancy import MOVABLE_PERSON_HIT, UNCONFIRMED_HIT
 
 
 HISTORY_DTYPES=dict(near_field_free=bool,near_field_free_classified_at=np.float64,
@@ -150,7 +151,7 @@ class NearFieldFreeMemory:
         moving=None
         if transient_mask is not None:
             moving=np.asarray(transient_mask)
-            if moving.shape!=(len(points),) or not np.isin(moving,[0,1]).all():
+            if moving.shape!=(len(points),) or not np.isin(moving,[0,MOVABLE_PERSON_HIT,UNCONFIRMED_HIT]).all():
                 raise ValueError('Transient mask must match near-field endpoints')
         if len(points):
             cells=np.floor((points[:,:2]-origin)/r).astype(int)
@@ -172,7 +173,8 @@ class NearFieldFreeMemory:
                 ordinary=touched.copy()
                 if moving is not None:
                     ordinary=np.zeros(shape,bool);ordinary[y[seen&~moving.astype(bool)],x[seen&~moving.astype(bool)]]=True
-                    ttl[touched&~ordinary]=min(self.config['obstacle_ttl_s'],self.config['dynamic']['transient_ttl_s'])
+                    short_ttl = self.config.get('dynamic', {}).get('transient_ttl_s', .2)
+                    ttl[touched&~ordinary]=min(self.config['obstacle_ttl_s'],short_ttl)
                 self.ordinary_stamp[ordinary]=stamp
                 self.hit_expires[touched]=np.maximum(stamp+ttl[touched],self.ordinary_stamp[touched]+self.config['obstacle_ttl_s'])
         invalidated=int((valid&hit).sum())

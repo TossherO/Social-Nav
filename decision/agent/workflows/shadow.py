@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from ..tools.places import Catalog
 from .interaction import Console
-from .common import emit, make_loop
+from .common import emit, make_loop, model_options
 from .drivers import SavedObservationDriver
 from ..adapters.shadow import SavedShadowNavigation, RuntimeShadowNavigation
 from ..tools.observations import ObservationSet
@@ -122,6 +122,8 @@ def start_unique_bag_follow(session, goal_id):
 
 
 def run(args):
+    if not args.actions:
+        model_options(args)
     if args.duration <= 0 or args.interactive and args.observations:
         raise ValueError('Positive duration required; interactive input is for runtime shadow')
     catalog = Catalog.load(args.catalog,condition=args.map_condition)

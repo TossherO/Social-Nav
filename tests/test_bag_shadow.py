@@ -12,7 +12,7 @@ from runtime.bag_shadow import BagShadow, RecordedRoute, SCOPE
 from runtime.command import CommandInbox
 from runtime.interactive import cancel_operator_goal
 from runtime.session import InteractiveSession
-from tests.navigation_fixtures import asset, bundle
+from tests.navigation_fixtures import asset, shadow_inputs, square_vehicle_geometry
 
 
 def mapped_row(stamp, x, *, healthy=True):
@@ -23,12 +23,9 @@ def mapped_row(stamp, x, *, healthy=True):
 
 class BagShadowTests(unittest.TestCase):
     def test_route_breaks_on_loss_and_does_not_bridge_untrusted_samples(self):
-        from tests.test_navigation_shadow import ShadowTests
-
-        fixture=ShadowTests();fixture.setUp()
         track=RecordedRoute([mapped_row(10.,2.),mapped_row(10.2,2.4),mapped_row(10.4,2.8),
                              mapped_row(10.6,3.2,healthy=False),mapped_row(10.8,3.6),
-                             mapped_row(11.,4.),mapped_row(11.2,4.4)],fixture.controller.geometry,'map')
+                             mapped_row(11.,4.),mapped_row(11.2,4.4)],square_vehicle_geometry(),'map')
         first, reason=track.target(10.,[2.,2.,0.],3.)
         self.assertIsNone(reason)
         self.assertAlmostEqual(first[1][0],2.8)
@@ -38,15 +35,15 @@ class BagShadowTests(unittest.TestCase):
         self.assertGreater(later[0],first[0])
 
     def test_current_goal_reaches_frozen_and_continuous_dwa_with_no_goal_feedback(self):
+        from navigation.control.shadow import DwaShadowController
         from navigation.planning.frozen import preview
         from navigation.safety.shadow import ShadowSafety
-        from tests.test_navigation_shadow import ShadowTests
 
-        fixture=ShadowTests();fixture.setUp()
-        scene=assemble_scene(bundle().geometry,clock_domain='runtime_bag',settings=load_config()['scene'])
+        fixture=shadow_inputs()
+        scene=assemble_scene(fixture.scene.geometry,clock_domain='runtime_bag',settings=load_config()['scene'])
         prior=asset()
-        geometry=fixture.controller.geometry
-        fixture.controller.asset=fixture.controller.controller.asset=prior
+        geometry=fixture.geometry
+        controller=DwaShadowController(fixture.config,fixture.motion,geometry,asset=prior)
         settings=dict(route_replay=dict(lookahead_m=2.,min_update_s=2.,goal_shift_m=1.),input_python='/usr/bin/python3')
         with tempfile.TemporaryDirectory() as folder:
             output=Path(folder)
@@ -65,12 +62,12 @@ class BagShadowTests(unittest.TestCase):
             inbox=CommandInbox.__new__(CommandInbox)
             inbox.lock,inbox.safety,inbox.session=threading.Lock(),safety,session
             self.assertEqual(inbox.bag_shadow_goal(None,goal),goal)
-            frozen=preview(goal,scene,fixture.rows,fixture.controller.controller,fixture.config,asset=prior,scope=SCOPE)
+            frozen=preview(goal,scene,fixture.rows,controller.controller,fixture.config,asset=prior,scope=SCOPE)
             self.assertTrue(frozen['reference_available'],frozen['reason'])
             self.assertTrue(frozen['generated'],frozen['reason'])
             self.assertEqual(frozen['scope'],SCOPE)
-            packet=fixture.controller.step(goal,scene,fixture.rows,frozen['reference'],now=10.,clock_domain='runtime_bag',
-                                           mono=.01,goal_diagnostic=False)
+            packet=controller.step(goal,scene,fixture.rows,frozen['reference'],now=10.,clock_domain='runtime_bag',
+                                   mono=.01,goal_diagnostic=False)
             self.assertEqual(packet['proposal']['status'],'candidate',packet['proposal'].get('reason'))
             self.assertIsNone(packet['recorded_goal_diagnostic'])
             self.assertFalse(packet['execution_feedback'] or packet['executable'] or packet['task_completed'])

@@ -2,8 +2,6 @@
 import copy
 import io
 import json
-import os
-from pathlib import Path
 import socket
 import time
 import base64
@@ -12,7 +10,6 @@ import hashlib
 from contextlib import closing, contextmanager
 from email.utils import parsedate_to_datetime
 from threading import Lock, Timer
-from urllib.parse import urlsplit
 import httpx
 import jsonschema
 from .. import ROOT
@@ -21,6 +18,8 @@ from .media import image_part, png_part
 from .async_model import request_cancelled, request_timing
 from .context import project_dialogue, view_context, visual_inputs
 from .model_projection import ModelProjection
+from .model_settings import DEFAULT_MODEL, GPT_MODEL, credentials_for, validate_effort
+from . import responses_api
 from perception.environment.context import fingerprint
 from ..tools.framework import Reply, EXECUTION_TOOLS, FOLLOW_RESTART_TOOLS, follow_supervision_active, native_tools
 
@@ -37,9 +36,9 @@ class ModelTemporarilyUnavailable(ApiError):
         self.retry_after_s = retry_after_s
 
 
-def http_client(transport=None):
+def http_client(transport=None, *, trust_env=False):
     return httpx.Client(timeout=httpx.Timeout(120.,connect=10),transport=transport,
-                        follow_redirects=False,trust_env=False)
+                        follow_redirects=False,trust_env=trust_env)
 
 
 SSE_TAIL_TIMEOUT_S = .05
@@ -52,7 +51,7 @@ def interrupt_http_tail(connection):
         pass
 
 
-def stream_payloads(response, timing):
+def stream_payloads(response, timing, *, responses=False):
     done = False
     tail_timer = None
     try:
@@ -62,8 +61,18 @@ def stream_payloads(response, timing):
             if done or not line.startswith('data:'):
                 continue
             payload = line[5:].strip()
-            if payload=='[DONE]':
+            chunk = None
+            if payload != '[DONE]':
+                chunk = json.loads(payload)
+                if not isinstance(chunk,dict):
+                    raise ValueError('Expected an API stream event object')
+            terminal = (chunk is not None and chunk.get('type') in responses_api.TERMINAL_EVENTS
+                        if responses else payload == '[DONE]')
+            if terminal:
                 timing['transport_complete_s'] = time.perf_counter()
+                done = True
+                if chunk is not None:
+                    yield chunk
                 # HTTP/1.x can finish locally once all Content-Length bytes
                 # have arrived. Bound any remaining reads on a dedicated socket.
                 http1 = response.http_version in ('HTTP/1.0','HTTP/1.1')
@@ -78,9 +87,8 @@ def stream_payloads(response, timing):
                     tail_timer = Timer(SSE_TAIL_TIMEOUT_S,interrupt_http_tail,args=(connection,))
                     tail_timer.daemon = True
                     tail_timer.start()
-                done = True
-            else:
-                yield payload
+            elif chunk is not None:
+                yield chunk
     except (httpx.TimeoutException,httpx.NetworkError,httpx.RemoteProtocolError):
         # A broken HTTP trailer costs the connection, while the completed
         # provider reply can still be validated and used.
@@ -88,6 +96,8 @@ def stream_payloads(response, timing):
             raise
     else:
         timing['http_body_complete_s'] = time.perf_counter()
+        if responses and not done:
+            raise httpx.RemoteProtocolError('Responses API stream ended without a terminal event')
         timing.setdefault('transport_complete_s', timing['http_body_complete_s'])
     finally:
         if tail_timer is not None:
@@ -98,7 +108,8 @@ def stream_payloads(response, timing):
 class SessionTransport:
     """Own a lazy HTTP pool for the session's single model request at a time."""
 
-    def __init__(self):
+    def __init__(self, model_name=DEFAULT_MODEL):
+        self.model_name = model_name
         self._lock = Lock()
         self._client = None
         self._in_use = False
@@ -112,7 +123,7 @@ class SessionTransport:
             if self._in_use:
                 raise RuntimeError('Agent HTTP transport already in use')
             if self._client is None:
-                self._client = http_client()
+                self._client = http_client(trust_env=True) if self.model_name == GPT_MODEL else http_client()
             client = self._client
             self._in_use = True
         try:
@@ -261,33 +272,35 @@ def observation_context(messages, source, key, record):
 
 
 class Model:
-    model = 'qwen3.8-flash'
+    model = DEFAULT_MODEL
 
     def __init__(self, private_config, budget, store, *, transport=None, cache_mode='implicit', thinking_mode='off', output_limit=None, transient_sink=None,
-                 session_transport=None):
+                 session_transport=None, model_name=DEFAULT_MODEL, decision_phase=None):
         if cache_mode not in ('implicit','explicit'):
             raise ValueError('Choose an explicit cache policy; no automatic fallback')
-        if thinking_mode not in ('off','low','medium'):
-            raise ValueError('Choose off, low or medium thinking; no automatic fallback')
+        validate_effort(model_name,thinking_mode)
+        self.model = model_name
+        self._responses = model_name == GPT_MODEL
+        if self._responses and cache_mode == 'explicit':
+            raise ValueError('OpenAI Responses API requires implicit caching')
         if output_limit is not None and (type(output_limit) is not int or not 1 <= output_limit <= 8192):
             raise ValueError('Output limit must be between 1 and 8192 tokens')
+        if session_transport is not None and session_transport.model_name != model_name:
+            raise ValueError('Agent session transport requires the same model as the request')
+        if decision_phase not in (None,'registration','execution','monitor'):
+            raise ValueError('Unknown Agent decision phase')
+        self.decision_phase = decision_phase
         self.cache_mode = cache_mode
         self.thinking_mode = thinking_mode
         self.output_limit = output_limit
         self.transient_sink = transient_sink
         # Read credentials only for an explicitly requested API operation.
-        self._private = json.loads(Path(private_config).read_text())
-        self._key = os.environ.get('SOCIAL_NAV_AGENT_API_KEY') or self._private['api_key']
-        url = self._private['base_url'].rstrip('/')
-        parsed = urlsplit(url)
-        if parsed.scheme != 'https' or parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise ValueError('API requires HTTPS and credentials outside the URL')
-        self._url = url if url.endswith('/chat/completions') else url+'/chat/completions'
+        self._url, self._key = credentials_for(model_name,private_config)
         self.budget, self.store, self.transport = budget, store, transport
         self.session_transport = session_transport
 
     def request(self, system, messages, *, observation_id=None, max_tokens=2048, tool_names=None, tool_choice='auto', projection=None, transient=False,
-                supervised_follow=False, prepare_started_s=None):
+                supervised_follow=False, prepare_started_s=None, decision_phase=None):
         timing = request_timing(prepare_started_s if prepare_started_s is not None else time.perf_counter())
         if tool_choice not in ('auto','required'):
             raise ValueError('Unsupported tool choice')
@@ -295,32 +308,41 @@ class Model:
         if projection is not None:
             tools = projection.tools(tools)
         offered={tool['function']['name'] for tool in tools}
-        body = dict(model=self.model,messages=cache_messages(system,messages,self.cache_mode),tools=tools,
-                    tool_choice=tool_choice,parallel_tool_calls=False,enable_thinking=self.thinking_mode!='off',temperature=0,
-                    stream=True,stream_options=dict(include_usage=True))
-        if self.thinking_mode != 'off':
-            # Bound reasoning and final output together, including reservation.
-            # Historical thinking is not used as dialogue context.
-            output_bound = self.output_limit or (24576 if self.thinking_mode=='medium' else 6144)
-            body.update(reasoning_effort=self.thinking_mode,preserve_thinking=False,max_completion_tokens=output_bound)
+        history = dict(model=self.model,messages=cache_messages(system,messages,self.cache_mode),tools=tools,
+                       tool_choice=tool_choice,parallel_tool_calls=False,stream=True)
+        if self._responses:
+            output_bound = self.output_limit or (max_tokens if self.thinking_mode == 'off' else 6144)
+            history['max_output_tokens'] = output_bound
+            protocol = dict(provider='openai',api_format='responses')
         else:
-            output_bound = self.output_limit or max_tokens
-            body['max_tokens'] = output_bound
+            history.update(enable_thinking=self.thinking_mode!='off',temperature=0,stream_options=dict(include_usage=True))
+            if self.thinking_mode != 'off':
+                # Bound reasoning and final output together, including reservation.
+                output_bound = self.output_limit or (24576 if self.thinking_mode=='medium' else 6144)
+                history.update(reasoning_effort=self.thinking_mode,preserve_thinking=False,max_completion_tokens=output_bound)
+            else:
+                output_bound = self.output_limit or max_tokens
+                history['max_tokens'] = output_bound
+            protocol = dict(provider='qwen',api_format='chat_completions')
+        protocol['decision_phase'] = decision_phase or self.decision_phase or ('monitor' if transient else None)
         try:
-            bound = input_estimate(body['messages'],tools)
+            bound = input_estimate(history['messages'],tools)
         except InputEstimateExceeded as error:
             self.store.event('api_input_rejected',dict(reason='estimated_context_limit',
                 estimated_input_tokens=error.estimate,limit=131072,request_sent=False,timing=dict(timing)))
             raise
+        body = responses_api.request_body(history,self.thinking_mode) if self._responses else history
         estimated_output=self.budget.estimate_output(self.model,self.thinking_mode,output_bound)
         call_id = self.budget.reserve(bound,estimated_output)
         timing['call_id'] = call_id
         request_event=dict(call_id=call_id,purpose='elevator_monitor' if transient else 'native_tool_decision',model=self.model,
             observation_id=observation_id,input_token_reservation=bound,
             input_estimate_method='empirical_utf8_and_image_area',estimated_output_tokens=estimated_output,
-            cache_mode=self.cache_mode,timing=dict(timing))
+            cache_mode=self.cache_mode,thinking_mode=self.thinking_mode,timing=dict(timing),**protocol)
         if not transient:
-            request_event['request'] = body
+            request_event['request'] = history
+            if self._responses:
+                request_event['request_representation'] = 'chat_messages_for_history_and_replay'
             if projection is not None and projection.references:
                 request_event['model_references'] = projection.references
         self.store.event('api_request',request_event)
@@ -330,12 +352,16 @@ class Model:
         first = usage = returned_model = finish_reason = status = None
         retry_after_s = None
         chunks,text_parts,reason_parts,calls = [],[],[],{}
+        tool_calls = []
         try:
             if request_cancelled():
                 raise ApiError('Request cancelled before transport')
             if transient and self.transient_sink is not None:
-                self.transient_sink(dict(kind='request',call_id=call_id,request=copy.deepcopy(body)))
-            with (http_client(self.transport) if self.session_transport is None else self.session_transport.client()) as client:
+                self.transient_sink(dict(kind='request',call_id=call_id,request=copy.deepcopy(history),
+                                         model=self.model,thinking_mode=self.thinking_mode,**protocol))
+            client_context = (self.session_transport.client() if self.session_transport is not None else
+                              http_client(self.transport,trust_env=True) if self._responses else http_client(self.transport))
+            with client_context as client:
                 request = client.build_request('POST',self._url,headers={'Authorization':'Bearer '+self._key},json=body)
                 timing['prepare_completed_s'] = time.perf_counter()
                 if request_cancelled():
@@ -343,19 +369,39 @@ class Model:
                 timing['transport_started_s'] = time.perf_counter()
                 with closing(client.send(request,stream=True)) as response:
                     status = response.status_code
+                    retry_after_s=retry_after_seconds(response.headers.get('Retry-After'))
                     if status != 200:
-                        retry_after_s=retry_after_seconds(response.headers.get('Retry-After'))
                         error_body = response.read()
                         timing['http_body_complete_s'] = time.perf_counter()
                         detail = error_body[:16384].decode('utf-8',errors='replace')
-                        for secret in (self._key,self._url,self._private['base_url']):
+                        for secret in (self._key,self._url,self._url.removesuffix('/responses' if self._responses else '/chat/completions')):
                             detail = detail.replace(secret,'[private]')
                         self.store.event('api_http_error',dict(call_id=call_id,http_status=status,
                                                                detail='[transient request]' if transient else detail))
                         raise ApiError('API rejected native tool request; no retry performed')
-                    for payload in stream_payloads(response,timing):
-                        chunk = json.loads(payload)
+                    for chunk in stream_payloads(response,timing,responses=self._responses):
                         chunks.append(chunk)
+                        if self._responses:
+                            kind = chunk.get('type')
+                            if first is None and responses_api.has_output_delta(chunk):
+                                timing['transport_first_delta_s'] = time.perf_counter()
+                                first = timing['transport_first_delta_s']-began
+                            if kind not in responses_api.TERMINAL_EVENTS:
+                                continue
+                            result = chunk.get('response',{})
+                            if not isinstance(result,dict):
+                                raise ValueError('Expected a Responses API result object')
+                            usage = responses_api.normalized_usage(result)
+                            returned_model = result.get('model')
+                            if kind in ('error','response.failed'):
+                                detail = (result.get('error') or {}) if kind=='response.failed' else chunk
+                                if isinstance(detail,dict) and detail.get('code') in responses_api.TEMPORARY_ERROR_CODES:
+                                    raise ModelTemporarilyUnavailable(retry_after_s=retry_after_s)
+                            if kind!='response.completed' or returned_model!=self.model:
+                                raise ApiError('Unexpected Responses API terminal event or model')
+                            text_parts,tool_calls,reason_parts = responses_api.completed_message(result)
+                            finish_reason = 'tool_calls' if tool_calls else 'stop'
+                            continue
                         if 'error' in chunk:
                             raise ApiError('API stream reported an error')
                         if chunk.get('usage') is not None:
@@ -397,28 +443,31 @@ class Model:
                 raise ApiError('Request cancelled by a task event')
             message = dict(role='assistant',content=''.join(text_parts) or None)
             if calls:
-                message['tool_calls'] = [calls[index] for index in sorted(calls)]
+                tool_calls = [calls[index] for index in sorted(calls)]
+            if tool_calls:
+                message['tool_calls'] = tool_calls
             record = dict(call_id=call_id,purpose='native_tool_decision',requested_model=self.model,
                 returned_model=returned_model,wall_s=time.time(),first_token_s=first,
                 full_return_s=timing['transport_complete_s']-began,
                 timing=dict(timing),usage=usage,finish_reason=finish_reason,
                 raw_chunks=chunks,content=message['content'],tool_calls=message.get('tool_calls',[]),
                 message=message,reasoning=''.join(reason_parts),thinking_mode=self.thinking_mode,
-                cache=cache_usage(usage,self.cache_mode))
+                cache=cache_usage(usage,self.cache_mode),**protocol)
             saved=({k:record[k] for k in ('call_id','requested_model','returned_model','wall_s','first_token_s',
-                                           'full_return_s','timing','usage','finish_reason','thinking_mode','cache')} if transient else record)
+                                           'full_return_s','timing','usage','finish_reason','thinking_mode','cache',
+                                           'provider','api_format','decision_phase')} if transient else record)
             if transient:saved['purpose']='elevator_monitor'
             self.budget.finish(call_id,saved)
             settled=True
             self.store.event('api_response',saved)
-            expected = 'tool_calls' if calls else 'stop'
+            expected = 'tool_calls' if tool_calls else 'stop'
             if returned_model!=self.model or finish_reason!=expected or self.thinking_mode=='off' and record['reasoning']:
                 raise ApiError('Unexpected model, finish reason or thinking output')
             reply=Reply.parse(message,report_argument_error=True,model_schema=True,
                               validate_action=None if projection is None else projection.validate_action)
             if transient and self.transient_sink is not None:
                 self.transient_sink(dict(kind='response',call_id=call_id,message=copy.deepcopy(message)))
-            if calls and message['tool_calls'][0]['function']['name'] not in offered:
+            if tool_calls and message['tool_calls'][0]['function']['name'] not in offered:
                 name=message['tool_calls'][0]['function']['name']
                 if supervised_follow and name in FOLLOW_RESTART_TOOLS:
                     return Reply(reply.message,None,dict(status='refused',reason='local_follow_owns_recovery',tool=name))
@@ -444,10 +493,12 @@ class Model:
                     usage=usage,full_return_s=full_return_s,first_token_s=first))
             self.store.event('api_failure',dict(call_id=call_id,error_type=type(error).__name__,http_status=status,
                 retry_after_s=retry_after_s,full_return_s=full_return_s,timing=dict(timing),
-                partial_chunks=[] if transient else chunks,automatically_retried=False))
+                partial_chunks=[] if transient else chunks,automatically_retried=False,**protocol))
             transport_failed=(status in (None,200) and
-                              isinstance(error,(httpx.TimeoutException,httpx.NetworkError,httpx.RemoteProtocolError)))
-            if not request_cancelled() and (transport_failed or status in (408,429,500,502,503,504)):
+                              (isinstance(error,(httpx.TimeoutException,httpx.NetworkError,httpx.RemoteProtocolError))
+                               or self._responses and isinstance(error,httpx.ProxyError)))
+            if not request_cancelled() and (transport_failed or isinstance(error,ModelTemporarilyUnavailable)
+                                           or status in (408,429,500,502,503,504)):
                 raise ModelTemporarilyUnavailable(retry_after_s=retry_after_s) from None
             raise ApiError('Native tool request failed or response rejected; see session events, no retry performed') from None
 
@@ -554,18 +605,20 @@ class Model:
                                         REGISTRATION_TOOLS if registration else execution_tools),
                             tool_choice='required' if self.thinking_mode=='off' else 'auto',projection=projection,
                             transient=bool(payload.get('ride_inputs')),supervised_follow=supervised_follow,
-                            prepare_started_s=prepare_started_s)
+                            prepare_started_s=prepare_started_s,decision_phase=self.decision_phase or (
+                                'monitor' if ride_inputs else 'registration' if registration else 'execution'))
 
 
 def api_work(config, session, payload, observation=None, spatial_view=None, *, cache_mode='implicit', thinking_mode='off',transient_sink=None,
-             session_transport=None):
+             session_transport=None, model_name=DEFAULT_MODEL, decision_phase=None):
     # Background operations own their database connections and credentials.
     store = Store(session)
     try:
         budget = shared_budget()
         try:
             return Model(config,budget,store,cache_mode=cache_mode,thinking_mode=thinking_mode,
-                         transient_sink=transient_sink,session_transport=session_transport).decide(
+                         transient_sink=transient_sink,session_transport=session_transport,model_name=model_name,
+                         decision_phase=decision_phase).decide(
                              payload,observation=observation,spatial_view=spatial_view)
         finally:
             budget.close()

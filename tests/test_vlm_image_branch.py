@@ -12,7 +12,7 @@ from unittest.mock import patch
 from runtime.decision import DecisionBuffer,DecisionRecorder
 from decision.vlm.image_inputs import ImagePreparer
 from perception.detection_tracking.inference.config import load_config
-from tests.test_decision_runtime import observation
+from tests.decision_fixtures import observation
 from tests.test_rgb_association import TRANSFORM
 
 

@@ -17,21 +17,48 @@ LOCAL_OCCUPIED_COLOR = 0xF47B63
 
 class DisplayGrids:
     """Download selected display layers once per snapshot in the display worker."""
-    def __init__(self,metrics=None,*,asset=None):self.cache=OrderedDict();self.metrics=metrics;self.asset=asset
+    def __init__(self,metrics=None,*,asset=None):
+        self.cache=OrderedDict();self.metrics=metrics;self.asset=asset
+        self.host_layers=()
 
-    def get(self,source,*,navigation=True):
+    def remember_host(self,source,host):
+        """The map producer supplies the immutable host fields of this exact device snapshot."""
+        if host.metadata['snapshot_id']!=source.metadata['snapshot_id']:return
+        fields=('occupancy','ground_z','ground_support','navigation_occupancy','navigation_source')
+        layers={name:host.layers[name] for name in fields if name in host.layers and not host.layers[name].flags.writeable}
+        # One producer replaces the tuple. The display worker reads one consistent pair of entries.
+        self.host_layers=((source.owner,layers),)+self.host_layers[:1]
+
+    def get(self,source,*,navigation=True,ground=True):
         if source is None:return None
-        if not hasattr(source,'materialize'):return navigation_grid(source,self.asset) if navigation else source
+        if not hasattr(source,'materialize'):
+            return navigation_grid(source,self.asset,ground=ground) if navigation else source
+        from perception.environment.layers import GridSnapshot
         key=getattr(source,'owner',source.metadata['snapshot_id'])
-        if key not in self.cache:
-            fields=[k for k in ('occupancy','ground_z','ground_support','navigation_occupancy','navigation_source') if k in source._layers]
-            raw=source.materialize(consumer='optional_ros_display',fields=fields,metrics=self.metrics)
-            self.cache[key]=(raw,navigation_grid(raw,self.asset))
-            if len(self.cache)>2:self.cache.popitem(last=False)
-        return self.cache[key][1 if navigation else 0]
+        raw,views=self.cache.get(key,(None,{}))
+        if ground:
+            fields=('occupancy','ground_z','ground_support','navigation_occupancy','navigation_source')
+        else:
+            fields=('occupancy','navigation_occupancy') if navigation else ('occupancy',)
+        missing=[name for name in fields if name in source._layers and (raw is None or name not in raw.layers)]
+        if missing and self.host_layers:
+            host=next((layers for owner,layers in self.host_layers if owner==key),{})
+            shared={name:host[name] for name in missing if name in host}
+            if shared:
+                raw=GridSnapshot(source.metadata,{**(raw.layers if raw is not None else {}),**shared})
+                missing=[name for name in missing if name not in shared]
+        if missing:
+            selected=source.materialize(consumer='optional_ros_display',fields=missing,metrics=self.metrics)
+            raw=selected if raw is None else GridSnapshot(raw.metadata,{**raw.layers,**selected.layers})
+        self.cache[key]=(raw,views)
+        self.cache.move_to_end(key)
+        if len(self.cache)>2:self.cache.popitem(last=False)
+        if not navigation:return raw
+        if ground not in views:views[ground]=navigation_grid(raw,self.asset,ground=ground)
+        return views[ground]
 
 
-def navigation_grid(raw,asset=None):
+def navigation_grid(raw,asset=None,*,ground=True):
     """Display the producer's navigation cells; supplementary heights stay display-only."""
     from perception.environment.layers import GridSnapshot
     from perception.environment.navigation import association_reason,prior_floor
@@ -46,6 +73,9 @@ def navigation_grid(raw,asset=None):
         return GridSnapshot(dict(m,display_only=True,display_occupancy='navigation'),dict(l,occupancy=cells))
     if proof.get('method')!=METHOD:raise ValueError('Unsupported display navigation derivation')
     cells=l['navigation_occupancy'];layers=dict(l,occupancy=cells)
+    if not ground:
+        cells=circle_view(GridSnapshot(m,layers),observed_objects(raw)).layers['occupancy']
+        return GridSnapshot(dict(m,display_only=True,display_occupancy='navigation'),dict(occupancy=cells))
     ground=l.get('ground_z',np.full(cells.shape,np.nan))
     supported=l.get('ground_support',np.zeros(cells.shape,bool))&np.isfinite(ground)
     sources=supported.astype(np.uint8)
@@ -89,6 +119,15 @@ def annotation_height(grid,xy,fallback):
     """A label anchor, never evidence for a terrain cell or a navigable path."""
     z=sample_ground(grid,[xy])[0][0]
     return float(z) if np.isfinite(z) else float(fallback)
+
+
+def map_from_local_pose(row):
+    """Use the same measured transform as the RViz TF publisher."""
+    from perception.mapping_localization.context import pose_matrix
+
+    local = pose_matrix(row['position'], row['quaternion_xyzw'])
+    mapped = pose_matrix(row['map_position'], row['map_quaternion_xyzw'])
+    return mapped @ np.linalg.inv(local)
 
 
 class DisplaySurface:
@@ -287,36 +326,43 @@ class NavigationGridSurface:
             self.plane = _ground_plane(self.static, self.ground,
                 (self.support | self.fitted) & np.isfinite(self.ground))
 
+    def visible_static_heights(self, xy):
+        meta = self.static.metadata
+        ij = np.floor((xy - meta['origin_xy']) / meta['resolution']).astype(int)
+        rows, columns = self.ground.shape
+        indices = np.flatnonzero(((ij >= 0) & (ij < (columns, rows))).all(axis=1))
+        x, y = ij[indices].T
+        static_z = self.ground[y, x]
+        supported = (self.support[y, x] | self.fitted[y, x]) & np.isfinite(static_z)
+        visible = supported | (self.static.layers['occupancy'][y, x] >= 0)
+        fallback = xy[indices] @ self.plane[:2] + self.plane[2]
+        heights = np.full(len(xy), np.nan)
+        heights[indices[visible]] = np.where(supported, static_z, fallback)[visible]
+        return heights
+
     def _project(self, points, transform, offset):
         if transform is not None:
             points = points @ transform[:3, :3].T + transform[:3, 3]
-            meta = self.static.metadata
-            ij = np.floor((points[:, :2] - meta['origin_xy']) / meta['resolution']).astype(int)
-            rows, columns = self.ground.shape
-            within = ((ij >= 0) & (ij < (columns, rows))).all(axis=1)
-            indices = np.flatnonzero(within)
-            x, y = ij[indices].T
-            static_z = self.ground[y, x]
-            supported = (self.support[y, x] | self.fitted[y, x]) & np.isfinite(static_z)
-            visible = supported | (self.static.layers['occupancy'][y, x] >= 0)
-            fallback = points[indices, :2] @ self.plane[:2] + self.plane[2]
-            static_z = np.where(supported, static_z, fallback)
             # Keep the overlay above static cells when local display heights
             # fall below their background. XY and planner inputs are unchanged.
-            points[indices[visible], 2] = np.maximum(points[indices[visible], 2], static_z[visible])
+            np.fmax(points[:, 2], self.visible_static_heights(points[:, :2]), out=points[:, 2])
         points[:, 2] += offset
         return points
 
-    def layer(self, grid, transform):
+    def layer(self, grid, transform, *, cloud=True, boundary=True):
         meta = grid.metadata
         frame = meta['frame_id'] if transform is None else self.static.metadata['frame_id']
-        points, rgb = _ground_points(grid, fill_known=True, local_overlay=True)
-        x, y, z = self._project(points, transform, .015).T
-        cloud = coloured_cloud(x, y, z, rgb, frame, meta['stamp_s'])
+        message = None
+        if cloud:
+            points, rgb = _ground_points(grid, fill_known=True, local_overlay=True)
+            x, y, z = self._project(points, transform, .015).T
+            message = coloured_cloud(x, y, z, rgb, frame, meta['stamp_s'])
+        if not boundary:
+            return message, None
         height, width = grid.layers['occupancy'].shape
         xy = np.asarray(meta['origin_xy']) + meta['resolution'] * np.array(
             [(0, 0), (width, 0), (width, height), (0, height), (0, 0)])
         ground, support, fitted = _ground_layers(grid)
         plane = _ground_plane(grid, ground, (support | fitted) & np.isfinite(ground))
         boundary = np.column_stack((xy, xy @ plane[:2] + plane[2]))
-        return cloud, self._project(boundary, transform, .065)
+        return message, self._project(boundary, transform, .065)

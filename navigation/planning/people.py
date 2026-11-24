@@ -67,6 +67,7 @@ class PeopleModel:
                 if ownership.get('people_source')==self.source:
                     by_id={key:i for i,key in enumerate(self.ids)}
                     for obj in self.observed_objects:
+                        if obj.get('current_only', False):continue
                         key=tuple(obj['identity']);i=by_id.get(key)
                         if i is None or not np.allclose(self.xy[i],obj['xy'],rtol=0,atol=1e-8):continue
                         # Each track is independent. Unknown velocity uses its

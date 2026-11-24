@@ -65,6 +65,17 @@ class ReferenceDisplayMapTests(unittest.TestCase):
         query.query(dict(job, display_enabled=False), self.scene, self.asset)
         self.assertIsNone(query.display_map)
 
+    def test_live_capture_follows_subscribers_when_a_query_is_submitted(self):
+        with ReferenceRuntime(self.fixture.cfg, self.fixture.motion, self.fixture.geometry, worker_factory=FakeWorker) as runtime:
+            runtime.display_enabled = True
+            for revision, subscribed in enumerate((False, True, False)):
+                runtime.display_subscribed = lambda: subscribed
+                request = dict(self.req, goal_revision=revision)
+                self.assertTrue(runtime.update(request, self.scene, None, self.asset, now=10.))
+                runtime.tick(now=10., clock_domain='synthetic')
+                self.assertEqual(bool(runtime.worker.job.get('display_enabled')), subscribed)
+                runtime.cancel()
+
     def test_runtime_uses_the_map_for_the_reference_it_keeps_displaying(self):
         runtime = ReferenceRuntime(self.fixture.cfg, self.fixture.motion, self.fixture.geometry, worker_factory=FakeWorker)
         self.assertFalse(runtime.display_enabled)

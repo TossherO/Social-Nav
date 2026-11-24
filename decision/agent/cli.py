@@ -3,8 +3,9 @@ import argparse
 import json
 from pathlib import Path
 from . import CONFIG_DIR, ROOT
+from .core.model_settings import DEFAULT_MODEL, MODEL_EFFORTS
 from .tools.places import Catalog
-from .workflows.common import emit
+from .workflows.common import emit, model_options
 
 
 def main():
@@ -15,6 +16,7 @@ def main():
     p.add_argument('--map-condition', choices=('complete','simple','none'))
     p = sub.add_parser('status', help='只读检查任务，不自动恢复执行')
     p.add_argument('--session', required=True)
+    effort_choices = tuple(dict.fromkeys(effort for efforts in MODEL_EFFORTS.values() for effort in efforts))
     for name in ('run', 'shadow', 'execute', 'manual'):
         p = sub.add_parser(name)
         p.add_argument('--instruction', required=name!='manual')
@@ -24,12 +26,14 @@ def main():
         p.add_argument('--actions', help='显式工具动作JSON数组；不读取凭证或调用API，不接收旧计划格式')
         p.add_argument('--max-requests', type=int, default=512)
         p.add_argument('--api-config', default=str(ROOT/'configs/agent_api.local.json'))
+        p.add_argument('--model', choices=tuple(MODEL_EFFORTS), default=DEFAULT_MODEL, help='托管模型，默认 %(default)s')
         p.add_argument('--cache-mode',choices=('explicit','implicit'),default='implicit',
                        help='默认隐式缓存；explicit显式标记稳定前缀，不自动降级或重试')
-        p.add_argument('--thinking-mode',choices=('planning','off','low'),default='planning',
-                       help='planning 仅登记阶段使用指定思考强度；off 和 low 分别用于全程关闭或开启的对照')
-        p.add_argument('--planning-thinking-mode',choices=('off','low','medium'),default='low',
-                       help='planning 模式下任务登记阶段的思考强度，默认 low；登记后关闭思考')
+        p.add_argument('--thinking-mode', choices=('planning', *effort_choices), default='planning',
+                       help='planning 按任务阶段使用思考强度，也可为全程指定同一强度')
+        p.add_argument('--planning-thinking-mode', choices=effort_choices, help='任务要求登记阶段的思考强度')
+        p.add_argument('--execution-thinking-mode', choices=effort_choices, help='任务执行阶段的思考强度')
+        p.add_argument('--monitor-thinking-mode', choices=effort_choices, help='任务监控与复核阶段的思考强度')
         p.add_argument('--interactive', action='store_true')
         p.add_argument('--no-memory', action='store_true', help='关闭附加证据记忆，仍保留原任务与有界工具历史')
         if name == 'run':
@@ -61,6 +65,11 @@ def main():
     p = sub.add_parser('evaluate', help='运行少量合成工具反馈场景，不调用API')
     p.add_argument('--output', required=True)
     args = parser.parse_args()
+    if hasattr(args, 'model'):
+        try:
+            model_options(args)
+        except ValueError as error:
+            parser.error(str(error))
     if hasattr(args, 'catalog') and args.catalog is None:
         from .workflows.manual import floor_files
         args.catalog = str(floor_files('floor2')[1])

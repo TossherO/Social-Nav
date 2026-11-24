@@ -10,13 +10,13 @@
 
 模型、默认后端和各任务 Prompt 由 [project.json](../../decision/vlm/configs/project.json)登记。本机使用的运行资源和已有结果保存在仓库根目录的 `ENVIRONMENT.local.md`。新服务器部署见[SGLang 服务部署方案](SGLang服务部署方案.md)。
 
-外层 Agent 使用独立托管 API，当前优先完备地图下的室内点和区域导航。它通过单模型工具循环读取地图、自主选择连续位姿并检查完成；桌边停靠和持续跟随已接入可选局部任务，T1 群组更新仍待接入。实现见[Agent 长程导航](技术实现-Agent长程导航.md)，命令见[系统运行手册](../系统运行手册.md)，后续事项见[开发测试汇总](../后续开发测试汇总.md)。
+外层 Agent 使用独立托管 API，负责长程任务登记、导航和局部技能调度。实现见[Agent 长程导航](技术实现-Agent长程导航.md)，命令见[系统运行手册](../系统运行手册.md)，后续事项见[开发测试汇总](../后续开发测试汇总.md)。
 
 ## 后端选择
 
-局部 VLM 在线推理以及 Prompt、Schema 和语义调试默认调用远程 SGLang＋DSPARK。T2 可显式选择托管 API，也可以用 `reid` 在本机处理当前观察。远程服务不可用或所需 GPU 被占用时，已有的 Transformers＋XGrammar 备用入口供 T1 使用。
+局部 VLM 在线推理以及 Prompt、Schema 和语义调试默认调用远程 SGLang＋DSPARK。T2 另支持[显式选用托管 API 或本地 ReID](技术实现-T2行人跟随.md#观察与后端)。远程服务不可用或所需 GPU 被占用时，T1 可以使用 [Transformers＋XGrammar 备用入口](技术实现-T1群组识别.md#本地备用推理)。
 
-切换后端必须记录原因。不能因为某次响应错误就静默换模型或重放请求。代码检查和输入准备不依赖模型服务；当前本地入口也不支持 T3。
+切换后端必须记录原因。单次响应错误按所选后端的失败流程处理，禁止静默换模型或重放请求。代码检查和输入准备无需模型服务。
 
 ## 远程服务启停与访问（默认）
 
@@ -57,13 +57,15 @@ T1 冻结输入可以复用 [vlm_api_common.make_body](../../decision/vlm/vlm_ap
 
 ### T1 与 T3 的内存调用接口
 
-T1 的 [GroupsDecision](../../decision/vlm/t1/online.py) 和 T3 的 [SeatingDecision](../../decision/vlm/t3/online.py) 分别准备任务请求，共用[请求发送和响应校验流程](../../decision/vlm/online.py)。T3 已由在线桌边工作器调度，连续接近效果尚未实机验证；T1 结果持续接入控制和独立安全仍待实现。T1 调用方在 `DecisionBuffer.consume()` 的租约内使用 `observations.render_window()` 获取绑定的三帧记录和 PNG 字节，再调用 `GroupsDecision.social(scene, window, images, now=...)`。接口校验图片摘要、人物编号与源场景；租约释放后 PNG 字节仍可使用。
+T1 的 [GroupsDecision](../../decision/vlm/t1/online.py) 和 T3 的 [SeatingDecision](../../decision/vlm/t3/online.py) 共用[发送和校验流程](../../decision/vlm/online.py)。
 
-`SeatingDecision.seating(scene, candidates, now=..., observation=...)` 根据当前场景、同源 RGB 和本次候选生成模型请求。在线桌边停靠的候选由运行时根据 Agent 圈出的桌沿和对应点云生成。离线调用方也可以提供同一观察的候选集，历史拟合上下文不能作为本轮输入。
+T1 调用方在 `DecisionBuffer.consume()` 租约内使用 `observations.render_window()` 获取对应的三帧记录和 PNG 字节，再调用 `GroupsDecision.social(scene, window, images, now=...)`。接口校验图片摘要、人物编号与源场景，租约释放后 PNG 字节仍可使用。
+
+`SeatingDecision.seating(scene, candidates, now=..., observation=...)` 使用当前场景、同源 RGB 和本次候选准备请求。候选可由[在线桌边工作器](技术实现-T3桌边停靠.md#在线选点与接近)生成，也可由离线调用方提供与本次观察对应的候选集。历史拟合上下文不能作为本轮输入。
 
 T3 桌边工作器在发起请求和使用回复时，分别用采集端记录的源时刻与单调时钟读数推算当前源时间。回放时，经过的单调时间按回放倍率换算。两次检查都以请求所用观察的采集时刻为有效期起点。
 
-调用 `infer()` 才会访问配置的远程 SGLang＋DSPARK。调用方保留完整返回，失败时可用 `discard()` 释放请求。收到结果后，`accept()` 核对 Schema、观察身份和有效期。T1 返回带原始时间的人群关系，将其持续送入控制和独立安全仍待接入。T3 返回局部坐标中的候选位姿。桌边停靠线程检查当前路径，使用有效地图关联转换位姿。外层 Agent 提交目标前再核对任务、地图和车体足迹。
+调用 `infer()` 才会访问配置的远程 SGLang＋DSPARK。调用方保留完整返回，失败时可用 `discard()` 释放请求。`accept()` 核对 Schema、观察身份和有效期后，T1 返回带原始时间的人群关系，T3 返回局部坐标中的候选位姿。T1 的控制和独立安全消费仍待接入。
 
 ## 托管API对照（显式选用）
 

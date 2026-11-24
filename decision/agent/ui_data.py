@@ -102,7 +102,8 @@ def poll_session(db, cursor, limit=100):
     marks=','.join('?' for _ in KINDS)
     sql=("SELECT seq,wall_s,kind,CASE WHEN kind='api_request' THEN "
          "json_object('call_id',json_extract(value,'$.call_id'),'model',json_extract(value,'$.model'),"
-         "'observation_id',json_extract(value,'$.observation_id')) WHEN kind='api_response' THEN "
+         "'observation_id',json_extract(value,'$.observation_id'),'decision_phase',json_extract(value,'$.decision_phase'),"
+         "'thinking_mode',json_extract(value,'$.thinking_mode')) WHEN kind='api_response' THEN "
          "json_object('call_id',json_extract(value,'$.call_id'),'content',json_extract(value,'$.content'),"
          "'full_return_s',json_extract(value,'$.full_return_s'),'finish_reason',json_extract(value,'$.finish_reason'),"
          "'message',json_extract(value,'$.message')) "
@@ -389,7 +390,11 @@ def event_summary(event):
                 parts.append('工具: '+str((call.get('function') or {}).get('name','')))
         return ' | '.join(parts) or '对话'
     if kind=='tool_intent':return '调用工具: '+str(value.get('tool',''))
-    if kind=='api_request':return '模型请求 '+str(value.get('call_id',''))[:10]
+    if kind=='api_request':
+        phase={'registration':'任务登记','execution':'执行','monitor':'监控复核'}.get(value.get('decision_phase'))
+        mode=value.get('thinking_mode')
+        thinking='关闭思考' if mode=='off' else mode
+        return ' · '.join(part for part in ('模型请求',value.get('model'),phase,thinking) if part)
     if kind=='api_response':return '模型返回: '+str(value.get('content') or value.get('finish_reason') or '')[:200]
     if kind=='api_input_rejected':
         return f"模型输入估算为 {value.get('estimated_input_tokens')}，超过本地限制 {value.get('limit')}；请求未发送。"

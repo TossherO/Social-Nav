@@ -158,7 +158,7 @@ class Budget:
             if recorded_model==model and mode==thinking_mode and type(value) is int and value>=0:
                 values.append(value)
                 if len(values)==16:break
-        estimated=math.ceil(sum(values)/len(values)) if values else (1024 if thinking_mode in ('low','medium') else 512)
+        estimated=math.ceil(sum(values)/len(values)) if values else (512 if thinking_mode=='off' else 1024)
         return min(maximum,max(1,estimated))
 
     def finish(self, call_id, record):

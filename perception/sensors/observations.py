@@ -117,7 +117,7 @@ def bag_observations(path,config,*,duration=None,image_topics=None,start=0.,mess
                 if accepted is False:continue
                 if accepted is None:return
                 fields=pointcloud_fields(msg,['x','y','z','intensity','timestamp'])
-                raw=np.column_stack([fields[k] for k in ('x','y','z','intensity')]).astype(np.float32)
+                raw=np.column_stack([fields[k] for k in ('x','y','z','intensity')]).astype(np.float32,copy=False)
                 points,begin,end=rs16_preprocess(fields,config,stamp)
                 header_ns=msg.header.stamp.to_nsec()
                 stamp_ns=header_ns if config['preprocess'].get('stamp_at_scan_end',True) else round(end*1e9)

@@ -6,16 +6,13 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
-import yaml
-
 from perception.environment.layers import load_config
 from perception.environment.occupancy import VoxelBudgetExceeded
-from perception.environment.scans import ScanJournal
 from perception.environment.storage import StaticEnvironmentMap, content_hash
-from perception.mapping_localization.context import pose_matrix
-from perception.mapping_localization.manual_edit import read_xyzi,write_xyzi
-from perception.mapping_localization.results import file_fingerprint,map_fingerprint,read_pcd
+from perception.mapping_localization.manual_edit import read_xyzi
+from perception.mapping_localization.results import map_fingerprint,read_pcd
 from perception.mapping_localization.update_map import update
+from tests.mapping_fixtures import registered_map_inputs
 
 
 class LocalMapUpdateTests(unittest.TestCase):
@@ -43,53 +40,9 @@ class LocalMapUpdateTests(unittest.TestCase):
                     hit_tree=cKDTree([[.1,0.,0.]]))
         np.testing.assert_array_equal(mask,[False,True])
 
-    def write_map(self,path,rows,points):
-        (path/'keyframes').mkdir(parents=True)
-        for index,cloud in enumerate(points):
-            write_xyzi(path/'keyframes'/f'corner{index}.pcd',np.empty((0,4),np.float32))
-            write_xyzi(path/'keyframes'/f'surf{index}.pcd',np.asarray(cloud,np.float32))
-        np.savetxt(path/'keyframes/poses.txt',np.asarray(rows),fmt='%.17g')
-        write_xyzi(path/'GlobalMap.pcd',np.concatenate([np.asarray(p,np.float32) for p in points]))
-        (path/'manifest.yaml').write_text(yaml.safe_dump(dict(format='roll_keyframes_v1',frame='map',
-            units='metres_radians',keyframes=len(rows),visualization_resolution=.1)))
-        (path/'COMPLETE').write_text('roll_keyframes_v1\n')
-
-    def fixture(self,root):
-        root=Path(root);old=root/'old';mapping=root/'mapping';reference=root/'reference'
-        mapping.mkdir();reference.mkdir();bag=root/'input.bag';bag.write_bytes(b'synthetic bag')
-        self.write_map(old,[[100,0,0,0,0,0,0,0,1],[101,0,0,0,0,0,0,1,1]],
-                       [[[1,0,0,1],[1,1,0,1],[4,4,1,1]],[[1,0,0,1],[1,1,0,1]]])
-        self.write_map(mapping/'map',[[200,0,0,0,0,0,0,0,1],[201.2,.2,0,0,0,0,0,1,1]],
-                       [[[3,0,0,1]],[[2.8,0,0,1]]])
-        settings=load_config()['scan_recording'];journal=ScanJournal(mapping/'environment/scans.sqlite',settings,{})
-        rows=[];targets=[]
-        for i in range(6):
-            stamp=200+i*.6;x=i*.1;ns=round(stamp*1e9)
-            row=dict(stamp_s=stamp,stamp_ns=ns,frame_id='odom',child_frame_id='rslidar',
-                position=[x,0,0],quaternion_xyzw=[0,0,0,1],health=0,session_id='synthetic',generation=0)
-            rows.append(row);targets.append(dict(row,has_map_pose=True,map_frame='map',map_position=[x,0,0],
-                                                 map_quaternion_xyzw=[0,0,0,1]))
-            points=np.array([[3-x,0,0]],np.float32);origins=np.array([[x,0,0]],np.float32)
-            journal.append(points,pose_matrix(row['position'],row['quaternion_xyzw']),ns,
-                dict(session_id='synthetic',generation=0,frame_id='odom',sensor_frame='rslidar',
-                     rays_used=True,ray_origin_model='pose_interpolated_origins'),origins,np.array([0],np.float32))
-        journal.close()
-        for folder,data in ((mapping,rows),(reference,targets)):
-            (folder/'localization.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in data))
-        digest=file_fingerprint(bag)
-        def run(mode,map_path):
-            return dict(success=True,source='bag',mode=mode,bag=str(bag),
-                        algorithm_parameters=dict(mapping=dict(extrinsic_R=np.eye(3).reshape(-1).tolist(),
-                            extrinsic_T=[0.,0.,0.],extrinsic_est_en=False),
-                            common=dict(imu_time_offset=0.,time_sync_en=False)),
-                        playback=dict(bag_fingerprint=digest,map_fingerprint=map_fingerprint(map_path)))
-        a=run('mapping',mapping/'map');a['environment_scans_fingerprint']=file_fingerprint(mapping/'environment/scans.sqlite')
-        (mapping/'run.json').write_text(json.dumps(a));(reference/'run.json').write_text(json.dumps(run('localization',old)))
-        return old,mapping,reference
-
     def test_update_retains_unobserved_old_points_and_produces_a_new_map(self):
         with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory);old,mapping,reference=self.fixture(root)
+            root=Path(directory);old,mapping,reference=registered_map_inputs(root)
             before=map_fingerprint(old);report=update(old,mapping,reference,root/'candidate')
             self.assertEqual(map_fingerprint(old),before)
             self.assertEqual(report['status'],'candidate_not_accepted')
@@ -108,7 +61,7 @@ class LocalMapUpdateTests(unittest.TestCase):
 
     def test_custom_3d_voxel_budget_bounds_evidence_and_is_recorded(self):
         with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory);old,mapping,reference=self.fixture(root)
+            root=Path(directory);old,mapping,reference=registered_map_inputs(root)
             output=root/'candidate'
             with self.assertRaisesRegex(ValueError,'positive integer'):
                 update(old,mapping,reference,output,max_voxels=0)
@@ -124,7 +77,7 @@ class LocalMapUpdateTests(unittest.TestCase):
 
     def test_different_bag_and_overwrite_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory);old,mapping,reference=self.fixture(root)
+            root=Path(directory);old,mapping,reference=registered_map_inputs(root)
             target=reference/'run.json';value=json.loads(target.read_text())
             value['playback']['bag_fingerprint']={'wrong':True};target.write_text(json.dumps(value))
             with self.assertRaises(ValueError):update(old,mapping,reference,root/'candidate')
@@ -136,7 +89,7 @@ class LocalMapUpdateTests(unittest.TestCase):
         from perception.environment.maps import static_geometry
 
         with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory);old,mapping,reference=self.fixture(root)
+            root=Path(directory);old,mapping,reference=registered_map_inputs(root)
             static=root/'old_static';output=root/'candidate';config=load_config()
             geometry=static_geometry(read_pcd(old/'GlobalMap.pcd'),[[0.,0.,0.]],config,
                                      map_id='parent',frame='map',stamp=101.)
@@ -165,7 +118,7 @@ class LocalMapUpdateTests(unittest.TestCase):
 
     def test_registration_jump_and_overlapping_session_time_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory);old,mapping,reference=self.fixture(root)
+            root=Path(directory);old,mapping,reference=registered_map_inputs(root)
             path=reference/'localization.jsonl'
             rows=[json.loads(line) for line in path.read_text().splitlines()]
             rows[3]['map_position'][0]+=2.
@@ -183,7 +136,7 @@ class LocalMapUpdateTests(unittest.TestCase):
 
     def test_mismatched_sensor_timing_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory);old,mapping,reference=self.fixture(root)
+            root=Path(directory);old,mapping,reference=registered_map_inputs(root)
             path=reference/'run.json';run=json.loads(path.read_text())
             run['algorithm_parameters']['common']['imu_time_offset']=.1
             path.write_text(json.dumps(run))

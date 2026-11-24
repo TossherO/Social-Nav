@@ -1,6 +1,5 @@
 """Decision/runtime ownership, time, identity and navigation adapter boundaries."""
 import copy
-import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -19,39 +18,7 @@ from navigation.planning.footprint import VehicleGeometry
 from navigation.planning.inputs import load_config
 from navigation.planning.motion import load_motion_config
 from perception.environment.context import fingerprint
-from perception.environment.scene import assemble_scene
-from perception.environment.layers import load_config as environment_config
-from tests.test_environment_scene import person
-from tests.navigation_fixtures import grid
-from tests.test_navigation_prediction import track
-
-
-def observation(stamp,generation=0,*,stamp_ns=None):
-    snapshot=grid(generation=generation);snapshot.metadata['stamp_s']=stamp
-    row=person(stamp)
-    if stamp_ns is not None:
-        row['stamp_ns']=stamp_ns
-    row.update(observation_id=str(round(stamp*1e9)),pose_health='valid',pose_source='localization',
-        pose_stamp_s=stamp,timestamp_source='sensor_header',world_from_lidar=snapshot.metadata['world_from_lidar'],
-        localization_binding=dict(session_id='test',generation=generation,frame_id='odom',source='fast_lio'))
-    row['tracks']=[dict(track(4,2,(.5,0,0),stamp=stamp),lifecycle_generation=7,state='observed')]
-    row['covariance_order']=['x','y','z','dx','dy','dz','yaw','vx','vy','vz']
-    row['input_fingerprint']=fingerprint(row)
-    arrays=dict(raw=np.array([[1.,0.,0.,3.],[2.,1.,1.,5.]],np.float32),rgb=np.full((48,64,3),120,np.uint8))
-    association={k:row[k] for k in ('session_id','generation','sequence_id','clock_domain','observation_id','stamp_s')}
-    association.update(perception_input_fingerprint=row['input_fingerprint'],
-        image_input=dict(raw_rgb_sha256=hashlib.sha256(arrays['rgb'].tobytes()).hexdigest(),
-            rgb_stamp_ns=round((stamp-.02)*1e9),image_size=[64,48]),
-        result=dict(status='complete',tracks={'a/g7':dict(status='matched',rgb_box=[20,5,35,40])}))
-    scene=assemble_scene(snapshot,clock_domain='synthetic',settings=environment_config()['scene'],people=row,stamp_ns=stamp_ns)
-    return row,arrays,association,scene
-
-
-def candidate_set(scene):
-    r=scene.record
-    return dict(instruction='在桌边就座',observation_id=r['observation_id'],stamp_s=r['as_of'],
-        **{k:r[k] for k in ('frame_id','clock_domain','session_id','generation')},revision=0,
-        candidates=[dict(id=0,pose=[4.,2.,0.],motion='forward',geometry='unknown')])
+from tests.decision_fixtures import candidate_set, observation
 
 
 class DecisionRuntimeTests(unittest.TestCase):

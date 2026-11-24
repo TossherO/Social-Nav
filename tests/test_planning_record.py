@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 from runtime.planning_record import PlanningRecorder
-from tests import test_navigation_dwa as fixtures
+from tests.navigation_fixtures import dwa_fixture
 
 
 class PlanningRecordTests(unittest.TestCase):
@@ -47,7 +47,7 @@ class PlanningRecordTests(unittest.TestCase):
             self.assertEqual(classify(packet,None),('dwa',reason))
 
     def test_saved_scene_and_reference_keep_original_bindings(self):
-        f=fixtures.DwaTests();f.setUp()
+        f = dwa_fixture()
         from perception.environment.scene import SceneInputs
         from navigation.planning.continuity import check_reference
         with tempfile.TemporaryDirectory() as directory:
@@ -85,7 +85,8 @@ class PlanningRecordTests(unittest.TestCase):
         from tests.navigation_fixtures import FakeWorker
         from tests.navigation_fixtures import bundle
         import numpy as np
-        f=fixtures.DwaTests();f.setUp();scene=bundle(np.full((60,60),-1,np.int8))
+        f = dwa_fixture()
+        scene = bundle(np.full((60,60),-1,np.int8))
         with ReferenceRuntime(f.cfg,f.motion,f.geometry,worker_factory=FakeWorker) as reference:
             reference.diagnostics=True
             self.assertTrue(reference.update(f.req,scene,None,now=10.))
@@ -102,7 +103,7 @@ class PlanningRecordTests(unittest.TestCase):
         from perception.environment.scene import assemble_scene
         from tests.navigation_fixtures import FakeWorker, scene_at
 
-        f=fixtures.DwaTests();f.setUp()
+        f = dwa_fixture()
         geometry=scene_at(10.1).geometry
         occupied=geometry.layers['occupancy'].copy()
         occupied[20,20]=100
@@ -137,7 +138,8 @@ class PlanningRecordTests(unittest.TestCase):
             self.assertEqual(restored['planning_observation']['source_stamp_s'],10.2)
 
     def test_sampling_diagnostic_identifies_speed_recovery_without_changing_proposal(self):
-        f=fixtures.DwaTests();f.setUp();feedback=dict(f.feedback,velocity=[.95,0.])
+        f = dwa_fixture()
+        feedback = dict(f.feedback,velocity=[.95,0.])
         plain=f.controller.command(f.req,f.scene,feedback,f.reference,now=10.,clock_domain='synthetic')
         f.controller.clear();f.controller.diagnostics=True
         traced=f.controller.command(f.req,f.scene,feedback,f.reference,now=10.,clock_domain='synthetic')

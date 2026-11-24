@@ -1,6 +1,7 @@
 """Current static-support geometry and independent navigation consumption checks."""
 import copy
 import numpy as np
+from .obstacle_memory import EXPIRY_LAYER
 
 from .context import fingerprint
 from .layers import GridSnapshot
@@ -9,7 +10,7 @@ from perception.detection_tracking.inference.geometry import validate_transform
 
 NAVIGATION_DTYPES = dict(navigation_occupancy=np.int8, navigation_source=np.uint8,
                          navigation_source_stamp=np.float64)
-CAPSULE_FIELDS = ('occupancy', 'person_background_free', 'ground_conflict', *NAVIGATION_DTYPES)
+CAPSULE_FIELDS = ('occupancy', 'person_background_free', 'ground_conflict', EXPIRY_LAYER, *NAVIGATION_DTYPES)
 STATIC_GROUND_TOLERANCE_M = .20
 
 
@@ -166,6 +167,8 @@ def navigation_geometry(scene, *, now=None, asset=None, check_asset=False, _laye
         if dates is not None:
             cells=grid.layers['occupancy']
             restored=(cells==-1)&np.isfinite(dates)
+            if EXPIRY_LAYER in scene.geometry.layers:
+                restored &= ~scene.geometry.layers[EXPIRY_LAYER]
             if restored.any():
                 cells=cells.copy();cells[restored]=0;cells.flags.writeable=False
                 grid=GridSnapshot(dict(grid.metadata,navigation_view='confirmed_free_memory'),

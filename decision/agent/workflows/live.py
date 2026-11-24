@@ -7,7 +7,7 @@ from ..adapters.shadow import RuntimeLiveNavigation
 from ..core.session import AgentSession
 from ..core.store import Store, shared_budget
 from ..tools.places import Catalog
-from .common import emit, make_loop
+from .common import emit, make_loop, model_options
 from .interaction import Console
 
 
@@ -34,6 +34,8 @@ def cleanup_goal(navigation, skill, *, timeout_s=2.):
 
 
 def run(args):
+    if not args.actions:
+        model_options(args)
     if args.duration <= 0:
         raise ValueError('Positive duration required')
     catalog = Catalog.load(args.catalog, condition=args.map_condition)

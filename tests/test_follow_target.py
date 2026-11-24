@@ -1,18 +1,20 @@
 """First follow selection, source binding and immutable visual references."""
 import copy
+from contextlib import closing
 import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from decision.agent import ROOT
 from decision.agent.core.session import AgentSession
-from decision.agent.core.store import Store
+from decision.agent.core.store import Budget, Store
 from decision.agent.tools.observations import Observation
 from decision.agent.tools.places import Catalog
 from decision.vlm.t2.target import annotated, candidates, reference, verify_candidates
+from tests.decision_fixtures import observation
 from tests.test_agent import ScriptedFeedback
-from tests.test_decision_runtime import observation
 
 
 class FollowTargetTests(unittest.TestCase):
@@ -150,16 +152,15 @@ class FollowTargetTests(unittest.TestCase):
 
     def test_agent_model_input_receives_numbered_image_and_candidate_binding(self):
         from decision.agent.core.model import Model
-        model=Model.__new__(Model)
-        model.thinking_mode='off'
-        captured={}
-        def request(system,messages,**kwargs):
-            captured['messages']=messages
-            return 'fixture'
-        model.request=request
-        payload=self.session.prompt()
-        self.assertEqual(model.decide(payload,observation=self.session.observation),'fixture')
-        content=captured['messages'][-1]['content']
+        root=Path(self.temp.name)
+        config=root/'agent.json'
+        config.write_text('{"base_url":"https://example.invalid/v1","api_key":"fixture"}')
+        with closing(Budget(root/'budget.sqlite')) as budget:
+            model=Model(config,budget,self.store)
+            with patch.object(model,'request',return_value='fixture') as request:
+                payload=self.session.prompt()
+                self.assertEqual(model.decide(payload,observation=self.session.observation),'fixture')
+        content=request.call_args.args[1][-1]['content']
         self.assertTrue(any('黄色数字' in part.get('text','') for part in content))
         self.assertTrue(any(part.get('type')=='image_url' for part in content))
         visible=self.session.observation.prompt()['follow_candidates']

@@ -14,7 +14,7 @@ from perception.environment.context import fingerprint
 from perception.environment.layers import load_config
 from perception.environment.scene import assemble_scene
 from tests.test_agent import ScriptedFeedback
-from tests.test_decision_runtime import observation
+from tests.decision_fixtures import observation
 
 
 def candidate_observation(stamp,track_id='a',*,associated=True,mapped=False):

@@ -8,7 +8,7 @@ from .geometry import distance_to_zero, ground_cell_statistics, nearest_support
 from .ground import GroundTracker
 from .layers import GridSnapshot
 from .maps import endpoint_layers
-from .scans import read_scans
+from .scans import read_scans, sampled_scan_stamps
 
 
 def scan_ground(candidate, scan_path, timeline, config, scan_fingerprint, *, interval_s=.2,
@@ -23,14 +23,14 @@ def scan_ground(candidate, scan_path, timeline, config, scan_fingerprint, *, int
     if interval_s <= 0 or min_scans < 2 or max_height_spread_m <= 0:
         raise ValueError('Invalid offline scan-ground settings')
     meta=candidate.metadata;shape=tuple(meta['shape']);origin=np.asarray(meta['origin_xy']);res=float(meta['resolution'])
-    tracker=GroundTracker(config['ground_tracking']);identity=None;previous_stamp=None;last_sample=-np.inf
-    keys=[];heights=[];stats=dict(scans_read=0,scans_sampled=0,scans_unbound=0,tracked_scans=0,
+    tracker=GroundTracker(config['ground_tracking']);identity=None;previous_stamp=None
+    # Report the archive record count even though only sampled payloads are decoded.
+    count, sampled = sampled_scan_stamps(scan_path, interval_s)
+    keys=[];heights=[];stats=dict(scans_read=count,scans_sampled=0,scans_unbound=0,tracked_scans=0,
         tracker_resets=0,cell_scan_samples=0)
-    for record, data in read_scans(scan_path):
-        stats['scans_read']+=1
+    for record, data in read_scans(scan_path, stamps=sampled):
         stamp=record['stamp_ns']/1e9
-        if stamp-last_sample < interval_s-1e-6:continue
-        last_sample=stamp;stats['scans_sampled']+=1
+        stats['scans_sampled']+=1
         if progress and stats['scans_sampled']%500==0:
             progress('地面扫描：%d 已采样，%d 已跟踪。'%(stats['scans_sampled'],stats['tracked_scans']))
         item=_scan_geometry(record,data,timeline)

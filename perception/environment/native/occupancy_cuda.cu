@@ -9,6 +9,7 @@
 #include <string>
 #include <limits>
 #include <cfloat>
+#include "point_evidence.h"
 
 namespace {
 thread_local std::string error;
@@ -27,7 +28,7 @@ template<class T> struct Buffer {
     }
     ~Buffer() { if(data) cudaFree(data); }
 };
-struct Voxel { double stamp, hit_stamp,ordinary_stamp=-INFINITY; float odds; uint8_t valid, transient; };
+struct Voxel { double stamp, hit_stamp,ordinary_stamp=-INFINITY; float odds; uint8_t valid; PointEvidence evidence; };
 struct NearCell {
     double classified, free_seen, hit_stamp, expires, hit_min, hit_max;
     float free_ground, free_coverage, ground;
@@ -79,7 +80,7 @@ __global__ void prepare(Voxel* voxels,unsigned* flags,Grid now,Grid previous,boo
     int3 k=now.key(i); int slot=now.slot(k); auto& v=voxels[slot]; flags[slot]=0;
     if(!initialized || !previous.contains(k) || !now.inside(now.center(k)) ||
        (v.valid && (stamp-v.stamp>ttl || (v.odds>0 && stamp-v.hit_stamp>
-            (v.transient?fmin(obstacle_ttl,transient_ttl):obstacle_ttl) && stamp-v.ordinary_stamp>obstacle_ttl)))) v=Voxel{};
+            (v.evidence!=OrdinaryHit?fmin(obstacle_ttl,transient_ttl):obstacle_ttl) && stamp-v.ordinary_stamp>obstacle_ttl)))) v=Voxel{};
 }
 __device__ void mark(unsigned* flags,Grid grid,int3 key,unsigned value) {
     if(grid.contains(key)) atomicOr(flags+grid.slot(key),value);
@@ -94,8 +95,9 @@ __global__ void trace(unsigned* flags,Grid grid,const float* xyz,int n,float3 or
     if(!isfinite(length) || length<.01) return;
     int3 endpoint=grid.coordinate(p);
     if(length<=maxrange && grid.inside(p) && key_valid(endpoint)) {
-        bool moving=transient && transient[i];
-        if(!moving || !omit) mark(flags,grid,endpoint,moving?2:4);
+        const int evidence=transient?transient[i]:OrdinaryHit;
+        if(evidence==UnconfirmedHit) mark(flags,grid,endpoint,8);
+        else if(evidence==OrdinaryHit || !omit) mark(flags,grid,endpoint,evidence==MovablePersonHit?2:4);
     }
     if(!stride || i%stride) return;
     if(length>maxrange) {
@@ -133,12 +135,17 @@ __global__ void apply(Voxel* voxels,const unsigned* flags,int size,double stamp,
     if(i<size) {
         auto& v=voxels[i]; unsigned f=flags[i];
         if(f) {
-            bool hit=f&6;
+            bool hit=f&14;
             // OctoMap stores its sensor-model log odds and additions in float.
             float previous=(hit && invalidate_free)?fmaxf(0.f,v.odds):v.odds;
             float odds=previous+(hit?float(0.8472978603872034):float(-0.4054651081081643));
             v.odds=fmaxf(float(-2.000027830777221),fminf(float(3.5110306383048497),odds));
-            v.stamp=stamp; v.valid=1; if(hit) { v.transient=!(f&4); v.hit_stamp=stamp;if(f&4)v.ordinary_stamp=stamp; }
+            v.stamp=stamp; v.valid=1;
+            if(hit) {
+                v.evidence=(f&4)?OrdinaryHit:(f&8)?UnconfirmedHit:MovablePersonHit;
+                v.hit_stamp=stamp;
+                if(v.evidence==OrdinaryHit)v.ordinary_stamp=stamp;
+            }
         }
         valid=v.valid;
     }
@@ -233,17 +240,18 @@ __global__ void person_voxels(const Voxel* voxels,Grid grid,const double* ground
     float probability=1.f-1.f/(1.f+expf(v.odds));if(probability<float(p.occupied))return;
     float3 xyz=grid.center(grid.key(j));int i=cell(xyz.x,xyz.y,p);if(i<0)return;
     double h=double(xyz.z)-ground[i];
-    if(isfinite(h) && h>=p.minimum && h<=p.maximum)atomicOr(tags+i,v.transient && stamp-v.ordinary_stamp>ordinary_ttl?1u:2u);
+    if(isfinite(h) && h>=p.minimum && h<=p.maximum)atomicOr(tags+i,v.evidence==MovablePersonHit && stamp-v.ordinary_stamp>ordinary_ttl?1u:2u);
 }
 __global__ void person_endpoints(const double* xyz,int n,const uint8_t* moving,const double* ground,Projection p,unsigned* tags) {
     int j=blockIdx.x*blockDim.x+threadIdx.x;if(j>=n)return;
     int i=cell(xyz[3*j],xyz[3*j+1],p);if(i<0)return;double h=xyz[3*j+2]-ground[i];
-    if(isfinite(h) && h>=p.minimum && h<=p.maximum)atomicOr(tags+i,moving && moving[j]?1u:2u);
+    if(isfinite(h) && h>=p.minimum && h<=p.maximum)atomicOr(tags+i,moving && moving[j]==MovablePersonHit?1u:2u);
 }
 #include "local_view.cuh"
 #include "support.cuh"
 }
 extern "C" {
+int sn_occupancy_uncertain_person_hits() { return 1; }
 int sn_occupancy_local_ground_conflicts() { return 1; }
 int sn_navigation_support_with_ground_conflicts(const int8_t* raw,const double* seen,const double* prior,
     const double* previous,double* hits,double* out,uint8_t* allowed,const double* points,
@@ -374,6 +382,16 @@ int sn_occupancy_project_device_view(void* ptr,const double* floor,const uint8_t
         project_resident(t,floor,support,required,height,width,origin,p,stamp,endpoints,n);
         local_view(t,height,width,origin,p,stamp,pose,plane,settings,moving,n,device_out,counts,ring,people!=0,true);
         return t.count;
+    } catch(const std::exception& e) { error=e.what();return -1; }
+}
+int sn_occupancy_refresh_view_distances(void* ptr,double* view,int h,int w,double resolution,cudaStream_t stream) {
+    try {
+        auto& t=*static_cast<Tree*>(ptr);Guard guard(t.device);
+        t.distance_rows.reserve(size_t(h)*w*2);
+        distance_rows<<<blocks(h*w),256,0,stream>>>(view,h,w,t.distance_rows.data);
+        distance_columns<<<blocks(h*w),256,0,stream>>>(view,h,w,resolution,t.distance_rows.data);
+        check(cudaGetLastError());
+        return 0;
     } catch(const std::exception& e) { error=e.what();return -1; }
 }
 }

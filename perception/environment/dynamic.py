@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 
 
-def people_boxes(row, stamp, identity, frame, settings, *, clock_domain=None):
+def people_boxes(row, stamp, identity, frame, settings, *, clock_domain=None, allow_recent_predictions=False):
     status = dict(status='unavailable', reason='no_people', selected_tracks=0)
     if row is None:
         return np.empty((0, 8)), status
@@ -19,16 +19,23 @@ def people_boxes(row, stamp, identity, frame, settings, *, clock_domain=None):
             (binding.get('session_id'), binding.get('generation'), binding.get('frame_id')) != (*identity, frame)):
         status['reason'] = 'localization_binding_mismatch'
     else:
-        boxes = [];track_ids=[]
+        boxes = [];track_ids=[];predicted=[]
+        hold = settings.get('prediction_mask_hold_s', 0.)
         for track in row.get('tracks', []):
             box = np.asarray(track['box'], dtype=float)
             observed_age = stamp-float(track['last_observed_stamp_s'])
-            if (track['state'] == 'observed' and track['confirmed'] and track['hits'] >= settings['min_hits']
-                    and 0 <= observed_age <= settings['max_people_age_s'] and box.shape == (8,)
+            observed = track['state'] == 'observed' and 0 <= observed_age <= settings['max_people_age_s']
+            recent = (allow_recent_predictions and track['state'] == 'predicted'
+                      and track['hits'] >= max(3, settings['min_hits']) and 0 < observed_age <= hold)
+            if ((observed or recent) and track['confirmed'] and track['hits'] >= settings['min_hits']
+                    and box.shape == (8,)
                     and np.isfinite(box).all() and (box[3:6] > 0).all() and box[7] >= settings['min_score']):
+                predicted.append(recent)
                 boxes.append(box)
                 track_ids.append(str(track['track_id']) if 'track_id' in track else None)
         status.update(status='valid', reason=None, selected_tracks=len(boxes),track_ids=track_ids)
+        if allow_recent_predictions:
+            status['predicted_boxes'] = predicted
         return np.asarray(boxes).reshape(-1, 8), status
     return np.empty((0, 8)), status
 

@@ -24,7 +24,7 @@ def verify_rviz_tools(python):
         raise RuntimeError('RViz session panel is missing from the plugin manifest or library. '+help_text)
     code = ('import ctypes,sys; lib=ctypes.CDLL(sys.argv[1]); '
             'marker=lib.social_nav_rviz_session_panel_abi; marker.restype=ctypes.c_int; '
-            'assert marker()==3, "unsupported session panel ABI"')
+            'assert marker()==4, "unsupported session panel ABI"')
     result = subprocess.run([str(python),'-B','-c',code,str(library)],
                             capture_output=True,text=True,timeout=10)
     if result.returncode:

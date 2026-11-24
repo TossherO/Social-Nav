@@ -6,6 +6,7 @@ new obstacle returns; it does not gate access to an already measured prior.
 import copy
 import hashlib
 import numpy as np
+from .obstacle_memory import EXPIRY_LAYER
 
 from .context import fingerprint
 from .geometry import shift_array
@@ -121,6 +122,7 @@ class NavigationSupport:
         times=np.where(cells!=-1,l['last_observed'],np.nan)
         selected=region(m,proof['radius_m'])
         if 'ground_conflict' in l:selected&=~l['ground_conflict']
+        if EXPIRY_LAYER in l:selected&=~l[EXPIRY_LAYER]
         transform=np.asarray(m['association']['map_from_local'])
         floor=prior_floor(snapshot,asset.snapshot,transform,self.reference['map_plane'],selected=selected)
         selected&=np.isfinite(floor)
@@ -172,6 +174,8 @@ def finalize(snapshot):
     metadata['navigation_fusion']['raw_occupancy_sha256']=hashlib.sha256(snapshot.layers['occupancy'].tobytes()).hexdigest()
     if 'ground_conflict' in snapshot.layers:
         metadata['navigation_fusion']['ground_conflict_sha256']=hashlib.sha256(snapshot.layers['ground_conflict'].tobytes()).hexdigest()
+    if EXPIRY_LAYER in snapshot.layers:
+        metadata['navigation_fusion']['obstacle_expiry_sha256']=hashlib.sha256(snapshot.layers[EXPIRY_LAYER].tobytes()).hexdigest()
     return GridSnapshot(metadata,snapshot.layers)
 
 
@@ -184,6 +188,12 @@ def verify(scene, *, now=None, asset=None, check_asset=False):
             p['raw_occupancy_sha256']!=hashlib.sha256(cells.tobytes()).hexdigest()):
         raise ValueError('Navigation support source mismatch')
     nav,source,times=(l[k] for k in NAVIGATION_DTYPES)
+    if EXPIRY_LAYER in l or 'obstacle_expiry_sha256' in p:
+        pending=l.get(EXPIRY_LAYER)
+        if (pending is None or pending.dtype!=bool or pending.shape!=cells.shape or
+                hashlib.sha256(pending.tobytes()).hexdigest()!=p.get('obstacle_expiry_sha256') or
+                np.any(pending&((cells!=-1)|(nav!=-1)))):
+            raise ValueError('Navigation support violates obstacle expiry')
     if 'ground_conflict_sha256' in p:
         conflicts=l.get('ground_conflict')
         if (conflicts is None or conflicts.dtype!=bool or conflicts.shape!=cells.shape or

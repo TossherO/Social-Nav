@@ -4,7 +4,7 @@ from unittest.mock import patch
 import numpy as np
 
 from perception.environment.layers import load_config,LocalEnvironmentMap
-from perception.environment.person_objects import point_owners,observed_objects
+from perception.environment.person_objects import point_owners,observed_objects,static_edge_permission
 from perception.environment.navigation import navigation_geometry
 from perception.environment.scene import assemble_scene,people_observation
 from perception.environment.support import NavigationSupport
@@ -38,6 +38,71 @@ class PersonObjectTests(unittest.TestCase):
         for plane in (None,np.array([0,0,-1.])):
             actual=point_owners(cloud,box,cfg,np.zeros(3),plane)
             np.testing.assert_equal(actual,[0,0,0,-1,-1,-1,-1])
+
+    def test_edge_growth_uses_core_seeds_once_and_respects_collision_height(self):
+        cfg = load_config()
+        box = np.array([[1.5, 1.5, .5, 1.2, 1.2, 1.8, 0., .99]])
+        cloud = np.array([[1.87, 1.5, .4], [1.94, 1.5, .4], [1.99, 1.5, .4],
+                          [2.07, 1.5, .4], [2.195, 1.5, .4], [2.07, 1.5, .04]])
+        allowed = lambda p, z: np.ones(len(p), dtype=bool)
+        actual = point_owners(cloud, box, cfg, np.zeros(3), [0., 0., 0.], edge_allowed=allowed)
+        np.testing.assert_equal(actual, [0, 0, 0, 0, -1, -1])
+
+    def test_static_edge_growth_requires_prior_free_ground_and_protects_nearby_wall(self):
+        prior = prior_asset(np.zeros((60, 60), np.int8)).snapshot
+        xy = np.array([[1.05, 1.05, 0.], [1.55, 1.05, 0.], [2.05, 1.05, 0.],
+                       [2.55, 1.05, 0.], [3.05, 1.05, 0.]])
+        layers = prior.layers
+        layers['occupancy'][10, 14] = 100
+        layers['occupancy'][10, 20] = -1
+        layers['last_observed'][10, 25] = 11.
+        layers['ground_z'][10, 30] = -.5
+        actual = static_edge_permission(prior, np.eye(4), 10., xy, np.full(len(xy), -.85))
+        np.testing.assert_array_equal(actual, [True, False, False, False, False])
+
+    def test_mapper_expands_only_when_bound_to_time_valid_prior(self):
+        cfg = load_config()
+        cfg['compute']['backend'] = 'cpu'
+        mapper = LocalEnvironmentMap(cfg)
+        self.addCleanup(mapper.close)
+        xx, yy = np.meshgrid(np.linspace(-3, 3, 25), np.linspace(-3, 3, 25))
+        floor = np.c_[xx.ravel(), yy.ravel(), np.full(xx.size, -.85)]
+        for step in range(cfg['ground_tracking']['min_observations'], 0, -1):
+            mapper.update(floor, np.eye(4), 10.-step*.1, ('test', 0))
+        body = np.array([[1.87, 1.5, .4], [1.94, 1.5, .4], [1.99, 1.5, .4], [2.07, 1.5, .4]])
+        cloud = np.vstack((body, floor))
+        prior = prior_asset()
+        data = dict(observation_id='p', input_fingerprint='p', session_id='people', generation=0,
+                    frame_id='odom', health='valid', clock_domain='synthetic',
+                    localization_binding=dict(session_id='test', generation=0, frame_id='odom'))
+        for stamp, state, future, expected in [
+                (10., 'observed', False, [0, 0, 0, 0]),
+                (10.2, 'predicted', False, [0, 0, 0, -1]),
+                (10.3, 'predicted', False, [-1, -1, -1, -1]),
+                (10.4, 'observed', True, [0, 0, 0, -1])]:
+            prior.snapshot.layers['last_observed'].fill(stamp+1 if future else 1.)
+            association = observation(stamp=stamp).metadata['association']
+            data['stamp_s'] = stamp
+            data['tracks'] = [dict(track_id='a', box=[1.5, 1.5, .5, 1.2, 1.2, 1.8, 0., .99],
+                                   state=state, confirmed=True, hits=4,
+                                   last_observed_stamp_s=stamp if state == 'observed' else 10.)]
+            raw = mapper.update(cloud, np.eye(4), stamp, ('test', 0), people=data,
+                                association=association, clock_domain='synthetic', static_asset=prior)
+            np.testing.assert_array_equal(mapper.support_observation['person_owner'][:4], expected)
+            if stamp == 10.:
+                self.assertGreater(observed_objects(raw)[0]['radius_m'], .57)
+            elif stamp == 10.2:
+                self.assertTrue(observed_objects(raw)[0]['current_only'])
+            elif stamp == 10.3:
+                self.assertFalse(observed_objects(raw))
+
+    def test_recent_predictions_remain_in_current_collision_grid(self):
+        current = object_scene([track(3, 2, (1, 0))])
+        current.geometry.metadata['person_objects']['objects'][0]['current_only'] = True
+        model = PeopleModel(current, planning_config()['people'])
+        grid, _, report = model.navigation_grid(current)
+        self.assertEqual(report['delegated_tracks'], 0)
+        self.assertEqual(grid.layers['occupancy'][20, 30], 100)
 
     def test_ownership_never_changes_preexisting_unknown_or_ordinary_background(self):
         current=object_scene([track(3,2)])

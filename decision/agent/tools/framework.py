@@ -114,7 +114,7 @@ REGISTRATION_GOAL = parameters({
     'description': dict(TEXT,description='保留子任务原意，包括“区域中央”“靠某侧”等选点要求，供执行阶段结合地图和观察选点。'),
     'target': dict(REGISTRATION_TARGET, description='point 只填 id 或 position，region 只填 id，sequence 只填 checkpoints。reference、route 有标注对象时填 id。独立技能省略 target。'),
     'table_id': GOAL['properties']['table_id'],
-    'conditions': dict(REGISTRATION_CONDITIONS, description='用户明确提出的约束；无约束时省略。'),
+    'conditions': dict(REGISTRATION_CONDITIONS, description='用户明确提出的完成或执行约束，例如朝向、视觉要求或附近停车许可。floor_id 和 execution_notes 若有需要，放在该子任务上，与 conditions 同级。无此类约束时省略 conditions。'),
     'floor_id': GOAL['properties']['floor_id'],
     'to_floor': GOAL['properties']['to_floor'],
     'monitor': GOAL['properties']['monitor'],

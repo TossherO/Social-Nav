@@ -39,13 +39,18 @@ def prepare_single_frame(points, intensity_scale=255.0, zero_intensity=False):
         raise ValueError('Detector requires raw [x,y,z,intensity] points of shape (N,4)')
     if not np.isfinite(intensity_scale) or intensity_scale <= 0:
         raise ValueError('Invalid intensity normalization')
-    points = points[np.all(np.isfinite(points), axis=1)]
-    if not len(points):
+    x, y, z, intensity = points.T
+    finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z) & np.isfinite(intensity)
+    if not finite.any():
         raise ValueError('No finite input points; not a valid empty-scene observation')
     # Exact ego-square removal used by CodaDataset.get_lidar_with_sweeps.
-    points = points[~((np.abs(points[:, 0]) < 1) & (np.abs(points[:, 1]) < 1))]
-    points[:, 3] = 0 if zero_intensity else points[:, 3]/intensity_scale
-    return np.c_[points, np.zeros(len(points), dtype=np.float32)].astype(np.float32)
+    keep = np.flatnonzero(finite & ~((np.abs(x) < 1) & (np.abs(y) < 1)))
+    filtered = np.take(points, keep, axis=0)
+    result = np.empty((len(filtered), 5), dtype=np.float32)
+    result[:, :3] = filtered[:, :3]
+    result[:, 3] = 0 if zero_intensity else filtered[:, 3] / intensity_scale
+    result[:, 4] = 0
+    return result
 
 
 class CausalSweeps:
@@ -97,20 +102,25 @@ class CausalSweeps:
         context['current_pose'] = transform.tolist()
         selected = [past for past in self.history
                     if 0 < frame.stamp_s - past['stamp_s'] <= self.max_time_lag_s]
-        merged = [points]
+        merged = np.empty((len(points) + sum(len(past['points']) for past in selected), 5),
+                          dtype=points.dtype)
+        merged[:len(points)] = points
+        offset = len(points)
         for past in selected:
             relative = np.linalg.solve(transform, past['pose']).astype(np.float32)
-            previous = past['points'].copy()
-            previous[:, :3] = previous[:, :3] @ relative[:3, :3].T + relative[:3, 3]
+            past_points = past['points']
+            previous = merged[offset:offset + len(past_points)]
+            previous[:, :3] = past_points[:, :3] @ relative[:3, :3].T + relative[:3, 3]
+            previous[:, 3] = past_points[:, 3]
             previous[:, 4] = frame.stamp_s - past['stamp_s']
-            merged.append(previous)
+            offset += len(past_points)
             context['history'].append(dict(observation_id=past['observation_id'], stamp_s=past['stamp_s'],
                 input_fingerprint=past['fingerprint'], current_from_history=relative.tolist()))
         context['used_sweeps'] += len(selected)
         context['status'] = 'ready' if len(selected) == self.max_sweeps - 1 else 'partial'
         self.history.append(dict(points=points, pose=transform.copy(), stamp_s=frame.stamp_s,
                                  observation_id=frame.observation_id, fingerprint=context['input_fingerprint']))
-        return np.concatenate(merged), context
+        return merged, context
 
 
 def _load_extensions(extension_root):
@@ -249,3 +259,8 @@ class SimpleDet3dDetector:
         if combined[:,8].any():raise RuntimeError('Unexpected detector class ID')
         result=combined[:,:8]
         return validate_boxes(result)
+
+    def predict_with_fingerprint(self, frame):
+        """Return host detections and the raw scan digest used to prepare them."""
+        boxes = self.predict(frame)
+        return boxes, self.last_input_context['input_fingerprint']

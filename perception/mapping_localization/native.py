@@ -83,19 +83,27 @@ def rs16_preprocess(fields,config,stamp):
     pre=config['preprocess']
     if pre['lidar_type']!=4 or pre['scan_line']!=16 or config['feature_extract_enable']:
         raise ValueError('Native RS16 adapter requires deployed type 4 / 16 beams / no feature extraction')
-    xyz=np.column_stack([fields[k] for k in ('x','y','z')]).astype(np.float32)
-    times=np.asarray(fields['timestamp'],np.float64).copy()
-    if len(times)<2:raise ValueError('Empty RS16 scan')
-    if times[0]>1000:times-=times[0]
-    if not times[-1]>1e-7:raise ValueError('Native RS16 adapter requires measured point timestamps')
-    xy=np.sqrt(xyz[:,0]*xyz[:,0]+xyz[:,1]*xyz[:,1])
+    timestamps=fields['timestamp']
+    if len(timestamps)<2:raise ValueError('Empty RS16 scan')
+    first,last=np.float64(timestamps[0]),np.float64(timestamps[-1])
+    absolute=first>1000
+    if not (last-first if absolute else last)>1e-7:
+        raise ValueError('Native RS16 adapter requires measured point timestamps')
+    # The timestamp convention uses the full scan, but geometry only needs
+    # the original indices selected by the RS16 point filter.
+    sample=slice(None,None,abs(config['point_filter_num']))
+    x,y,z=(np.asarray(fields[k][sample],np.float32) for k in ('x','y','z'))
+    times=np.asarray(timestamps[sample],np.float64)
+    if absolute:times=times-first
+    xy_squared=x*x+y*y
+    xy=np.sqrt(xy_squared)
     with np.errstate(invalid='ignore',divide='ignore'):
-        angle=(np.arctan(xyz[:,2]/xy)*180/np.pi).astype(np.float32)
+        angle=np.arctan(z/xy)*180/np.pi
         ring=np.trunc((angle+15)/2+.5)
     ring[~np.isfinite(ring)]=-1
-    valid=np.isfinite(xyz).all(axis=1)&np.isfinite(times)&(xy>=1e-6)&(ring>=0)&(ring<16)
-    valid&=(np.arange(len(xyz))%config['point_filter_num']==0)&((xyz*xyz).sum(axis=1)>pre['blind']**2)
-    points=np.column_stack([xyz,fields['intensity'],times*1000]).astype(np.float32)[valid]
+    valid=np.isfinite(x)&np.isfinite(y)&np.isfinite(z)&np.isfinite(times)&(xy>=1e-6)&(ring>=0)&(ring<16)
+    valid&=(xy_squared+z*z)>pre['blind']**2
+    points=np.column_stack([x[valid],y[valid],z[valid],fields['intensity'][sample][valid],times[valid]*1000]).astype(np.float32)
     if len(points)<2:raise ValueError('No usable RS16 points')
     duration=float(points[-1,4])/1000
     end=float(stamp) if pre.get('stamp_at_scan_end',True) else float(stamp)+duration

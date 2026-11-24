@@ -95,19 +95,23 @@ def intersection_polygon(subject, clip):
         old, points = points, []
         if not old:
             break
+        edge = b-a
+
         def side(p):
-            delta, edge = p-a, b-a
+            delta = p-a
             return edge[0]*delta[1] - edge[1]*delta[0]
+
         previous = old[-1]
+        before = side(previous)
         for current in old:
-            before, after = side(previous), side(current)
+            after = side(current)
             if (before >= -1e-9) != (after >= -1e-9):
                 denominator = before - after
                 if abs(denominator) > 1e-12:
                     points.append(previous + before/denominator*(current-previous))
             if after >= -1e-9:
                 points.append(current)
-            previous = current
+            previous, before = current, after
     return points
 
 

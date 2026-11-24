@@ -25,6 +25,22 @@ class SupportTests(unittest.TestCase):
         raw=self.raw() if raw is None else raw
         return self.support.apply(raw,self.prior,observation=points(raw,xyz,moving))
 
+    def test_expired_obstacle_cannot_inherit_static_free_or_old_hit(self):
+        from perception.environment.obstacle_memory import EXPIRY_LAYER
+        from perception.environment.free_memory import ConfirmedFreeMemory
+
+        raw=self.raw()
+        self.apply(raw,[[2.05,2.05,-.3]],[0])
+        raw=self.raw(10.2)
+        mask=np.zeros(raw.layers['occupancy'].shape,bool)
+        mask[20,20]=True
+        raw.layers[EXPIRY_LAYER]=mask
+        result=ConfirmedFreeMemory().update(self.apply(raw),self.prior)
+        current=scene(result)
+        nav=navigation_geometry(current,asset=self.prior,check_asset=True,include_confirmed_free=True)
+        self.assertEqual(nav.layers['occupancy'][20,20],-1)
+        self.assertEqual(nav.layers['occupancy'][20,21],0)
+
     def test_actual_weak_rays_are_free_but_missing_height_is_unknown(self):
         floor=np.full((1,1),-.87);config=self.config
         z=(np.arange(-8,9)+.5)*.1
@@ -164,6 +180,7 @@ class SupportCudaTests(unittest.TestCase):
         import torch
         from scipy.spatial.transform import Rotation
         from perception.environment.device import DeviceGridSnapshot
+        from perception.environment.obstacle_memory import EXPIRY_LAYER
         if not torch.cuda.is_available():self.skipTest('CUDA unavailable')
         config=load_config();prior=prior_asset();prior.snapshot.layers['occupancy'][10:12,20:23]=100
         prior.snapshot.layers['occupancy'][25:27,30:33]=-1
@@ -176,6 +193,8 @@ class SupportCudaTests(unittest.TestCase):
                 raw.metadata['association']['map_from_local']=transform.tolist()
                 raw.layers['ground_conflict']=np.zeros(raw.layers['occupancy'].shape,bool)
                 raw.layers['ground_conflict'][20:23,20:25]=True
+                raw.layers[EXPIRY_LAYER]=np.zeros(raw.layers['occupancy'].shape,bool)
+                raw.layers[EXPIRY_LAYER][22,26]=True
                 xyz=[[2.05,2.05,-.3]] if j<2 else []
                 obs=points(raw,xyz,[j] if xyz else [])
                 expected=host.apply(raw,prior,observation=obs)
@@ -185,4 +204,5 @@ class SupportCudaTests(unittest.TestCase):
                 actual=finalize(result.materialize(consumer='support_test'))
                 for name in ('navigation_occupancy','navigation_source','navigation_source_stamp'):
                     np.testing.assert_equal(actual.layers[name],expected.layers[name],err_msg=name)
+                self.assertEqual(actual.layers['navigation_occupancy'][22,26],-1)
                 navigation_geometry(scene(actual),asset=prior,check_asset=True,now=raw.metadata['stamp_s'])

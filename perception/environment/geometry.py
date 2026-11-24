@@ -1,7 +1,10 @@
-"""Observed ground support; no missing region is filled with a presumed floor."""
+"""Ground support, voxel geometry and intersections between planar grids."""
 from functools import lru_cache
 import numpy as np
 import cv2
+
+
+MAX_OVERLAP_CELLS = 81
 
 
 def voxel_height_band(ground, resolution, minimum, maximum):
@@ -21,15 +24,20 @@ def voxel_height_band(ground, resolution, minimum, maximum):
     return low, count
 
 
-def nearest_support(mask):
-    """Return an actual observed seed; verify its exact Euclidean support distance."""
+def nearest_support(mask, *, cells=None):
+    """Return observed seeds and Euclidean distances for the grid or requested (y, x) cells."""
     _, labels = cv2.distanceTransformWithLabels((~mask).astype(np.uint8),cv2.DIST_L2,5,
                                                labelType=cv2.DIST_LABEL_PIXEL)
     seeds = np.argwhere(mask)
+    if cells is None:
+        yy,xx = np.indices(mask.shape)
+    else:
+        yy,xx = cells
+        labels = labels[yy,xx]
     nearest = seeds[labels-1]
-    yy,xx = np.indices(mask.shape)
-    distance = np.hypot(yy-nearest[:,:,0],xx-nearest[:,:,1])
-    return distance,(nearest[:,:,0],nearest[:,:,1])
+    nearest_y,nearest_x = nearest[...,0],nearest[...,1]
+    distance = np.hypot(yy-nearest_y,xx-nearest_x)
+    return distance,(nearest_y,nearest_x)
 
 
 def distance_to_zero(mask):
@@ -131,3 +139,47 @@ def shift_array(values, dx, dy, fill):
     if x1 > x0 and y1 > y0:
         result[y0:y1,x0:x1] = values[y0-dy:y1-dy,x0-dx:x1-dx]
     return result
+
+
+def square_overlaps(points, rotation, target_resolution, local, *, include_contacts):
+    """Yield target rows and local cells for each candidate offset in the separating-axis test.
+
+    Prior revisions distinguish touching from positive-area hits. Navigation
+    overlays count positive-area overlap only. Outside rows cannot prove free space.
+    """
+    if not len(points):
+        return
+    res = local.metadata['resolution']
+    ox, oy = local.metadata['origin_xy']
+    height, width = local.layers['occupancy'].shape
+    target_half, local_half = target_resolution/2, res/2
+    ex, ey = target_half*np.abs(rotation).sum(axis=0)
+    tx, ty = target_half + local_half*np.abs(rotation).sum(axis=1)
+    px, py = points.T
+    pad = 1e-9 if include_contacts else -1e-9
+    x0 = np.floor((px-ex-ox)/res-pad).astype(np.intp)
+    y0 = np.floor((py-ey-oy)/res-pad).astype(np.intp)
+    x1 = np.floor((px+ex-ox)/res+pad).astype(np.intp)
+    y1 = np.floor((py+ey-oy)/res+pad).astype(np.intp)
+    nx, ny = int((x1-x0).max())+1, int((y1-y0).max())+1
+    if nx*ny > MAX_OVERLAP_CELLS:
+        raise ValueError('Grid cell scale ratio exceeds the overlap budget')
+    for j in range(ny):
+        y = y0+j
+        dy = (y+.5)*res+oy-py
+        in_y = (y>=0)&(y<height)
+        for i in range(nx):
+            x = x0+i
+            dx = (x+.5)*res+ox-px
+            u = np.abs(dx*rotation[0,0]+dy*rotation[0,1])
+            v = np.abs(dx*rotation[1,0]+dy*rotation[1,1])
+            if include_contacts:
+                gap = np.minimum(np.minimum(ex+local_half-np.abs(dx), ey+local_half-np.abs(dy)),
+                                 np.minimum(tx-u, ty-v))
+                overlap = gap >= -1e-9
+            else:
+                overlap = ((np.abs(dx)<ex+local_half-1e-10) & (np.abs(dy)<ey+local_half-1e-10)
+                           & (u<tx-1e-10) & (v<ty-1e-10))
+            inside = in_y&(x>=0)&(x<width)
+            rows = np.flatnonzero(overlap&inside)
+            yield rows, y[rows], x[rows], overlap&~inside, (gap[rows]>1e-9 if include_contacts else None)

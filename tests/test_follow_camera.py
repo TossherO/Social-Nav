@@ -7,7 +7,7 @@ import numpy as np
 
 from runtime.follow_camera import CameraPairClient, CameraPairServer, FollowCameraHistory
 from runtime.decision import DecisionBuffer
-from tests.test_decision_runtime import observation
+from tests.decision_fixtures import observation
 
 
 def msg(stamp, **values):

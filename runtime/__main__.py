@@ -256,7 +256,6 @@ def _run(args, resources, handles):
         camera_record=camera_calibration(args.camera_calibration)
     support_enabled=env_config.get('navigation_support',{}).get('enabled',False)
     factory=lambda resolution:OccupancyTree(resolution,library=ROOT/settings['environment_library'],backend='cuda',device=0)
-    environment = resources['environment'] = LocalEnvironmentMap(env_config,tree_factory=factory)
     from perception.environment.scans import AsyncScanJournal
     record_scans=mode=='mapping' if args.record_scans is None else args.record_scans
     journal = resources['journal'] = AsyncScanJournal(output/'environment/scans.sqlite',env_config['scan_recording'],dict(config=env_config,
@@ -276,6 +275,8 @@ def _run(args, resources, handles):
     if args.vehicle_profile:
         from navigation.control.vehicle import load_vehicle_profile
         geometry,motion,_=load_vehicle_profile(args.vehicle_profile,motion,require_execution=args.execute)
+    environment = resources['environment'] = LocalEnvironmentMap(
+        env_config,tree_factory=factory,lidar_from_base_xyz=geometry.lidar_from_base[:3,3])
     planning['motion_constraints']={k:motion[k] for k in ('min_turning_radius_m','allow_reverse','allow_in_place_rotation')}
     planning['pose_search']['native_library']=str(ROOT/'outputs/runtime/build/planning/libsocial_nav_pose_search.so')
     motion.update(collision_backend='cuda',collision_library=str(ROOT/settings['collision_library']))
@@ -312,6 +313,9 @@ def _run(args, resources, handles):
             reference_max_age_s=reference.settings['max_age_s'],
             trajectory_max_age_s=controller.controller.safety_settings['max_input_age_s'],metrics=metrics,
             clock_rate=args.rate,publish_static=not args.interactive_session)
+        # Live search snapshots also supply the displayed path heights and the
+        # session panel's query identity. Frozen previews keep their own snapshot.
+        reference.display_subscribed=lambda:display.subscribed('reference_search_map','navigation','basemap_source')
     state_parent, state_input = _socket_pair(handles)
     safety = resources['safety'] = SafetyProcess(state_parent,planning,motion,geometry,clock_domain=clock_domain,asset=asset,
         slots=settings['shared_safety_slots'],slot_bytes=settings['shared_safety_slot_bytes'],settings=shadow,
@@ -399,7 +403,8 @@ def _run(args, resources, handles):
         with torch.cuda.stream(map_stream):
             with metrics.span('environment_device'):
                 try:
-                    grid=environment.update(job['points'],job['pose'],job['stamp'],job['identity'],**job['options'],device=device,metrics=metrics)
+                    grid=environment.update(job['points'],job['pose'],job['stamp'],job['identity'],**job['options'],
+                                            device=device,metrics=metrics,static_asset=asset)
                 except VoxelBudgetExceeded:
                     # An explicitly requested scan archive must remain complete.
                     if journal is not None:raise
@@ -413,7 +418,7 @@ def _run(args, resources, handles):
                     grid=navigation_support.apply(grid,asset,observation=environment.support_observation,metrics=metrics)
             metrics.trace('map_device_done',measurement_stamp_s=job['stamp'])
             with metrics.span('safety_capsule_materialize'):
-                fields=CAPSULE_FIELDS if support_enabled else ('occupancy','person_background_free')
+                fields=CAPSULE_FIELDS if support_enabled else ('occupancy','person_background_free','obstacle_expiry_unknown')
                 reference_fields=('last_observed','near_field_free') if asset is not None else ()
                 if free_memory is not None or args.agent_seating and not args.execute:
                     reference_fields+=('coverage','ground_support')
@@ -425,6 +430,10 @@ def _run(args, resources, handles):
                     grid=DeviceGridSnapshot.seal(capsule.metadata,grid.consume())
                 if free_memory is not None:
                     capsule=free_memory.update(capsule,asset)
+                current_hits = environment.support_observation.get('current_obstacle_hits')
+                if current_hits is not None:
+                    from perception.environment.layers import GridSnapshot
+                    capsule = GridSnapshot(capsule.metadata, dict(capsule.layers, current_obstacle_hits=current_hits))
                 current=assemble_scene(capsule,clock_domain=clock_domain,people=job['options']['people'],
                                        stamp_ns=job['stamp_ns'],settings=env_config['scene'])
             metrics.trace('map_ready',measurement_stamp_s=job['stamp'],scene_binding=current.record['input_fingerprint'])
@@ -447,7 +456,7 @@ def _run(args, resources, handles):
         safety.scene(current)
         metrics.trace('map_safety_sent',measurement_stamp_s=current.record['as_of'],scene_binding=current.record['input_fingerprint'])
         control_loop.offer(current,grid);counts['maps']+=1
-        if display is not None:display.environment(grid)
+        if display is not None:display.environment(grid,host=current.geometry)
     previous_interrupt=None;stop_requested=False
     try:
         with tempfile.TemporaryDirectory(prefix='social-nav-runtime-') as tmp:
@@ -546,8 +555,9 @@ def _run(args, resources, handles):
                         latest=map_worker.latest()
                         scene,last_device=(None,None) if latest is None else latest
                     if pose is None:
+                        # The scan inbox already invalidated asynchronous map work
+                        # before making this failed localization observable here.
                         if map_worker is None:reset_map();control_loop.offer(None,None)
-                        else:map_worker.invalidate()
                         scene=None;last_device=None
                     elif (scan_inbox is None or scan_inbox.current(packet)) and 'deskewed' in arrays and stamp>=next_env-1e-6:
                         job=dict(points=arrays['deskewed'][:,:3],pose=pose,stamp=stamp,stamp_ns=row['stamp_ns'],identity=(row['session_id'],row['generation']),
@@ -671,7 +681,7 @@ def _run(args, resources, handles):
             physical_acceptance=False,task_completed=False)
         manifest['t2_follow']=dict(enabled=follow_decision is not None,
                                    backend=None if follow_decision is None else follow_decision.backend)
-        if route_replay is not None:manifest['route_replay']=route_replay.summary()
+        if route_replay is not None:manifest['route_replay']=report['route_replay']
         if decision_report is not None:manifest['decision_inputs']=dict(directory='decision_inputs',**decision_report)
         if mode in ('mapping','localization'):
             from perception.mapping_localization.results import map_fingerprint

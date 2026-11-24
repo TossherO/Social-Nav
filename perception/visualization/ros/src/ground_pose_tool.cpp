@@ -233,6 +233,12 @@ class SessionPanel : public rviz::Panel {
     connect(navigation_button_,&QPushButton::clicked,this,[this]() {selectBasemap(MapView::Navigation);});
     connect(search_button_,&QPushButton::clicked,this,[this]() {selectBasemap(MapView::Search);});
 
+    map_legend_=new QLabel(this);
+    map_legend_->setTextFormat(Qt::RichText);
+    map_legend_->setWordWrap(true);
+    map_legend_->hide();
+    layout->addWidget(map_legend_);
+
     auto* status_scroll=new QScrollArea(this);
     status_scroll->setFrameShape(QFrame::NoFrame);
     status_scroll->setWidgetResizable(true);
@@ -410,6 +416,29 @@ class SessionPanel : public rviz::Panel {
     if (auto* display=findDisplay("Navigation window")) display->setEnabled(view==MapView::Navigation);
     if (auto* display=findDisplay("Reference search snapshot")) display->setEnabled(view==MapView::Search);
   }
+  void updateMapLegend(bool show_static,bool show_navigation,bool show_window,bool show_search) {
+    // Swatches match the RViz point cloud palettes in visualization/surface.py.
+    const auto swatch=[](const char* color,const char* label) {
+      return QString::fromLatin1("<span style=\"color:%1\">&#9632;</span>&nbsp;%2")
+          .arg(QString::fromLatin1(color),QString::fromUtf8(label));
+    };
+    QStringList entries;
+    if (show_search) {
+      entries << swatch("#9EA9B4","搜索空闲") << swatch("#CF5D53","搜索占据") << swatch("#CB974A","条件代价");
+    } else {
+      if (show_static) {
+        entries << swatch("#9EA9B4","静态空闲") << swatch("#CF5D53","静态占据")
+                << swatch("#707885","静态未知") << swatch("#72A0B7","估计地面");
+      }
+      if (show_navigation) {
+        entries << swatch("#72C8C3","局部空闲") << swatch("#F47B63","局部占据");
+      }
+      if (show_window) entries << swatch("#59FFDB","局部范围");
+    }
+    const auto legend=entries.join(" &nbsp; ");
+    if (map_legend_->text()!=legend) map_legend_->setText(legend);
+    map_legend_->setVisible(!entries.isEmpty());
+  }
   void updateBasemapControls() {
     auto* static_map=findDisplay("Static map");
     auto* navigation=findDisplay("Navigation basemap");
@@ -439,6 +468,8 @@ class SessionPanel : public rviz::Panel {
     search_button_->setEnabled(search && search_available);
     const bool show_search=search && search->isEnabled();
     const bool show_navigation=(navigation && navigation->isEnabled()) || (window && window->isEnabled());
+    updateMapLegend(static_map && static_map->isEnabled(),navigation && navigation->isEnabled(),
+                    window && window->isEnabled(),show_search);
     map_buttons_->setExclusive(false);
     search_button_->setChecked(show_search);
     navigation_button_->setChecked(!show_search && show_navigation);
@@ -470,7 +501,7 @@ class SessionPanel : public rviz::Panel {
   QList<QShortcut*> adjustment_shortcuts_;
   QButtonGroup* map_buttons_;
   QPushButton *static_button_,*navigation_button_,*search_button_;
-  QLabel *status_,*playback_,*shadow_,*chassis_,*map_source_;
+  QLabel *status_,*playback_,*shadow_,*chassis_,*map_source_,*map_legend_;
   QString pending_request_;
   bool connected_=false;
   bool manager_ready_=false;
@@ -484,4 +515,4 @@ PLUGINLIB_EXPORT_CLASS(social_nav_rviz::ConfirmInitialPoseTool,rviz::Tool)
 PLUGINLIB_EXPORT_CLASS(social_nav_rviz::SessionPanel,rviz::Panel)
 
 // Startup checks use this symbol to detect stale RViz plugins.
-extern "C" int social_nav_rviz_session_panel_abi() { return 3; }
+extern "C" int social_nav_rviz_session_panel_abi() { return 4; }

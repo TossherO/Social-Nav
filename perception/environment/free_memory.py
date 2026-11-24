@@ -2,6 +2,7 @@
 import numpy as np
 
 from .layers import GridSnapshot
+from .obstacle_memory import EXPIRY_LAYER
 
 
 LAYER = 'confirmed_free_stamp'
@@ -71,6 +72,8 @@ class ConfirmedFreeMemory:
         conflicts = layers.get('ground_conflict')
         if conflicts is not None:
             hit_time[conflicts] = stamp
+        if EXPIRY_LAYER in layers:
+            hit_time[layers[EXPIRY_LAYER]] = stamp
         occupied = np.isfinite(hit_time)
         free = np.zeros((h,w),bool)
         if proof:

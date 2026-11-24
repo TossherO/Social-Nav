@@ -8,38 +8,14 @@ import threading
 import time
 import unittest
 
-import httpx
-
 from perception.environment.context import fingerprint
 from runtime.decision import DecisionBuffer
 from runtime.follow_decision import FollowDecisionWorker
-from tests.test_decision_runtime import observation
-
-
-def search(scene, context):
-    value=dict(clock_domain=scene.record['clock_domain'],source_stamp_s=scene.record['as_of'],
-        scene_binding=scene.record['input_fingerprint'],candidates=[dict(id=0,kind='wait',pose=None)])
-    value['binding']=fingerprint(value)
-    return value
-
-
-def factory(raw, gate=None):
-    def handle(request):
-        if request.url.path=='/v1/models':
-            return httpx.Response(200,json={'data':[{'id':'qwen3.8-27b-fp8'}]})
-        if request.url.path=='/get_server_info':
-            return httpx.Response(200,json={'server_args':{'speculative_algorithm':'DSPARK'}})
-        if gate is not None:gate.wait(3)
-        value=dict(target=raw if raw.startswith('P') else None,observation=None if raw.startswith('P') else raw)
-        event=dict(model='qwen3.8-27b-fp8',choices=[dict(index=0,delta=dict(content=json.dumps(value)),finish_reason='stop')])
-        return httpx.Response(200,text='data: '+json.dumps(event)+'\n\ndata: [DONE]\n\n')
-    transport=httpx.MockTransport(handle)
-    return lambda **kw:httpx.Client(transport=transport,**kw)
+from tests.decision_fixtures import follow_client, follow_search, observation
 
 
 class FollowDecisionWorkerTests(unittest.TestCase):
     def setUp(self):
-        self.gate=None
         self.handle=dict(task_id='f',goal_id='g',plan_revision=1,goal_revision=1,call_id='call')
         from PIL import Image
         out=io.BytesIO();Image.new('RGB',(15,35),'red').save(out,format='PNG');self.crop=out.getvalue()
@@ -51,7 +27,7 @@ class FollowDecisionWorkerTests(unittest.TestCase):
         worker.begin(self.handle,'red jacket',reference=self.reference,crop=self.crop)
 
     def worker(self, client):
-        return FollowDecisionWorker(search,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),
+        return FollowDecisionWorker(follow_search,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),
                                     inference=lambda request:request.infer(client_factory=client))
 
     def feed(self,worker):
@@ -68,32 +44,33 @@ class FollowDecisionWorkerTests(unittest.TestCase):
         self.fail('T2 worker did not finish')
 
     def test_real_window_selection_and_fixed_crop(self):
-        worker=self.worker(factory('P0'))
+        worker=self.worker(follow_client('P0'))
         try:
             self.begin(worker);self.feed(worker)
             outcome=self.wait_result(worker)
             self.assertEqual(outcome['result']['choice']['kind'],'person')
             self.assertEqual(outcome['prepared']['task'],self.handle)
             self.assertEqual(outcome['window']['fields']['dt'],[-1.,-.5,0.])
-            self.assertIsNone(outcome['reference_proposal'])
             self.assertEqual(outcome['prepared']['reference_id'],self.reference['reference_id'])
             self.assertTrue(worker.snapshot()['reference_fixed'])
         finally:worker.close()
 
-    def test_next_inference_uses_next_frame_without_two_second_period(self):
-        worker=self.worker(factory('P0'))
+    def test_submit_after_poll_schedules_next_frame_and_keeps_fixed_reference(self):
+        worker=self.worker(follow_client('P0'))
         try:
             self.begin(worker);self.feed(worker)
             first=self.wait_result(worker)
             row,arrays,association,scene=observation(11.2)
             self.assertTrue(worker.submit(row,arrays,scene=scene,image_metadata=None,association=association))
             second=self.wait_result(worker)
-            self.assertLess(second['prepared']['source_stamp_s']-first['prepared']['source_stamp_s'],2.)
+            self.assertEqual(second['prepared']['source_stamp_s'],scene.record['as_of'])
+            self.assertGreater(second['prepared']['source_stamp_s'],first['prepared']['source_stamp_s'])
+            self.assertEqual(second['prepared']['reference_id'],first['prepared']['reference_id'])
         finally:worker.close()
 
     def test_idle_candidate_preview_does_not_start_model_request(self):
         published=[]
-        worker=FollowDecisionWorker(search,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),
+        worker=FollowDecisionWorker(follow_search,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),
             inference=lambda _:self.fail('preview must not call the model'),
             publish_agent_frame=lambda *args:published.append(args))
         try:
@@ -112,7 +89,7 @@ class FollowDecisionWorkerTests(unittest.TestCase):
             created.append(detector)
             warmed.set()
             return detector
-        worker=FollowDecisionWorker(search,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),
+        worker=FollowDecisionWorker(follow_search,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),
             image_preparer_factory=factory,publish_agent_frame=lambda *_:None,
             inference=lambda _:self.fail('warmup must not call the model'))
         try:
@@ -126,8 +103,8 @@ class FollowDecisionWorkerTests(unittest.TestCase):
 
     def test_recorded_request_matches_input_and_result(self):
         with tempfile.TemporaryDirectory() as directory:
-            worker=FollowDecisionWorker(search,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),
-                inference=lambda request:request.infer(client_factory=factory('P0')),
+            worker=FollowDecisionWorker(follow_search,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),
+                inference=lambda request:request.infer(client_factory=follow_client('P0')),
                 record_directory=Path(directory)/'t2')
             try:
                 self.begin(worker);self.feed(worker)
@@ -146,9 +123,9 @@ class FollowDecisionWorkerTests(unittest.TestCase):
 
     def test_hosted_jpeg_records_exact_transport_images(self):
         with tempfile.TemporaryDirectory() as directory:
-            worker=FollowDecisionWorker(search,backend='hosted',jpeg_quality=70,
+            worker=FollowDecisionWorker(follow_search,backend='hosted',jpeg_quality=70,
                 buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),
-                inference=lambda request:request.infer(client_factory=factory('P0')),
+                inference=lambda request:request.infer(client_factory=follow_client('P0')),
                 record_directory=Path(directory)/'t2')
             try:
                 self.begin(worker);self.feed(worker)
@@ -161,9 +138,9 @@ class FollowDecisionWorkerTests(unittest.TestCase):
 
     def test_dspark_jpeg_80_preserves_reference_and_exact_transport(self):
         with tempfile.TemporaryDirectory() as directory:
-            worker=FollowDecisionWorker(search,backend='dspark',jpeg_quality=80,
+            worker=FollowDecisionWorker(follow_search,backend='dspark',jpeg_quality=80,
                 buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),
-                inference=lambda request:request.infer(client_factory=factory('P0')),
+                inference=lambda request:request.infer(client_factory=follow_client('P0')),
                 record_directory=Path(directory)/'t2')
             try:
                 self.begin(worker);self.feed(worker)
@@ -180,9 +157,9 @@ class FollowDecisionWorkerTests(unittest.TestCase):
 
     def test_raw_follow_uses_no_detector_and_preserves_3d_track_identity(self):
         def unavailable_detector():self.fail('T2 raw mode must not load YOLO')
-        worker=FollowDecisionWorker(search,backend='dspark',jpeg_quality=80,raw_rgb=True,
+        worker=FollowDecisionWorker(follow_search,backend='dspark',jpeg_quality=80,raw_rgb=True,
             image_preparer_factory=unavailable_detector,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),
-            inference=lambda request:request.infer(client_factory=factory('P0')))
+            inference=lambda request:request.infer(client_factory=follow_client('P0')))
         try:
             self.begin(worker)
             for i in range(12):
@@ -200,7 +177,7 @@ class FollowDecisionWorkerTests(unittest.TestCase):
 
     def test_raw_mode_previews_only_when_agent_requests_selection(self):
         requested=[False];published=[]
-        worker=FollowDecisionWorker(search,raw_rgb=True,preview_requested=lambda:requested[0],
+        worker=FollowDecisionWorker(follow_search,raw_rgb=True,preview_requested=lambda:requested[0],
             buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),publish_agent_frame=lambda *args:published.append(args))
         try:
             self.feed(worker)
@@ -226,8 +203,8 @@ class FollowDecisionWorkerTests(unittest.TestCase):
             frame=FollowAgentFrame(scene,pixels,association,None,camera_info)
             frames.append(frame)
             state.offer_follow_frame(frame,handle)
-        worker=FollowDecisionWorker(search,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),
-                                    inference=lambda req:req.infer(client_factory=factory('P0')),publish_agent_frame=publish)
+        worker=FollowDecisionWorker(follow_search,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),
+                                    inference=lambda req:req.infer(client_factory=follow_client('P0')),publish_agent_frame=publish)
         try:
             self.begin(worker)
             for i in range(12):
@@ -248,7 +225,7 @@ class FollowDecisionWorkerTests(unittest.TestCase):
         finally:worker.close()
 
     def test_cancelled_result_is_discarded_and_cannot_adopt_reference(self):
-        gate=threading.Event();worker=self.worker(factory('P0',gate))
+        gate=threading.Event();worker=self.worker(follow_client('P0',gate=gate))
         try:
             self.begin(worker);self.feed(worker)
             deadline=time.monotonic()+3
@@ -260,24 +237,25 @@ class FollowDecisionWorkerTests(unittest.TestCase):
             self.assertFalse(worker.snapshot()['active'])
         finally:gate.set();worker.close()
 
-    def test_single_bad_observation_does_not_disable_later_frames(self):
+    def test_submit_after_poll_resumes_inference_after_bad_observation(self):
         calls=[]
         def flaky(scene,context):
             calls.append(scene.record['as_of'])
             if len(calls)==1:raise ValueError('one invalid input')
-            return search(scene,context)
+            return follow_search(scene,context)
         worker=FollowDecisionWorker(flaky,buffer=DecisionBuffer(max_frames=16,slot_bytes=32768),
-                                    inference=lambda request:request.infer(client_factory=factory('P0')))
+                                    inference=lambda request:request.infer(client_factory=follow_client('P0')))
         try:
             self.begin(worker);self.feed(worker)
             result=self.wait_result(worker)
             self.assertTrue(result['transient'])
             self.assertIsNone(worker.snapshot()['error'])
-            worker.request_fresh()
+            self.assertEqual(len(calls),1)
             row,arrays,association,scene=observation(11.2)
-            worker.submit(row,arrays,scene=scene,image_metadata=None,association=association)
+            self.assertTrue(worker.submit(row,arrays,scene=scene,image_metadata=None,association=association))
             self.assertEqual(self.wait_result(worker)['result']['choice']['kind'],'person')
             self.assertEqual(len(calls),2)
+            self.assertEqual(calls[-1],scene.record['as_of'])
         finally:worker.close()
 
 

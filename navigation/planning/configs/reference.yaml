@@ -17,3 +17,9 @@ max_age_s: 5.0
 startup_timeout_s: 12.0
 # 终点直线接近段的长度，单位为米。
 terminal_straight_m: 1.5
+# 行人附近的同一格进入保留障碍前所需的独立扫描命中次数。
+person_obstacle_confirm_scans: 2
+# 上述命中须落在同一时间窗口内，单位为秒。
+person_obstacle_confirm_window_s: 0.5
+# 行人覆盖范围外扩后的可疑命中筛查距离，单位为米。
+person_obstacle_margin_m: 0.20

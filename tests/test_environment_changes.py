@@ -141,6 +141,35 @@ class ChangeTests(unittest.TestCase):
                 self.assertEqual(result.layers['occupancy'][34, 30], 0)
                 self.assertEqual(result.layers['revised_free_stamp'][34, 30], 10.)
 
+    def test_candidate_filter_preserves_full_projection_ledger_across_windows(self):
+        yy,xx=np.indices((31,43))
+        prior=evidence(np.choose((xx+yy)%3,[-1,0,100]).astype(np.int8))
+        full,filtered=PriorRevisions(),PriorRevisions()
+        for i,angle in enumerate((0.,.43,-.2,0.)):
+            cells=np.zeros(prior.layers['occupancy'].shape,np.int8)
+            cells[:,12:15]=-1
+            cells[7+i:10+i,15:18]=100
+            local=evidence(cells,10.+i)
+            local.metadata['origin_xy']=[.15*i,-.05*i]
+            transform=np.eye(4)
+            c,s=np.cos(angle),np.sin(angle)
+            transform[:2,:2]=[[c,-s],[s,c]]
+            association=dict(self.association,map_from_local=transform.tolist())
+            ledger=np.where(cells==0,10.+i,-np.inf) if i in (1,2) else None
+            for state,overlay in ((full,True),(filtered,False)):
+                state.apply(prior,local,association,scene_binding='frame',overlay_current=overlay,
+                            confirmed_free=ledger)
+            np.testing.assert_array_equal(full.stamps,filtered.stamps)
+            np.testing.assert_array_equal(full.cleared,filtered.cleared)
+            self.assertTrue(full.cleared.any())
+
+    def test_projection_budget_applies_even_without_eligible_prior_cells(self):
+        prior=evidence(np.zeros((12,12),np.int8))
+        prior.metadata['resolution']=1.
+        local=evidence(np.zeros((30,30),np.int8))
+        with self.assertRaisesRegex(ValueError,'overlap budget'):
+            PriorRevisions().apply(prior,local,self.association,scene_binding='budget',overlay_current=False)
+
     def test_ordinary_obstacle_expires_but_free_rays_remain_and_observed_wall_refreshes(self):
         engine=OccupancyTree(.1);self.addCleanup(engine.close)
         bounds=[-3,-3,-3,3,3,3]; cloud=np.array([[1.05,.05,.55]],np.float32)

@@ -28,7 +28,8 @@ class OfflineGroundTests(unittest.TestCase):
         def geometry(record,data,_timeline):
             pose=dict(session_id='s',generation=0,segment=1)
             return record['stamp_ns']/1e9,pose,None,np.eye(4),data['cloud'],None
-        with patch('perception.environment.offline_ground.read_scans',return_value=iter(records)), \
+        with patch('perception.environment.offline_ground.sampled_scan_stamps',return_value=(3,[r[0]['stamp_ns'] for r in records])), \
+             patch('perception.environment.offline_ground.read_scans',return_value=iter(records)), \
              patch('perception.environment.offline_ground._scan_geometry',side_effect=geometry), \
              patch('perception.environment.offline_ground.GroundTracker',SyntheticTracker):
             result=scan_ground(grid,'unused',None,config,{'source':'synthetic'})
@@ -50,7 +51,8 @@ class OfflineGroundTests(unittest.TestCase):
         grid=GridSnapshot(dict(shape=[1,1],origin_xy=[0.,0.],resolution=.1,snapshot_id='old',map_id='map'),
             dict(occupancy=np.array([[0]],np.int8),ground_z=np.array([[0.]],np.float32),
                  ground_support=np.array([[True]])))
-        with patch('perception.environment.offline_ground.read_scans',return_value=iter([])):
+        with patch('perception.environment.offline_ground.sampled_scan_stamps',return_value=(0,[])), \
+             patch('perception.environment.offline_ground.read_scans',return_value=iter([])):
             with self.assertRaisesRegex(ValueError,'No tracked scan ground'):
                 scan_ground(grid,'unused',None,config,{'source':'synthetic'})
 
@@ -63,7 +65,8 @@ class OfflineGroundTests(unittest.TestCase):
         records=[(dict(stamp_ns=int((1+i*.25)*1e9)),dict(cloud=value)) for i,value in enumerate(observations)]
         def geometry(record,data,_timeline):
             return record['stamp_ns']/1e9,dict(session_id='s',generation=0,segment=1),None,np.eye(4),data['cloud'],None
-        with patch('perception.environment.offline_ground.read_scans',return_value=iter(records)), \
+        with patch('perception.environment.offline_ground.sampled_scan_stamps',return_value=(3,[r[0]['stamp_ns'] for r in records])), \
+             patch('perception.environment.offline_ground.read_scans',return_value=iter(records)), \
              patch('perception.environment.offline_ground._scan_geometry',side_effect=geometry), \
              patch('perception.environment.offline_ground.GroundTracker',SyntheticTracker):
             result=scan_ground(grid,'unused',None,config,{'source':'synthetic'})

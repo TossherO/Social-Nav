@@ -10,10 +10,11 @@ import cv2
 
 from perception.detection_tracking.inference.geometry import validate_transform
 from .geometry import shift_array, nearest_support, distance_to_zero, voxel_height_band
-from .occupancy import OccupancyTree
+from .occupancy import UNCONFIRMED_HIT, OccupancyTree
 from .dynamic import people_boxes, person_points
 from .ground import GroundTracker
 from .near_field import NearFieldFreeMemory
+from .obstacle_memory import OBSTACLE_TIMING_DEFAULTS, ObstacleMemory, apply_obstacle_memory
 
 
 STATIC_FILTER_MODES = ('geometric', 'none')
@@ -41,6 +42,10 @@ def load_config(path=None):
     values.setdefault('obstacle_ttl_s', values['voxel_ttl_s'])
     if not np.isfinite(values['obstacle_ttl_s']) or not 0 < values['obstacle_ttl_s'] <= values['voxel_ttl_s']:
         raise ValueError('Obstacle lifetime must be positive and no longer than evidence retention')
+    for name,default in OBSTACLE_TIMING_DEFAULTS.items():
+        value=values.setdefault(name,default)
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(name+' must be positive')
     compute = values.setdefault('compute',{})
     compute.setdefault('backend','cuda')
     compute.setdefault('device',0)
@@ -76,12 +81,18 @@ def load_config(path=None):
     dynamic = values.get('dynamic')
     if dynamic is not None:
         dynamic.setdefault('object_radius_limit_m',.55)
+        dynamic.setdefault('edge_growth_m',0.)
+        dynamic.setdefault('prediction_mask_hold_s',0.)
         for name in ('max_people_age_s', 'wait_s', 'padding_m', 'max_radius_m', 'seed_distance_m',
                      'static_observation_interval_s','object_radius_limit_m'):
             if not np.isfinite(dynamic[name]) or dynamic[name] <= 0:
                 raise ValueError('Dynamic-filter sizes and time budgets must be positive')
         if dynamic['object_radius_limit_m']>.98:
             raise ValueError('Person ownership radius plus padding must fit the 1 m object budget')
+        if not np.isfinite(dynamic['edge_growth_m']) or not 0 <= dynamic['edge_growth_m'] <= .25:
+            raise ValueError('Person edge growth must be between 0 and 0.25 m')
+        if not np.isfinite(dynamic['prediction_mask_hold_s']) or dynamic['prediction_mask_hold_s'] < 0:
+            raise ValueError('Person prediction mask hold must be finite and nonnegative')
         if not np.isfinite(dynamic['transient_ttl_s']) or dynamic['transient_ttl_s'] < 0:
             raise ValueError('Person lifetime must be finite and nonnegative')
         for name in ('min_hits', 'min_cluster_points', 'static_min_observations'):
@@ -220,27 +231,51 @@ def project_evidence(voxels, floor, support, origin, config, stamp, *, endpoints
     return finish_evidence(occupancy, observed, seen, coverage, bottom, top, floor, support, resolution)
 
 
-def finish_evidence(occupancy, observed, seen, coverage, bottom, top, floor, support, resolution):
+def obstacle_endpoints(points, eligible, floor, origin, config, ground_tracking):
+    """Locate the current scan's obstacle endpoints and their rolling grid cells."""
+    ix = np.floor((points[:, :2]-origin)/config['resolution']).astype(np.intp)
+    inside = np.flatnonzero(eligible & ((ix >= 0) & (ix < np.asarray(floor.shape[::-1]))).all(axis=1))
+    x, y = ix[inside].T
+    points = points[inside]
+    z = floor[y, x].astype(np.float64)
+    if ground_tracking.get('status') == 'tracked':
+        plane = np.asarray(ground_tracking['plane_world'])
+        missing = ~np.isfinite(z)
+        z[missing] = points[missing, :2] @ plane[:2] + plane[2]
+    height = points[:, 2]-z
+    obstacle = (height >= config['min_obstacle_height_m']) & (height <= config['max_height_m'])
+    return inside[obstacle], y[obstacle], x[obstacle]
+
+
+def view_distance_fields(occupancy, resolution):
     """Common exact CPU distance fields and boundary rules for both native backends."""
     occupied = occupancy == 100
-    clearance = distance_to_zero(~occupied)*resolution if occupied.any() else np.full(floor.shape, np.nan)
+    clearance = distance_to_zero(~occupied)*resolution if occupied.any() else np.full(occupancy.shape, np.nan)
     clearance[occupancy == -1] = np.nan
     unknown_distance = distance_to_zero(np.pad(occupancy != -1, 1, constant_values=False))[1:-1, 1:-1]*resolution
     neighbors = cv2.dilate((occupancy == -1).astype(np.uint8), np.array([[0,1,0],[1,1,1],[0,1,0]], np.uint8))
     frontier = (occupancy == 0) & (neighbors != 0)
     frontier[[0, -1], :] = False; frontier[:, [0, -1]] = False
+    return dict(clearance=clearance.astype(np.float32), unknown_distance=unknown_distance.astype(np.float32),
+                frontier=frontier)
+
+
+def finish_evidence(occupancy, observed, seen, coverage, bottom, top, floor, support, resolution):
     return dict(occupancy=occupancy, ground_z=floor.astype(np.float32), ground_support=support,
                 observed=observed, last_observed=seen, coverage=coverage,
                 obstacle_min_z=bottom.astype(np.float32), obstacle_max_z=top.astype(np.float32),
-                clearance=clearance.astype(np.float32), unknown_distance=unknown_distance.astype(np.float32),
-                frontier=frontier)
+                **view_distance_fields(occupancy,resolution))
 
 
 class LocalEnvironmentMap:
     """Maintain a rolling map of current local evidence in the continuous odom frame."""
-    def __init__(self, config=None, tree_factory=OccupancyTree):
+    def __init__(self, config=None, tree_factory=OccupancyTree, *, lidar_from_base_xyz=None):
         self.config = copy.deepcopy(config or load_config())
         validate_current_policy(self.config)
+        self.lidar_from_base_xyz = None if lidar_from_base_xyz is None else np.array(lidar_from_base_xyz,float)
+        if self.lidar_from_base_xyz is not None and (self.lidar_from_base_xyz.shape!=(3,)
+                or not np.isfinite(self.lidar_from_base_xyz).all()):
+            raise ValueError('Vehicle base origin in the LiDAR frame needs three finite coordinates')
         compute = self.config.get('compute', {})
         self.tree_factory = (lambda resolution: OccupancyTree(resolution,
             backend=compute.get('backend','cuda'), device=compute.get('device',0))) if tree_factory is OccupancyTree else tree_factory
@@ -249,6 +284,8 @@ class LocalEnvironmentMap:
         self.identity, self.last_stamp, self.last_pose = None, None, None
         self.frame=None
         self.ground_z, self.ground_seen, self.origin = None, None, None
+        self.obstacles = ObstacleMemory()
+        self.obstacle_timing = {k:self.config.get(k,v) for k,v in OBSTACLE_TIMING_DEFAULTS.items()}
         self.snapshots = OrderedDict()
         self.revision = 0
         self.ground_tracker=GroundTracker(self.config.get('ground_tracking',dict(enabled=False)))
@@ -278,6 +315,7 @@ class LocalEnvironmentMap:
         self.support_observation=None
         self.snapshots.clear()
         self.ground_z = self.ground_seen = self.origin = None
+        self.obstacles = ObstacleMemory()
         self.last_stamp = self.last_pose = None
         self.identity=None;self.frame=None
         self.ground_tracker=GroundTracker(self.config.get('ground_tracking',dict(enabled=False)))
@@ -300,15 +338,29 @@ class LocalEnvironmentMap:
                 self.ground_conflict_heights=shift_array(self.ground_conflict_heights,dx,dy,np.nan)
         was_pending=self.ground_tracker.history_suspended
         plane,status = self.ground_tracker.fit(world,sensor,config)
-        old_floor,old_support=self._ground_support(stamp)
-        compared=0;localized=False
+        observations=[]
         for observed,verified in ((self.ground_tracker.observed_ground,True),(self.ground_tracker.floor_samples,False)):
             if observed is None or not len(observed):continue
             ij=np.floor((observed[:,:2]-origin)/resolution).astype(int)
             inside=((ij>=0)&(ij<size)).all(1)
-            ij,observed=ij[inside],observed[inside]
+            observations.append((ij[inside],observed[inside],verified))
+        if plane is None:
+            old_floor,old_support=self._ground_support(stamp)
+        elif observations:
+            # A fitted plane will refresh the full support field. The previous
+            # field is needed here only at cells checked for a ground conflict.
+            cells=np.concatenate([ij for ij,_,_ in observations],axis=0)
+            old_heights,_=self._ground_support(stamp,cells=(cells[:,1],cells[:,0]))
+        compared=0;localized=False
+        offset=0
+        for ij,observed,verified in observations:
             x,y=ij.T
-            reference=np.where(self.ground_conflicts[y,x],self.ground_conflict_heights[y,x],old_floor[y,x])
+            if plane is None:
+                previous=old_floor[y,x]
+            else:
+                previous=old_heights[offset:offset+len(ij)]
+                offset+=len(ij)
+            reference=np.where(self.ground_conflicts[y,x],self.ground_conflict_heights[y,x],previous)
             known=np.isfinite(reference)
             if verified:
                 compared=int(known.sum())
@@ -354,21 +406,22 @@ class LocalEnvironmentMap:
             compared_ground_points=compared)
         return floor,support,status
 
-    def _ground_support(self,stamp):
+    def _ground_support(self,stamp,*,cells=None):
         config=self.config
         supported = (stamp-self.ground_seen <= config['voxel_ttl_s']) & np.isfinite(self.ground_z)
-        if supported.any():
-            distances, nearest = nearest_support(supported)
+        if supported.any() and (cells is None or len(cells[0])):
+            distances, nearest = nearest_support(supported,cells=cells)
             support = distances*config['resolution'] <= config['ground_support_radius_m']
-            floor = self.ground_z[nearest].copy()
+            floor = self.ground_z[nearest]
             floor[~support] = np.nan
         else:
-            support, floor = np.zeros(self.ground_z.shape,bool), np.full(self.ground_z.shape,np.nan,np.float32)
+            shape = self.ground_z.shape if cells is None else cells[0].shape
+            support, floor = np.zeros(shape,bool), np.full(shape,np.nan,np.float32)
         return floor,support
 
     def update(self, points, transform, stamp, identity, *, frame='odom', association=None,
                scan_duration=None, ray_origins=None, people=None, clock_domain=None, device=None, metrics=None,
-               localization_source=None,sensor_frame=None):
+               localization_source=None,sensor_frame=None,static_asset=None):
         config = self.config
         if not np.isfinite(stamp):
             raise ValueError('Environment observation time must be finite')
@@ -408,28 +461,73 @@ class LocalEnvironmentMap:
             self.tree = self.tree_factory(resolution)
         bounds = [*origin, sensor[2]-config['ground_max_below_sensor_m']-.5,
                   *(origin+size*resolution), sensor[2]+config['max_height_m']+.5]
-        masking, person_status = {}, dict(status='disabled')
+        person_status = dict(status='disabled')
         owners=np.full(len(world),-1,np.int32);objects=None
+        transient = np.zeros(len(world), bool)
         if config.get('dynamic', {}).get('enabled'):
-            boxes, person_status = people_boxes(people, stamp, identity, frame, config['dynamic'], clock_domain=clock_domain)
-            if (people is not None and person_status['status']=='valid' and abs(people['stamp_s']-stamp)<1e-6
-                    and all(key is not None for key in person_status['track_ids'])
-                    and 'session_id' in people and 'generation' in people):
-                from .person_objects import point_owners,ownership_record
+            same_frame = (people is not None and abs(people['stamp_s']-stamp)<1e-6
+                          and 'session_id' in people and 'generation' in people)
+            boxes, person_status = people_boxes(people, stamp, identity, frame, config['dynamic'], clock_domain=clock_domain,
+                                               allow_recent_predictions=same_frame and static_asset is not None)
+            if (same_frame and person_status['status']=='valid'
+                    and all(key is not None for key in person_status['track_ids'])):
+                from .person_objects import extract_current_owners,ownership_record,static_edge_permission
                 plane=ground_status.get('plane_world') if ground_status.get('status')=='tracked' else None
-                owners=point_owners(world,boxes,config,sensor,plane)
+                edge_allowed = None
+                predicted = np.asarray(person_status.get('predicted_boxes', np.zeros(len(boxes), bool)), dtype=bool)
+                if (boxes.size and plane is not None and static_asset is not None
+                        and (config['dynamic'].get('edge_growth_m') or predicted.any())):
+                    from .navigation import association_reason
+                    current = GridSnapshot(dict(stamp_s=stamp, geometry_status='OBSERVED', association=association or {},
+                                                session_id=identity[0],generation=identity[1],frame_id=frame), {})
+                    if association_reason(current,static_asset,config['association_max_age_s']) is None:
+                        map_from_local = np.asarray(association['map_from_local'])
+                        def edge_allowed(points, ground):
+                            return static_edge_permission(static_asset.snapshot,map_from_local,stamp,points,ground)
+                owners=extract_current_owners(world,boxes,predicted,config,sensor,plane,edge_allowed)
                 transient=owners>=0
                 if transient.any():
-                    objects=ownership_record(world,owners,boxes,person_status['track_ids'],people,stamp,identity,frame)
+                    objects=ownership_record(world,owners,boxes,person_status['track_ids'],people,stamp,identity,frame,
+                                             current_only=predicted)
             else:
+                predicted = person_status.get('predicted_boxes')
+                if predicted is not None:
+                    boxes = boxes[~np.asarray(predicted, dtype=bool)]
                 transient = person_points(world, boxes, floor, origin, config)
             person_status.update(masked_points=int(transient.sum()), transient_ttl_s=config['dynamic']['transient_ttl_s'])
-            masking = dict(transient_mask=transient, transient_ttl=config['dynamic']['transient_ttl_s'],omit_transient=objects is not None)
-        count = self.tree.update(world,sensor,bounds,stamp,config,rays=rays,ray_origins=ray_origins,read=False,**masking)
+        hit_mask = transient.astype(np.uint8)
+        endpoints, y, x = obstacle_endpoints(world, ~transient, floor, origin, config, ground_status)
+        cells, point_cells = np.unique(y*size+x,return_inverse=True)
+        y,x = np.divmod(cells,size)
+        timing = self.obstacle_timing
+        self.obstacles.align(origin,floor.shape,resolution)
+        unconfirmed = self.obstacles.unconfirmed(y,x,stamp,timing['obstacle_confirmation_window_s'])
+        base = None if self.lidar_from_base_xyz is None else (transform[:2,:3]@self.lidar_from_base_xyz+sensor[:2])
+        previous = self.snapshots[next(reversed(self.snapshots))] if self.snapshots else None
+        near_short = self.obstacles.near_short_only(y,x,stamp,center=base,resolution=resolution,
+            radius=timing['near_obstacle_radius_m'],evidence_age=timing['near_obstacle_evidence_age_s'],
+            max_gap=timing['long_obstacle_max_gap_s'],ordinary_ttl=config['obstacle_ttl_s'],previous=previous)
+        unconfirmed |= near_short
+        hit_mask[endpoints[unconfirmed[point_cells]]] = UNCONFIRMED_HIT
+        short_ttl = config.get('dynamic', {}).get('transient_ttl_s', .2)
+        count = self.tree.update(world,sensor,bounds,stamp,config,rays=rays,ray_origins=ray_origins,read=False,
+                                 transient_mask=hit_mask,transient_ttl=short_ttl,omit_transient=objects is not None)
+        # Commit one actual vote per cell only after the occupancy update succeeds.
+        self.obstacles.observe(y,x,stamp,max_gap=timing['long_obstacle_max_gap_s'],
+            min_span=timing['long_obstacle_min_span_s'],hold=timing['long_obstacle_hold_s'])
+        person_cells = None
+        if objects is not None and base is not None:
+            person_points_seen = owners>=0
+            person_points_seen[person_points_seen] = ~predicted[owners[person_points_seen]]
+            _,yy,xx = obstacle_endpoints(world,person_points_seen,floor,origin,config,ground_status)
+            person_cells = yy,xx
+        self.obstacles.remember_sources(y,x,stamp,near_short=near_short,unconfirmed=unconfirmed,
+                                        person_cells=person_cells)
+        projection = self.obstacles.projection()
         if metrics is not None and self.tree.backend=='cuda':
             metrics.transfer('h2d',world.astype(np.float32,copy=False).nbytes+
                 (0 if ray_origins is None else ray_origins.nbytes)+
-                (0 if not masking else masking['transient_mask'].nbytes),'environment_evidence')
+                hit_mask.nbytes,'environment_evidence')
             metrics.transfer('d2h',4,'environment_voxel_count')
         self.revision += 1
         metadata = dict(entity_type='map',map_type='local_environment_map',snapshot_id='%s:%s:%d' % (*identity,self.revision), stamp_s=float(stamp),
@@ -448,20 +546,30 @@ class LocalEnvironmentMap:
         if sensor_frame is not None:metadata['sensor_frame']=sensor_frame
         metadata['ground_tracking'] = ground_status
         metadata['dynamic_filter'] = person_status
+        metadata['unconfirmed_obstacle_points'] = int(unconfirmed[point_cells].sum())
+        metadata['near_short_obstacle_cells'] = int(near_short.sum())
         if objects is not None:metadata['person_objects']=objects
         self.support_observation = dict(stamp_s=float(stamp),identity=(*identity,frame),
             endpoints=np.ascontiguousarray(world,np.float64),
-            transient_mask=np.ascontiguousarray(masking.get('transient_mask',np.zeros(len(world),bool)),np.uint8),
+            transient_mask=(hit_mask != 0).astype(np.uint8),
             person_owner=owners)
         backend=self.config.get('compute',{}).get('backend','cuda')
         metadata['hit_invalidates_free']=config.get('hit_invalidates_free',False)
         metadata['compute_components']=dict(occupancy=backend,projection=backend,distance_fields=backend,
             near_field=backend if self.near_field else 'disabled',ground_fit='cpu',ground_support='cpu',people_mask='cpu')
         remaining=owners<0;view_points=world[remaining]
-        view_mask=masking.get('transient_mask');view_mask=None if view_mask is None else view_mask[remaining]
+        view_mask=hit_mask[remaining]
+        if static_asset is not None:
+            hits = np.zeros(floor.shape, dtype=bool)
+            hits[y,x] = True
+            hits.flags.writeable = False
+            self.support_observation['current_obstacle_hits'] = hits
         layers = self.tree.project(floor,support,origin,config,stamp,endpoints=view_points,
             view_metadata=metadata,near_field=self.near_field if backend=='cuda' else None,
-            transient_mask=view_mask,device=device,metrics=metrics,ground_conflict=self.ground_conflict_view)
+            transient_mask=view_mask,device=device,metrics=metrics,ground_conflict=self.ground_conflict_view,
+            obstacle_projection=projection if backend=='cuda' else None)
+        if projection is not None and backend=='cuda':
+            self.obstacles.clear(self.tree.obstacle_fresh_free)
         if self.near_field and backend=='cuda':
             metadata.update(snapshot_id=metadata['snapshot_id']+':near_field:'+self.near_field.binding,
                             near_field_memory=self.tree.view_metadata)
@@ -477,6 +585,12 @@ class LocalEnvironmentMap:
         if self.near_field and backend=='cpu':
             snapshot=self.near_field.update(snapshot,view_points,transient_mask=view_mask,
                 person_only=getattr(self.tree,'person_only',None))
+        if projection is not None and backend=='cpu':
+            updated = {key:value.copy() for key,value in snapshot.layers.items()}
+            fresh_free = apply_obstacle_memory(updated,projection,config['free_vertical_coverage'])
+            self.obstacles.clear(fresh_free)
+            updated.update(view_distance_fields(updated['occupancy'],resolution))
+            snapshot = GridSnapshot(snapshot.metadata,updated)
         if 'person_background_free' in snapshot.layers:
             snapshot.metadata['dynamic_navigation']=dict(policy='exclusive_person_on_certified_historical_free',
                 eligible_cells=int(snapshot.layers['person_background_free'].sum()),current_occupancy_preserved=True)

@@ -5,15 +5,21 @@ set -eo pipefail
 cd "$(dirname -- "${BASH_SOURCE[0]}")/.."
 usage() {
   printf '%s\n' '用法: bash scripts/t2_bag_replay.sh --bag 文件 [--floor floor1|floor2] [--start 秒] [--rate 倍率] [--initial-z 米] [--pose-file 文件] [--reuse-session 文件 --auto-follow [--auto-follow-single-person]] [--ros-port 端口] [--t2-backend hosted|dspark|reid] [--t2-reid-weights 路径] [--t2-image-format jpeg|png] [--t2-jpeg-quality 1..95]' \
+    '长程 Agent 选项: [--model 模型] [--planning-thinking-mode 强度] [--execution-thinking-mode 强度] [--monitor-thinking-mode 强度]' \
     '仅回放 bag，不连接底盘。默认二楼、1 倍速，跟随后端读取本机配置，未配置时使用 hosted。' \
     'reid 权重使用 .onnx 选择 OpenCV CPU，使用 .engine 选择 TensorRT CUDA。'
 }
 bag='' floor=floor2 start=0 rate=1 pose_file='' initial_z='' reuse_session='' auto_follow=0 auto_follow_single_person=0 port=11329 backend='' reid_weights='' image_format=auto jpeg_quality=70
+agent_ui_args=()
 while (($#)); do
   case "$1" in
     --help|-h) usage; exit 0;;
     --auto-follow) auto_follow=1; shift;;
     --auto-follow-single-person) auto_follow_single_person=1; shift;;
+    --model|--planning-thinking-mode|--execution-thinking-mode|--monitor-thinking-mode)
+      if (($# < 2)) || [[ -z "$2" || "$2" == --* ]]; then usage >&2; exit 2; fi
+      agent_ui_args+=("$1" "$2")
+      shift 2;;
     --bag|--floor|--start|--rate|--pose-file|--initial-z|--reuse-session|--ros-port|--t2-backend|--t2-reid-weights|--t2-image-format|--t2-jpeg-quality)
       if (($# < 2)); then usage >&2; exit 2; fi
       case "$1" in
@@ -47,6 +53,21 @@ if [[ -f outputs/runtime/environment/activate.sh ]]; then
 fi
 replay_python="${replay_requested_python:-${SOCIAL_NAV_PYTHON:-python}}"
 command -v "$replay_python" >/dev/null || { echo '找不到回放解释器，请激活本机运行环境或设置 SOCIAL_NAV_PYTHON。' >&2; exit 1; }
+if ((${#agent_ui_args[@]})); then
+  "$replay_python" -B - "${agent_ui_args[@]}" <<'PY'
+import sys
+from decision.agent.core.model_settings import DEFAULT_MODEL, default_efforts, validate_effort
+
+settings = dict(zip(sys.argv[1::2], sys.argv[2::2]))
+model = settings.pop('--model', DEFAULT_MODEL)
+try:
+    default_efforts(model)
+    for effort in settings.values():
+        validate_effort(model, effort)
+except ValueError as error:
+    raise SystemExit(str(error))
+PY
+fi
 if [[ -z "$backend" ]]; then
   backend=$("$replay_python" -B -c 'from decision.vlm.t2.hosted import LOCAL_BACKEND, follow_backend; print(follow_backend() if LOCAL_BACKEND.is_file() else "hosted")')
 fi
@@ -100,7 +121,7 @@ while True:
         if time.monotonic()>=deadline: raise SystemExit('独立 ROS master 启动失败，请查看 roscore.log')
         time.sleep(.1)
 PY
-ui_args=(--replay --runtime-socket "$session/interactive/run/commands.sock" --catalog "$catalog")
+ui_args=(--replay --runtime-socket "$session/interactive/run/commands.sock" --catalog "$catalog" "${agent_ui_args[@]}")
 if [[ "$auto_follow" == 1 ]]; then ui_args+=(--reuse-session "$reuse_session" --auto-follow); fi
 if [[ "$auto_follow_single_person" == 1 ]]; then ui_args+=(--auto-follow-single-person); fi
 "$replay_python" -B -m decision.agent.manual_ui "${ui_args[@]}" & ui_pid=$!

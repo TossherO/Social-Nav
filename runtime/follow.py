@@ -148,7 +148,7 @@ class FollowRunner:
                     new[2]>source['stamp_s'] and 0<=now-self.policy.last_visual<=self.policy.hold_s):
                 self.history.continue_from(source['scene_binding'],key,self.policy.tracked_generation,scene)
                 return dict(operation='continue',reason='follow_t2_occlusion_superseded',
-                            request_fresh_observation=True,source_stamp_s=prepared['source_stamp_s'])
+                            source_stamp_s=prepared['source_stamp_s'])
             self.policy.cancel();self.policy=None;self.request=None
         return dict(operation='search',candidate=copy.deepcopy(choice['candidate']),
                     search_binding=prepared['search_binding'],source_stamp_s=prepared['source_stamp_s'],

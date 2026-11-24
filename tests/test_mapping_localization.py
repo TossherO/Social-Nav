@@ -1,6 +1,7 @@
 """Task/input contracts and map protection; no ROS master, models or hardware."""
 import contextlib
 import io
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -8,10 +9,35 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from perception.mapping_localization.__main__ import arguments, algorithm_command, wait_for_native_drain, merge_timings, wait_for_display_recording
+from perception.mapping_localization.__main__ import arguments, algorithm_command, finalize_artifacts, wait_for_native_drain, merge_timings, wait_for_display_recording
 
 
-class DisplayFinalizationTests(unittest.TestCase):
+class ReplayFinalizationTests(unittest.TestCase):
+    def test_replay_retention_preserves_maps_and_failure_diagnostics(self):
+        for success, keep_details in ((True, False), (True, True), (False, False)):
+            with self.subTest(success=success, keep_details=keep_details), tempfile.TemporaryDirectory() as folder:
+                output = Path(folder)
+                (output / 'map').mkdir()
+                map_file = output / 'map/GlobalMap.pcd'
+                map_file.write_bytes(b'SYNTHETIC_MAP_NOT_LOADED')
+                (output / 'localization.jsonl').write_text('{"health": "valid"}\n')
+                (output / 'people.jsonl').write_text('{"health": "valid", "tracks": []}\n')
+                (output / 'algorithm.log').write_text('Algorithm diagnostics\n')
+                (output / 'master.log').write_text('Master startup\n')
+                (output / 'notes.txt').write_text('Unrelated result\n')
+                settings = {'success': success, 'counts': {'localization': 1, 'valid': 1}}
+                finalize_artifacts(output, settings, keep_details=keep_details)
+                record = json.loads((output / 'run.json').read_text())
+                self.assertEqual(record['counts'], {'localization': 1, 'valid': 1})
+                self.assertEqual(map_file.read_bytes(), b'SYNTHETIC_MAP_NOT_LOADED')
+                self.assertIn('map/', record['retained_artifacts'])
+                self.assertIn('run.json', record['retained_artifacts'])
+                self.assertEqual((output / 'notes.txt').read_text(), 'Unrelated result\n')
+                self.assertTrue((output / 'localization.jsonl').exists())
+                self.assertTrue((output / 'people.jsonl').exists())
+                self.assertEqual((output / 'algorithm.log').exists(), keep_details or not success)
+                self.assertEqual((output / 'master.log').exists(), not success)
+
     def test_waits_for_recorder_child_after_launcher_exit(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'display.bag';active=Path(str(path)+'.active')

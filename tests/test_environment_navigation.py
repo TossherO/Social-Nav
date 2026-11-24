@@ -9,7 +9,7 @@ from perception.environment.layers import GridSnapshot, load_config
 from perception.environment.navigation import navigation_geometry
 from perception.environment.scene import assemble_scene, SceneInputs
 from navigation.planning.inputs import scene_status
-from tests.navigation_fixtures import grid, asset, request
+from tests.navigation_fixtures import FakeWorker, asset, dwa_inputs, grid
 
 
 def prior_asset(cells=None):
@@ -161,23 +161,15 @@ class NavigationConsumerTests(unittest.TestCase):
 
 
     def test_planner_reference_dwa_and_cpu_safety_share_the_fused_geometry(self):
-        from navigation.planning.inputs import load_config as planning_config
-        from navigation.planning.motion import load_motion_config
-        from navigation.planning.footprint import VehicleGeometry
         from navigation.planning.planner import Planner
         from navigation.planning.continuity import reference_envelope
         from navigation.planning.reference import ReferenceRuntime
         from navigation.control.dwa import DwaController
         from navigation.safety.guard import LocalSafety
-        from tests.navigation_fixtures import FakeWorker
-        cfg = planning_config(); cfg['algorithm'] = 'hybrid_astar'
-        cfg['local_replanning']['enabled'] = False
-        motion = load_motion_config()
-        geometry = VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]], np.eye(4), source='synthetic')
+        fixture = dwa_inputs()
+        cfg, motion, geometry = fixture.cfg, fixture.motion, fixture.geometry
+        req, feedback = fixture.req, fixture.feedback
         current = scene(self.apply(observation(self.unknown()), self.prior))
-        req = request('local', goal=[4., 2., 0.], goal_behavior='stop')
-        feedback = dict(status='valid', source='synthetic_actual_plant', pose=[2.,2.,0.], velocity=[0.,0.],
-            stamp_s=10., clock_domain='synthetic', local_identity=['test',0,'odom'])
         result = Planner(cfg, geometry).query(req, scene=current, asset=self.prior, now=10., clock_domain='synthetic')
         self.assertEqual(result['status'], 'path_found', result)
         reference = reference_envelope(result, req, current, self.prior)
@@ -199,12 +191,11 @@ class NavigationConsumerTests(unittest.TestCase):
 
 
     def test_shadow_rejoins_fused_geometry_and_new_contact_still_stops(self):
-        from tests.test_navigation_dwa import DwaTests
         from navigation.planning.planner import Planner
         from navigation.planning.continuity import reference_envelope
         from navigation.control.shadow import DwaShadowController
         from navigation.safety.shadow import ShadowSafety
-        fixture = DwaTests(); fixture.setUp()
+        fixture = dwa_inputs()
         current = scene(self.apply(observation(self.unknown()), self.prior))
         result = Planner(fixture.cfg, fixture.geometry).query(fixture.req, scene=current,
             asset=self.prior, now=10., clock_domain='synthetic')

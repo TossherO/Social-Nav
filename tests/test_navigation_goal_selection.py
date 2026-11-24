@@ -9,10 +9,8 @@ from navigation.planning.inputs import load_config
 from navigation.planning.planner import Planner
 from navigation.planning.reference import ReferenceRuntime
 from navigation.planning.continuity import reference_envelope
-from tests.navigation_fixtures import grid,bundle,request
+from tests.navigation_fixtures import FakeWorker, bundle, dwa_fixture, grid, request
 from tests import test_route_replay as route_fixtures
-from tests import test_navigation_dwa as dwa_fixtures
-from tests.navigation_fixtures import FakeWorker
 
 
 class EndpointTests(unittest.TestCase):
@@ -126,7 +124,7 @@ class RouteSelectionTests(unittest.TestCase):
         self.assertGreater(new['goal'][0],5.1);self.assertGreater(new['goal_revision'],req['goal_revision'])
 
     def test_reference_failure_handoff_keeps_original_request_and_observation(self):
-        f=dwa_fixtures.DwaTests();f.setUp()
+        f = dwa_fixture()
         runtime=ReferenceRuntime(f.cfg,f.motion,f.geometry,worker_factory=FakeWorker);self.addCleanup(runtime.close)
         runtime.update(f.req,f.scene,None,now=10.);runtime.tick(now=10.,clock_domain='synthetic')
         failed=copy.deepcopy(f.reference['result']);failed.update(status='no_path',reason='goal_footprint_occupied',path=[])

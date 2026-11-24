@@ -12,7 +12,7 @@ from ..core.session import AgentSession
 from ..core.tasks import next_unfinished_goal
 from ..core.store import Store, shared_budget
 from ..tools.places import Catalog
-from .common import emit, make_loop
+from .common import emit, make_loop, model_options
 from .interaction import Console
 from .manual_reference import ManualReference,reference_request
 
@@ -108,6 +108,8 @@ def floor_catalogs_for_manual(catalog):
 
 
 def run(args):
+    if not args.actions:
+        model_options(args)
     if args.duration <= 0 or not args.interactive:
         raise ValueError('Manual driving requires interactive input and a positive duration')
     catalog=Catalog.load(args.catalog,condition=args.map_condition)

@@ -12,6 +12,7 @@ import uuid
 from PyQt5 import QtCore, QtGui, QtWidgets
 import yaml
 from . import ROOT
+from .core.model_settings import DEFAULT_MODEL, MODEL_EFFORTS, default_efforts, validate_effort
 from .ui_data import ContextTimeline,blockage_text,connect_readonly,display_value,event_detail,event_summary,format_event_detail,goal_requirements,poll_session,request_context,select_detail
 
 STATUS={'ready':'准备决策','waiting_navigation':'等待人工驾驶和自动到达检查','waiting_observation':'等待新观察',
@@ -253,10 +254,18 @@ class ManualWindow(QtWidgets.QMainWindow):
         self.record_bag=QtWidgets.QCheckBox('任务执行时自动录制传感器 bag')
         self.record_bag.setToolTip('任务登记后开始录制导航原始话题；任务结束后自动关闭并检查 bag。')
         if self.replay:self.record_bag.setVisible(False)
-        self.planning_thinking=QtWidgets.QComboBox()
-        for label,value in (('无','off'),('low','low'),('medium','medium')):self.planning_thinking.addItem(label,value)
-        self.planning_thinking.setCurrentIndex(self.planning_thinking.findData('low'))
-        self.planning_thinking.setToolTip('仅影响任务登记和分解；登记完成后的选点、任务监控等决策仍关闭思考。')
+        self.model = QtWidgets.QComboBox()
+        for model_name in MODEL_EFFORTS:
+            self.model.addItem(model_name, model_name)
+        self.model.setCurrentIndex(self.model.findData(DEFAULT_MODEL))
+        self.planning_thinking = QtWidgets.QComboBox()
+        self.execution_thinking = QtWidgets.QComboBox()
+        self.monitor_thinking = QtWidgets.QComboBox()
+        self.planning_thinking.setToolTip('任务登记、分解和澄清时使用的思考强度。')
+        self.execution_thinking.setToolTip('子任务的执行决策使用的思考强度。')
+        self.monitor_thinking.setToolTip('任务监控和复核时使用的思考强度。')
+        self.model.currentIndexChanged.connect(self.update_model_efforts)
+        self.update_model_efforts()
         self.instruction=QtWidgets.QLineEdit();self.instruction.setPlaceholderText('输入长程任务，例如：先到停靠点1，再绕圆形区域一圈')
         self.duration=QtWidgets.QSpinBox();self.duration.setRange(1,86400);self.duration.setValue(duration);self.duration.setSuffix(' 秒')
         self.start_button=QtWidgets.QPushButton('开始新任务');self.start_button.clicked.connect(self.start_task)
@@ -276,7 +285,19 @@ class ManualWindow(QtWidgets.QMainWindow):
         form.addWidget(self.duration,2,2);form.addWidget(self.start_button,0,3);form.addWidget(self.history_button,1,3)
         form.addWidget(QtWidgets.QLabel('楼层预设'),3,0);form.addWidget(self.floor,3,1)
         form.addWidget(self.cross_floor,3,2,1,2)
-        form.addWidget(QtWidgets.QLabel('任务登记思考强度'),4,0);form.addWidget(self.planning_thinking,4,1)
+        model_settings = QtWidgets.QHBoxLayout()
+        model_settings.addWidget(self.model)
+        for label, combo in (('登记', self.planning_thinking), ('执行', self.execution_thinking),
+                             ('监控', self.monitor_thinking)):
+            stage = QtWidgets.QLabel(label)
+            stage.setBuddy(combo)
+            model_settings.addWidget(stage)
+            model_settings.addWidget(combo)
+        model_settings.addStretch()
+        model_label = QtWidgets.QLabel('模型与思考强度')
+        model_label.setBuddy(self.model)
+        form.addWidget(model_label, 4, 0)
+        form.addLayout(model_settings, 4, 1, 1, 3)
         form.addWidget(QtWidgets.QLabel('历史任务'),5,0);form.addWidget(self.reuse_label,5,1)
         form.addWidget(self.reuse_button,5,2);form.addWidget(self.reuse_clear,5,3)
         form.addWidget(self.record_bag,6,1,1,3)
@@ -392,6 +413,15 @@ class ManualWindow(QtWidgets.QMainWindow):
         self.settings_toggle.setArrowType(QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow)
         self.settings_toggle.setText('收起会话设置' if expanded else '展开会话设置')
 
+    def update_model_efforts(self):
+        model_name = self.model.currentData()
+        stages = (self.planning_thinking, self.execution_thinking, self.monitor_thinking)
+        for combo, default in zip(stages, default_efforts(model_name)):
+            combo.clear()
+            for effort in MODEL_EFFORTS[model_name]:
+                combo.addItem('无' if effort == 'off' else effort, effort)
+            combo.setCurrentIndex(combo.findData(default))
+
     def choose_file(self,edit):
         path,_=QtWidgets.QFileDialog.getOpenFileName(self,'选择文件',edit.text() or str(ROOT))
         if path:edit.setText(path)
@@ -488,7 +518,10 @@ class ManualWindow(QtWidgets.QMainWindow):
         self.target_text.setText('等待 Agent 选择目标');self.target_image.clear()
         args=['-B','-m','decision.agent','shadow' if self.replay else 'manual','--runtime-socket',socket,'--catalog',catalog,
               '--instruction',instruction,'--interactive','--gui-commands','--duration',str(self.duration.value()),
-              '--output',str(output),'--thinking-mode','planning','--planning-thinking-mode',self.planning_thinking.currentData()]
+              '--output',str(output),'--model',self.model.currentData(),'--thinking-mode','planning',
+              '--planning-thinking-mode',self.planning_thinking.currentData(),
+              '--execution-thinking-mode',self.execution_thinking.currentData(),
+              '--monitor-thinking-mode',self.monitor_thinking.currentData()]
         if self.reuse_plan is not None:args.extend(['--reuse-session',self.reuse_path,'--reuse-digest',self.reuse_plan['digest']])
         if self.cross_floor.isChecked():args.append('--cross-floor')
         if not self.replay and self.record_bag.isChecked():args.append('--record-bag')
@@ -614,7 +647,7 @@ class ManualWindow(QtWidgets.QMainWindow):
                 self.show_current_request(event,stamp)
                 count=len(event['context']['messages'])
                 images=sum(len(message['images']) for message in event['context']['messages'])
-                item=QtWidgets.QTreeWidgetItem([stamp,'模型请求',f'{count} 条消息，{images} 张图片 · 双击查看整轮'])
+                item=QtWidgets.QTreeWidgetItem([stamp,event_summary(event),f'{count} 条消息，{images} 张图片 · 双击查看整轮'])
                 item.setData(0,QtCore.Qt.UserRole,event['seq'])
                 self.context_tree.addTopLevelItem(item)
                 self.timeline.request(event['context'],event['seq'])
@@ -631,7 +664,10 @@ class ManualWindow(QtWidgets.QMainWindow):
     def show_current_request(self,event,stamp):
         context=event['context'];messages=context['messages'];self.latest_request_seq=event['seq']
         self.current_tree.clear()
-        self.request_summary.setText(f"最近请求 {stamp} · {len(messages)} 条消息 · {sum(len(m['images']) for m in messages)} 张图片")
+        summary=f"最近请求 {stamp} · {len(messages)} 条消息 · {sum(len(m['images']) for m in messages)} 张图片"
+        if event.get('value',{}).get('model'):
+            summary+=' · '+event_summary(event).removeprefix('模型请求 · ')
+        self.request_summary.setText(summary)
         self.request_button.setEnabled(True)
         for index,message in enumerate(messages):
             label,color=message_label(message)
@@ -653,7 +689,7 @@ class ManualWindow(QtWidgets.QMainWindow):
             self.transient_seq-=1;seq=self.transient_seq
             self.transient_requests[seq]=dict(request=value['request']);self.transient_calls[call]=seq
             context=request_context(self.transient_requests[seq]);stamp=datetime.now().strftime('%H:%M:%S')
-            self.active_tools=context['tools'];self.show_current_request(dict(context=context,seq=seq),stamp)
+            self.active_tools=context['tools'];self.show_current_request(dict(kind='api_request',value=value,context=context,seq=seq),stamp)
             item=QtWidgets.QTreeWidgetItem([stamp,'跨楼层临时请求',f"{len(context['messages'])} 条消息，{sum(len(m['images']) for m in context['messages'])} 张图片 · 双击查看"])
             item.setData(0,QtCore.Qt.UserRole,seq);self.context_tree.addTopLevelItem(item);self.transient_items.append((seq,item))
             while len(self.transient_items)>32:
@@ -962,6 +998,8 @@ class ManualWindow(QtWidgets.QMainWindow):
         self.history_button.setEnabled(self.process.state()==QtCore.QProcess.NotRunning)
         editable=self.process.state()==QtCore.QProcess.NotRunning
         for field in (self.socket,self.catalog,self.instruction,self.duration,self.floor,self.cross_floor,self.record_bag,self.reuse_button,self.reuse_clear,*self.browse_buttons):field.setEnabled(editable)
+        for field in (self.model, self.execution_thinking, self.monitor_thinking):
+            field.setEnabled(editable)
         self.planning_thinking.setEnabled(editable and self.reuse_plan is None)
 
     def refresh_recording(self):
@@ -1029,7 +1067,18 @@ def main():
     parser.add_argument('--reuse-session',default='',help='预载已登记的历史任务')
     parser.add_argument('--auto-follow',action='store_true',help='定位就绪后自动启动历史任务的第一项跟随')
     parser.add_argument('--auto-follow-single-person',action='store_true',help='回放画面只有一人且具备三维轨迹时直接跟随，多人时由 Agent 选人')
+    parser.add_argument('--model', choices=MODEL_EFFORTS, default=DEFAULT_MODEL, help='预选长程任务模型')
+    parser.add_argument('--planning-thinking-mode', help='预选登记思考强度，省略时使用模型默认值')
+    parser.add_argument('--execution-thinking-mode', help='预选执行思考强度，省略时使用模型默认值')
+    parser.add_argument('--monitor-thinking-mode', help='预选监控思考强度，省略时使用模型默认值')
     args=parser.parse_args()
+    efforts = (args.planning_thinking_mode, args.execution_thinking_mode, args.monitor_thinking_mode)
+    try:
+        for effort in efforts:
+            if effort is not None:
+                validate_effort(args.model, effort)
+    except ValueError as error:
+        parser.error(str(error))
     if not 1<=args.duration<=86400:parser.error('duration 必须在 1 至 86400 秒之间')
     if args.session and not Path(args.session).is_file():parser.error('session 文件不存在')
     if args.auto_follow and (not args.replay or not args.reuse_session or not args.runtime_socket or not args.catalog):
@@ -1040,6 +1089,10 @@ def main():
     if args.floor and (args.runtime_socket or args.catalog):parser.error('--floor 不能与 --runtime-socket 或 --catalog 同时使用')
     window=ManualWindow(args.runtime_socket,args.catalog,args.duration,args.floor,replay=args.replay,
                         auto_follow=args.auto_follow,auto_follow_single_person=args.auto_follow_single_person)
+    window.model.setCurrentIndex(window.model.findData(args.model))
+    for combo, effort in zip((window.planning_thinking, window.execution_thinking, window.monitor_thinking), efforts):
+        if effort is not None:
+            combo.setCurrentIndex(combo.findData(effort))
     if args.reuse_session:
         try:window.load_reuse(args.reuse_session)
         except (ValueError,OSError) as error:parser.error(str(error))

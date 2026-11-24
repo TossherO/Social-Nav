@@ -308,6 +308,8 @@ class VoxelRCNNHead(nn.Module):
         self.model_cfg = model_cfg
         self.num_class = num_class
         self.pool_cfg = model_cfg.ROI_GRID_POOL
+        self.register_buffer('_dense_grid_indices', self._grid_indices(self.pool_cfg.GRID_SIZE),
+                             persistent=False)
         LAYER_cfg = self.pool_cfg.POOL_LAYERS
         self.point_cloud_range = point_cloud_range
         self.voxel_size = voxel_size
@@ -493,11 +495,15 @@ class VoxelRCNNHead(nn.Module):
         return global_roi_grid_points, local_roi_grid_points
 
     @staticmethod
-    def get_dense_grid_points(rois, batch_size_rcnn, grid_size):
-        faked_features = rois.new_ones((grid_size, grid_size, grid_size))
-        dense_idx = faked_features.nonzero()
-        dense_idx = dense_idx.repeat(batch_size_rcnn, 1, 1).float()
+    def _grid_indices(grid_size, device=None):
+        axis = torch.arange(grid_size, device=device)
+        return torch.cartesian_prod(axis, axis, axis)
 
+    def get_dense_grid_points(self, rois, batch_size_rcnn, grid_size):
+        dense_idx = self._dense_grid_indices
+        if dense_idx.shape[0] != grid_size**3:
+            dense_idx = self._grid_indices(grid_size, rois.device)
+        dense_idx = dense_idx.to(device=rois.device, dtype=torch.float32)
         local_roi_size = rois.view(batch_size_rcnn, -1)[:, 3:6]
         roi_grid_points = (dense_idx + 0.5) / grid_size * local_roi_size.unsqueeze(dim=1) \
                           - (local_roi_size.unsqueeze(dim=1) / 2)

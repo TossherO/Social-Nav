@@ -6,13 +6,9 @@ import numpy as np
 from perception.environment.context import fingerprint
 from navigation.control.shadow import DwaShadowController,ClockWatch,observed_feedback,publisher
 from navigation.safety.shadow import ShadowSafety
-from navigation.planning.inputs import load_config
-from navigation.planning.motion import load_motion_config
-from navigation.planning.footprint import VehicleGeometry
 from navigation.planning.planner import Planner
-from navigation.planning.reference import planning_config
 from navigation.planning.continuity import reference_envelope
-from tests.navigation_fixtures import bundle,request,grid
+from tests.navigation_fixtures import grid, request, shadow_packet_fixture
 
 
 class ChassisAuthorizationTests(unittest.TestCase):
@@ -37,15 +33,17 @@ class ChassisAuthorizationTests(unittest.TestCase):
 
 class ShadowTests(unittest.TestCase):
     def setUp(self):
-        self.config=planning_config(load_config());self.motion=load_motion_config();self.scene=bundle();self.req=request('local',goal=[4.,2.])
-        self.geometry=VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],np.eye(4),source='synthetic')
-        self.rows=[dict(stamp_s=t,health=0,session_id='test',generation=0,frame_id='odom',position=[2.,2.,0.],quaternion_xyzw=[0.,0.,0.,1.]) for t in [9.7,9.8,9.9,10.]]
-        planner=Planner(self.config,self.geometry,require_actual_start=True)
-        result=planner.query(self.req,scene=self.scene,now=10.,clock_domain='synthetic')
-        self.reference=reference_envelope(result,self.req,self.scene,None)
-        self.controller=DwaShadowController(self.config,self.motion,self.geometry)
-        self.packet=self.controller.step(self.req,self.scene,self.rows,self.reference,now=10.,clock_domain='synthetic',mono=0.)
-        self.result=self.controller.controller.result
+        fixture = shadow_packet_fixture()
+        self.config = fixture.config
+        self.motion = fixture.motion
+        self.scene = fixture.scene
+        self.req = fixture.req
+        self.geometry = fixture.geometry
+        self.rows = fixture.rows
+        self.reference = fixture.reference
+        self.controller = fixture.controller
+        self.packet = fixture.packet
+        self.result = fixture.controller.controller.result
         self.safety=ShadowSafety(self.config,self.motion,self.geometry,clock_domain='synthetic')
         self.safety.command('goal',self.req);self.safety.push_grid(self.scene.geometry,mono=0.);self.safety.push_record(self.scene.record)
         for row in self.rows:self.safety.push_state(row)

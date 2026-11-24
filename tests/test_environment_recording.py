@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import numpy as np
 import yaml
 
-from perception.environment.scans import AsyncScanJournal,ScanJournal,read_scans,sealed_scan_summary
+from perception.environment.scans import AsyncScanJournal,ScanJournal,read_scans,sampled_scan_stamps,sealed_scan_summary
 from perception.environment.layers import load_config,GridSnapshot
 from perception.environment.export import export_environment
 from perception.environment.maps import static_geometry
@@ -19,6 +19,29 @@ from perception.mapping_localization.results import file_fingerprint,map_fingerp
 
 
 class RecordingTests(unittest.TestCase):
+    def test_sampled_timestamps_skip_payloads_and_keep_original_interval(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'scans.sqlite'
+            writer = ScanJournal(path, load_config()['scan_recording'], {})
+            points = np.array([[1., 0., .5], [2., 0., .5]], np.float32)
+            origins = np.zeros_like(points)
+            offsets = np.array([0., -2.], np.float32)
+            stamps = [1_000_000_000, 1_100_000_000, 1_199_999_500, 1_350_000_000, 1_400_000_000]
+            for stamp in stamps:
+                writer.append(points, np.eye(4), stamp, dict(rays_used=True,
+                              ray_origin_model='pose_interpolated_origins'), origins, offsets)
+            writer.close()
+            with patch('perception.environment.scans.np.load', wraps=np.load) as decode:
+                count, selected = sampled_scan_stamps(path, .2)
+                records = list(read_scans(path, stamps=selected))
+            self.assertEqual(count, len(stamps))
+            self.assertEqual([row['stamp_ns'] for row, _ in records], stamps[::2])
+            self.assertEqual(decode.call_count, len(records))
+            for _, data in records:
+                np.testing.assert_array_equal(data['points'], points)
+                np.testing.assert_array_equal(data['origins'], origins)
+                np.testing.assert_array_equal(data['offset_ms'], offsets)
+
     def test_failed_marker_overrides_a_leftover_seal(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'scans.sqlite'
@@ -28,6 +51,7 @@ class RecordingTests(unittest.TestCase):
                 database.execute("INSERT INTO metadata VALUES ('failed','{}')")
             with self.assertRaises(ValueError):sealed_scan_summary(path)
             with self.assertRaises(ValueError):list(read_scans(path))
+            with self.assertRaises(ValueError):sampled_scan_stamps(path,.2)
 
     def test_publication_precedes_archive_failure_without_invalidating_geometry(self):
         from perception.environment.ros.node import EnvironmentNode

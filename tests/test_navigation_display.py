@@ -181,9 +181,22 @@ class NavigationDisplayTests(unittest.TestCase):
         second=renderer.update(row,None,grid=ground_grid(-2.,10.1),mono=.1)
         self.assertAlmostEqual(second['z'],-1.97)
         np.testing.assert_allclose([p[2] for p in second['history']],[-.97,-1.97])
-        self.assertTrue(np.allclose(first['footprint'][:,2],-.93))
-        self.assertTrue(np.allclose(second['footprint'][:,2],-1.93))
+        self.assertTrue(np.allclose(first['footprint'][:,2],-.88))
+        self.assertTrue(np.allclose(second['footprint'][:,2],-1.88))
         self.assertEqual(second['raw_history'][1][1][2],-3.)
+
+    def test_body_draws_above_the_higher_visible_map_with_the_same_tf(self):
+        static = asset()
+        static.snapshot.layers.update(ground_grid(-.8).layers)
+        row = dict(self.row, has_map_pose=True, map_frame='map',
+                   map_position=[2., 2., -1.6], map_quaternion_xyzw=[0., 0., 0., 1.])
+        local = ground_grid(-1.8)
+        renderer = NavigationView(self.geometry, self.cfg, asset=static, vehicle_clearance_m=.12)
+        view = renderer.update(row, None, grid=local, mono=0.)
+        for key in ('footprint', 'heading'):
+            np.testing.assert_allclose(view[key][:, 2], -1.08)
+        np.testing.assert_allclose(view['pose'], [2., 2., 0.])
+        self.assertAlmostEqual(view['history'][0][2], -1.77, places=6)
 
     def test_reference_bridges_missing_display_heights_but_keeps_supported_slope(self):
         packet=self.packet();snapshot=ground_grid(np.arange(60)[None,:]*.1-3.)
@@ -237,6 +250,26 @@ class NavigationDisplayTests(unittest.TestCase):
         self.assertFalse(snapshot.layers['ground_support'].any())
         snapshot.metadata['ground_tracking']['status']='warming'
         self.assertTrue(np.isnan(DisplaySurface(snapshot,self.row).sample([[2.,2.]])[0][0]))
+
+    def test_display_reuses_only_readonly_fields_from_the_same_device_snapshot(self):
+        from perception.environment.layers import GridSnapshot
+        calls=[];host=ground_grid()
+        host.layers['occupancy'].flags.writeable=False
+        class Device:
+            metadata=host.metadata
+            _layers=host.layers
+            def __init__(self,owner):self.owner=owner
+            def materialize(self,*,fields,**kwargs):
+                calls.append(fields)
+                return GridSnapshot(self.metadata,{key:self._layers[key] for key in fields})
+        first,other=Device('first'),Device('different_owner')
+        cache=DisplayGrids();cache.remember_host(first,host)
+        self.assertIs(cache.get(first,navigation=False,ground=False).layers['occupancy'],host.layers['occupancy'])
+        self.assertEqual(calls,[])
+        cache.get(first,navigation=False)
+        self.assertEqual(calls,[['ground_z','ground_support']])
+        cache.get(other,navigation=False,ground=False)
+        self.assertEqual(calls[-1],['occupancy'])
 
     def test_display_grid_download_is_named_selective_and_cached(self):
         calls=[];host=ground_grid()

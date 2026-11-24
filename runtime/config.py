@@ -29,6 +29,9 @@ def runtime_settings(path):
         raise ValueError('Invalid display point budget')
     if type(display['path_z_m']) not in (int,float) or not math.isfinite(display['path_z_m']):
         raise ValueError('Display drawing height must be finite')
+    clearance=display['vehicle_clearance_m']
+    if type(clearance) not in (int,float) or not math.isfinite(clearance) or clearance<0:
+        raise ValueError('Display vehicle ground clearance must be nonnegative and finite')
     if display['height_mode'] not in ('ground','plane'):raise ValueError('Invalid display height mode')
     radius=display['ground_plane_radius_m']
     if type(radius) not in (int,float) or not math.isfinite(radius) or radius<0:

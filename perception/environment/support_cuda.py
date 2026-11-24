@@ -3,6 +3,7 @@ import ctypes as C
 from functools import lru_cache
 from pathlib import Path
 import numpy as np
+from .obstacle_memory import EXPIRY_LAYER
 
 
 @lru_cache(maxsize=1)
@@ -34,7 +35,11 @@ def project(snapshot,layers,asset,prior,plane,proof,observation,previous,origin,
     hits=torch.empty((2,*shape),dtype=torch.float64,device=device)
     output=torch.empty((3,*shape),dtype=torch.float64,device=device)
     allowed=torch.empty(shape,dtype=torch.uint8,device=device)
-    buffers=[layers['occupancy'],layers['last_observed'],prior,previous,hits,output,allowed,points,moving,layers.get('ground_conflict')]
+    excluded=layers.get('ground_conflict')
+    if EXPIRY_LAYER in layers:
+        expiry=layers[EXPIRY_LAYER]
+        excluded=expiry if excluded is None else (excluded|expiry)
+    buffers=[layers['occupancy'],layers['last_observed'],prior,previous,hits,output,allowed,points,moving,excluded]
     stream=torch.cuda.current_stream(device)
     native=library(library_path or Path(__file__).resolve().parents[2]/'outputs/perception/ros1_ws/devel/lib/libsocial_nav_occupancy_cuda.so')
     result=native.sn_navigation_support_with_ground_conflicts(*[None if t is None else t.data_ptr() for t in buffers],len(points),params.ctypes.data,

@@ -11,7 +11,7 @@ from unittest.mock import patch
 import numpy as np
 import yaml
 
-from perception.visualization.runtime import DisplayBuffer,RuntimeDisplay
+from perception.visualization.runtime import DisplayBuffer,DisplayConnections,RuntimeDisplay
 from runtime.config import ROOT,runtime_settings
 
 
@@ -79,6 +79,7 @@ class RuntimeDisplayTests(unittest.TestCase):
     def test_pending_points_and_images_are_owned_before_source_release(self):
         display=object.__new__(RuntimeDisplay);display.buffer=DisplayBuffer(self.settings)
         display.navigation_lock=threading.Lock();display.navigation_result=None;display.submit_ms=deque()
+        display.publishers={name:SimpleNamespace(get_num_connections=lambda:1) for name in ('scan','people','rgb')}
         points=np.ones((20,4),np.float32);rgb=np.ones((2,3,3),np.uint8)
         row=dict(session_id='s',generation=0,frame_id='odom',stamp_s=10.,health=0)
         people=dict(rgb_stamp_s=9.99,stamp_s=10.,tracks=[])
@@ -90,6 +91,17 @@ class RuntimeDisplayTests(unittest.TestCase):
         self.assertEqual(display.buffer.pending['rgb'][1],9.99)
         self.assertFalse(display.buffer.pending['people'][0]['tracks'])
         self.assertIs(display.buffer.pending['map'],grid)
+
+    def test_unsubscribed_submit_keeps_source_metadata_without_copying_display_layers(self):
+        display=object.__new__(RuntimeDisplay);display.buffer=DisplayBuffer(self.settings)
+        display.navigation_lock=threading.Lock();display.navigation_result=None;display.submit_ms=deque()
+        display.publishers={name:SimpleNamespace(get_num_connections=lambda:0) for name in ('scan','people','rgb')}
+        row=dict(session_id='s',generation=0,frame_id='odom',stamp_s=10.,health=0)
+        with patch('perception.visualization.runtime.np.array',side_effect=AssertionError('sensor copy')), \
+             patch('perception.visualization.runtime.copy.deepcopy',side_effect=AssertionError('people copy')):
+            display.submit(object(),row,object(),rgb=object(),rgb_frame='camera')
+        self.assertEqual(set(display.buffer.pending),{'navigation'})
+        self.assertEqual(display.buffer.observation()[0],row)
 
     def test_partial_configuration_inherits_and_frequency_validation_rejects_invalid_values(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -111,7 +123,7 @@ class RuntimeDisplayTests(unittest.TestCase):
         display=object.__new__(RuntimeDisplay)
         display.rospy=SimpleNamespace(Time=SimpleNamespace(from_sec=lambda value:value))
         display.Image=Message
-        display.publishers={name:SimpleNamespace(publish=rows.append) for name,rows in packets.items()}
+        display.publishers={name:SimpleNamespace(publish=rows.append,get_num_connections=lambda:1) for name,rows in packets.items()}
         display._publish('rgb',(np.zeros((2,3,3),np.uint8),11.5,'camera'))
         self.assertEqual(packets['rgb'][0].header.stamp,11.5)
 
@@ -129,6 +141,7 @@ class RuntimeDisplayTests(unittest.TestCase):
         from navigation.planning.footprint import VehicleGeometry
         from navigation.planning.inputs import load_config
         from perception.visualization.navigation import NavigationView
+        from perception.visualization.people import MarkerUpdates
         geometry=VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],np.eye(4),source='synthetic')
         row=dict(session_id='test',generation=0,frame_id='odom',health=0,stamp_s=10.1,
             position=[2.,2.,0.],quaternion_xyzw=[0,0,0,1],has_map_pose=True,
@@ -137,22 +150,45 @@ class RuntimeDisplayTests(unittest.TestCase):
         transforms=[];markers=[];display=object.__new__(RuntimeDisplay);display.rospy=rospy
         display.map_tf=SimpleNamespace(publish=transforms.append)
         display._map_tf_seen=OrderedDict()
+        display._marker_updates={'navigation':MarkerUpdates()}
+        display._navigation_marker_view=None
         display.publishers={name:SimpleNamespace(get_num_connections=lambda:0)
             for name in ('path','lidar_path','reference','trajectory')}
         display.publishers['navigation']=SimpleNamespace(get_num_connections=lambda:1,publish=markers.append)
-        display._publish_navigation(view)
+        with patch('perception.visualization.runtime.time.monotonic',return_value=0.):
+            display._publish_navigation(view)
         transform=transforms[0].transforms[0]
         self.assertEqual(transform.header.stamp,rospy.Time.from_sec(row['stamp_s']))
         self.assertEqual((transform.header.frame_id,transform.child_frame_id),('map','odom'))
         self.assertEqual((transform.transform.translation.x,transform.transform.translation.y),(3.,4.))
         clear=markers[0].markers[0]
         self.assertEqual(clear.action,Marker.DELETEALL)
-        self.assertEqual(clear.header.frame_id,'odom')
-        self.assertEqual(clear.header.stamp,rospy.Time.from_sec(row['stamp_s']))
+        self.assertEqual(clear.header.frame_id,'')
         added=[m for m in markers[0].markers if m.action==Marker.ADD]
         self.assertTrue(added)
+        self.assertTrue(all(m.header.frame_id=='odom' and m.header.stamp==transform.header.stamp for m in added))
         self.assertFalse(any(m.ns in ('history','reference','trajectory') for m in added))
         self.assertTrue(all(m.points for m in added if m.type==Marker.LINE_LIST))
+        trajectory=dict(display_poses=np.array([[1.,2.,0.],[3.,4.,0.]]),heights=np.array([.1,.2]),stamp_s=10.)
+        with_goal=dict(view,trajectory=trajectory,goal=[3.,4.],goal_z=.2)
+        with patch('perception.visualization.runtime.time.monotonic',return_value=0.):
+            display._publish_navigation(with_goal)
+            drawn=next(m for m in markers[-1].markers if m.ns=='trajectory')
+            self.assertEqual(drawn.header.stamp,rospy.Time.from_sec(10.))
+            self.assertEqual(drawn.header.frame_id,'odom')
+            display._publish_navigation(view)
+            self.assertEqual({(m.ns,m.id) for m in markers[-1].markers if m.action==Marker.DELETE},
+                             {('goal',2),('trajectory',12)})
+        count=len(markers)
+        with patch('perception.visualization.runtime.time.monotonic',return_value=.1):
+            display._publish_navigation(view)
+        self.assertEqual(len(markers),count)
+        with patch.object(display,'_connection_epoch',return_value=1), \
+                patch('perception.visualization.runtime.time.monotonic',return_value=.2):
+            display._refresh_marker_snapshots()
+        self.assertEqual({(m.ns,m.id) for m in markers[-1].markers if m.action==Marker.DELETE},
+                         {('goal',2),('trajectory',12)})
+        self.assertTrue(any(m.ns=='status' and m.action==Marker.ADD for m in markers[-1].markers))
         display._publish_map_transform(dict(row,has_map_pose=False))
         display._publish_map_transform(dict(row,health=1))
         self.assertEqual(len(transforms),1)
@@ -180,7 +216,8 @@ class RuntimeDisplayTests(unittest.TestCase):
                 position=SimpleNamespace(),orientation=SimpleNamespace())))
         received={name:[] for name in ('occupancy','raw_occupancy','ground_map')}
         display=object.__new__(RuntimeDisplay);display.grids=DisplayGrids(asset=asset)
-        display._show_basemap=lambda:None
+        display._show_basemap=lambda:display._publish_environment_layers(display.last_environment_grid)
+        display.layer_state={}
         display.rospy=SimpleNamespace(Time=SimpleNamespace(from_sec=lambda value:value))
         display.OccupancyGrid=message
         display.publishers={name:SimpleNamespace(publish=rows.append,get_num_connections=lambda:1) for name,rows in received.items()}
@@ -202,18 +239,23 @@ class RuntimeDisplayTests(unittest.TestCase):
         display.rospy=rospy
         display.buffer=DisplayBuffer(self.settings)
         display.clock_rate=2.;display.max_grid_age=.5;display.max_association_age=.55
-        display.local_key=display.local_frame=display.search_key=display.basemap_status=None
+        display.layer_state={};display.local_frame=display.environment_meta=None
         display.local_surface=display.search_surface=None
-        display.navigation_view=SimpleNamespace(reference_max_age_s=5.)
+        display.navigation_view=SimpleNamespace(reference_max_age_s=5.,observe=lambda row:None,history=[],raw_history=[])
         display.frozen=False;display.frozen_snapshot=display.frozen_row=None
         display.frozen_association=None
-        display.last_navigation=display.last_view=None
+        display.last_navigation=display.last_view=display.navigation_epochs=None
+        display.last_navigation_source=display.last_navigation_grid=None
         display.last_environment_grid=None
         display.error=None
-        display.grids=SimpleNamespace(asset=asset)
+        from perception.visualization.surface import DisplayGrids
+        display.grids=DisplayGrids(asset=asset)
         display.String=SimpleNamespace
         received={name:[] for name in ('navigation_basemap','navigation_window','static_basemap','basemap_source','reference_search_map')}
-        display.publishers={name:SimpleNamespace(publish=messages.append) for name,messages in received.items()}
+        display.publishers={name:SimpleNamespace(publish=messages.append,get_num_connections=lambda:1)
+            for name,messages in received.items()}
+        display._refresh_marker_snapshots=lambda **kwargs:None
+        display._publish_marker_update=lambda *args,**kwargs:None
         return display,received
 
     def test_static_background_publishes_once_without_map_localization(self):
@@ -366,9 +408,131 @@ class RuntimeDisplayTests(unittest.TestCase):
         display._show_basemap(stopped=True,mono=.1)
         self.assertEqual([message.width for message in received['navigation_basemap']],[4,0,4,0])
 
+    def test_paused_map_draws_only_subscribed_layers_and_clears_latch_on_invalid_pose(self):
+        from perception.environment.layers import GridSnapshot
+        from tests.test_environment_navigation import observation
+
+        grid=observation(np.zeros((2,2),np.int8))
+        calls=[]
+        class Device:
+            metadata=grid.metadata
+            _layers=grid.layers
+            def materialize(self,*,fields,**kwargs):
+                calls.append(fields)
+                return GridSnapshot(self.metadata,{name:self._layers[name] for name in fields})
+
+        display,received=self.basemap_display(None)
+        rospy=display.rospy
+        from nav_msgs.msg import OccupancyGrid
+        display.OccupancyGrid=OccupancyGrid
+        received['occupancy']=[]
+        connected=set()
+        display._connections={name:DisplayConnections() for name in received}
+        display.publishers={name:SimpleNamespace(publish=messages.append,get_num_connections=lambda name=name:int(name in connected))
+                            for name,messages in received.items()}
+        row=dict(session_id='test',generation=0,frame_id='odom',stamp_s=10.,health=0)
+        source=Device()
+        display.buffer.observe(row,(10.,0.))
+        display._publish('map',source)
+        display.frozen_basemap(True,row=row)
+        display._publish(*display.buffer.take())
+        display._show_basemap(mono=50.)
+        self.assertFalse(calls)
+        self.assertFalse(any(received.values()))
+
+        connected.add('occupancy')
+        display._show_basemap(mono=50.)
+        self.assertEqual(calls,[['occupancy']])
+        self.assertEqual(received['occupancy'][-1].header.stamp,rospy.Time.from_sec(10.))
+        self.assertFalse(received['navigation_basemap'])
+        connected.add('navigation_window')
+        with patch('perception.visualization.surface.coloured_cloud',side_effect=AssertionError('unsubscribed cloud')):
+            display._show_basemap(mono=50.)
+        self.assertEqual(received['navigation_window'][-1].header.stamp,rospy.Time.from_sec(10.))
+        self.assertFalse(received['navigation_basemap'])
+
+        connected.clear()
+        previous_downloads=len(calls)
+        replacement=Device()
+        replacement.metadata=dict(grid.metadata,snapshot_id='replacement')
+        replacement._layers=dict(grid.layers,occupancy=np.full((2,2),100,np.int8))
+        display._publish('map',replacement)
+        self.assertEqual(len(calls),previous_downloads)
+        self.assertTrue(all(value==-1 for value in received['occupancy'][-1].data))
+        connected.add('occupancy')
+        display._show_basemap(mono=50.)
+        self.assertEqual(received['occupancy'][-1].data,[100]*4)
+
+        connected.clear()
+        display.frozen_basemap(True,row=dict(row,health=1))
+        display._publish(*display.buffer.take())
+        self.assertTrue(all(value==-1 for value in received['occupancy'][-1].data))
+        self.assertEqual(received['navigation_window'][-1].action,received['navigation_window'][-1].DELETE)
+        self.assertEqual(len(received['occupancy']),4)
+
+    def test_reconnected_tf_gets_latest_measurement_without_rebroadcast(self):
+        display,_=self.basemap_display(None)
+        sent=[];replayed=[]
+        connected=[]
+        display.map_tf=SimpleNamespace(publish=sent.append,get_num_connections=lambda:len(connected),
+            impl=SimpleNamespace(publock=threading.RLock()))
+        display._map_tf_seen=OrderedDict()
+        display._map_tf_missed=OrderedDict()
+        display._connections={'tf':DisplayConnections(save_peers=True)}
+        row=dict(session_id='s',generation=0,frame_id='odom',stamp_s=10.,health=0,has_map_pose=True,
+            map_frame='map',position=[1.,0.,0.],quaternion_xyzw=[0,0,0,1],
+            map_position=[2.,0.,0.],map_quaternion_xyzw=[0,0,0,1])
+        with patch.object(display,'_map_transform',side_effect=AssertionError('unsubscribed TF computation')):
+            display._publish_map_transform(dict(row,stamp_s=9.7))
+        connected.append('old')
+        display._publish_map_transform(dict(row,stamp_s=.1))
+        display._publish_map_transform(dict(row,stamp_s=9.8))
+        display._publish_map_transform(row)
+        display._connections['tf'].peer_subscribe('/tf',None,replayed.append)
+        display._publish_map_transform(row)
+        self.assertEqual(len(sent),3)
+        self.assertEqual(len(replayed),1)
+        self.assertEqual([sample.header.stamp for sample in replayed[0].transforms],
+                         [display.rospy.Time.from_sec(stamp) for stamp in (9.7,9.8,10.)])
+        display._connections['tf'].peer_subscribe('/tf',None,replayed.append)
+        display._publish_map_transform(dict(row,health=1))
+        self.assertEqual(len(replayed),1)
+        display._connections['tf'].peer_subscribe('/tf',None,replayed.append)
+        display._publish_map_transform(dict(row,generation=1))
+        self.assertEqual(len(replayed),1)
+        self.assertEqual(len(sent),3)
+
+    def test_path_latch_clears_when_localization_is_invalid_or_restarted(self):
+        try:
+            from nav_msgs.msg import Path as PathMessage
+            import rospy
+        except ImportError:
+            self.skipTest('source perception/scripts/ros1_env.sh to check ROS display messages')
+        display,_=self.basemap_display(None)
+        display.Path=PathMessage
+        messages=[]
+        display.publishers={'path':SimpleNamespace(publish=messages.append,get_num_connections=lambda:0)}
+        row=dict(session_id='s',generation=0,frame_id='odom',stamp_s=10.,health=0)
+        for updated in (dict(row,health=1,stamp_s=10.1),dict(row,generation=1,stamp_s=10.2)):
+            display._path_latch=(row,True)
+            with self.subTest(row=updated):
+                before=len(messages)
+                display._clear_latched_path(updated)
+                self.assertEqual(len(messages),before+1)
+                self.assertFalse(messages[-1].poses)
+                self.assertEqual(messages[-1].header.stamp,rospy.Time.from_sec(updated['stamp_s']))
+        display._path_latch=(row,True)
+        display.buffer.observe(row,(10.,0.))
+        display._publish_marker_update=lambda *args,**kwargs:None
+        display._publish('map_clear',('odom',10.3))
+        self.assertEqual(len(messages),3)
+        self.assertFalse(messages[-1].poses)
+        self.assertEqual(messages[-1].header.stamp,rospy.Time.from_sec(10.3))
+
     def test_control_display_keeps_original_clock_anchor_and_owns_metadata(self):
         display=object.__new__(RuntimeDisplay);display.buffer=DisplayBuffer(self.settings)
         display.navigation_lock=threading.Lock();display.navigation_result=None
+        display.publishers={'navigation':SimpleNamespace(get_num_connections=lambda:1)}
         row=dict(session_id='s',generation=0,frame_id='odom',stamp_s=10.,health=0)
         display.navigation(None,None,None,None,row,dict(proposal=None),'no_active_goal',
             now=10.,clock_domain='synthetic',clock_rate=1.,clock_mono=2.)
@@ -376,3 +540,19 @@ class RuntimeDisplayTests(unittest.TestCase):
         _,packet,_=display.buffer.pending['navigation']
         self.assertEqual(packet['mono'],2.);self.assertEqual(packet['now_s'],10.)
         self.assertEqual(packet['row']['health'],0)
+
+    def test_hidden_navigation_skips_projection_and_raw_history_needs_no_device_grid(self):
+        display,_=self.basemap_display(None)
+        observed=[];rendered=[]
+        display.navigation_view=SimpleNamespace(height_mode='ground',observe=observed.append,
+            update=lambda row,packet,*,grid,stopped:dict(row=row,grid=grid))
+        display._publish_navigation=rendered.append
+        row=dict(session_id='test',generation=0,frame_id='odom',stamp_s=10.,health=0)
+        display.last_navigation=(row, None)
+        display.last_navigation_source=object()
+        display._refresh_navigation(new=True)
+        self.assertEqual(observed,[row])
+        self.assertFalse(rendered)
+        display.publishers['lidar_path']=SimpleNamespace(get_num_connections=lambda:1)
+        display._refresh_navigation(new=True)
+        self.assertEqual(rendered,[dict(row=row,grid=None)])

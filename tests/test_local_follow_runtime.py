@@ -24,8 +24,7 @@ from runtime.decision import DecisionBuffer
 from runtime.follow import FollowRunner
 from runtime.follow_decision import FollowDecisionWorker
 from runtime.metrics import Metrics
-from tests.test_decision_runtime import observation
-from tests.test_follow_decision_worker import search
+from tests.decision_fixtures import follow_search, observation
 from tests.navigation_fixtures import asset
 
 
@@ -87,7 +86,7 @@ class LocalFollowRuntimeTests(unittest.TestCase):
         _, arrays, association, source = frame(10.)
         observation = follow_observation(source, arrays['rgb'], association, None, None)
         self.reference, _, self.crop = reference(observation, 0, 'red shirt', task_id='mission', revision=1, goal_id='person')
-        self.worker = FollowDecisionWorker(search, backend='reid', reid_factory=self.matcher,
+        self.worker = FollowDecisionWorker(follow_search, backend='reid', reid_factory=self.matcher,
             buffer=DecisionBuffer(max_frames=16, slot_bytes=32768), publish_agent_frame=self.publish)
         self.addCleanup(self.worker.close)
         self.addCleanup(self.worker.stop)

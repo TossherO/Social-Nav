@@ -3,7 +3,63 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import numpy as np
+from perception.mapping_localization.native import rs16_preprocess
 from perception.sensors.observations import bag_observations,selected_messages
+from perception.sensors.pointcloud import pointcloud_fields
+
+
+class Rs16ScanTests(unittest.TestCase):
+    def test_padded_cloud_preserves_raw_points_and_original_sample_indices(self):
+        width, height, point_step = 6, 2, 30
+        row_step = width * point_step + 11
+        names = ('x', 'y', 'z', 'intensity', 'timestamp')
+        offsets = (0, 8, 12, 16, 22)
+        dtype = np.dtype(dict(names=names, formats=('>f8', '>f4', '>f4', '>u2', '>f8'),
+                              offsets=offsets, itemsize=point_step))
+        data = bytearray(row_step * height)
+        cloud = np.ndarray((height, width), dtype=dtype, buffer=data, strides=(row_step, point_step))
+        cloud['x'] = [[2., 2., 2., 2., 1., 2.], [2., 2., 2., 2., 3., 2.]]
+        cloud['z'][0, 0] = np.nan
+        cloud['z'][1, 0] = 2.
+        cloud['y'][1, 4] = -0.
+        cloud['intensity'] = np.arange(100, 112).reshape(height, width)
+        offset = np.arange(12).reshape(height, width) * .01
+        offset[1, 2] = np.nan
+        config = dict(common=dict(lid_topic='/points', imu_topic='/imu'),
+                      preprocess=dict(lidar_type=4, scan_line=16, blind=1.),
+                      feature_extract_enable=False, point_filter_num=2)
+        stamp = SimpleNamespace(to_sec=lambda: 200., to_nsec=lambda: 200_000_000_000)
+        scan = SimpleNamespace(
+            width=width, height=height, point_step=point_step, row_step=row_step, is_bigendian=True,
+            fields=[SimpleNamespace(name=name, offset=field_offset, count=1, datatype=datatype)
+                    for name, field_offset, datatype in zip(names, offsets, (8, 7, 7, 4, 8))],
+            header=SimpleNamespace(stamp=stamp, frame_id='rslidar'))
+        imu_stamp = SimpleNamespace(to_sec=lambda: 201., to_nsec=lambda: 201_000_000_000)
+        vector = SimpleNamespace(x=0., y=0., z=0.)
+        imu = SimpleNamespace(header=SimpleNamespace(stamp=imu_stamp),
+                              linear_acceleration=vector, angular_velocity=vector)
+        rows = [('/points', scan, None), ('/imu', imu, None)]
+        raw = np.column_stack([cloud[k].reshape(-1) for k in names[:4]]).astype(np.float32)
+        for base, stamp_at_end in ((0., True), (1_795_000_000., False)):
+            with self.subTest(base=base, stamp_at_end=stamp_at_end):
+                cloud['timestamp'] = base + offset
+                scan.data = bytes(data)
+                config['preprocess']['stamp_at_scan_end'] = stamp_at_end
+                with np.errstate(invalid='ignore'):
+                    batch, = bag_observations(None, config, messages=rows)
+                self.assertEqual(batch['raw'].tobytes(), raw.tobytes())
+                times = ((base + offset.reshape(-1)[[2, 10]] - base) * 1000).astype(np.float32)
+                expected = np.column_stack((raw[[2, 10]], times))
+                self.assertEqual(batch['points'].tobytes(), expected.tobytes())
+                duration = float(times[-1]) / 1000
+                end = 200. if stamp_at_end else 200. + duration
+                self.assertEqual((batch['begin'], batch['end']), (end - duration, end))
+
+        # An unsampled final point still determines whether timestamps are valid.
+        cloud['timestamp'][-1, -1] = base
+        scan.data = bytes(data)
+        with self.assertRaisesRegex(ValueError, 'requires measured point timestamps'):
+            rs16_preprocess(pointcloud_fields(scan, names), config, 200.)
 
 
 class ImuTimeTests(unittest.TestCase):

@@ -48,6 +48,11 @@ class SeatingWorker:
         self.last_stamp = None
         self.last_candidate = None
 
+    def _start_active_selection(self):
+        """Start the selection stored in self.active while holding self.lock."""
+        self.thread = threading.Thread(target=self._run, args=self.active, name='seating-t3', daemon=True)
+        self.thread.start()
+
     def observe(self, scene, observation, image, points, camera, clock):
         if points is None or camera is None:
             return
@@ -55,10 +60,7 @@ class SeatingWorker:
             self.frames.append((scene, observation, image, points, camera, clock))
             if (self.active is not None and (self.thread is None or not self.thread.is_alive()) and
                     self.last_stamp is not None and scene.record['as_of']>self.last_stamp):
-                value,original,original_edge,epoch=self.active
-                self.thread=threading.Thread(target=self._run,args=(value,original,original_edge,epoch),
-                    name='seating-t3',daemon=True)
-                self.thread.start()
+                self._start_active_selection()
 
     def update_scene(self,scene,clock):
         with self.lock:
@@ -120,8 +122,7 @@ class SeatingWorker:
             self.last_candidate=None
             value=copy.deepcopy(value)
             self.active=(value,original,None,self.epoch)
-            self.thread=threading.Thread(target=self._run,args=(value,original,None,self.epoch),name='seating-t3',daemon=True)
-            self.thread.start()
+            self._start_active_selection()
         return dict(accepted=True,selection_id=value['selection_id'],executable=False,execution_feedback=False)
 
     def _edge(self,frame,roi):
@@ -195,8 +196,6 @@ class SeatingWorker:
         from navigation.planning.footprint import footprint_status
         from navigation.planning.inputs import navigation_grid
         from perception.environment.navigation import navigation_geometry
-        from navigation.planning.planner import transform_poses
-
         margin = self.planning['safety_margin_m']
         grid = navigation_geometry(scene, now=now, asset=self.asset, check_asset=True,
                                    include_confirmed_free=manual_table is not None)
@@ -230,7 +229,6 @@ class SeatingWorker:
     def _mapped_view_route(self, planner, request, scene, now, pose, *, table=None):
         """Check a display-only view approach against the mapped reference and current hits."""
         from navigation.planning.footprint import swept_check
-        from navigation.planning.planner import transform_poses
         from perception.environment.layers import GridSnapshot
         from perception.environment.navigation import navigation_geometry
 
@@ -497,9 +495,7 @@ class SeatingWorker:
                 self.last_candidate=result['candidate_id']
                 self.active=(value,original,original_edge,epoch)
                 if self.frames and self.frames[-1][0].record['as_of']>self.last_stamp:
-                    self.thread=threading.Thread(target=self._run,args=(value,original,original_edge,epoch),
-                        name='seating-t3',daemon=True)
-                    self.thread.start()
+                    self._start_active_selection()
             else:
                 self.active=None
 

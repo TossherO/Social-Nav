@@ -5,6 +5,12 @@ from pathlib import Path
 import numpy as np
 
 
+# Match the native PointEvidence values. Unconfirmed hits age like person hits,
+# while remaining part of the collision geometry.
+MOVABLE_PERSON_HIT = 1
+UNCONFIRMED_HIT = 2
+
+
 class VoxelBudgetExceeded(RuntimeError):
     """The native occupancy backend discarded its voxel evidence."""
 
@@ -86,11 +92,14 @@ class OccupancyTree:
             n = self.lib.sn_occupancy_update(*arguments)
         else:
             mask = np.ascontiguousarray(transient_mask, dtype=np.uint8)
-            if (mask.shape != (len(points),) or not np.isin(mask, [0, 1]).all() or
+            if (mask.shape != (len(points),) or (mask > UNCONFIRMED_HIT).any() or
                     transient_ttl is None or not np.isfinite(transient_ttl) or transient_ttl < 0):
                 raise ValueError('Invalid transient point mask/lifetime')
             if not hasattr(self.lib, 'sn_occupancy_update_masked'):
                 raise RuntimeError('Rebuild the environment occupancy library for transient point masks')
+            if (not hasattr(self.lib, 'sn_occupancy_uncertain_person_hits')
+                    and (mask == UNCONFIRMED_HIT).any()):
+                raise RuntimeError('Rebuild the environment occupancy library for short-lived collision hits')
             n = self.lib.sn_occupancy_update_masked(*arguments, mask.ctypes.data_as(C.POINTER(C.c_uint8)),
                                                    transient_ttl, int(omit_transient))
         if n < 0:
@@ -145,7 +154,8 @@ class OccupancyTree:
         return votes
 
     def project(self, floor, support, origin, config, stamp, *, endpoints, view_metadata=None,
-                near_field=None, transient_mask=None, device=None, metrics=None,ground_conflict=None):
+                near_field=None, transient_mask=None, device=None, metrics=None,ground_conflict=None,
+                obstacle_projection=None):
         """Project resident evidence without exporting the entire 3D voxel map."""
         from .layers import finish_evidence
         if not hasattr(self.lib,'sn_occupancy_project'):
@@ -165,7 +175,7 @@ class OccupancyTree:
             from .cuda_view import native_view
             layers,self.view_metadata=native_view(self,original,support,origin,config,stamp,endpoints,
                 required=required,metadata=view_metadata,policy=near_field,transient_mask=transient_mask,
-                device=device,metrics=metrics,ground_conflict=ground_conflict)
+                device=device,metrics=metrics,ground_conflict=ground_conflict,obstacle_projection=obstacle_projection)
             return layers
         if device is not None:raise ValueError('Device layers require CUDA evidence')
         floor = np.ascontiguousarray(original,np.float64)

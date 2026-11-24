@@ -76,6 +76,9 @@ class ReferenceRuntime:
     def __init__(self,planning,motion,geometry,settings=None,*,worker_factory=Worker):
         self.motion=motion;self.geometry=geometry;self.settings=copy.deepcopy(settings) if settings is not None else load_config()
         self.planning=planning_config(planning,self.settings)
+        self.obstacles=ReferenceObstacles(confirm_scans=self.settings.get('person_obstacle_confirm_scans',2),
+                                          confirm_window_s=self.settings.get('person_obstacle_confirm_window_s',.5),
+                                          person_margin_m=self.settings.get('person_obstacle_margin_m',.2))
         self.worker=worker_factory(self.planning,geometry)
         self.events=deque(maxlen=512);self.sequence=0;self.epoch=0;self.context=None
         self.latest=None;self.current=None;self.reference=None;self.reason='waiting_for_observation'
@@ -86,11 +89,11 @@ class ReferenceRuntime:
         self.start_status=None
         self.start_occupied_stamp_s=None
         self.display_enabled=False
+        self.display_subscribed=None
         self._display_reference_map=None
         self._display_failure_map=None
         self.retry_after_observation=None
         self.control_blocked_since=None
-        self.obstacles=ReferenceObstacles()
         self.follow_key=None
         self.follow_revision=-1
 
@@ -522,7 +525,8 @@ class ReferenceRuntime:
                 asset=item['asset'],sent_mono=mono,now=now,clock_rate=item['clock_rate'],
                 reference_obstacles=self._retained_obstacles(scene,item['asset']),
                 reference_obstacle_version=self.obstacles.version)
-            if self.display_enabled:job['display_enabled']=True
+            if self.display_enabled and (self.display_subscribed is None or self.display_subscribed()):
+                job['display_enabled']=True
             self.worker.send(job);self.last_sent=mono;self.retry_after_observation=None
             self._event('submitted',role='reference',job_id=self.sequence,as_of=r['as_of'],
                         goal_revision=item['request']['goal_revision'])

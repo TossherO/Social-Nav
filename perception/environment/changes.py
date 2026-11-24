@@ -5,18 +5,13 @@ import cv2
 
 from .context import fingerprint
 from .layers import GridSnapshot, finish_evidence
-from .geometry import distance_to_zero
+from .geometry import MAX_OVERLAP_CELLS, distance_to_zero, square_overlaps
 
 
 def cell_evidence(points, rotation, target_resolution, local, *, confirmed_free=None):
     """Exact SAT overlap of target squares with the local axis-aligned raster."""
     m, layers=local.metadata,local.layers
-    cells=layers['occupancy'];res=m['resolution'];a=target_resolution/2;b=res/2
-    extent=a*np.abs(rotation).sum(axis=0)
-    lower=np.floor((points-extent-m['origin_xy'])/res-1e-9).astype(int)
-    upper=np.floor((points+extent-m['origin_xy'])/res+1e-9).astype(int)
-    span=(upper-lower).max(axis=0)+1
-    if int(np.prod(span))>81:raise ValueError('Prior/local cell scale ratio exceeds the overlap budget')
+    cells=layers['occupancy']
     free=np.ones(len(points),bool);hit=np.zeros(len(points),bool);seen=np.full(len(points),np.nan)
     occupied_overlap=np.zeros(len(points),bool)
     if confirmed_free is None:
@@ -27,20 +22,12 @@ def cell_evidence(points, rotation, target_resolution, local, *, confirmed_free=
     else:
         valid_free=np.isfinite(confirmed_free)&(cells!=100)
         observed=confirmed_free
-    for dy in range(span[1]):
-        for dx in range(span[0]):
-            ij=lower+[dx,dy];centres=(ij+.5)*res+m['origin_xy'];delta=centres-points
-            local_gap=extent+b-np.abs(delta)
-            target_gap=a+b*np.abs(rotation).sum(axis=1)-np.abs(delta@rotation.T)
-            overlap=((local_gap>=-1e-9)&(target_gap>=-1e-9)).all(axis=1)
-            inside=((ij>=0)&(ij<np.asarray(cells.shape[::-1]))).all(axis=1)
-            free[overlap & ~inside]=False
-            rows=np.flatnonzero(overlap & inside);x,y=ij[rows].T
-            occupied=cells[y,x]==100
-            free[rows]&=valid_free[y,x];hit[rows]|=occupied
-            hits=rows[occupied]
-            occupied_overlap[hits]|=((local_gap[hits]>1e-9)&(target_gap[hits]>1e-9)).all(axis=1)
-            seen[rows]=np.fmin(seen[rows],observed[y,x])
+    for rows,y,x,outside,interior in square_overlaps(points,rotation,target_resolution,local,include_contacts=True):
+        free[outside]=False
+        occupied=cells[y,x]==100
+        free[rows]&=valid_free[y,x];hit[rows]|=occupied
+        occupied_overlap[rows]|=occupied&interior
+        seen[rows]=np.fmin(seen[rows],observed[y,x])
     free &= np.isfinite(seen)&(seen<=m['stamp_s']+1e-6)
     return free,hit,seen,occupied_overlap
 
@@ -106,8 +93,8 @@ class PriorRevisions:
         cells = local.layers['occupancy']; lm, pm = local.metadata, prior.metadata
         # Only local cells intersecting this raster need projection. Bounding
         # target cells by a half diagonal covers arbitrary sub-cell alignment.
-        yy, xx = np.indices(cells.shape)
-        local_xy = np.stack((xx.ravel()+.5, yy.ravel()+.5), axis=1)*lm['resolution']+lm['origin_xy']
+        h,w=cells.shape
+        local_xy = (np.array([[0,0],[0,h-1],[w-1,0],[w-1,h-1]])+.5)*lm['resolution']+lm['origin_xy']
         yaw = np.arctan2(transform[1, 0], transform[0, 0]); c, s = np.cos(yaw), np.sin(yaw)
         rotation = np.array([[c,-s],[s,c]])
         local_pose = np.asarray(lm['world_from_lidar'])[:2,3]
@@ -119,13 +106,34 @@ class PriorRevisions:
         current_hit = np.zeros(self.cleared.shape, bool)
         if (high>low).all():
             y,x = np.mgrid[low[1]:high[1],low[0]:high[0]]
-            xy = np.stack((x.ravel()+.5,y.ravel()+.5),axis=1)*pm['resolution']+pm['origin_xy']
+            y,x = y.ravel(),x.ravel()
+            xy = (np.column_stack((x,y))+.5)*pm['resolution']+pm['origin_xy']
             sample = (xy-map_pose) @ rotation+local_pose
+            # Near the scale limit, use the full set so the exact budget check
+            # still sees every alignment, including regions with no corrections.
+            span_bound = np.ceil(pm['resolution']/lm['resolution']*np.abs(rotation).sum(axis=0)+2e-9)+1
+            if not overlay_current and span_bound.prod() <= MAX_OVERLAP_CELLS:
+                # This consumer only needs updates to historical free cells. A
+                # new one must cover its centre with locally certified free
+                # space. Existing corrections always get the full revoke test.
+                prior_cells = prior.layers['occupancy'][y,x]
+                eligible = prior_cells!=0 if confirmed_free is not None else prior_cells==100
+                ij = np.floor((sample-lm['origin_xy'])/lm['resolution']).astype(np.intp)
+                cx,cy = ij.T
+                inside = (cx>=0)&(cy>=0)&(cx<w)&(cy<h)
+                possible = self.cleared[y,x]
+                rows = np.flatnonzero(eligible&inside)
+                sy,sx = cy[rows],cx[rows]
+                if confirmed_free is not None:
+                    possible[rows] |= np.isfinite(confirmed_free[sy,sx]) & (cells[sy,sx]!=100)
+                elif not self.has_confirmed_free:
+                    possible[rows] |= cells[sy,sx]==0
+                sample,y,x = sample[possible],y[possible],x[possible]
             certified,occupied,seen,occupied_overlap=cell_evidence(
                 sample,rotation,pm['resolution'],local,confirmed_free=confirmed_free)
             if confirmed_free is not None or not self.has_confirmed_free:
-                current_free[y.ravel()[certified],x.ravel()[certified]]=True
-            current_hit[y.ravel()[occupied],x.ravel()[occupied]]=True
+                current_free[y[certified],x[certified]]=True
+            current_hit[y[occupied],x[occupied]]=True
             # A partial view can revoke a correction when occupied cells
             # intersect its interior. Unknown space requires full coverage.
             forget=occupied_overlap if self.has_confirmed_free else np.zeros(len(sample),bool)
@@ -135,15 +143,15 @@ class PriorRevisions:
                 upper=origin+np.asarray(lm['shape'][::-1])*lm['resolution']
                 observable=((sample-extent>=origin)&(sample+extent<=upper)).all(axis=1)
                 forget|=observable&~certified
-            self.cleared[y.ravel()[forget],x.ravel()[forget]]=False
-            self.stamps[y.ravel()[forget],x.ravel()[forget]]=np.nan
+            self.cleared[y[forget],x[forget]]=False
+            self.stamps[y[forget],x[forget]]=np.nan
         current_free &= ~current_hit
         eligible = prior.layers['occupancy']!=0 if confirmed_free is not None else prior.layers['occupancy']==100
         newly_free = current_free & eligible
         self.cleared |= newly_free
         if (high>low).all():
-            selected=newly_free[y.ravel(),x.ravel()]
-            self.stamps[y.ravel()[selected],x.ravel()[selected]]=seen[selected]
+            selected=newly_free[y,x]
+            self.stamps[y[selected],x[selected]]=seen[selected]
         begin,end=np.zeros(2,int),np.asarray(pm['shape'][::-1])
         if bounds is not None:
             begin=np.maximum(begin,np.floor((np.asarray(bounds[:2])-pm['origin_xy'])/pm['resolution']).astype(int))

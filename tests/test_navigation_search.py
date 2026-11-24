@@ -14,6 +14,9 @@ from perception.environment.layers import GridSnapshot
 from tests.navigation_fixtures import asset, bundle, request
 
 
+POSE_SEARCH_LIBRARY = Path(__file__).resolve().parents[1] / 'outputs/runtime/build/planning/libsocial_nav_pose_search.so'
+
+
 class RoundTableReferenceTests(unittest.TestCase):
     def test_approach_and_observation_replan_around_table_on_empty_lidar_grid(self):
         from navigation.planning.continuity import goal_binding
@@ -49,12 +52,8 @@ class RoundTableReferenceTests(unittest.TestCase):
         self.assertFalse(prior.snapshot.layers['occupancy'].any())
 
 
+@unittest.skipUnless(POSE_SEARCH_LIBRARY.is_file(), 'Build the standalone native pose-search library')
 class SearchCacheTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.library=Path(__file__).resolve().parents[1]/'outputs/runtime/build/planning/libsocial_nav_pose_search.so'
-        if not cls.library.is_file():raise unittest.SkipTest('Build the standalone native pose-search library')
-
     def setUp(self):
         self.config=load_config()
         self.config['pose_search'].update(max_expansions=10000,max_search_s=.08)
@@ -63,7 +62,7 @@ class SearchCacheTests(unittest.TestCase):
         self.clearance=np.zeros(self.cells.shape,np.float32)
         self.grid=GridSnapshot(dict(shape=[64,64],origin_xy=[0.,0.],resolution=.1),dict(occupancy=self.cells))
         self.geometry=VehicleGeometry([[-.15,-.15],[.15,-.15],[.15,.15],[-.15,.15]],np.eye(4),source='synthetic')
-        self.backend=FootprintSearch(self.library);self.addCleanup(self.backend.close)
+        self.backend=FootprintSearch(POSE_SEARCH_LIBRARY);self.addCleanup(self.backend.close)
 
     def search(self,goal=(4.8,3.2)):
         return self.backend.search(self.grid,self.geometry,self.config,self.clearance,self.costs,[1.6,3.2,0.],goal)
@@ -105,15 +104,11 @@ class SearchCacheTests(unittest.TestCase):
         self.assertTrue(self.search()[1]['heuristic_cache_reused'])
 
 
+@unittest.skipUnless(POSE_SEARCH_LIBRARY.is_file(), 'Build the standalone native pose-search library')
 class ReferenceTangentTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.library=Path(__file__).resolve().parents[1]/'outputs/runtime/build/planning/libsocial_nav_pose_search.so'
-        if not cls.library.is_file():raise unittest.SkipTest('Build the standalone native pose-search library')
-
     def setUp(self):
         self.config=planning_config(load_config())
-        self.config['pose_search']['native_library']=str(self.library)
+        self.config['pose_search']['native_library']=str(POSE_SEARCH_LIBRARY)
         self.config['motion_constraints'].update(allow_in_place_rotation=False,allow_reverse=False)
         self.geometry=VehicleGeometry([[-.15,-.15],[.15,-.15],[.15,.15],[-.15,.15]],np.eye(4),source='synthetic')
         self.start=[2.,2.,0.]
@@ -176,7 +171,7 @@ class ReferenceTangentTests(unittest.TestCase):
         for seconds,expected in ((.8,'disconnected_search_region'),(1e-9,'curvature_search_time_budget')):
             with self.subTest(timeout=seconds):
                 config=planning_config(load_config())
-                config['pose_search'].update(native_library=str(self.library),max_search_s=seconds)
+                config['pose_search'].update(native_library=str(POSE_SEARCH_LIBRARY),max_search_s=seconds)
                 planner=Planner(config,self.geometry,require_actual_start=True)
                 result=planner.query(request(start=self.start,goal=[5.,2.35]),asset=asset(cells))
                 self.assertEqual(result['search_attempts'][-1]['reason'],expected,result)

@@ -9,13 +9,13 @@ from navigation.planning.continuity import reference_envelope
 from navigation.planning.planner import Planner
 from navigation.safety.guard import LocalSafety
 from perception.environment.context import fingerprint
-from tests import test_navigation_dwa as fixtures
-from tests.navigation_fixtures import bundle
+from tests.navigation_fixtures import bundle, dwa_inputs
 
 
 class ReverseTests(unittest.TestCase):
     def setUp(self):
-        self.f=fixtures.DwaTests();self.f.setUp()
+        self.f = dwa_inputs()
+        self.f.scene = bundle()
         self.motion=dict(self.f.motion,allow_reverse=True)
         self.cfg=copy.deepcopy(self.f.cfg);self.cfg['motion_constraints']['allow_reverse']=True
         self.request=dict(self.f.req,goal=[1.,2.,0.])

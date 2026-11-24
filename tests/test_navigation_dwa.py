@@ -7,27 +7,23 @@ from perception.environment.context import fingerprint
 from navigation.control.dwa import DwaController
 from navigation.control.runtime import DwaNavigationControl
 from navigation.planning.planner import Planner
-from navigation.planning.inputs import load_config
 from navigation.planning.motion import load_motion_config
 from navigation.planning.continuity import reference_envelope
-from navigation.planning.footprint import VehicleGeometry
 from navigation.planning.reference import ReferenceRuntime
-from tests.navigation_fixtures import bundle,request
-from tests.navigation_fixtures import FakeWorker,scene_at
+from tests.navigation_fixtures import FakeWorker, bundle, dwa_fixture, request, scene_at
 
 
 class DwaTests(unittest.TestCase):
     def setUp(self):
-        self.cfg=load_config();self.cfg['algorithm']='hybrid_astar';self.cfg['local_replanning']['enabled']=False
-        self.motion=load_motion_config()
-        self.geometry=VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],np.eye(4),source='synthetic')
-        self.scene=bundle();self.req=request('local',goal=[4.,2.,0.],goal_behavior='stop')
-        self.feedback=dict(status='valid',source='synthetic_actual_plant',pose=[2.,2.,0.],velocity=[0.,0.],stamp_s=10.,
-            clock_domain='synthetic',local_identity=['test',0,'odom'])
-        result=Planner(self.cfg,self.geometry).query(self.req,scene=self.scene,now=10.,clock_domain='synthetic')
-        self.assertEqual(result['status'],'path_found',result)
-        self.reference=reference_envelope(result,self.req,self.scene,None)
-        self.controller=DwaController(self.cfg,self.motion,self.geometry)
+        fixture = dwa_fixture()
+        self.cfg = fixture.cfg
+        self.motion = fixture.motion
+        self.geometry = fixture.geometry
+        self.scene = fixture.scene
+        self.req = fixture.req
+        self.feedback = fixture.feedback
+        self.reference = fixture.reference
+        self.controller = fixture.controller
 
     def test_small_reachable_start_and_bounded_candidate_count_without_optimizers(self):
         r=self.controller.command(self.req,self.scene,self.feedback,self.reference,now=10.,clock_domain='synthetic')

@@ -10,7 +10,8 @@ from navigation.planning.continuity import check_reference,content_valid,context
 from navigation.planning.inputs import association_status,navigation_grid,request_status,scene_status
 from navigation.planning.planner import se2,transform_poses
 from perception.mapping_localization.context import pose_matrix
-from .surface import DisplaySurface,sample_ground,sample_poses,complete_display_heights
+from .surface import (DisplaySurface, NavigationGridSurface, complete_display_heights,
+                      map_from_local_pose, sample_ground, sample_poses)
 
 
 IDENTITY=('session_id','generation','frame_id')
@@ -27,9 +28,12 @@ def display_packet(result,reference,request,scene,row,control,reason,*,now,clock
 
 
 class NavigationView:
-    def __init__(self,geometry,planning,*,asset=None,path_z_m=.03,height_mode='ground',ground_plane_radius_m=1.5,reference_max_age_s=5.,trajectory_max_age_s=.5):
+    def __init__(self,geometry,planning,*,asset=None,path_z_m=.03,vehicle_clearance_m=.12,
+                 height_mode='ground',ground_plane_radius_m=1.5,reference_max_age_s=5.,trajectory_max_age_s=.5):
         self.geometry,self.planning,self.asset=geometry,planning,asset
         self.z=path_z_m;self.height_mode=height_mode;self.plane_radius=ground_plane_radius_m
+        self.vehicle_clearance_m=vehicle_clearance_m
+        self.static_surface=None
         self.reference_max_age_s=reference_max_age_s;self.trajectory_max_age_s=trajectory_max_age_s
         self.history=deque(maxlen=2000);self.raw_history=deque(maxlen=2000);self.identity=None
 
@@ -39,18 +43,10 @@ class NavigationView:
         # Independent control may have a newer measured pose than perception.
         same=packet is not None and tuple(packet['row'][k] for k in IDENTITY)==identity
         if same and packet['row']['stamp_s']>row['stamp_s']:row=packet['row']
-        valid=row['health']==0
-        if identity!=self.identity or not valid or (self.history and row['stamp_s']<self.history[-1][0]):
-            self.history.clear();self.raw_history.clear();self.identity=identity
         surface=DisplaySurface(grid,row,offset=self.z,mode=self.height_mode,plane_radius=self.plane_radius,
             max_age=self.planning['max_geometry_age_s'])
-        pose=None;z=np.nan;ground_source=0
-        if valid:
-            pose=self.geometry.pose(pose_matrix(row['position'],row['quaternion_xyzw']))
-            heights,sources=surface.sample([pose[:2]]);z=float(heights[0]);ground_source=int(sources[0])
-            if not self.history or row['stamp_s']>self.history[-1][0]:
-                self.history.append((row['stamp_s'],pose.copy(),z))
-                self.raw_history.append((row['stamp_s'],list(row['position']),list(row['quaternion_xyzw'])))
+        valid=row['health']==0
+        pose,z,ground_source=self.observe(row,surface)
         out=dict(frame_id=row['frame_id'],stamp_s=row['stamp_s'],localization_row=row,history=list(self.history),
             raw_history=list(self.raw_history),pose=pose,reference=None,trajectory=None,goal=None,search_map=None,
             text='SHADOW | no control observation',level='waiting',z=z,ground_source=ground_source,
@@ -135,6 +131,27 @@ class NavigationView:
         out['level']='ready' if out['trajectory'] is not None else 'waiting'
         return self._project(out,surface)
 
+    def observe(self,row,surface=None):
+        identity=tuple(row[k] for k in IDENTITY)
+        valid=row['health']==0
+        stamp=row['stamp_s']
+        if identity!=self.identity or not valid or (self.history and stamp<self.history[-1][0]):
+            self.history.clear();self.raw_history.clear();self.identity=identity
+        pose=None;z=np.nan;ground_source=0
+        if valid:
+            pose=self.geometry.pose(pose_matrix(row['position'],row['quaternion_xyzw']))
+            if surface is not None:
+                heights,sources=surface.sample([pose[:2]])
+                z,ground_source=float(heights[0]),int(sources[0])
+            elif self.height_mode=='plane':
+                z,ground_source=self.z,3
+            if not self.history or stamp>self.history[-1][0]:
+                self.history.append((stamp,pose.copy(),z))
+                self.raw_history.append((stamp,list(row['position']),list(row['quaternion_xyzw'])))
+            elif np.isfinite(z) and not np.isfinite(self.history[-1][2]):
+                self.history[-1]=(stamp,pose.copy(),z)
+        return pose,z,ground_source
+
     def _project(self,out,surface):
         snapshot=out.get('search_map')
         if snapshot is not None:
@@ -143,9 +160,9 @@ class NavigationView:
         if pose is not None:
             polygon=self.geometry.polygon(pose);polygon=np.vstack([polygon,polygon[0]])
             polygon=sample_poses(np.c_[polygon,np.zeros(len(polygon))],surface.resolution)[:,:2]
-            heights,_=surface.sample(polygon);out['footprint']=np.c_[polygon,heights+.04]
             heading=np.vstack([pose[:2],pose[:2]+.8*np.array([np.cos(pose[2]),np.sin(pose[2])])])
-            heights,_=surface.sample(heading);out['heading']=np.c_[heading,heights+.05]
+            body=self._vehicle_points(np.vstack((polygon,heading)),surface,out['localization_row'])
+            out['footprint'],out['heading']=body[:-len(heading)],body[-len(heading):]
         if out['goal'] is not None:out['goal_z']=float(surface.sample([out['goal'][:2]])[0][0])
         status={0:'unknown (markers omitted)',1:'supported cells',2:'fitted near vehicle',3:'fixed XY diagnostic',4:'static supported cells',5:'estimated static ground'}[out['ground_source']]
         for key in ('reference','trajectory'):
@@ -174,3 +191,25 @@ class NavigationView:
                 status+=' | %s height %d/%d'%(key,int(np.isfinite(data['heights']).sum()),len(data['heights']))
         out['text']+='\nGROUND: '+status
         return out
+
+    def _vehicle_points(self, xy, surface, row):
+        z, _ = surface.sample(xy)
+        if surface.mode == 'plane':
+            return np.c_[xy, z+self.vehicle_clearance_m]
+        body = np.c_[xy, z-surface.offset+self.vehicle_clearance_m]
+        if self.asset is None or not row.get('has_map_pose') or not np.isfinite(z).any():
+            return body
+        if self.static_surface is None:
+            self.static_surface = NavigationGridSurface(self.asset)
+        if row.get('map_frame') != self.static_surface.static.metadata['frame_id']:
+            return body
+        transform = map_from_local_pose(row)
+        vertical = transform[2, 2]
+        if vertical <= .9:
+            return body
+        known = np.flatnonzero(np.isfinite(z))
+        mapped = body[known] @ transform[:3, :3].T + transform[:3, 3]
+        reference_z = self.static_surface.visible_static_heights(mapped[:, :2])
+        extra = np.fmax(0., reference_z+self.vehicle_clearance_m-mapped[:, 2])
+        body[known, 2] += extra/vertical
+        return body

@@ -13,15 +13,15 @@ import numpy as np
 
 from perception.environment.layers import GridSnapshot
 from perception.environment.multi_export import _registered_source
+from tests.mapping_fixtures import registered_map_inputs, write_parent_map
 
 
 class MultiSurveyTests(unittest.TestCase):
     def test_reference_must_match_selected_map_and_source_bag(self):
-        from tests.test_local_map_update import LocalMapUpdateTests
         from perception.environment.layers import load_config
         from perception.mapping_localization.results import map_fingerprint
         with tempfile.TemporaryDirectory() as tmp:
-            old, mapping, reference = LocalMapUpdateTests().fixture(tmp)
+            old, mapping, reference = registered_map_inputs(tmp)
             selected = _registered_source(mapping,reference,map_fingerprint(old),'map',load_config())
             self.assertEqual(selected['source']['recorded_scans'],6)
             with self.assertRaisesRegex(ValueError, 'selected final map'):
@@ -35,9 +35,8 @@ class MultiSurveyTests(unittest.TestCase):
     def test_overlapping_surveys_are_not_given_an_invented_time_order(self):
         from perception.environment.layers import load_config
         from perception.environment.multi_export import export_registered_multi_environment
-        from tests.test_local_map_update import LocalMapUpdateTests
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp); old,_,_=LocalMapUpdateTests().fixture(root)
+            root=Path(tmp); old=write_parent_map(root)
             def source(evidence, reference, *unused):
                 return dict(timeline=SimpleNamespace(times=np.array([1.,3. if evidence=='a' else 4.])),
                             source={'bag_fingerprint':{'id':evidence}})
@@ -60,9 +59,8 @@ class MultiSurveyTests(unittest.TestCase):
         from perception.environment.layers import load_config
         from perception.environment.multi_export import export_registered_multi_environment
         from perception.environment.storage import StaticEnvironmentMap
-        from tests.test_local_map_update import LocalMapUpdateTests
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp); old,_,_=LocalMapUpdateTests().fixture(root)
+            root=Path(tmp); old=write_parent_map(root)
             shape=(3,3); ground=np.zeros(shape,np.float32); support=np.ones(shape,bool)
             ground[2,1:]=np.nan; support[2,1:]=False
             layers=dict(occupancy=np.full(shape,-1,np.int8),observed=np.zeros(shape,bool),
@@ -203,11 +201,10 @@ class MultiSurveyTests(unittest.TestCase):
         from perception.environment.multi_export import export_registered_multi_environment
         from perception.environment.scans import ScanJournal,read_scans
         from perception.mapping_localization.results import file_fingerprint,map_fingerprint
-        from tests.test_local_map_update import LocalMapUpdateTests
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); first=root/'first';second=root/'second';first.mkdir();second.mkdir()
-            old,mapping1,reference1=LocalMapUpdateTests().fixture(first)
-            _,mapping2,reference2=LocalMapUpdateTests().fixture(second)
+            old,mapping1,reference1=registered_map_inputs(first)
+            _,mapping2,reference2=registered_map_inputs(second)
             bag=second/'input.bag';bag.write_bytes(b'different bag')
             for folder in (mapping2,reference2):
                 path=folder/'localization.jsonl'

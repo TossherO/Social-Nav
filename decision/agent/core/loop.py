@@ -13,6 +13,8 @@ from perception.environment.context import fingerprint
 MODEL_RETRY_DELAY_S = 5.
 MODEL_RETRY_MAX_LOCAL_DELAY_S = 60.
 MODEL_RETRY_REASON = 'model_temporarily_unavailable'
+REVIEW_EVIDENCE_TOOLS = frozenset(('observe_scene', 'query_map', 'lookup_places', 'get_navigation_state',
+                                 'read_keyframe', 'save_keyframe'))
 
 
 class AgentLoop:
@@ -187,7 +189,7 @@ class AgentLoop:
                     reply.argument_error is None else None)
             valid = not result['stale'] and self.session.valid_context(result['context'],tool=tool)
             self.session.store.event('model_result_consumed', dict(request_index=result['request_index'],
-                valid_context=valid, ok=result['ok'], timing=timing))
+                decision_phase=result['purpose'], valid_context=valid, ok=result['ok'], timing=timing))
             if result['ok']:
                 self.model_retry_delay=MODEL_RETRY_DELAY_S
             if not valid:
@@ -208,6 +210,8 @@ class AgentLoop:
                         # prompt preparation will request current observations.
                         self.session._save('discard_observation_after_context_change')
                     else:
+                        if result['purpose']=='monitor' and not result['stale']:
+                            self.session.request_model_review()
                         self.session.wait_for_event('observation')
                         self.session._save('await_fresh_observation')
                 if self.session.spatial_view is not None and not self.session.spatial_view.current(self.session.navigation.snapshot()['stamp_s']):
@@ -218,6 +222,8 @@ class AgentLoop:
                     elevator=s.get('elevator_active')
                     if elevator:
                         self.session.wait_for_event('monitor')
+                    elif result['purpose']=='monitor':
+                        self.session.request_model_review()
                     retry_after_s=result.get('retry_after_s')
                     delay=max(self.model_retry_delay,retry_after_s or 0.)
                     self.model_retry_at=time.monotonic()+delay
@@ -249,10 +255,14 @@ class AgentLoop:
                             self.session.wait_for_event('monitor')
                             return s
                         self.session.conversation.commit(reply,reply.argument_error)
+                        if result['purpose']=='monitor':
+                            self.session.request_model_review()
                         self.session._save('tool_arguments_rejected',reply.argument_error)
                         return s
                     if reply.action is None:
                         self._handle_text_reply(reply, transient)
+                        if result['purpose']=='monitor' and not transient and s['status']=='ready':
+                            self.session.request_model_review()
                         return s
                     self.missing_action_for = None
                     value = reply.action
@@ -293,6 +303,11 @@ class AgentLoop:
                          type(source_stamp) in (int,float) and 0<=current_stamp-source_stamp else None)
                     self.session._save('model_action_applied', dict(call=value,result=output,context=result['context'],
                                                                   source_age_s=age))
+                    if result['purpose']=='monitor' and (
+                            value['tool'] in REVIEW_EVIDENCE_TOOLS or
+                            value['tool']=='record_monitor_review' and output.get('status')!='recorded' or
+                            value['tool']=='wait_for_event' and output.get('event')=='observation'):
+                        self.session.request_model_review()
                     refusal=self.repeated_refusal(value,output)
                     if refusal:
                         self.session.stop('needs_clarification',refusal)
@@ -340,7 +355,9 @@ class AgentLoop:
         context = self.session.context()
         observation = copy.deepcopy(self.session.observation)
         spatial_view = copy.deepcopy(self.session.spatial_view)
-        self.model.submit('tool', context, lambda: self.work(payload, observation, spatial_view),
+        phase = self.session.take_model_phase(payload)
+        payload['decision_phase'] = phase
+        self.model.submit(phase, context, lambda: self.work(payload, observation, spatial_view),
                           prepare_started_s=prepare_started_s, request_index=self.requests+1)
         self.requests += 1
         return s

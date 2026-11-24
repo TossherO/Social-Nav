@@ -90,7 +90,55 @@ def suspended_history_sequence(backend):
     finally:tree.close()
 
 
+def check_uncertain_person_hit(test, backend):
+    from perception.environment.cuda_view import native_view
+    from perception.environment.occupancy import UNCONFIRMED_HIT
+
+    config = dict(load_config(), resolution=.1, hit_invalidates_free=True)
+    memory = NearFieldFreeMemory(config, dict(remember_outside_ring=True, temporary_obstacle_overlay=True))
+    tree = OccupancyTree(.1, backend=backend)
+    test.addCleanup(tree.close)
+    seed = sample(1., state=0)
+    floor, support = seed.layers['ground_z'], seed.layers['ground_support']
+    origin, bounds = [-4, -4], [-4, -4, -2, 4, 4, 3]
+    empty = np.empty((0, 3))
+    if backend == 'cpu':
+        memory.update(seed, empty)
+    else:
+        native_view(tree, floor, support, origin, config, 1., empty,
+                    source_layers=seed.layers, metadata=seed.metadata, policy=memory)
+
+    def project(stamp, points, kinds):
+        points = np.asarray(points, dtype=float).reshape(-1, 3)
+        tree.update(points, [0, 0, .84], bounds, stamp, config, rays=False,
+                    transient_mask=kinds, transient_ttl=.2, omit_transient=True, read=False)
+        metadata = sample(stamp).metadata
+        layers = tree.project(floor, support, origin, config, stamp, endpoints=points, view_metadata=metadata,
+                              near_field=memory if backend=='cuda' else None, transient_mask=kinds)
+        if backend == 'cpu':
+            layers = memory.update(GridSnapshot(metadata, layers), points, transient_mask=kinds,
+                                   person_only=tree.person_only).layers
+        return layers
+
+    provisional, fixed = [.55, .05, .5], [1.05, .05, .5]
+    project(1.9, [fixed], [0])
+    current = project(2., [provisional, fixed], [UNCONFIRMED_HIT, UNCONFIRMED_HIT])
+    test.assertEqual(current['occupancy'][40, 45], 100)
+    test.assertFalse(current['person_background_free'][40, 45])
+    retained = project(2.1, empty, [])
+    test.assertEqual(retained['occupancy'][40, 45], 100)
+    test.assertFalse(retained['person_background_free'][40, 45])
+    expired = project(2.25, empty, [])
+    test.assertNotEqual(expired['occupancy'][40, 45], 100)
+    test.assertEqual(expired['occupancy'][40, 50], 100)
+    project(2.3, [provisional], [0])
+    test.assertEqual(project(2.6, empty, [])['occupancy'][40, 45], 100)
+
+
 class NearFieldTests(unittest.TestCase):
+    def test_uncertain_person_hit_blocks_then_expires_without_shortening_ordinary_hit(self):
+        check_uncertain_person_hit(self, 'cpu')
+
     def model(self):
         return NearFieldFreeMemory(dict(load_config(),hit_invalidates_free=True))
 

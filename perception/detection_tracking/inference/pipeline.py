@@ -95,7 +95,13 @@ class PerceptionPipeline:
         # Reset invalid/jumped pose history before the detector can merge it.
         detection_frame = (replace(frame, world_from_lidar=None, pose_health='invalid')
                            if reason == 'localization_discontinuity' else frame)
-        boxes = validate_boxes(self.detector.predict(detection_frame))
+        predict_with_fingerprint = getattr(self.detector, 'predict_with_fingerprint', None)
+        if predict_with_fingerprint is None:
+            boxes = self.detector.predict(detection_frame)
+            fingerprint = None
+        else:
+            boxes, fingerprint = predict_with_fingerprint(detection_frame)
+        boxes = validate_boxes(boxes)
         detector_done = time.perf_counter()
         detection_input = getattr(self.detector, 'last_input_context', None)
         if not localized:
@@ -119,7 +125,8 @@ class PerceptionPipeline:
             'pose_source': frame.pose_source, 'pose_health': frame.pose_health,
             'pose_stamp_s': (frame.pose_stamp_s if frame.pose_stamp_s is not None else frame.stamp_s) if localized else None,
             'world_from_lidar': transform.tolist() if localized else None,
-            'detections': boxes.tolist(), 'tracks': tracks, 'input_fingerprint': frame.input_fingerprint(),
+            'detections': boxes.tolist(), 'tracks': tracks,
+            'input_fingerprint': frame.input_fingerprint() if fingerprint is None else fingerprint,
             'detection_input': detection_input,
             'tracking_policy': self.tracker.association.metadata,
             'rgb_asset_uri': frame.rgb_asset_uri, 'rgb_stamp_s': frame.rgb_stamp_s,

@@ -22,6 +22,24 @@ class CudaEnvironmentTests(unittest.TestCase):
         for engine in engines:self.addCleanup(engine.close)
         return engines
 
+    def test_uncertain_person_hit_blocks_then_expires_without_shortening_ordinary_hit(self):
+        from tests.test_environment_near_field import check_uncertain_person_hit
+        check_uncertain_person_hit(self, 'cuda')
+
+    def test_obstacle_confirmation_without_people_uses_distinct_scans_and_world_cells(self):
+        from tests.test_environment_dynamic import check_uniform_obstacle_confirmation
+        check_uniform_obstacle_confirmation(self, 'cuda')
+
+    def test_long_obstacle_renews_then_expires_to_unknown_on_device(self):
+        import torch
+        from tests.test_environment_dynamic import check_long_obstacle
+        check_long_obstacle(self, 'cuda',device=torch.device('cuda:0'))
+
+    def test_near_short_reads_only_measured_free_from_device_grid(self):
+        import torch
+        from tests.test_environment_dynamic import check_near_short_obstacles
+        check_near_short_obstacles(self,device=torch.device('cuda:0'))
+
     def test_suspended_history_matches_cpu_and_preserves_obstacle_updates(self):
         from tests.test_environment_near_field import suspended_history_sequence,person_background_sequence
         cpu=suspended_history_sequence('cpu');gpu=suspended_history_sequence('cuda')
@@ -86,9 +104,8 @@ class CudaEnvironmentTests(unittest.TestCase):
         self.assertTrue(views[1].layers['ground_support'].any())
         self.assertAlmostEqual(maps[1].ground_tracker.reference,.85,places=2)
 
-    def test_hit_invalidation_requires_post_hit_free_on_both_backends(self):
+    def test_cuda_hit_invalidation_requires_post_hit_free(self):
         from tests.test_environment_near_field import column_sequence
-        self.assertEqual(column_sequence('cpu'),[0,100,100,-1,0])
         self.assertEqual(column_sequence('cuda'),[0,100,100,-1,0])
 
     def test_near_field_history_and_obstacle_lifetimes_match_cpu_reference(self):

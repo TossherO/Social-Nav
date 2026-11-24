@@ -38,6 +38,77 @@ def request(mode='static', **changes):
     return values
 
 
+def square_vehicle_geometry():
+    from navigation.planning.footprint import VehicleGeometry
+
+    return VehicleGeometry([[-.2, -.2], [.2, -.2], [.2, .2], [-.2, .2]],
+                           np.eye(4), source='synthetic')
+
+
+def dwa_inputs():
+    """Provide the planning, motion and feedback inputs shared by DWA tests."""
+    from navigation.planning.inputs import load_config
+    from navigation.planning.motion import load_motion_config
+
+    cfg = load_config()
+    cfg['algorithm'] = 'hybrid_astar'
+    cfg['local_replanning']['enabled'] = False
+    motion = load_motion_config()
+    geometry = square_vehicle_geometry()
+    req = request('local', goal=[4., 2., 0.], goal_behavior='stop')
+    feedback = dict(status='valid', source='synthetic_actual_plant', pose=[2., 2., 0.],
+                    velocity=[0., 0.], stamp_s=10., clock_domain='synthetic',
+                    local_identity=['test', 0, 'odom'])
+    return SimpleNamespace(cfg=cfg, motion=motion, geometry=geometry, req=req, feedback=feedback)
+
+
+def dwa_fixture():
+    """Plan a straight reference through the synthetic flat local scene."""
+    from navigation.control.dwa import DwaController
+    from navigation.planning.continuity import reference_envelope
+    from navigation.planning.planner import Planner
+
+    fixture = dwa_inputs()
+    fixture.scene = bundle()
+    result = Planner(fixture.cfg, fixture.geometry).query(
+        fixture.req, scene=fixture.scene, now=10., clock_domain='synthetic')
+    if result['status'] != 'path_found':
+        raise AssertionError(result)
+    fixture.reference = reference_envelope(result, fixture.req, fixture.scene, None)
+    fixture.controller = DwaController(fixture.cfg, fixture.motion, fixture.geometry)
+    return fixture
+
+
+def shadow_inputs():
+    """Build a flat scene and measured stationary poses for shadow control."""
+    from navigation.planning.inputs import load_config
+    from navigation.planning.motion import load_motion_config
+    from navigation.planning.reference import planning_config
+
+    rows = [dict(stamp_s=stamp, health=0, session_id='test', generation=0, frame_id='odom',
+                 position=[2., 2., 0.], quaternion_xyzw=[0., 0., 0., 1.])
+            for stamp in (9.7, 9.8, 9.9, 10.)]
+    return SimpleNamespace(config=planning_config(load_config()), motion=load_motion_config(),
+                           geometry=square_vehicle_geometry(), scene=bundle(),
+                           req=request('local', goal=[4., 2.]), rows=rows)
+
+
+def shadow_packet_fixture():
+    """Generate a shadow proposal from the flat synthetic scene."""
+    from navigation.control.shadow import DwaShadowController
+    from navigation.planning.continuity import reference_envelope
+    from navigation.planning.planner import Planner
+
+    fixture = shadow_inputs()
+    planner = Planner(fixture.config, fixture.geometry, require_actual_start=True)
+    result = planner.query(fixture.req, scene=fixture.scene, now=10., clock_domain='synthetic')
+    fixture.reference = reference_envelope(result, fixture.req, fixture.scene, None)
+    fixture.controller = DwaShadowController(fixture.config, fixture.motion, fixture.geometry)
+    fixture.packet = fixture.controller.step(fixture.req, fixture.scene, fixture.rows, fixture.reference,
+                                             now=10., clock_domain='synthetic', mono=0.)
+    return fixture
+
+
 class FakeWorker:
     def __init__(self,*args):self.ready=True;self.job=None;self.started=0.;self.response=None;self.restarts=0
     def send(self,job):

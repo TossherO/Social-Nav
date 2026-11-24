@@ -497,6 +497,12 @@ class CodaDataset(torch_data.Dataset):
                         batch_size_ratio = len(val[0])
                         val = [i for item in val for i in item]
                     ret[key] = np.concatenate(val, axis=0)
+                elif key in ['points', 'voxel_coords'] and len(val) == 1 and isinstance(val[0], np.ndarray):
+                    coor = val[0]
+                    batched = np.empty((len(coor), coor.shape[1] + 1), dtype=coor.dtype)
+                    batched[:, 0] = 0
+                    batched[:, 1:] = coor
+                    ret[key] = batched
                 elif key in ['points', 'voxel_coords']:
                     coors = []
                     if isinstance(val[0], list):

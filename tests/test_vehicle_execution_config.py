@@ -54,10 +54,12 @@ class VehicleExecutionConfigTests(unittest.TestCase):
 
     def test_wheelchair_trial_profile_loads_for_execution(self):
         trial=load_motion_config(profile='trial')
-        _,selected,profile=load_vehicle_profile('configs/wheelchair_vehicle.yaml',trial,require_execution=True)
+        geometry,selected,profile=load_vehicle_profile('configs/wheelchair_vehicle.yaml',trial,require_execution=True)
+        self.assertFalse(geometry.assumed)
+        self.assertFalse(selected['parameters_assumed'])
         self.assertEqual(selected['execution_max_longitudinal_speed_mps'],profile['execution_max_longitudinal_speed_mps'])
         self.assertEqual(selected['execution_max_angular_rps'],profile['measured_limits']['max_angular_rps'])
-        self.assertEqual(selected['minimum_command_speeds'],dict(forward_mps=.1,reverse_mps=.1,angular_rps=.2))
+        self.assertEqual(selected['minimum_command_speeds'], dict(forward_mps=.1, reverse_mps=.1, angular_rps=.2))
 
     def test_invalid_minimum_command_speeds_are_rejected(self):
         for value in (None,True,-.1,.11):
@@ -79,7 +81,12 @@ class VehicleExecutionConfigTests(unittest.TestCase):
             p=self.profile();p['execution_max_longitudinal_speed_mps']=value
             with self.subTest(value=value),self.assertRaises(ValueError):self.load(p)
         p=self.profile();p['measured_limits']['max_forward_mps']=.15
-        with self.assertRaises(ValueError):self.load(p)
+        with self.assertRaisesRegex(ValueError,'Invalid execution longitudinal-speed bound'):self.load(p)
+        for key in ('max_forward_mps', 'max_angular_rps'):
+            p = self.profile()
+            p['measured_limits'][key] = self.motion[key] / 2
+            with self.subTest(limit=key), self.assertRaisesRegex(ValueError, f'Selected motion exceeds measured limit: {key}'):
+                self.load(p)
 
     def test_real_execution_needs_explicit_valid_controller_fields(self):
         for value in (None,{},dict(velocity_limit_field=0,feedback_max_linear_mps=.15,feedback_max_angular_rps=.3),

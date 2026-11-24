@@ -1,15 +1,13 @@
 """Explicit bag pause boundaries. Measurement timestamps are never rewritten."""
 import json
-import socket
 import time
 
 
 class BagPlayback:
     """Input-worker clock; pauses occur between processed scans, not mid-SLAM."""
-    def __init__(self, channel, *, rate, pause_at=None):
+    def __init__(self, channel, *, pause_at=None):
         self.channel = channel
         self.channel.setblocking(False)
-        self.rate = rate
         self.pause_at = pause_at
         self.first = self.anchor = self.last = None
         self.paused = False

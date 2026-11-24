@@ -5,6 +5,7 @@ import numpy as np
 from perception.environment.layers import LocalEnvironmentMap,load_config
 from perception.environment.occupancy import OccupancyTree
 from runtime.metrics import Metrics
+from tests.navigation_fixtures import dwa_fixture
 
 
 class DeviceBoundaryTests(unittest.TestCase):
@@ -14,14 +15,14 @@ class DeviceBoundaryTests(unittest.TestCase):
         if not torch.cuda.is_available():self.skipTest('CUDA unavailable')
         from tests.test_person_objects import object_scene
         from tests.test_navigation_prediction import track
-        from tests.test_navigation_dwa import DwaTests
         from perception.environment.scene import assemble_scene,people_observation
         from perception.environment.device import DeviceGridSnapshot
         from navigation.control.device import DeviceDwaBatch
         from navigation.control.dwa import DwaController
         from navigation.planning.planner import Planner
         from navigation.planning.continuity import reference_envelope
-        fixture=DwaTests();fixture.setUp();current=object_scene([track(4,4)])
+        fixture = dwa_fixture()
+        current = object_scene([track(4,4)])
         data=people_observation(current);data['input_fingerprint']='different-source'
         current=assemble_scene(current.geometry,clock_domain='synthetic',settings=load_config()['scene'],people=data)
         result=Planner(fixture.cfg,fixture.geometry).query(fixture.req,scene=current,now=10.,clock_domain='synthetic')
@@ -56,7 +57,6 @@ class DeviceBoundaryTests(unittest.TestCase):
         import torch
         if not torch.cuda.is_available(): self.skipTest('CUDA unavailable')
         from tests.test_environment_navigation import observation, prior_asset, scene
-        from tests.test_navigation_dwa import DwaTests
         from perception.environment.navigation import NAVIGATION_DTYPES
         from perception.environment.support import NavigationSupport, finalize
         from tests.test_environment_support import points
@@ -65,7 +65,8 @@ class DeviceBoundaryTests(unittest.TestCase):
         from navigation.control.dwa import DwaController
         from navigation.planning.planner import Planner
         from navigation.planning.continuity import reference_envelope
-        fixture=DwaTests();fixture.setUp();prior=prior_asset()
+        fixture = dwa_fixture()
+        prior = prior_asset()
         cells=np.zeros((60,60),np.int8);cells[18:23,18:23]=-1
         config=load_config();fusion=NavigationSupport(config);device_fusion=NavigationSupport(config)
         raw=observation(cells);fused=fusion.apply(raw,prior,observation=points(raw));current=scene(fused)
@@ -91,12 +92,12 @@ class DeviceBoundaryTests(unittest.TestCase):
 
     def test_dwa_device_batch_preserves_cpu_decisions_and_prediction_samples(self):
         import torch
-        from tests.test_navigation_dwa import DwaTests
         from perception.environment.device import DeviceGridSnapshot
         from navigation.control.device import DeviceDwaBatch
         from navigation.control.dwa import DwaController
         if not torch.cuda.is_available():self.skipTest('CUDA unavailable')
-        fixture=DwaTests();fixture.setUp();metrics=Metrics()
+        fixture = dwa_fixture()
+        metrics = Metrics()
         from tests.test_navigation_prediction import tracked_scene,track
         from navigation.planning.people import PeopleModel
         from navigation.planning.continuity import reference_envelope

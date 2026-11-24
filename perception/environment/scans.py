@@ -161,12 +161,44 @@ class AsyncScanJournal:
         if self.error is not None:raise RuntimeError('Scan archive failed: '+self.error)
 
 
+def _read_seal(db):
+    entry = db.execute("SELECT value FROM metadata WHERE key='sealed'").fetchone()
+    if entry is None or db.execute("SELECT 1 FROM metadata WHERE key='failed'").fetchone() is not None:
+        raise ValueError('Scan journal was not sealed cleanly')
+    return json.loads(entry[0])
+
+
+def sampled_scan_stamps(path, interval_s):
+    """Count journal records and select timestamps without reading scan payloads."""
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError('Scan journal is missing')
+    db = sqlite3.connect(path.resolve().as_uri()+'?mode=ro', uri=True)
+    try:
+        seal = _read_seal(db)
+        selected = []
+        count = 0
+        last_sample = -np.inf
+        for stamp_ns, raw in db.execute('SELECT stamp_ns,record_json FROM scans ORDER BY stamp_ns'):
+            if json.loads(raw)['stamp_ns'] != stamp_ns:
+                raise ValueError('Scan payload timestamp mismatch')
+            count += 1
+            stamp = stamp_ns/1e9
+            if stamp-last_sample < interval_s-1e-6:
+                continue
+            last_sample = stamp
+            selected.append(stamp_ns)
+        if count != seal['records']:
+            raise ValueError('Scan journal was not sealed cleanly')
+        return count, selected
+    finally:
+        db.close()
+
+
 def read_scans(path, *, stamps=None):
     db = sqlite3.connect(Path(path).resolve().as_uri()+'?mode=ro', uri=True)
     try:
-        sealed = db.execute("SELECT value FROM metadata WHERE key='sealed'").fetchone()
-        if (db.execute("SELECT 1 FROM metadata WHERE key='failed'").fetchone() is not None or
-                sealed is None or json.loads(sealed[0])['records'] != db.execute('SELECT COUNT(*) FROM scans').fetchone()[0]):
+        if _read_seal(db)['records'] != db.execute('SELECT COUNT(*) FROM scans').fetchone()[0]:
             raise ValueError('Scan journal was not sealed cleanly')
         if stamps is None:
             records = db.execute('SELECT stamp_ns,record_json,payload FROM scans ORDER BY stamp_ns')
@@ -195,10 +227,9 @@ def sealed_scan_summary(path):
         raise ValueError('Scan journal is missing')
     db = sqlite3.connect(Path(path).resolve().as_uri()+'?mode=ro', uri=True)
     try:
-        entry = db.execute("SELECT value FROM metadata WHERE key='sealed'").fetchone()
-        if (db.execute("SELECT 1 FROM metadata WHERE key='failed'").fetchone() is not None or
-                entry is None or json.loads(entry[0])['records'] != db.execute('SELECT COUNT(*) FROM scans').fetchone()[0]):
+        seal = _read_seal(db)
+        if seal['records'] != db.execute('SELECT COUNT(*) FROM scans').fetchone()[0]:
             raise ValueError('Scan journal was not sealed cleanly')
-        return json.loads(entry[0])
+        return seal
     finally:
         db.close()

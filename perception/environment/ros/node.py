@@ -59,7 +59,7 @@ class EnvironmentNode:
         backend = rospy.get_param('~backend','')
         if backend:
             self.config.setdefault('compute',{})['backend']=backend
-        self.engine = LocalEnvironmentMap(self.config)
+        self.engine = LocalEnvironmentMap(self.config,lidar_from_base_xyz=rospy.get_param('~lidar_from_base_xyz',None))
         self.lock = threading.RLock()
         self.engine_lock = threading.RLock()
         self.condition = threading.Condition(self.lock)

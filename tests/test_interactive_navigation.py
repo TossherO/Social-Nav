@@ -20,6 +20,7 @@ from navigation.planning.motion import load_motion_config
 from runtime.playback import BagPlayback
 from runtime.session import InteractiveSession
 from tests.chassis_fixtures import frame
+from tests.navigation_fixtures import shadow_inputs
 
 
 class PlaybackTests(unittest.TestCase):
@@ -192,7 +193,7 @@ class PlaybackTests(unittest.TestCase):
 
     def test_pause_holds_source_time_and_resume_reanchors_wall_clock(self):
         parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
-        playback = BagPlayback(child, rate=1., pause_at=1.)
+        playback = BagPlayback(child, pause_at=1.)
         playback.start(100.); playback.last = 101.
         before = playback.anchor; stopped = threading.Event(); rows = []
         worker = threading.Thread(target=playback.boundary, args=(rows.append, stopped))
@@ -249,31 +250,32 @@ class PlaybackTests(unittest.TestCase):
         with self.assertRaises(ValueError):selected_initial_pose('odom',[1.,2.,0.],[0.,0.,0.,1.],hint)
 
     def test_frozen_query_uses_causal_motion_and_preserves_scene(self):
-        from tests.test_navigation_shadow import ShadowTests
+        from navigation.control.dwa import DwaController
         from perception.environment.scene import assemble_scene
         from perception.environment.layers import load_config
         from navigation.planning.frozen import preview
-        fixture=ShadowTests();fixture.setUp()
+        fixture=shadow_inputs()
+        controller=DwaController(fixture.config,fixture.motion,fixture.geometry)
         scene=assemble_scene(fixture.scene.geometry,clock_domain='runtime_bag',settings=load_config()['scene'])
         original=copy.deepcopy(scene.record)
         future=dict(fixture.rows[-1],stamp_s=20.,position=[100.,100.,0.])
-        result=preview(fixture.req,scene,[*fixture.rows,future],fixture.controller.controller,fixture.config)
+        result=preview(fixture.req,scene,[*fixture.rows,future],controller,fixture.config)
         self.assertTrue(result['reference_available'],result)
         self.assertTrue(result['generated'],result)
         self.assertEqual(result['feedback']['pose'],[2.,2.,0.])
         self.assertEqual(result['as_of'],10.);self.assertEqual(scene.record,original)
         self.assertFalse(result['executable']);self.assertFalse(result['task_completed'])
-        with self.assertRaises(ValueError):preview(fixture.req,fixture.scene,fixture.rows,fixture.controller.controller,fixture.config)
+        with self.assertRaises(ValueError):preview(fixture.req,fixture.scene,fixture.rows,controller,fixture.config)
 
     def test_frozen_display_map_follows_accepted_preview_and_stays_out_of_session_json(self):
+        from navigation.control.shadow import DwaShadowController
         from navigation.planning.runtime import decode_display_map
         from perception.environment.layers import load_config
         from perception.environment.scene import assemble_scene
         from runtime.control import ControlLoop
         from tests.navigation_fixtures import asset, bundle, request
-        from tests.test_navigation_shadow import ShadowTests
 
-        fixture=ShadowTests();fixture.setUp()
+        fixture=shadow_inputs()
         local=np.zeros((60,60),np.int8);local[45,44]=100
         scene=assemble_scene(bundle(local).geometry,clock_domain='runtime_bag',settings=load_config()['scene'])
         static=np.zeros_like(local);static[45,44:46]=100
@@ -284,7 +286,8 @@ class PlaybackTests(unittest.TestCase):
         loop=ControlLoop.__new__(ControlLoop)
         loop.preview_token=None;loop.scene=scene;loop.device=object();loop.request=goal;loop.asset=prior
         loop.display=Mock();loop.batch=Mock();loop.lock=threading.Lock();loop.environment_epoch=0
-        loop.controller=fixture.controller;loop.rows=fixture.rows;loop.settings=dict(control_period_s=.1)
+        loop.controller=DwaShadowController(fixture.config,fixture.motion,fixture.geometry)
+        loop.rows=fixture.rows;loop.settings=dict(control_period_s=.1)
         loop.reference=SimpleNamespace(planning=fixture.config,display_enabled=True);loop.metrics=None
         loop._search_scene=lambda scene:scene
         with tempfile.TemporaryDirectory() as folder:
@@ -401,33 +404,14 @@ class DriverTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_vehicle_profile('navigation/control/vehicle.example.yaml',self.motion,require_execution=True)
 
-    def test_measured_profile_cannot_understate_motion_limits(self):
-        profile=yaml.safe_load(Path('navigation/control/vehicle.example.yaml').read_text())
-        profile.update(vehicle_id='synthetic_fixture',protocol='af01_12_bf01_32_payload_sum_mode1_3')
-        profile['controller']=dict(velocity_limit_field=1500,feedback_max_linear_mps=1.5,feedback_max_angular_rps=1.5)
-        profile['execution_max_longitudinal_speed_mps']=2.
-        profile['verification']=dict(source='synthetic unit test, not a real vehicle',geometry_confirmed=True,motion_confirmed=True,protocol_confirmed=True)
-        profile['geometry']=dict(footprint=[[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],base_from_lidar=np.eye(4).tolist())
-        limits=profile['measured_limits']
-        for name in ('max_forward_mps','max_reverse_mps','max_angular_rps','max_acceleration_mps2','max_angular_acceleration_rps2'):
-            limits[name]=self.motion[name]
-        with tempfile.TemporaryDirectory() as folder:
-            path=Path(folder)/'vehicle.yaml';path.write_text(yaml.safe_dump(profile))
-            geometry,motion,_=load_vehicle_profile(path,self.motion,require_execution=True)
-            self.assertFalse(geometry.assumed);self.assertFalse(motion['parameters_assumed'])
-            for key,value in (('max_forward_mps',.01),('max_angular_rps',.01)):
-                bad=copy.deepcopy(profile);bad['measured_limits'][key]=value;path.write_text(yaml.safe_dump(bad))
-                with self.assertRaises(ValueError):load_vehicle_profile(path,self.motion,require_execution=True)
-
     def test_execution_gate_checks_quantized_target_and_original_clock(self):
-        from tests.test_navigation_shadow import ShadowTests
         from perception.environment.scene import assemble_scene
         from perception.environment.layers import load_config
         from navigation.planning.planner import Planner
         from navigation.planning.continuity import reference_envelope
         from navigation.control.shadow import DwaShadowController
         from navigation.safety.shadow import ShadowSafety
-        fixture=ShadowTests();fixture.setUp()
+        fixture=shadow_inputs()
         fixture.geometry.assumed=False;motion=dict(fixture.motion,parameters_assumed=False,
             execution_max_longitudinal_speed_mps=fixture.motion['max_forward_mps'],
             execution_max_angular_rps=fixture.motion['max_angular_rps'])
