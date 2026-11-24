@@ -1,4 +1,6 @@
 Panels:
+  - Class: social_nav_rviz/SessionPanel
+    Name: Social-Nav session
   - Class: rviz/Displays
     Name: Displays
   - Class: rviz/Views
@@ -21,7 +23,7 @@ Visualization Manager:
       Topic: /social_nav_runtime_view/scan
       Queue Size: 1
       Style: Points
-      Size (Pixels): 2
+      Size (Pixels): 3
       Color Transformer: AxisColor
       Axis: Z
       Decay Time: 0
@@ -38,7 +40,32 @@ Visualization Manager:
       Style: Squares
       Size (m): 0.1
       Color Transformer: RGB8
-      Alpha: 0.8
+      Alpha: 0.9
+      Decay Time: 0
+    - Class: rviz/PointCloud2
+      Name: Static map
+      Enabled: true
+      Topic: /social_nav_runtime_view/static_basemap
+      Queue Size: 1
+      Style: Squares
+      Size (m): 0.1
+      Color Transformer: RGB8
+      Alpha: 0.9
+      Decay Time: 0
+    - Class: rviz/Marker
+      Name: Navigation window
+      Enabled: true
+      Marker Topic: /social_nav_runtime_view/navigation_window
+      Queue Size: 1
+    - Class: rviz/PointCloud2
+      Name: Reference search snapshot
+      Enabled: false
+      Topic: /social_nav_runtime_view/reference_search_map
+      Queue Size: 1
+      Style: Squares
+      Size (m): 0.1
+      Color Transformer: RGB8
+      Alpha: 0.9
       Decay Time: 0
     - Class: rviz/PointCloud2
       Name: Local navigation map (DWA diagnostic)
@@ -68,7 +95,7 @@ Visualization Manager:
       Topic: /social_nav_runtime_view/path
       Color: 255; 160; 40
       Line Style: Billboards
-      Line Width: 0.04
+      Line Width: 0.06
     - Class: rviz/Path
       Name: Raw LiDAR path (3D diagnostic)
       Enabled: false
@@ -82,14 +109,14 @@ Visualization Manager:
       Topic: /social_nav_runtime_view/trajectory
       Color: 80; 220; 255
       Line Style: Billboards
-      Line Width: 0.06
+      Line Width: 0.10
     - Class: rviz/Path
       Name: Spatial reference (continuous prefix)
       Enabled: false
       Topic: /social_nav_runtime_view/reference
       Color: 235; 235; 235
       Line Style: Billboards
-      Line Width: 0.05
+      Line Width: 0.075
     - Class: rviz/MarkerArray
       Name: Terrain paths, vehicle and planning status
       Enabled: true
@@ -113,5 +140,7 @@ Visualization Manager:
       Yaw: 0.8
       Focal Point: {X: 0, Y: 0, Z: 0}
 Window Geometry:
-  Width: 1280
-  Height: 900
+  # Session, Displays and Views share the upper left dock above RGB.
+  QMainWindow State: 000000ff00000000fd00000001000000000000019c00000275fc0200000002fc0000003e00000162000001620100001cfa000000000200000003fb000000240053006f006300690061006c002d004e00610076002000730065007300730069006f006e0100000000ffffffff0000014500fffffffb000000100044006900730070006c0061007900730100000000ffffffff000000cb00fffffffb0000000a005600690065007700730100000000ffffffff000000a500fffffffb0000000600520047004201000001a60000010d0000001600ffffff000002460000027500000004000000040000000100000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Width: 1000
+  Height: 720

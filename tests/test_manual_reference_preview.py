@@ -118,7 +118,7 @@ class ManualReferenceTests(unittest.TestCase):
         scene=SimpleNamespace(record=dict(prior=dict(valid=True,map_id='map'),as_of=10.))
         loop.scene=None;loop.pending=(scene,object());loop.lock=threading.Lock();loop.offered_mono=None
         loop.environment_epoch=int(recovered);loop.environment_fault=None
-        loop.session=SimpleNamespace(epoch=0,pause_requested=False,paused=False,lock=threading.RLock(),
+        loop.session=SimpleNamespace(epoch=0,pause_requested=False,paused=False,source_ended=False,bag_shadow=None,lock=threading.RLock(),
             command_generation=0,publish_observation=lambda *a,**k:None)
         loop.session_epoch=0;loop.follow=None;loop.route_replay=None;loop.request=None;loop.manual_preview_key=None
         loop.scene_settings={'max_association_age_s':.5}

@@ -93,11 +93,11 @@ def main(argv=None):
                     prior=(result.metadata['environment_configuration']['scene']['output_topic']+'/prior/occupancy'
                            if result.metadata.get('prior_map') else None)
                     add_environment_display(config,prefix,prior_topic=prior)
-                    config['Visualization Manager']['Displays']=[d for d in config['Visualization Manager']['Displays']
-                        if d.get('Name') not in ('Saved map','Recorded observation scan','Recorded people detections and tracks')]
-                    config['Visualization Manager']['Displays'].append(dict(Class='rviz/PointCloud2',Name='Recorded deskewed scan',
-                        Enabled=True,Topic=prefix+'/scan',**{'Queue Size':1,'Style':'Points','Size (Pixels)':2,
-                                                          'Color Transformer':'AxisColor','Axis':'Z','Decay Time':0}))
+                    displays=[d for d in config['Visualization Manager']['Displays']
+                              if d.get('Name') not in ('Saved map','Recorded people detections and tracks')]
+                    scan=next(d for d in displays if d['Name']=='Recorded observation scan')
+                    scan.update(Name='Recorded deskewed scan',Topic=prefix+'/scan')
+                    config['Visualization Manager']['Displays']=displays
                     camera=config['Visualization Manager']['Views']['Current'];camera['Distance']=25
                     first=result.rows[result.index_at(args.start)]
                     if first.get('health')!=0:first=next((r for r in result.rows if r.get('health')==0),None)

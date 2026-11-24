@@ -131,7 +131,7 @@ class NavigationDisplayTests(unittest.TestCase):
         packet['search_map']=snapshot
         view=renderer.update(self.row,packet,mono=0.)
         self.assertIs(view['search_map'],snapshot)
-        self.assertIn('reference search #19',view['text'])
+        self.assertIn('Reference search #19',view['text'])
         np.testing.assert_allclose(view['reference']['search_xy'][[0,-1]],
                                    np.asarray(reference['result']['path'])[[0,-1],:2])
         failure=dict(snapshot,job_id=20,status='no_path',reason='goal_footprint_occupied')
@@ -143,7 +143,7 @@ class NavigationDisplayTests(unittest.TestCase):
         for changed in (dict(req,goal_revision=req['goal_revision']+1),None):
             view=renderer.update(self.row,dict(packet,request=changed),mono=0.)
             self.assertIsNone(view['search_map'])
-            self.assertIn('selected static map',view['text'])
+            self.assertNotIn('Reference search',view['text'])
 
     def test_newer_measured_control_pose_is_used_without_predicting_history(self):
         packet=self.packet();packet['row'].update(stamp_s=10.1,position=[2.1,2.,-2.])

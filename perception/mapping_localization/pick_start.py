@@ -91,7 +91,7 @@ def first_scan_config(frame, points):
             'Displays': [
                 {'Class': 'rviz/PointCloud2', 'Name': 'First scan', 'Enabled': True,
                  'Topic': '/start_picker/first_scan', 'Queue Size': 1, 'Style': 'Points',
-                 'Size (Pixels)': 2, 'Color Transformer': 'AxisColor', 'Axis': 'Z'},
+                 'Size (Pixels)': 3, 'Color Transformer': 'AxisColor', 'Axis': 'Z'},
                 {'Class': 'rviz/Axes', 'Name': 'Sensor axes', 'Enabled': True,
                  'Reference Frame': frame, 'Length': 1, 'Radius': .025}],
             'Tools': [{'Class': 'rviz/MoveCamera'}],
@@ -108,7 +108,7 @@ def make_window(QtWidgets, QtCore, QtGui, args, frame, points, rgb, binding, pub
             self.setWindowTitle('起点标注 · ' + args.bag.name)
             layout = QtWidgets.QVBoxLayout(self)
             title = QtWidgets.QLabel('RViz中选择 2D Pose Estimate，点击位置并拖动朝向。\n'
-                                    '青色首帧叠加为人工预览；调整坐标后点击保存。')
+                                    '地图上按高度着色的首帧点云供人工对齐，调整坐标后点击保存。')
             layout.addWidget(title)
             tabs = QtWidgets.QTabWidget()
             layout.addWidget(tabs)

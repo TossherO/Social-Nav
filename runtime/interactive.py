@@ -25,17 +25,18 @@ def resolve(value):
 
 
 def session_inputs(config_path):
-    from perception.environment.storage import StaticEnvironmentMap
+    from .static_map import load_static_map
     from perception.mapping_localization.coverage import PriorCoverage, asset_digest, full_map_coverage
     from perception.mapping_localization.results import map_fingerprint
     config = yaml.safe_load(Path(config_path).read_text())
     config = dict({key: str(resolve(config[key])) for key in
               ('map', 'static_map', 'initial_pose_hint', 'motion_config')},
               coverage=str(resolve(config['coverage'])) if config.get('coverage') else None,
+              catalog=str(resolve(config['catalog'])) if config.get('catalog') else None,
               motion_profile=config.get('motion_profile'))
     if not Path(config['map'], 'COMPLETE').is_file():
         raise ValueError('Select a complete localization map')
-    asset = StaticEnvironmentMap(config['static_map'])
+    asset = load_static_map(config['static_map'], config['catalog'])
     fingerprint = map_fingerprint(config['map'])
     if asset.manifest['source'].get('map_fingerprint') != fingerprint:
         raise ValueError('Static environment and localization map do not match')
@@ -141,7 +142,7 @@ def session_notice(status, *, selected=False, candidate=False):
     """Operator-visible state independent of the missing map-to-local transform."""
     if not selected:
         if candidate:
-            return ('initial_pose_preview', 'PREVIEW ONLY: compare cyan scan with map.\nReselect as needed, then Confirm Initial Pose or c + Enter.', False)
+            return ('initial_pose_preview', 'PREVIEW ONLY: align the scan with the map.\nReselect as needed, then Confirm Initial Pose or c + Enter.', False)
         return ('waiting_for_initial_pose', 'Use Ground Pose Estimate to select\nthe actual LiDAR XY and heading on the ground.', False)
     observation = (status or {}).get('observation') or {}
     row = observation.get('localization') or {}
@@ -156,8 +157,37 @@ def session_notice(status, *, selected=False, candidate=False):
     if not (observation.get('prior') or {}).get('valid'):
         return ('map_association_unavailable', prefix+'Map association is not valid for planning.\nCheck coverage and association freshness.', True)
     if paused:
+        if status.get('source_ended'):
+            return ('paused_ready', 'END OF BAG: select a goal for frozen planning.', False)
         return ('paused_ready', 'PAUSED: select a goal for frozen planning.\nr + Enter resumes playback.', False)
+    if status.get('live'):
+        return ('ready', 'Map localization ready. Select a goal.\ns cancels; q exits.', False)
     return ('ready', 'Map localization ready. Select a goal.\np + Enter pauses; s cancels; q exits.', False)
+
+
+def panel_controls(status, *, live, execute, preview_selected, preview_ready, runtime_ready):
+    status = status or {}
+    ended = bool(status.get('source_ended'))
+    paused = status.get('pause_requested', status.get('paused', False))
+    playback_available = not live and bool(status) and not ended
+    shadow = status.get('shadow_navigation') or {}
+    return dict(adjust=preview_selected, confirm=preview_ready,
+                pause=playback_available and not paused, resume=playback_available and paused,
+                shadow_start=not live and bool(shadow.get('available')) and not shadow.get('enabled', False),
+                shadow_stop=not live and bool(shadow.get('enabled')),
+                arm=live and execute and bool(status), cancel=runtime_ready, exit=True)
+
+
+def cancel_operator_goal(bridge, send, *, bag_ready, execute):
+    try:
+        if bridge.last_submitted is not None:
+            return bridge.cancel()
+        if bag_ready:
+            return send('shadow_navigation', dict(enabled=False))
+        return dict(accepted=True)
+    finally:
+        if execute:
+            send('arm', dict(enabled=False))
 
 
 def motion_selection(config, *, path=None, profile=None):
@@ -192,11 +222,14 @@ def runtime_command(args, config, pose):
                '--motion-config', str(motion_path),
                '--output', str(Path(args.output)/'run'), '--display', '--interactive-session', '--record-planning']
     if config.get('coverage'):command += ['--coverage', config['coverage']]
+    if config.get('catalog'):command += ['--catalog', config['catalog']]
     if profile is not None:command += ['--motion-profile', profile]
     if args.live:
         command += ['--live']
     else:
-        command += ['--bag', str(resolve(args.bag)), '--start', str(args.start), '--rate', str(args.rate)]
+        command += ['--bag', str(resolve(args.bag)), '--start', str(args.start), '--rate', str(args.rate), '--bag-shadow']
+        if getattr(args,'shadow_route_run',None):
+            command += ['--shadow-route-run', str(resolve(args.shadow_route_run))]
         if args.pause_at is not None:
             command += ['--pause-at', str(args.pause_at)]
     if args.gpu is not None:
@@ -248,6 +281,7 @@ def parser():
     p.add_argument('--start', type=float, default=0.)
     p.add_argument('--rate', type=float, default=1.)
     p.add_argument('--pause-at', type=float)
+    p.add_argument('--shadow-route-run', help='Reuse fixed-map localization recorded for this bag and map')
     p.add_argument('--initial-z', type=float, help='LiDAR map Z initial guess, overriding the selected map hint')
     p.add_argument('--pose-file', help='Explicit saved LiDAR start, validated against this bag, map and --start; skips mouse initialization')
     p.add_argument('--handoff-seed', help='Provisional cross-floor LiDAR seed for a nonexecuting live Agent observation')
@@ -284,7 +318,7 @@ def main(argv=None):
         p.error('Environment window must be finite and in (0,60] metres')
     if args.roll_gravity_deg is not None and (not args.live or not math.isfinite(args.roll_gravity_deg) or not 0 < args.roll_gravity_deg <= 15):
         p.error('--roll-gravity-deg requires live input and a finite value in (0,15] degrees')
-    if args.live and (args.start != 0 or args.rate != 1 or args.pause_at is not None):
+    if args.live and (args.start != 0 or args.rate != 1 or args.pause_at is not None or args.shadow_route_run):
         p.error('Live input does not accept bag playback options')
     if args.handoff_seed and (not args.live or not args.agent_observations or args.execute or args.pose_file or args.initial_z is not None):
         p.error('--handoff-seed requires nonexecuting live Agent observations, without --pose-file or --initial-z')
@@ -342,6 +376,7 @@ def main(argv=None):
         start=args.start, rate=args.rate, pause_at=args.pause_at, execute_requested=args.execute,
         owner_pid=os.getpid(),agent_observations=args.agent_observations,
         initial_pose_reference='rslidar', map_frame=asset.manifest['frame_id'],
+        navigation_window=asset.navigation_window,
         initial_guess_source=config['initial_pose_hint'],pose_file=args.pose_file,handoff_seed=args.handoff_seed), ensure_ascii=False, indent=2))
 
     import rospy
@@ -361,11 +396,11 @@ def main(argv=None):
     signal.signal(signal.SIGINT, lambda *_: stopped.set())
     signal.signal(signal.SIGTERM, lambda *_: stopped.set())
     state_pub = rospy.Publisher('/social_nav_interactive/state', String, queue_size=1, latch=True)
+    panel_state_pub = rospy.Publisher('/social_nav_interactive/panel_state', String, queue_size=1, latch=True)
+    panel_reply_pub = rospy.Publisher('/social_nav_interactive/panel_reply', String, queue_size=10)
     map_pub = rospy.Publisher('/social_nav_interactive/map', OccupancyGrid, queue_size=1, latch=True)
+    static_basemap_pub = rospy.Publisher('/social_nav_interactive/static_basemap', PointCloud2, queue_size=1, latch=True)
     terrain_pub = rospy.Publisher('/social_nav_interactive/ground_map', PointCloud2, queue_size=1, latch=True)
-    # The interactive process owns the visual basemap during picking; the
-    # runtime takes ownership when launched. Ground picking keeps its own map.
-    initial_base_pub = rospy.Publisher('/social_nav_runtime_view/navigation_basemap', PointCloud2, queue_size=1, latch=True)
     reference_pub = rospy.Publisher('/social_nav_interactive/preview_reference', RosPath, queue_size=1, latch=True)
     trajectory_pub = rospy.Publisher('/social_nav_interactive/preview_trajectory', RosPath, queue_size=1, latch=True)
     label_pub = rospy.Publisher('/social_nav_interactive/preview_status', Marker, queue_size=1, latch=True)
@@ -374,15 +409,14 @@ def main(argv=None):
     goal_pub = rospy.Publisher('/social_nav_interactive/accepted_goal', MarkerArray, queue_size=1, latch=True)
     initial_scan_pub = rospy.Publisher('/social_nav_interactive/initial_scan_preview', PointCloud2, queue_size=1, latch=True)
     initial_marker_pub = rospy.Publisher('/social_nav_interactive/initial_pose_preview', MarkerArray, queue_size=1, latch=True)
-    message = OccupancyGrid(); grid = asset.snapshot
+    message = OccupancyGrid(); grid = asset.navigation_snapshot
     message.header.frame_id = grid.metadata['frame_id']; message.header.stamp = rospy.Time.from_sec(grid.metadata['stamp_s'])
     message.info.resolution = grid.metadata['resolution']; message.info.height, message.info.width = grid.layers['occupancy'].shape
     message.info.origin.position.x, message.info.origin.position.y = grid.metadata['origin_xy']; message.info.origin.orientation.w = 1.
     message.data = grid.layers['occupancy'].reshape(-1).tolist(); map_pub.publish(message)
     from perception.visualization.surface import ground_cloud,annotation_height
-    initial_terrain=ground_cloud(grid,offset=-.015)
-    terrain_pub.publish(initial_terrain)
-    initial_base_pub.publish(initial_terrain)
+    static_basemap_pub.publish(ground_cloud(grid,offset=-.015,fill_known=True))
+    terrain_pub.publish(ground_cloud(grid,offset=-.015))
     runtime = rviz = log = None
     from .initial_preview import PreviewState, PreviewGroundEstimator, preview_points
     from perception.visualization.scans import pointcloud_message
@@ -392,7 +426,7 @@ def main(argv=None):
     from perception.mapping_localization.initial_pose import quaternion_rpy
     from perception.environment.layers import load_config as environment_config
     initial_roll,initial_pitch,_ = quaternion_rpy(hint['pose']['quaternion_xyzw'])
-    ground_config=environment_config() if args.live else None
+    ground_config=environment_config() if args.live or not args.no_rviz else None
     initial_ground = PreviewGroundEstimator(initial_roll,initial_pitch,ground_config) if args.live and args.initial_z is None else None
     preview_visible = False
     socket_path = output/'run/commands.sock'
@@ -452,8 +486,41 @@ def main(argv=None):
         except Exception as error:
             result = dict(accepted=False, error=str(error), executable=False)
             rospy.logwarn('%s', error)
+        reply = result.get('reply')
+        if isinstance(reply, dict) and 'accepted' in reply:
+            result['accepted'] = reply['accepted']
+            if 'error' in reply:
+                result['error'] = reply['error']
         state_pub.publish(String(data=json.dumps(result, ensure_ascii=False, allow_nan=False)))
         return result
+
+    last_panel_state = None
+
+    def publish_panel_state(status=None):
+        nonlocal last_panel_state
+        with lock:
+            preview_selected = args.live and not selection and initial_preview.pose is not None
+            preview_ready = preview_selected and initial_preview.ready(time.monotonic())
+        runtime_ready = runtime is not None and runtime.poll() is None and socket_path.exists()
+        controls = panel_controls(status, live=args.live, execute=args.execute,
+                                  preview_selected=preview_selected, preview_ready=preview_ready,
+                                  runtime_ready=runtime_ready)
+        status = status or {}
+        playback_state = None
+        if not args.live and status:
+            playback_state = ('ended' if status.get('source_ended') else
+                              'paused' if status.get('paused') else 'running')
+        chassis = status.get('chassis') or {}
+        shadow = status.get('shadow_navigation') or {}
+        shadow_fields = ('state','reason')
+        if shadow.get('state') == 'planning':
+            shadow_fields += ('planning_status','planning_reason','dwa_status','dwa_reason')
+        message = dict(controls=controls, playback_state=playback_state, hardware_enabled=args.execute,
+                       chassis={key:chassis.get(key) for key in ('state','status_fresh') if key in chassis},
+                       shadow_navigation={key:shadow[key] for key in shadow_fields if key in shadow})
+        if message != last_panel_state:
+            last_panel_state = message
+            panel_state_pub.publish(String(data=json.dumps(message, ensure_ascii=False, allow_nan=False)))
 
     def show_initial_candidate(pose, error=None):
         marker=Marker();marker.header.frame_id=asset.manifest['frame_id']
@@ -479,7 +546,7 @@ def main(argv=None):
                 if runtime is not None or selection:
                     raise ValueError('This session is already initialized; stop and restart to change the initial pose')
                 pose = message.pose.pose
-                height_seed=(selected_initial_height(grid,hint,[pose.position.x,pose.position.y],initial_z=args.initial_z,
+                height_seed=(selected_initial_height(asset.snapshot,hint,[pose.position.x,pose.position.y],initial_z=args.initial_z,
                     observed_height=None if initial_ground is None else initial_ground.current(time.monotonic()),
                     height_range=(ground_config['ground_min_below_sensor_m'],ground_config['ground_max_below_sensor_m']))
                              if args.live else None)
@@ -572,21 +639,29 @@ def main(argv=None):
             position=[message.point.x, message.point.y, message.point.z], stamp_s=message.header.stamp.to_sec()))
 
     def cancel():
-        try:
-            return bridge.cancel() if bridge.last_submitted is not None else dict(accepted=True)
-        finally:
-            if args.execute:
-                send('arm', dict(enabled=False))
+        bag_ready=not args.live and runtime is not None and runtime.poll() is None and socket_path.exists()
+        return cancel_operator_goal(bridge,send,bag_ready=bag_ready,execute=args.execute)
 
-    def panel_command(message):
-        command=message.data
+    def set_playback_paused(paused):
+        if args.live:
+            raise ValueError('Playback controls require a bag session')
+        return send('playback', dict(paused=paused))
+
+    def set_armed(enabled):
+        if not args.execute:
+            raise ValueError('Execution is not enabled for this session')
+        return send('arm', dict(enabled=enabled))
+
+    def run_operator_command(command):
         def act():
+            if stopped.is_set() and command != 'exit':
+                raise ValueError('The interactive session is shutting down')
             if command in ('w','a','s','d','q','e'):
                 with lock:
                     if not args.live or runtime is not None or selection or initial_preview.pose is None:
                         raise ValueError('Select an unconfirmed live initial pose first')
                     value=adjust_initial_pose(initial_preview.pose,command)
-                    height=selected_initial_height(grid,hint,value[3:5],initial_z=args.initial_z,
+                    height=selected_initial_height(asset.snapshot,hint,value[3:5],initial_z=args.initial_z,
                         observed_height=None if initial_ground is None else initial_ground.current(time.monotonic()),
                         height_range=(ground_config['ground_min_below_sensor_m'],ground_config['ground_max_below_sensor_m']))
                     value[5]=height['lidar_z_m']
@@ -594,19 +669,34 @@ def main(argv=None):
                     show_initial_candidate(value)
                     return dict(accepted=True,state='initial_pose_preview',preview_revision=initial_preview.revision)
             if command=='confirm':return confirm_initial()
-            if command=='arm':
-                if not args.execute:raise ValueError('Execution is not enabled for this session')
-                return send('arm',dict(enabled=True))
-            if command=='cancel':
-                result=cancel()
-                if isinstance(result.get('reply'),dict):
-                    result['accepted']=result['reply'].get('accepted') is True
-                return result
+            if command in ('pause', 'resume'):return set_playback_paused(command=='pause')
+            if command in ('shadow_start', 'shadow_stop'):
+                return send('shadow_navigation', dict(enabled=command=='shadow_start'))
+            if command=='arm':return set_armed(True)
+            if command=='cancel':return cancel()
             if command=='exit':
                 stopped.set()
                 return dict(accepted=True,state='stopping')
-            raise ValueError('Unknown panel command')
-        report(act)
+            raise ValueError('Unknown operator command')
+        return report(act)
+
+    def panel_command(message):
+        if not message.data.startswith('{'):
+            run_operator_command(message.data)
+            return
+        try:
+            request = json.loads(message.data)
+            command, request_id = request['command'], request['request_id']
+            if not isinstance(command, str) or not isinstance(request_id, str) or not request_id:
+                raise ValueError('Expected a command and request identifier')
+        except (KeyError, TypeError, ValueError) as error:
+            rospy.logwarn('Invalid RViz panel command: %s', error)
+            return
+        result = run_operator_command(command)
+        response = dict(request_id=request_id, accepted=result.get('accepted') is True)
+        if not response['accepted'] and result.get('error'):
+            response['error'] = result['error']
+        panel_reply_pub.publish(String(data=json.dumps(response, ensure_ascii=False)))
 
     last_goal = object()
     def show_goal(request):
@@ -633,11 +723,11 @@ def main(argv=None):
         goal_pub.publish(MarkerArray(markers=markers))
 
     def pause_service(request):
-        result = report(lambda: send('playback', dict(paused=request.data)))
+        result = report(lambda: set_playback_paused(request.data))
         return SetBoolResponse(success=result.get('accepted', False), message=json.dumps(result, ensure_ascii=False))
 
     def arm_service(request):
-        result = report(lambda: send('arm', dict(enabled=request.data)))
+        result = report(lambda: set_armed(request.data))
         return SetBoolResponse(success=result.get('accepted', False), message=json.dumps(result, ensure_ascii=False))
 
     def cancel_service(_):
@@ -658,14 +748,14 @@ def main(argv=None):
                 rospy.Service('/social_nav_interactive/confirm_initial_pose', Trigger, confirm_initial_service)]
 
     def keyboard():
+        commands = {'c':'confirm', 'p':'pause', 'r':'resume', 's':'cancel', 'a':'arm', 'q':'exit',
+                    'shadow_start':'shadow_start', 'shadow_stop':'shadow_stop'}
         for line in sys.stdin:
-            key = line.strip().lower()
-            if key == 'q': stopped.set(); return
-            if key == 'c': report(confirm_initial)
-            if key == 'p': report(lambda: send('playback', dict(paused=True)))
-            elif key == 'r': report(lambda: send('playback', dict(paused=False)))
-            elif key == 's': report(cancel)
-            elif key == 'a': report(lambda: send('arm', dict(enabled=True)))
+            command = commands.get(line.strip().lower())
+            if command is not None:
+                run_operator_command(command)
+            if command == 'exit':
+                return
     if sys.stdin.isatty():
         threading.Thread(target=keyboard, daemon=True, name='interactive-keyboard').start()
 
@@ -684,31 +774,49 @@ def main(argv=None):
             view=yaml.safe_load((ROOT/'perception/visualization/configs/interactive.rviz').read_text())
             xy=anchor if seed is None else seed[3:5]
             z=annotation_height(grid,xy,anchor_z)
-            view['Visualization Manager']['Views']['Current']['Focal Point']=dict(X=float(xy[0]),Y=float(xy[1]),Z=z)
-            for layer in view['Visualization Manager']['Displays']:
-                if layer.get('Topic') in ('/social_nav_runtime_view/navigation_basemap','/social_nav_interactive/ground_map'):
-                    layer['Size (m)']=float(grid.metadata['resolution'])
-            for tool in view['Visualization Manager']['Tools']:
+            manager=view['Visualization Manager']
+            manager['Global Options']['Fixed Frame']=grid.metadata['frame_id']
+            manager['Views']['Current']['Focal Point']=dict(X=float(xy[0]),Y=float(xy[1]),Z=z)
+            static_resolution=float(grid.metadata['resolution'])
+            local_resolution=float(ground_config['resolution'])
+            cell_sizes={
+                '/social_nav_interactive/static_basemap':static_resolution,
+                '/social_nav_runtime_view/reference_search_map':static_resolution,
+                '/social_nav_runtime_view/navigation_basemap':local_resolution,
+                '/social_nav_runtime_view/ground_map':local_resolution,
+            }
+            for layer in manager['Displays']:
+                if layer.get('Topic') in cell_sizes:
+                    layer['Size (m)']=cell_sizes[layer['Topic']]
+            for tool in manager['Tools']:
                 if tool['Class'] in ('social_nav_rviz/GroundInitialPose','social_nav_rviz/GroundGoal'):
-                    tool['Cell size']=float(grid.metadata['resolution'])
+                    tool['Cell size']=static_resolution
             view_path=output/'view.rviz';view_path.write_text(yaml.safe_dump(view,sort_keys=False))
             rviz = subprocess.Popen(['rviz', '-d', str(view_path)])
         state_pub.publish(String(data=json.dumps(dict(state='initializing' if selection else 'waiting_for_initial_pose', reference='rslidar', executable=False))))
+        publish_panel_state()
         show_notice()
         show_goal(None)
         print(('Cross-floor provisional start loaded; wait for map localization. ' if args.handoff_seed else
                'Saved bag start loaded; wait for map localization. ' if seed is not None else
                'RViz: Ground Pose Estimate selects LiDAR start. ')+
               'Ground Nav Goal selects pose; Publish Point selects XY.', flush=True)
-        print('Terminal: c + Enter confirms live initial pose; p pauses; r resumes; s cancels/disarms; a arms; q exits.', flush=True)
+        terminal_actions = ['s cancels/disarms', 'q exits']
+        if args.live:
+            terminal_actions.insert(0, 'c confirms the live initial pose')
+        else:
+            terminal_actions[:0] = ['p pauses', 'r resumes', 'shadow_start / shadow_stop control shadow navigation']
+        if args.execute:
+            terminal_actions.append('a arms')
+        print('Terminal (press Enter after each command): '+', '.join(terminal_actions)+'.', flush=True)
         while not stopped.is_set() and not rospy.is_shutdown():
             draw_initial_preview()
+            status = None
             with lock:
                 if runtime is None and selection:
                     command = runtime_command(args, config, selection[0])
                     (output/'command.json').write_text(json.dumps(command, ensure_ascii=False, indent=2))
                     log = (output/'runtime.log').open('x')
-                    initial_base_pub.unregister()
                     runtime = subprocess.Popen(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             if runtime is not None:
                 if runtime.poll() is not None:
@@ -717,6 +825,8 @@ def main(argv=None):
                 if socket_path.exists():
                     try:
                         status = send('session_status', {})
+                        if status.get('accepted') is False:
+                            raise OSError(status.get('error', 'Cannot read interactive session status'))
                         show_notice(status)
                         show_goal(status.get('goal_intent'))
                         state_pub.publish(String(data=json.dumps(status, ensure_ascii=False, allow_nan=False)))
@@ -729,8 +839,8 @@ def main(argv=None):
                             clear=Marker();clear.header.frame_id=asset.manifest['frame_id'];clear.action=Marker.DELETEALL
                             curves=[clear]
                             for number,(name,publisher,color,width) in enumerate((
-                                    ('reference',reference_pub,(.96,.96,.96,1.),.06),
-                                    ('trajectory',trajectory_pub,(.27,.86,1.,1.),.08))):
+                                    ('reference',reference_pub,(.96,.96,.96,1.),.075),
+                                    ('trajectory',trajectory_pub,(.27,.86,1.,1.),.10))):
                                 curve=display.get('curves',{}).get(name,{})
                                 frame=curve.get('frame_id',asset.manifest['frame_id'])
                                 publish_path(publisher,curve.get('prefix',[]),frame,stamp)
@@ -756,8 +866,10 @@ def main(argv=None):
                                     marker.text+='\n%s approximate heights: %d'%(name,curve['approximate_count'])
                             label_pub.publish(marker)
                     except (OSError, EOFError) as error:
+                        status = None
                         rospy.logwarn_throttle(2., 'Waiting for runtime: %s', error)
                 else:show_notice()
+            publish_panel_state(status)
             stopped.wait(.2)
     finally:
         if runtime is not None and runtime.poll() is None:

@@ -84,6 +84,8 @@ def inspect(config_path, *, motion_path=None, motion_profile=None, vehicle_profi
             check(key, lambda key=key: asset(key, config.get(key)))
         if config.get('coverage'):
             check('coverage', lambda: asset('coverage', config['coverage']))
+        if config.get('catalog'):
+            check('catalog', lambda: asset('catalog', config['catalog']))
 
         def map_pair():
             from .interactive import session_inputs
@@ -203,7 +205,7 @@ def inspect(config_path, *, motion_path=None, motion_profile=None, vehicle_profi
                 limits=['No model weights loaded, inference, sensor subscription or chassis I/O.',
                         'CUDA visibility/import checks do not certify native kernel architecture or runtime performance.',
                         'Target machine still needs a short bag/online observation test and physical protocol/braking acceptance.',
-                        'Copy model and matching map/coverage/hint assets separately from Git; rebuild native/ROS/detector extensions on target.',
+                        'Copy model and matching map/coverage/catalog/hint assets separately from Git; rebuild native/ROS/detector extensions on target.',
                         'Map matching uses existing asset fingerprints; a successful check is not a survey of the live scene.'])
 
 

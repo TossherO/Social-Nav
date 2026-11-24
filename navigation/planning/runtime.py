@@ -96,8 +96,9 @@ def _worker(connection,handle,owner,slots,slot_bytes,planning,geometry):
                 scene=read_scene(reader,job.pop('shared_scene'))
                 packet=job['asset']
                 if packet is not None:
-                    if asset is None or str(asset.directory)!=packet['directory']:
-                        asset=StaticEnvironmentMap(packet['directory'])
+                    if (asset is None or str(asset.directory)!=packet['directory'] or
+                            asset.manifest!=packet['manifest'] or asset.navigation_window!=packet['navigation_window']):
+                        asset=StaticEnvironmentMap(packet['directory'],navigation_window=packet['navigation_window'])
                     if asset.manifest!=packet['manifest']:raise ValueError('Static asset metadata changed')
                 else:asset=None
                 result=query.query(job,scene,asset)
@@ -130,7 +131,9 @@ class Worker:
         if not self.ready or self.job is not None:raise RuntimeError('Reference worker is not idle')
         if self.scene_factory is not None:job=dict(job,scene=self.scene_factory(job['scene']))
         wire={k:v for k,v in job.items() if k!='scene'};asset=job['asset']
-        if asset is not None:wire['asset']=dict(directory=str(asset.directory),manifest=asset.manifest)
+        if asset is not None:
+            wire['asset']=dict(directory=str(asset.directory),manifest=asset.manifest,
+                               navigation_window=asset.navigation_window)
         self.description=self.scenes.publish(job['scene'],'reference');wire['shared_scene']=self.description
         try:self.connection.send(wire)
         except Exception:

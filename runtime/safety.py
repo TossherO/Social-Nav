@@ -29,7 +29,8 @@ def _apply_command(engine, arm, chassis, kind, value):
             arm.update(enabled=False,revision=arm['revision']+1)
 
 
-def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,motion,geometry,clock_domain,asset_path,shadow_settings,chassis_fd=None,trace_timing=False):
+def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,motion,geometry,clock_domain,
+         asset_path,navigation_window,shadow_settings,chassis_fd=None,trace_timing=False):
     signal.signal(signal.SIGINT,signal.SIG_IGN)
     os.environ['CUDA_VISIBLE_DEVICES']=''
     from navigation.safety.shadow import ShadowSafety,chassis_authorization
@@ -37,7 +38,7 @@ def _run(control,pose_fd,output_fd,buffer_fd,owner,slots,slot_bytes,planning,mot
     reader=SharedArrayReader(buffer_fd.detach(),owner,slots,slot_bytes)
     pose=Connection(socket.socket(fileno=pose_fd.detach()));output=socket.socket(fileno=output_fd.detach());output.setblocking(False)
     settings=copy.deepcopy(motion);settings['collision_backend']='cpu';settings['collision_library']=None
-    asset=None if asset_path is None else StaticEnvironmentMap(asset_path)
+    asset=None if asset_path is None else StaticEnvironmentMap(asset_path,navigation_window=navigation_window)
     chassis=None if chassis_fd is None else socket.socket(fileno=chassis_fd.detach())
     if chassis is not None:chassis.setblocking(False)
     arm=dict(enabled=False,revision=0)
@@ -153,7 +154,8 @@ class SafetyProcess:
             startup.callback(self.connection.close)
             startup.callback(child.close)
             self.process=context.Process(target=_run,args=(child,DupFd(pose_socket.fileno()),DupFd(child_out.fileno()),DupFd(pool.fd),
-                pool.owner,pool.slots,pool.slot_bytes,planning,motion,geometry,clock_domain,None if asset is None else str(asset.directory),settings,
+                pool.owner,pool.slots,pool.slot_bytes,planning,motion,geometry,clock_domain,None if asset is None else str(asset.directory),
+                None if asset is None else asset.navigation_window,settings,
                 None if self.chassis is None else DupFd(self.chassis.channel.fileno()),trace_timing),daemon=True)
             self.ready=False;self.pending={}
             self.send_lock=threading.Lock()

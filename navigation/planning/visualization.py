@@ -12,7 +12,7 @@ import tempfile
 import numpy as np
 from .backend import ROOT
 from .footprint import VehicleGeometry
-from .inputs import load_config, load_input
+from .inputs import load_config, load_input, navigation_grid
 from .planner import se2, transform_poses
 from .replay import resolve, write_json
 
@@ -71,12 +71,14 @@ def display_scan(source):
 def figure_for(row, geometry, *, scan=None):
     import matplotlib.pyplot as plt
     source = row['source']; result = row['result']
+    binding = result.get('input_binding',{}).get('navigation_grid',{})
     scene, asset = load_input(scene=resolve(source['scene']) if source.get('scene') else None,
-                             static_map=resolve(source['static_map']) if source.get('static_map') else None)
+                             static_map=resolve(source['static_map']) if source.get('static_map') else None,
+                             navigation_window=binding.get('window'))
     count = (3 if scene.rgb is not None else 2) if scene is not None else 1
     figure, axes = plt.subplots(1, count, figsize=(7*count, 7), squeeze=False, constrained_layout=True)
     axes = axes[0]; global_ax = axes[0]
-    grid = asset.snapshot if asset is not None else scene.geometry
+    grid = navigation_grid(asset) if asset is not None else scene.geometry
     draw_grid(global_ax, grid)
     path = np.asarray(result.get('path', []))
     if len(path):
@@ -185,7 +187,7 @@ document.getElementById('save').onclick=()=>{const a=document.createElement('a')
 def pick_endpoints(static_map, output):
     import matplotlib.pyplot as plt
     _, asset = load_input(static_map=static_map)
-    fig, ax = plt.subplots(figsize=(10, 9)); draw_grid(ax, asset.snapshot)
+    fig, ax = plt.subplots(figsize=(10, 9)); draw_grid(ax, navigation_grid(asset))
     ax.set_title('Pan/zoom first; close toolbar modes; click START then GOAL (yaw=0)')
     points = plt.ginput(2, timeout=0)
     if len(points) != 2: raise ValueError('Two explicit points are required')

@@ -63,6 +63,55 @@ def json_safe(value):
     return value
 
 
+def grid_extent(grid):
+    x, y = grid.metadata['origin_xy']
+    resolution = grid.metadata['resolution']
+    height, width = grid.layers['occupancy'].shape
+    return [x, y, x+width*resolution, y+height*resolution]
+
+
+def include_extent_positions(bounds, points, *, padding_m, upper_exclusive=False):
+    """Expand the extent when any supplied XY is outside the current window."""
+    if not points:
+        return False
+    xy = np.asarray(points, dtype=float)
+    if xy.ndim != 2 or xy.shape[1] != 2 or not np.isfinite(xy).all():
+        raise ValueError('Invalid map extent positions')
+    low, high = xy.min(axis=0), xy.max(axis=0)
+    above = high >= bounds[2:] if upper_exclusive else high > bounds[2:]
+    expand = bool((low < bounds[:2]).any() or above.any())
+    if expand:
+        bounds[:2] = np.minimum(bounds[:2], low-padding_m)
+        bounds[2:] = np.maximum(bounds[2:], high+padding_m)
+    return expand
+
+
+def fixed_map_extent(grid, annotations, *, padding_m=1., upper_exclusive=False):
+    """Find the metre bounds of known occupancy and fixed semantic annotations."""
+    asset = np.asarray(grid_extent(grid), dtype=float)
+    cells = grid.layers['occupancy']
+    known = (cells == 0) | (cells == 100)
+    rows = np.flatnonzero(known.any(axis=1))
+    cols = np.flatnonzero(known.any(axis=0))
+    if rows.size and cols.size:
+        origin = np.asarray(grid.metadata['origin_xy'])
+        resolution = grid.metadata['resolution']
+        bounds = np.r_[origin+np.array([cols[0], rows[0]])*resolution-padding_m,
+                       origin+np.array([cols[-1]+1, rows[-1]+1])*resolution+padding_m]
+        bounds[:2] = np.maximum(bounds[:2], asset[:2])
+        bounds[2:] = np.minimum(bounds[2:], asset[2:])
+        policy = 'known_occupancy_with_padding'
+    else:
+        bounds = asset.copy()
+        policy = 'all_unknown_original_extent'
+    positions = [point['pose'][:2] for point in annotations.get('points', [])
+                 if point.get('place_id') != 'mission_start' and point.get('pose') is not None]
+    for region in annotations.get('regions', []):
+        positions.extend(region['polygon'])
+    expanded = include_extent_positions(bounds, positions, padding_m=padding_m, upper_exclusive=upper_exclusive)
+    return bounds, asset, policy, expanded
+
+
 def query_geometry(snapshot, points, *, frame):
     meta, layers = snapshot.metadata,snapshot.layers
     if frame != meta['frame_id']:

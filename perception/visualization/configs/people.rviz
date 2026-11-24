@@ -23,9 +23,9 @@ Visualization Manager:
       Queue Size: 1
       Decay Time: 0
       Style: Points
-      Size (Pixels): 2
-      Color Transformer: FlatColor
-      Color: 140; 140; 160
+      Size (Pixels): 3
+      Color Transformer: AxisColor
+      Axis: Z
     - Class: rviz/MarkerArray
       Name: People detections and tracks
       Enabled: true

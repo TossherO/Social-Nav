@@ -76,12 +76,12 @@ class PeopleScene:
             add(namespace, 'box', color, [corners[i] for edge in EDGES for i in edge], sensor=sensor)
 
         for box in result['detections'] if result['health'] != 'invalid' else ():
-            wire(box, 'detections', (1, .8, .1, .65), sensor=True)
+            wire(box, 'detections', (1, .85, .30, .70), sensor=True)
         active = set()
         for track in result['tracks'] if localized else ():
             box = validate_boxes([track['box']])[0]
             observed = track['state'] == 'observed'
-            color = ((.2, 1, .4, 1) if track['confirmed'] else (.3, .65, 1, 1)) if observed else (1, .5, .1, 1)
+            color = ((.33, 1, .54, 1) if track['confirmed'] else (.49, .68, 1, 1)) if observed else (1, .59, .32, 1)
             wire(box, 'tracks', color)
             key = (track['track_id'], track['lifecycle_generation'])
             label = 'ID %s / g%s %s %.2f' % (key[0].rsplit(':', 1)[-1], key[1],
@@ -131,7 +131,7 @@ def marker_array(specs, lifetime_s=0.0):
         marker.color.r, marker.color.g, marker.color.b, marker.color.a = spec['color']
         marker.points = [Point(*point) for point in spec['points']]
         marker.text = spec['text']
-        marker.scale.x = .025 if spec['namespace'] == 'detections' else .05
+        marker.scale.x = .03 if spec['namespace'] == 'detections' else .065
         if spec['kind'] == 'text':
             marker.scale.z = .25
         elif spec['kind'] == 'arrow':

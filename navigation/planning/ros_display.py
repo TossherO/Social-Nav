@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import numpy as np
 from .footprint import VehicleGeometry
-from .inputs import load_config, load_input
+from .inputs import load_config, load_input, navigation_grid
 from .planner import se2, transform_poses
 from .replay import resolve
 
@@ -22,8 +22,10 @@ def messages(row, geometry, scan=None):
     from perception.visualization.scans import pointcloud_message
     from .visualization import display_scan
     source, result = row['source'], row['result']
+    binding = result.get('input_binding',{}).get('navigation_grid',{})
     scene, asset = load_input(scene=resolve(source['scene']) if source.get('scene') else None,
-                             static_map=resolve(source['static_map']) if source.get('static_map') else None)
+                             static_map=resolve(source['static_map']) if source.get('static_map') else None,
+                             navigation_window=binding.get('window'))
     local_pose = (geometry.pose(scene.record['localization']['world_from_lidar'])
                   if scene is not None and scene.record['localization']['status'] == 'valid' else None)
     has_global = asset is not None and 'start' in result and result['request']['mode'] in ('static', 'mapped')
@@ -84,7 +86,7 @@ def messages(row, geometry, scan=None):
     if scan is not None and base_from_local is not None:
         points = scan['points'].copy()
         points[:, :2] = points[:, :2] @ base_from_local[:2, :2].T+base_from_local[:2, 2]
-    return dict(static=grid_message(asset.snapshot if has_global else None, base_from_reference),
+    return dict(static=grid_message(navigation_grid(asset) if has_global else None, base_from_reference),
                 local=grid_message(scene.geometry if base_from_local is not None else None, base_from_local), path=path,
                 markers=markers, scan=pointcloud_message(points, FRAME, stamp.to_sec()))
 
@@ -131,7 +133,7 @@ def run(results_path):
             {'Class': 'rviz/Map', 'Name': 'Current local', 'Topic': TOPIC+'/local', 'Enabled': True, 'Alpha': .9},
             {'Class': 'rviz/MarkerArray', 'Name': 'Footprint and status', 'Marker Topic': TOPIC+'/markers', 'Enabled': True},
             {'Class': 'rviz/PointCloud2', 'Name': 'Current raw scan', 'Topic': TOPIC+'/scan', 'Enabled': True,
-             'Style': 'Points', 'Size (Pixels)': 2, 'Color Transformer': 'FlatColor', 'Color': '0; 150; 180'}]}}
+             'Style': 'Points', 'Size (Pixels)': 2, 'Color Transformer': 'AxisColor', 'Axis': 'Z'}]}}
         screen = app.primaryScreen().availableGeometry()
         config['Window Geometry'] = dict(Width=min(1280, screen.width()-40), Height=max(400, screen.height()-210),
                                          X=screen.x()+20, Y=screen.y()+190)

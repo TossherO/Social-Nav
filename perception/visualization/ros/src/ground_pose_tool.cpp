@@ -5,6 +5,7 @@
 #include <QKeyEvent>
 #include <QTimer>
 #include <QApplication>
+#include <QButtonGroup>
 #include <QGridLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -12,9 +13,12 @@
 #include <QJsonObject>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QShortcut>
+#include <QStringList>
 #include <QTextEdit>
 #include <QAbstractSpinBox>
+#include <QUuid>
 #include <QVBoxLayout>
 #include <OgreCamera.h>
 #include <OgreRay.h>
@@ -29,6 +33,7 @@
 #include <std_msgs/Empty.h>
 #include <std_msgs/String.h>
 #include <rviz/display_context.h>
+#include <rviz/display_group.h>
 #include <rviz/ogre_helpers/arrow.h>
 #include <rviz/properties/float_property.h>
 #include <rviz/properties/string_property.h>
@@ -36,6 +41,7 @@
 #include <rviz/panel.h>
 #include <rviz/tool_manager.h>
 #include <rviz/viewport_mouse_event.h>
+#include <rviz/visualization_manager.h>
 
 namespace social_nav_rviz {
 class GroundPoseTool : public rviz::Tool {
@@ -200,53 +206,275 @@ class SessionPanel : public rviz::Panel {
   explicit SessionPanel(QWidget* parent=nullptr):rviz::Panel(parent) {
     publisher_=node_.advertise<std_msgs::String>("/social_nav_interactive/panel_command",10);
     auto* layout=new QVBoxLayout(this);
-    auto* instructions=new QLabel(QString::fromUtf8("先选择实机起点。WASD 沿车体方向平移，Q/E 旋转。\n确认前请检查点云预览。"));
-    instructions->setWordWrap(true);layout->addWidget(instructions);
     auto* grid=new QGridLayout();layout->addLayout(grid);
-    add(grid,"Q 左转","q",0,0);add(grid,"W 前移","w",0,1);add(grid,"E 右转","e",0,2);
-    add(grid,"A 左移","a",1,0);add(grid,"S 后移","s",1,1);add(grid,"D 右移","d",1,2);
-    add(grid,"轮椅使能","arm",2,0);add(grid,"取消 / 退出使能","cancel",2,1);
-    add(grid,"退出会话","exit",2,2);
-    status_=new QLabel(QString::fromUtf8("命令沿用现有会话检查。"));
-    status_->setWordWrap(true);layout->addWidget(status_);
-    state_=new QLabel(QString::fromUtf8("等待会话状态"));state_->setWordWrap(true);layout->addWidget(state_);
-    subscriber_=node_.subscribe<std_msgs::String>("/social_nav_interactive/state",1,
+    add(grid,"Q 左转","q","adjust",0,0);add(grid,"W 前移","w","adjust",0,1);add(grid,"E 右转","e","adjust",0,2);
+    add(grid,"A 左移","a","adjust",1,0);add(grid,"S 后移","s","adjust",1,1);add(grid,"D 右移","d","adjust",1,2);
+    auto* confirm=add(grid,"确认实机起点","confirm","confirm",2,0);
+    confirm->setToolTip(QString::fromUtf8("请先将点云预览与静态地图对齐。"));
+    add(grid,"暂停回放","pause","pause",2,1);add(grid,"继续回放","resume","resume",2,2);
+    add(grid,"启动影子导航","shadow_start","shadow_start",3,0);
+    add(grid,"停止影子导航","shadow_stop","shadow_stop",3,1);
+    add(grid,"轮椅使能","arm","arm",4,0);add(grid,"取消目标 / 解除使能","cancel","cancel",4,1);
+    add(grid,"退出会话","exit","exit",4,2);
+
+    auto* maps=new QGridLayout();layout->addLayout(maps);
+    static_button_=new QPushButton(QString::fromUtf8("静态底图"));
+    navigation_button_=new QPushButton(QString::fromUtf8("导航底图"));
+    search_button_=new QPushButton(QString::fromUtf8("搜索快照"));
+    map_buttons_=new QButtonGroup(this);
+    for (auto* button : {static_button_,navigation_button_,search_button_}) {
+      button->setCheckable(true);
+      button->setEnabled(false);
+      map_buttons_->addButton(button);
+    }
+    maps->addWidget(static_button_,0,0);maps->addWidget(navigation_button_,0,1);
+    maps->addWidget(search_button_,0,2);
+    connect(static_button_,&QPushButton::clicked,this,[this]() {selectBasemap(MapView::Static);});
+    connect(navigation_button_,&QPushButton::clicked,this,[this]() {selectBasemap(MapView::Navigation);});
+    connect(search_button_,&QPushButton::clicked,this,[this]() {selectBasemap(MapView::Search);});
+
+    auto* status_scroll=new QScrollArea(this);
+    status_scroll->setFrameShape(QFrame::NoFrame);
+    status_scroll->setWidgetResizable(true);
+    auto* status_panel=new QWidget();
+    auto* status_layout=new QVBoxLayout(status_panel);
+    status_layout->setContentsMargins(0,0,0,0);
+    status_scroll->setWidget(status_panel);
+    layout->addWidget(status_scroll,1);
+
+    map_source_=new QLabel();map_source_->setTextFormat(Qt::PlainText);
+    map_source_->setWordWrap(true);status_layout->addWidget(map_source_);
+
+    status_=new QLabel(QString::fromUtf8("交互会话未连接"));
+    status_->setTextFormat(Qt::PlainText);
+    status_->setWordWrap(true);status_layout->addWidget(status_);
+    playback_=new QLabel();playback_->setWordWrap(true);status_layout->addWidget(playback_);
+    shadow_=new QLabel();shadow_->setWordWrap(true);status_layout->addWidget(shadow_);
+    chassis_=new QLabel();chassis_->setWordWrap(true);status_layout->addWidget(chassis_);
+    status_layout->addStretch(1);
+    panel_subscriber_=node_.subscribe<std_msgs::String>("/social_nav_interactive/panel_state",1,
         [this](const std_msgs::String::ConstPtr& message) {
           const auto object=QJsonDocument::fromJson(QByteArray::fromStdString(message->data)).object();
-          QMetaObject::invokeMethod(this,[this,object]() {
-            if (object.contains("accepted")) {
-              status_->setText(object.value("accepted").toBool() ? QString::fromUtf8("会话已接收操作")
-                  : QString::fromUtf8("操作未接收：")+object.value("error").toString());
-            }
-            if (object.value("chassis").isObject()) {
-              const auto chassis=object.value("chassis").toObject();
-              state_->setText(QString::fromUtf8("底盘状态：")+chassis.value("state").toString(QString::fromUtf8("未知"))+
-                  (chassis.value("status_fresh").toBool() ? QString::fromUtf8("（新鲜）") : QString::fromUtf8("（不可用或过期）")));
-            }
-          },Qt::QueuedConnection);
+          QMetaObject::invokeMethod(this,[this,object]() {updateSession(object);},Qt::QueuedConnection);
+        });
+    reply_subscriber_=node_.subscribe<std_msgs::String>("/social_nav_interactive/panel_reply",10,
+        [this](const std_msgs::String::ConstPtr& message) {
+          const auto object=QJsonDocument::fromJson(QByteArray::fromStdString(message->data)).object();
+          QMetaObject::invokeMethod(this,[this,object]() {updateReply(object);},Qt::QueuedConnection);
+        });
+    basemap_subscriber_=node_.subscribe<std_msgs::String>("/social_nav_runtime_view/basemap_source",1,
+        [this](const std_msgs::String::ConstPtr& message) {
+          const auto source=QJsonDocument::fromJson(QByteArray::fromStdString(message->data)).object();
+          QMetaObject::invokeMethod(this,[this,source]() {basemap_source_=source;updateBasemapControls();},
+                                    Qt::QueuedConnection);
         });
     for (const auto key : {"w","a","s","d","q","e"}) {
       auto* shortcut=new QShortcut(QKeySequence(QString::fromLatin1(key)),this);
       shortcut->setContext(Qt::WindowShortcut);
+      shortcut->setEnabled(false);
+      adjustment_shortcuts_.append(shortcut);
       connect(shortcut,&QShortcut::activated,this,[this,key]() {
         auto* focus=QApplication::focusWidget();
         if (qobject_cast<QLineEdit*>(focus) || qobject_cast<QTextEdit*>(focus) ||
             qobject_cast<QPlainTextEdit*>(focus) || qobject_cast<QAbstractSpinBox*>(focus)) return;
-        send(key);
+        if (controls_.value("adjust").toBool() && publisher_.getNumSubscribers()) send(key);
       });
     }
+    auto* timer=new QTimer(this);
+    connect(timer,&QTimer::timeout,this,[this]() {updateButtons();updateBasemapControls();});
+    timer->start(250);
+  }
+  ~SessionPanel() override {
+    panel_subscriber_.shutdown();
+    reply_subscriber_.shutdown();
+    basemap_subscriber_.shutdown();
+  }
+  void onInitialize() override {
+    manager_ready_=true;
+    QTimer::singleShot(0,this,[this]() {updateBasemapControls();});
   }
  private:
-  void add(QGridLayout* grid,const char* title,const char* command,int row,int col) {
+  enum class MapView { Static, Navigation, Search };
+
+  QPushButton* add(QGridLayout* grid,const char* title,const char* command,const char* control,int row,int col) {
     auto* button=new QPushButton(QString::fromUtf8(title));grid->addWidget(button,row,col);
+    buttons_.append({button,QString::fromLatin1(control)});
+    button->setEnabled(false);
     connect(button,&QPushButton::clicked,this,[this,command](){send(command);});
+    return button;
   }
   void send(const char* command) {
     if (!publisher_.getNumSubscribers()) { status_->setText(QString::fromUtf8("会话不可用，命令未发送。"));return; }
-    std_msgs::String message;message.data=command;publisher_.publish(message);
+    const auto request_id=QUuid::createUuid().toString(QUuid::WithoutBraces);
+    pending_request_=request_id;
+    const QJsonObject request{{"command",QString::fromLatin1(command)},{"request_id",request_id}};
+    std_msgs::String message;
+    message.data=QJsonDocument(request).toJson(QJsonDocument::Compact).toStdString();
+    publisher_.publish(message);
     status_->setText(QString::fromUtf8("已发送 %1，等待会话确认。").arg(command));
+    QTimer::singleShot(8000,this,[this,request_id]() {
+      if (pending_request_!=request_id) return;
+      pending_request_.clear();
+      status_->setText(QString::fromUtf8("会话回执超时，操作结果未知。"));
+    });
   }
-  ros::NodeHandle node_;ros::Publisher publisher_;ros::Subscriber subscriber_;QLabel *status_,*state_;
+  void updateReply(const QJsonObject& object) {
+    if (pending_request_.isEmpty() || object.value("request_id").toString()!=pending_request_ ||
+        !object.value("accepted").isBool()) return;
+    pending_request_.clear();
+    const auto error=object.value("error").toString();
+    if (object.value("accepted").toBool()) status_->setText(QString::fromUtf8("会话已接收操作"));
+    else if (error.isEmpty()) status_->setText(QString::fromUtf8("会话拒绝了操作"));
+    else status_->setText(QString::fromUtf8("操作未接收：")+error);
+  }
+  void updateButtons() {
+    const bool connected=publisher_.getNumSubscribers()>0;
+    if (!connected && connected_) {
+      controls_={};
+      pending_request_.clear();
+      status_->setText(QString::fromUtf8("交互会话未连接"));
+      playback_->clear();
+      shadow_->clear();
+      shadow_->setToolTip(QString());
+      chassis_->clear();
+    }
+    if (connected && !connected_) status_->setText(QString::fromUtf8("交互会话已连接"));
+    connected_=connected;
+    for (const auto& entry : buttons_) entry.first->setEnabled(connected && controls_.value(entry.second).toBool());
+    for (auto* shortcut : adjustment_shortcuts_) shortcut->setEnabled(connected && controls_.value("adjust").toBool());
+  }
+  void updateSession(const QJsonObject& object) {
+    if (!object.value("controls").isObject()) return;
+    controls_=object.value("controls").toObject();
+    const auto playback=object.value("playback_state").toString();
+    if (playback=="ended") playback_->setText(QString::fromUtf8("回放已结束，当前画面可用于检查"));
+    else if (playback=="paused") playback_->setText(QString::fromUtf8("回放已暂停"));
+    else if (playback=="running") playback_->setText(QString::fromUtf8("正在回放"));
+    else playback_->clear();
+    updateShadow(object.value("shadow_navigation").toObject());
+    if (!object.value("hardware_enabled").toBool()) chassis_->clear();
+    else {
+      const auto chassis=object.value("chassis").toObject();
+      chassis_->setText(QString::fromUtf8("底盘状态：")+chassis.value("state").toString(QString::fromUtf8("未知"))+
+          (chassis.value("status_fresh").toBool() ? QString::fromUtf8("（状态有效）") : QString::fromUtf8("（不可用或过期）")));
+    }
+    updateButtons();
+  }
+  void updateShadow(const QJsonObject& shadow) {
+    const auto shadow_state=shadow.value("state").toString();
+    QString tooltip=shadow.value("reason").toString();
+    if (shadow_state=="disabled") shadow_->setText(QString::fromUtf8("影子导航未启动"));
+    else if (shadow_state=="preparing") shadow_->setText(QString::fromUtf8("正在准备影子导航"));
+    else if (shadow_state=="waiting") shadow_->setText(QString::fromUtf8("影子导航等待前方目标"));
+    else if (shadow_state=="unavailable") shadow_->setText(QString::fromUtf8("影子导航不可用"));
+    else if (shadow_state=="planning") {
+      const auto planning_status=shadow.value("planning_status").toString();
+      const auto planning_reason=shadow.value("planning_reason").toString();
+      const auto dwa_status=shadow.value("dwa_status").toString();
+      const auto dwa_reason=shadow.value("dwa_reason").toString();
+
+      QString reference=QString::fromUtf8("计算中");
+      if (planning_status=="reference_ready") reference=QString::fromUtf8("已生成");
+      else if (planning_reason=="goal_occupied" || planning_reason=="goal_footprint_occupied")
+        reference=QString::fromUtf8("目标位置被占用");
+      else if (planning_status=="unavailable" && planning_reason!="waiting_for_background_reference")
+        reference=QString::fromUtf8("未生成");
+
+      QString dwa=QString::fromUtf8("等待计算");
+      if (dwa_status=="candidate") dwa=QString::fromUtf8("已生成候选轨迹");
+      else if (dwa_reason=="reference_has_no_path") dwa=QString::fromUtf8("缺少可用参考路径");
+      else if (dwa_status=="unavailable" || !dwa_reason.isEmpty()) dwa=QString::fromUtf8("未生成");
+      shadow_->setText(QString::fromUtf8("影子导航\n参考路径：%1\nDWA：%2").arg(reference,dwa));
+
+      QStringList reasons;
+      if (!tooltip.isEmpty()) reasons.append(tooltip);
+      if (!planning_reason.isEmpty()) reasons.append(QString::fromUtf8("参考路径：")+planning_reason);
+      if (!dwa_reason.isEmpty()) reasons.append(QString::fromUtf8("DWA：")+dwa_reason);
+      tooltip=reasons.join('\n');
+    }
+    else shadow_->clear();
+    shadow_->setToolTip(tooltip);
+  }
+  rviz::Display* findDisplay(const QString& name) const {
+    if (!manager_ready_) return nullptr;
+    auto* root=vis_manager_->getRootDisplayGroup();
+    for (int i=0;i<root->numDisplays();++i) {
+      auto* display=root->getDisplayAt(i);
+      if (display->getName()==name) return display;
+    }
+    return nullptr;
+  }
+  void selectBasemap(MapView view) {
+    if (auto* display=findDisplay("Static map")) display->setEnabled(view!=MapView::Search);
+    if (auto* display=findDisplay("Navigation basemap")) display->setEnabled(view==MapView::Navigation);
+    if (auto* display=findDisplay("Navigation window")) display->setEnabled(view==MapView::Navigation);
+    if (auto* display=findDisplay("Reference search snapshot")) display->setEnabled(view==MapView::Search);
+  }
+  void updateBasemapControls() {
+    auto* static_map=findDisplay("Static map");
+    auto* navigation=findDisplay("Navigation basemap");
+    auto* window=findDisplay("Navigation window");
+    auto* search=findDisplay("Reference search snapshot");
+    if (!basemap_subscriber_.getNumPublishers()) basemap_source_={};
+    const auto fixed_frame=basemap_source_.value("static_frame").toString();
+    if (static_map && !initial_map_frame_seen_ && !fixed_frame.isEmpty()) {
+      initial_map_frame_seen_=true;
+      // The standalone view starts in odom for mapless runs. Select the asset frame
+      // before localization and reconnect latched layers cleared by the frame change.
+      if (vis_manager_->getFixedFrame()=="odom" && fixed_frame!="odom") {
+        vis_manager_->setFixedFrame(fixed_frame);
+        for (auto* display : {static_map,navigation,window,search}) {
+          if (display && display->isEnabled()) {
+            display->setEnabled(false);
+            display->setEnabled(true);
+          }
+        }
+      }
+    }
+    const auto query=basemap_source_.value("search_query_id");
+    const bool search_available=query.isDouble();
+    if (search && search->isEnabled() && !search_available) selectBasemap(MapView::Navigation);
+    static_button_->setEnabled(static_map!=nullptr);
+    navigation_button_->setEnabled(navigation && window);
+    search_button_->setEnabled(search && search_available);
+    const bool show_search=search && search->isEnabled();
+    const bool show_navigation=(navigation && navigation->isEnabled()) || (window && window->isEnabled());
+    map_buttons_->setExclusive(false);
+    search_button_->setChecked(show_search);
+    navigation_button_->setChecked(!show_search && show_navigation);
+    static_button_->setChecked(!show_search && !show_navigation && static_map && static_map->isEnabled());
+    map_buttons_->setExclusive(true);
+
+    QStringList layers;
+    if (!show_search && static_map && static_map->isEnabled()) {
+      const auto topic=static_map->subProp("Topic")->getValue().toString();
+      if (topic=="/social_nav_interactive/static_basemap" || basemap_source_.value("static_available").toBool())
+        layers.append(QString::fromUtf8("静态地图"));
+    }
+    if (!show_search && show_navigation && basemap_source_.value("local_available").toBool())
+      layers.append(basemap_source_.value("frozen").toBool()
+          ? QString::fromUtf8("暂停时的局部导航图") : QString::fromUtf8("局部导航图"));
+    const auto search_status=search_available
+        ? QString::fromUtf8("搜索快照可用，查询 #%1").arg(query.toVariant().toLongLong())
+        : QString::fromUtf8("搜索快照不可用");
+    if (!static_map && !navigation && !window && !search) map_source_->clear();
+    else if (show_search) map_source_->setText(search_status);
+    else map_source_->setText((layers.isEmpty() ? QString::fromUtf8("底图不可用") : layers.join(" + "))+
+                              "\n"+search_status);
+  }
+  ros::NodeHandle node_;
+  ros::Publisher publisher_;
+  ros::Subscriber panel_subscriber_,reply_subscriber_,basemap_subscriber_;
+  QJsonObject controls_,basemap_source_;
+  QList<QPair<QPushButton*,QString>> buttons_;
+  QList<QShortcut*> adjustment_shortcuts_;
+  QButtonGroup* map_buttons_;
+  QPushButton *static_button_,*navigation_button_,*search_button_;
+  QLabel *status_,*playback_,*shadow_,*chassis_,*map_source_;
+  QString pending_request_;
+  bool connected_=false;
+  bool manager_ready_=false;
+  bool initial_map_frame_seen_=false;
 };
 } // namespace social_nav_rviz
 
@@ -255,5 +483,5 @@ PLUGINLIB_EXPORT_CLASS(social_nav_rviz::GroundInitialPoseTool,rviz::Tool)
 PLUGINLIB_EXPORT_CLASS(social_nav_rviz::ConfirmInitialPoseTool,rviz::Tool)
 PLUGINLIB_EXPORT_CLASS(social_nav_rviz::SessionPanel,rviz::Panel)
 
-// A stable C symbol lets startup checks detect a library built before the panel.
-extern "C" int social_nav_rviz_session_panel_abi() { return 1; }
+// Startup checks use this symbol to detect stale RViz plugins.
+extern "C" int social_nav_rviz_session_panel_abi() { return 3; }

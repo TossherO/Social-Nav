@@ -37,6 +37,7 @@ def parser():
     p.add_argument('--sensor-session',help='Bag-bound clock-session JSON; defaults to BAG.clock.json')
     p.add_argument('--output',required=True);p.add_argument('--gpu',help='Physical visible-device selection; otherwise preserve CUDA_VISIBLE_DEVICES');p.add_argument('--duration',type=float)
     p.add_argument('--rate',type=float,default=1.);p.add_argument('--static-map');p.add_argument('--goal',nargs='+',type=float)
+    p.add_argument('--catalog',help='Fixed annotation catalog for the selected static map navigation window')
     p.add_argument('--goal-frame',default='odom');p.add_argument('--coverage');p.add_argument('--record-views',action='store_true')
     p.add_argument('--record-planning',action='store_true',help='Bounded asynchronous planning evidence: 2 Hz maps plus footprint/ground/budget failure snapshots; preserves normal map scheduling')
     p.add_argument('--trace-timing',action='store_true',help='Bounded scalar timing events, flushed at shutdown; no map/image recording or scheduling change')
@@ -59,6 +60,8 @@ def parser():
     p.add_argument('--display',action='store_true',help='Publish optional RViz display topics; no core subscribes to them')
     p.add_argument('--interactive-session',action='store_true',help='Enable session status and bag pause/preview commands')
     p.add_argument('--pause-at',type=float,help='Pause an interactive bag after this many source seconds; hold at bag end')
+    p.add_argument('--bag-shadow',action='store_true',help='Offer recorded-route planning review in an interactive bag')
+    p.add_argument('--shadow-route-run',help='Reuse a successful fixed-map localization run for the same bag and map')
     p.add_argument('--vehicle-profile',help='Explicit measured vehicle geometry, limits and protocol')
     p.add_argument('--execute',action='store_true',help='Enable supervised live hardware output; separate operator arming required')
     p.add_argument('--chassis-port',help='Exclusive serial device, only with --execute')
@@ -86,6 +89,8 @@ def load_command_schedule(path):
 
 
 def _runtime_inputs(args):
+    if args.catalog and not args.static_map:
+        raise ValueError('--catalog requires --static-map')
     if args.execute and (not args.live or not args.interactive_session or not args.vehicle_profile or not args.chassis_port):
         raise ValueError('--execute requires --live --interactive-session --vehicle-profile and --chassis-port')
     if args.agent_execution and not (args.execute and args.agent_observations):
@@ -130,6 +135,11 @@ def _runtime_inputs(args):
         raise ValueError('--pause-at requires an interactive bag and a finite nonnegative offset')
     if args.interactive_session and (args.route or args.commands):
         raise ValueError('Interactive goals cannot share a recorded route or scheduled commands')
+    if args.bag_shadow and (args.live or args.execute or not args.interactive_session or
+                            mode!='localization' or not args.static_map or args.goal is not None):
+        raise ValueError('--bag-shadow requires an interactive fixed-map bag without hardware output or an initial goal')
+    if args.shadow_route_run and not args.bag_shadow:
+        raise ValueError('--shadow-route-run requires --bag-shadow')
     if not args.live and not args.bag and not run.get('bag'):raise ValueError('Select --bag, --live or a source run with an original bag')
     if args.route and (args.live or not args.route_floor or args.goal is not None or args.commands):
         raise ValueError('--route needs a bag and --route-floor, without --goal or --commands')
@@ -177,7 +187,7 @@ def _close_resources(resources):
     # Stop producers before the consumers and storage they still use.
     order = ('scan_inbox', 'map_worker', 'commands', 'control', 'agent_observations', 'seating', 'follow_decision',
              'safety_telemetry', 'safety', 'reference', 'environment', 'reader', 'journal', 'exporter',
-             'planning_recorder', 'associations', 'decision_inputs', 'interactive_session', 'display')
+             'planning_recorder', 'associations', 'decision_inputs', 'interactive_session', 'bag_shadow', 'display')
     reports, errors = {}, []
     for name in order:
         resource = resources.pop(name, None)
@@ -209,6 +219,8 @@ def main():
 def _run(args, resources, handles):
     source, mode, bag, config, settings, env_config, timing = _runtime_inputs(args)
     schedule = load_command_schedule(args.commands)
+    from .static_map import load_static_map
+    asset=load_static_map(args.static_map,args.catalog) if args.static_map else None
     with_rgb=bool((args.display and settings['display']['rgb_hz']>0) or args.record_views or
         args.record_decision_inputs or args.agent_observations)
     import torch
@@ -221,7 +233,6 @@ def _run(args, resources, handles):
     from perception.environment.occupancy import OccupancyTree,VoxelBudgetExceeded
     from .environment import EnvironmentFault,LatestMapWorker
     from perception.environment.scene import assemble_scene,people_observation
-    from perception.environment.storage import StaticEnvironmentMap
     from perception.mapping_localization.context import pose_matrix
     from perception.mapping_localization.results import file_fingerprint
     from navigation.planning.inputs import load_config as planning_config
@@ -268,7 +279,6 @@ def _run(args, resources, handles):
     planning['motion_constraints']={k:motion[k] for k in ('min_turning_radius_m','allow_reverse','allow_in_place_rotation')}
     planning['pose_search']['native_library']=str(ROOT/'outputs/runtime/build/planning/libsocial_nav_pose_search.so')
     motion.update(collision_backend='cuda',collision_library=str(ROOT/settings['collision_library']))
-    asset=StaticEnvironmentMap(args.static_map) if args.static_map else None
     if asset is not None and asset.snapshot.metadata.get('projection_strategy') in ('docker_assume_free', 'ground_relative_assume_free'):
         print('[static map] Non-hit cells are assumed free; measured local safety checks remain required.',
               file=sys.stderr,flush=True)
@@ -293,13 +303,15 @@ def _run(args, resources, handles):
         (output/'planning/config.json').write_text(json.dumps(dict(planning=reference.planning,motion=motion,
             reference=reference.settings,dwa=controller.controller.settings,safety=controller.controller.safety_settings,
             geometry=dict(footprint=geometry.footprint.tolist(),base_from_lidar=geometry.base_from_lidar.tolist(),source=geometry.source),
-            static_map=args.static_map),allow_nan=False,indent=2)+'\n')
+            static_map=args.static_map,catalog=args.catalog,
+            navigation_window=None if asset is None else asset.navigation_window),allow_nan=False,indent=2)+'\n')
     if args.display:
         from perception.visualization.runtime import RuntimeDisplay
         reference.display_enabled=asset is not None and settings['display']['navigation_hz']>0
         display = resources['display'] = RuntimeDisplay(settings['display'],geometry,planning,asset=asset,
             reference_max_age_s=reference.settings['max_age_s'],
-            trajectory_max_age_s=controller.controller.safety_settings['max_input_age_s'],metrics=metrics)
+            trajectory_max_age_s=controller.controller.safety_settings['max_input_age_s'],metrics=metrics,
+            clock_rate=args.rate,publish_static=not args.interactive_session)
     state_parent, state_input = _socket_pair(handles)
     safety = resources['safety'] = SafetyProcess(state_parent,planning,motion,geometry,clock_domain=clock_domain,asset=asset,
         slots=settings['shared_safety_slots'],slot_bytes=settings['shared_safety_slot_bytes'],settings=shadow,
@@ -311,7 +323,14 @@ def _run(args, resources, handles):
     interactive=None
     if args.interactive_session:
         from .session import InteractiveSession
-        interactive = resources['interactive_session'] = InteractiveSession(live=args.live,safety=safety,output=output,execute=args.execute)
+        bag_shadow = None
+        if args.bag_shadow:
+            from .bag_shadow import BagShadow
+            bag_shadow = resources['bag_shadow'] = BagShadow(bag, config, settings, geometry, asset,
+                start=args.start, duration=args.duration, cache=ROOT/'outputs/runtime/shadow_routes',
+                route_run=args.shadow_route_run, output=output)
+        interactive = resources['interactive_session'] = InteractiveSession(live=args.live,safety=safety,output=output,
+                                                                          execute=args.execute,bag_shadow=bag_shadow)
     commands = resources['commands'] = CommandInbox(output/'commands.sock',safety,session=interactive,agent_execution=args.agent_execution,
                           follow_enabled=args.agent_follow_candidates)
     commands.agent_state.configure_vehicle(geometry,motion)
@@ -578,7 +597,8 @@ def _run(args, resources, handles):
                             image_metadata=dict(rgb_stamp_ns=packet['rgb_stamp_ns'],
                                 rgb_frame=packet['rgb_frame'],camera_info=packet['camera_info']))
                     if display is not None:
-                        display.submit(arrays['raw'],row,people,rgb=arrays.get('rgb'),rgb_frame=packet['rgb_frame'])
+                        display.submit(arrays['raw'],row,people,rgb=arrays.get('rgb'),rgb_frame=packet['rgb_frame'],
+                            clock=clock,association=packet['association'])
                     now=packet['source_clock_s']+(time.monotonic()-packet['source_mono'])*args.rate
                     metrics.add('sensor_ready_to_compute_complete',time.monotonic()-packet['source_mono'])
                     metrics.add('source_observation_age',max(0.,now-stamp))
@@ -627,6 +647,7 @@ def _run(args, resources, handles):
             scan_scheduling=dict(policy='synchronous_archive') if scan_inbox is None else dict(policy='one_active_one_latest_pending',received=scan_inbox.received,replaced=scan_inbox.replaced),
             main_process_cpu_s=process_cpu_s,run_wall_s=run_wall_s,cleanup_errors=cleanup_errors)
         report['route_replay']=None if route_replay is None else route_replay.summary()
+        report['shadow_navigation']=reports.get('bag_shadow')
         report['agent_observations']=reports.get('agent_observations')
         report['last_environment_fault']=last_environment_fault
         report['termination']='user_stop' if stop_requested else 'source_end'
@@ -642,6 +663,9 @@ def _run(args, resources, handles):
         manifest['termination']=report['termination']
         manifest['start']=args.start;manifest['duration']=args.duration
         manifest['association_coverage']=args.coverage
+        if asset is not None:
+            manifest['static_navigation']=dict(static_map=args.static_map,catalog=args.catalog,
+                snapshot_id=asset.manifest['snapshot_id'],navigation_window=asset.navigation_window)
         manifest['interactive']=dict(enabled=args.interactive_session,execution_requested=args.execute,
             vehicle_source=motion.get('vehicle_source'),chassis_port=args.chassis_port,
             physical_acceptance=False,task_completed=False)

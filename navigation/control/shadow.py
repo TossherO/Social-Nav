@@ -88,7 +88,7 @@ class DwaShadowController(_ShadowOutput):
         binding=result['binding'];changed=binding!=self.last_offered;self.last_offered=binding
         return changed
 
-    def step(self,request,scene,rows,result,*,now,clock_domain,mono=None,reason=None,dt=None):
+    def step(self,request,scene,rows,result,*,now,clock_domain,mono=None,reason=None,dt=None,goal_diagnostic=True):
         mono=time.monotonic() if mono is None else mono;began=time.perf_counter()
         reason=reason or self.clock.update(now,mono)
         if request is None:reason=reason or 'no_active_goal'
@@ -98,11 +98,12 @@ class DwaShadowController(_ShadowOutput):
         else:
             feedback=observed_feedback(rows,scene,self.geometry,self.motion,now=now)
             proposal=self.controller.command(request,scene,feedback,result,now=now,clock_domain=clock_domain,dt=self.settings['period_s'] if dt is None else dt)
-            diagnostic=goal_feedback(request,scene,feedback,self.controller.goal_settings,now=now,clock_domain=clock_domain,
-                active=True,geometry=self.geometry,asset=self.asset,planning=self.controller.planning)
+            if goal_diagnostic:
+                diagnostic=goal_feedback(request,scene,feedback,self.controller.goal_settings,now=now,clock_domain=clock_domain,
+                    active=True,geometry=self.geometry,asset=self.asset,planning=self.controller.planning)
         return self._output(request,scene,began,now=now,clock_domain=clock_domain,
             proposal=proposal,feedback=feedback,reason=reason,result_accepted=self.controller.result is not None,
-            recorded_goal_diagnostic=diagnostic)
+            recorded_goal_diagnostic=diagnostic,execution_feedback=False)
 
 
 def publisher(rospy,topic,message_type,**options):

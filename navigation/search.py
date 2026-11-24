@@ -110,8 +110,8 @@ def check_last_position(scene, asset, geometry, target, planning, *, now, clock_
     """Check current occupancy and the requested endpoint before mapped planning."""
     from navigation.planning.continuity import context_binding
     from navigation.planning.footprint import footprint_status, wrap
-    from navigation.planning.inputs import association_status, scene_status
-    from navigation.planning.planner import goal_cell_issue
+    from navigation.planning.inputs import association_status, navigation_grid, scene_status
+    from navigation.planning.planner import goal_cell_issue, mapped_endpoint_reason
     from perception.environment.navigation import navigation_geometry
 
     scene.verify()
@@ -127,16 +127,20 @@ def check_last_position(scene, asset, geometry, target, planning, *, now, clock_
     local_from_lidar = np.asarray(record['localization']['world_from_lidar'])
     local_pose = geometry.pose(local_from_lidar)
     map_pose = geometry.pose(np.asarray(record['prior']['map_from_local']) @ local_from_lidar)
+    grid = navigation_grid(asset)
+    margin = planning['safety_margin_m']
+    reason = mapped_endpoint_reason(grid, geometry, map_pose, point, margin)
+    if reason:
+        raise ValueError(reason)
     xy_tolerance, yaw_tolerance = _arrival_tolerances()
     reached_xy = np.linalg.norm(point[:2]-map_pose[:2]) <= xy_tolerance
     aligned = len(point) == 2 or abs(wrap(point[2]-map_pose[2])) <= yaw_tolerance
     if reached_xy and aligned:
         raise ValueError('follow_last_position_reached')
-    margin = planning['safety_margin_m']
-    reason = goal_cell_issue(asset.snapshot, geometry, point, margin)
+    reason = goal_cell_issue(grid, geometry, point, margin)
     if reason:
         raise ValueError(reason)
-    if len(point) == 3 and footprint_status(asset.snapshot, geometry, point, margin) != 'free':
+    if len(point) == 3 and footprint_status(grid, geometry, point, margin) != 'free':
         raise ValueError('follow_last_position_map_footprint_not_free')
     local = navigation_geometry(scene, now=now, asset=asset, check_asset=True)
     if footprint_status(local, geometry, local_pose, margin) != 'free':
@@ -222,7 +226,7 @@ def follow_candidates(scene, asset, geometry, last=None, *, anchor=None, margin=
                       continuation=None, local_reid=False, planning=None, loss=None):
     """Build search choices or check the existing fixed target against this scene."""
     from perception.environment.context import fingerprint
-    from navigation.planning.inputs import association_status, load_config
+    from navigation.planning.inputs import association_status, load_config, navigation_grid
     scene.verify();record=scene.record;stamp=record['as_of']
     identity=[record[k] for k in ('session_id','generation','frame_id')]
     results=[dict(id=0,kind='wait',pose=None)]
@@ -241,7 +245,7 @@ def follow_candidates(scene, asset, geometry, last=None, *, anchor=None, margin=
         if matrix.shape==(4,4) and transform.shape==(4,4) and np.isfinite(matrix).all() and np.isfinite(transform).all():
             local_pose=geometry.pose(matrix);map_pose=geometry.pose(transform@matrix)
             inputs=dict(stamp_s=stamp,clock_domain=record['clock_domain'],scene=scene,geometry=geometry,
-                        global_grid=asset.snapshot,local_pose=local_pose,pose=map_pose)
+                        global_grid=navigation_grid(asset),local_pose=local_pose,pose=map_pose)
             search_anchor=map_pose[:2] if anchor is None else anchor
             try:
                 results=candidates(inputs,last,now=stamp,clock_domain=record['clock_domain'],

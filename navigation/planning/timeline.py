@@ -254,14 +254,18 @@ def build(run_path,output,*,rgb=None,static_map=None):
         bag_fingerprint=run['playback']['bag_fingerprint'],static_map=None)
     if static_map:
         from perception.environment.storage import StaticEnvironmentMap
-        asset=StaticEnvironmentMap(static_map);cells=asset.snapshot.layers['occupancy']
+        navigation=run.get('static_navigation') or {}
+        window=navigation.get('navigation_window')
+        asset=StaticEnvironmentMap(static_map,navigation_window=window)
+        grid=asset.snapshot if window is None else asset.navigation_snapshot
+        cells=grid.layers['occupancy']
         requested={r.get('request',{}).get('map_snapshot_id') for r in read_rows(source/'control.jsonl') if r.get('request')}
         if asset.manifest['snapshot_id'] not in requested:raise ValueError('Static map is not the recorded goal asset')
         palette=np.array([[226,222,211],[249,250,247],[62,73,82]],np.uint8)
         pixels=palette[np.where(cells==0,1,np.where(cells==100,2,0))]
         stream=io.BytesIO();Image.fromarray(pixels).save(stream,format='PNG')
         data['static_map']=dict(image=base64.b64encode(stream.getvalue()).decode(),
-            resolution=asset.snapshot.metadata['resolution'],origin=asset.snapshot.metadata['origin_xy'],
+            resolution=grid.metadata['resolution'],origin=grid.metadata['origin_xy'],
             shape=list(cells.shape),source=str(Path(static_map).resolve()),manifest=asset.manifest)
     if (source/'planning/cycles.jsonl').exists():
         attach_planning(data,source)

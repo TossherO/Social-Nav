@@ -642,6 +642,18 @@ class CommandInbox:
             self.safety.command(kind,value)
             return True
 
+    def bag_shadow_goal(self, previous, request):
+        """Keep a route revision behind any newer manual claim on the command inbox."""
+        with self.lock:
+            selected = self.session.bag_shadow.status()
+            if request is not None and (not selected['enabled'] or selected['request_id'] != request['request_id']):
+                request = None
+            if request is not None and request != previous:
+                self.safety.command('goal',validate('goal',request))
+            elif request is None and previous is not None:
+                self.safety.command('cancel',{k:previous[k] for k in ('task_id','goal_revision')})
+            return request
+
     def drain(self):
         with self.lock:items=list(self.pending);self.pending.clear();return items
 
@@ -678,9 +690,20 @@ class CommandInbox:
             try:
                 request=connection.recv()
                 if set(request)!={'kind','value'}:raise ValueError('Use kind and value')
-                if request['kind'] in ('session_status','playback','arm'):
+                if request['kind'] in ('session_status','playback','arm','shadow_navigation'):
                     if self.session is None:raise ValueError('Interactive session is not enabled')
-                    connection.send(self.session.handle(request['kind'],request['value']));continue
+                    if request['kind']=='shadow_navigation':
+                        with self.lock:
+                            value=request['value']
+                            if isinstance(value,dict) and value.get('enabled') is True:
+                                if len(self.pending)>=64:raise RuntimeError('Command inbox is full')
+                                if self.agent_owner is not None or self.manual_preview_snapshot_locked() is not None:
+                                    raise ValueError('Release the current Agent goal before enabling recorded-route planning')
+                            reply=self.session.handle(request['kind'],request['value'])
+                            if reply['enabled'] and reply['changed']:self.pending.append(('shadow_activate',None))
+                    else:
+                        reply=self.session.handle(request['kind'],request['value'])
+                    connection.send(reply);continue
                 if request['kind'] in ('agent_state','agent_live_state'):
                     live = request['kind']=='agent_live_state'
                     if live and not self.agent_execution:
@@ -760,7 +783,7 @@ class CommandInbox:
 
 def send_request(path,kind,value,*,timeout=2.):
     """Submit one intent; the reply acknowledges receipt, never execution."""
-    if kind not in ('session_status','playback','arm'):value=validate(kind,value)
+    if kind not in ('session_status','playback','arm','shadow_navigation'):value=validate(kind,value)
     elif not isinstance(value,dict):raise ValueError('Session commands require an object')
     if not 0<timeout<=10:raise ValueError('Command timeout must be in (0,10] seconds')
     return exchange_request(path,kind,value,timeout=timeout)

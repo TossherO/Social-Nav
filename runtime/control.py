@@ -145,15 +145,16 @@ class ControlLoop:
         return assemble_scene(grid,clock_domain=scene.record['clock_domain'],people=people_observation(scene),
                               stamp_ns=scene.record.get('stamp_ns'),settings=self.scene_settings)
 
-    def _preview_frozen(self, token, environment_epoch):
+    def _preview_frozen(self, token, environment_epoch, request, *, shadow=False):
         """Publish the search raster only for the preview accepted by the bag session."""
-        key=(token,self.scene is not None)
+        key=(token,self.scene is not None,None if request is None else request['request_id'])
         if key==self.preview_token:
             return
         self.preview_token=key
         if self.display is not None:
-            self.display.frozen_basemap(True)
-        if self.request is None:
+            self.display.frozen_basemap(True,row=self.rows[-1])
+        if request is None:
+            self.session.clear_preview(token)
             return
         snapshot=None
         if self.scene is None:
@@ -167,8 +168,9 @@ class ControlLoop:
 
             self.batch.bind(self.device)
             scene=self._search_scene(self.scene)
-            result=preview(self.request,scene,list(self.rows),self.controller.controller,
+            result=preview(request,scene,list(self.rows),self.controller.controller,
                 self.reference.planning,asset=self.asset,dt=self.settings['control_period_s'],
+                scope=request['source'] if shadow else 'frozen_bag_observation',
                 on_mapped_grid=capture if self.display is not None and self.reference.display_enabled else None)
             if mapped:
                 from navigation.planning.runtime import encode_display_map
@@ -185,8 +187,13 @@ class ControlLoop:
         with self.lock, self.session.lock:
             if environment_epoch!=self.environment_epoch or not self.session.pause_requested:
                 return
-            if self.session.publish_preview(result,token) and snapshot is not None:
-                self.display.frozen_basemap(True,snapshot)
+            if self.session.publish_preview(result,token):
+                if snapshot is not None:
+                    self.display.frozen_basemap(True,snapshot,row=self.rows[-1])
+                if shadow:
+                    status='reference_ready' if result.get('reference_available') else 'unavailable'
+                    reference_reason=result['reference']['result'].get('reason')
+                    self.session.bag_shadow.note_result(request,status,reference_reason,proposal=result.get('proposal'))
 
     def _work(self):
         try:
@@ -195,6 +202,8 @@ class ControlLoop:
             next_tick=time.monotonic();last_tick=None;last_state=None
             previous_environment_epoch=0
             frozen_display=False
+            bag_shadow=None if self.session is None else self.session.bag_shadow
+            active_shadow_goal=None
             with torch.cuda.stream(stream):
                 while not self.done.is_set():
                     while True:
@@ -207,10 +216,12 @@ class ControlLoop:
                         self.rows.append(row)
                     epoch=self.session_epoch
                     pause_requested=paused=False
+                    source_ended=False
                     if self.session is not None:
                         with self.session.lock:
                             epoch=self.session.epoch
                             pause_requested,paused=self.session.pause_requested,self.session.paused
+                            source_ended=self.session.source_ended
                             # A command offered after this read cannot accept the previous goal's preview.
                             token=self.session.command_generation
                     if epoch!=self.session_epoch:
@@ -236,7 +247,13 @@ class ControlLoop:
                             self.safety.command('cancel',{k:self.request[k] for k in ('task_id','goal_revision')})
                         self.request=None;self.reference.invalidate('bag_pause_or_resume');self.controller.controller.clear()
                     for kind,value in self.commands.drain():
-                        if kind=='follow_start':
+                        if kind=='shadow_activate' and bag_shadow is not None and bag_shadow.status()['enabled']:
+                            if self.request is not None:
+                                cancel={k:self.request[k] for k in ('task_id','goal_revision')}
+                                self.safety.command('cancel',cancel);self.reference.cancel(self.request)
+                                self.cancelled_request=cancel;self.request=None;self.controller.controller.clear()
+                        elif kind=='follow_start':
+                            if bag_shadow is not None:bag_shadow.toggle(False,reason='manual_override')
                             self.follow_pending=value
                             self.follow_target=None
                             self.follow_issued=None;self.follow_held=False
@@ -286,19 +303,26 @@ class ControlLoop:
                             if self.request is not None:self.reference.cancel(self.request)
                             self.request=None;self.controller.controller.clear();self.cancelled_request=value
                     freezing=pause_requested or paused
+                    if freezing and active_shadow_goal is not None:
+                        active_shadow_goal=self.commands.bag_shadow_goal(active_shadow_goal,None)
+                        bag_shadow.suspend()
                     if freezing!=frozen_display:
                         frozen_display=freezing
                         if self.display is not None:
                             self.display.frozen_basemap(freezing)
                     if freezing:
                         if paused and pause_requested and self.rows:
-                            previous_environment_epoch,_,_=self._take_environment(previous_environment_epoch)
-                            self.session.publish_observation(self.scene,self.rows[-1],goal_intent=self.request)
-                            self._preview_frozen(token,previous_environment_epoch)
+                            previous_environment_epoch,environment_fault,_=self._take_environment(previous_environment_epoch)
+                            shadow_request=None if bag_shadow is None or self.request is not None else bag_shadow.select(
+                                self.scene if environment_fault is None else None,self.rows[-1],now=self.rows[-1]['stamp_s'],
+                                clock_domain=self.clock_domain,planning=self.reference.planning,source_ended=source_ended)
+                            request=self.request or shadow_request
+                            self.session.publish_observation(self.scene,self.rows[-1],goal_intent=request,token=token)
+                            self._preview_frozen(token,previous_environment_epoch,request,shadow=shadow_request is not None)
                         elif self.preview_token is not None:
                             self.preview_token=None
                             if self.display is not None:
-                                self.display.frozen_basemap(True)
+                                self.display.frozen_basemap(True,row=self.rows[-1] if self.rows else None)
                         self.done.wait(.01);continue
                     mono=time.monotonic()
                     if self.clock is None:self.done.wait(.005);continue
@@ -315,7 +339,6 @@ class ControlLoop:
                     next_tick=mono+max(period,self.controller.motion['state_max_age_s'])
                     previous=self.scene
                     environment_epoch,environment_fault,offered_mono=self._take_environment(previous_environment_epoch)
-                    if self.session is not None:self.session.publish_observation(self.scene,self.rows[-1],goal_intent=self.request)
                     if environment_epoch==previous_environment_epoch and previous is not None and self.scene is None:
                         self.reference.invalidate('localization_invalid')
                     previous_environment_epoch=environment_epoch
@@ -345,13 +368,24 @@ class ControlLoop:
                         self.batch.bind(self.device)
                     preview=self.commands.manual_preview_snapshot() if self.session is not None else None
                     preview_request=None if preview is None or self.request is not None else preview['request']
-                    planning_request=self.request if self.request is not None else preview_request
+                    shadow_request=None if bag_shadow is None or self.request is not None or preview_request is not None else bag_shadow.select(
+                        self.scene if environment_fault is None else None,self.rows[-1],now=now,
+                        clock_domain=self.clock_domain,planning=self.reference.planning)
+                    if bag_shadow is not None:
+                        old_shadow_goal=active_shadow_goal
+                        active_shadow_goal=shadow_request=self.commands.bag_shadow_goal(active_shadow_goal,shadow_request)
+                        if old_shadow_goal != active_shadow_goal:
+                            self.controller.controller.clear()
+                    planning_request=self.request or preview_request or shadow_request
+                    if self.session is not None:
+                        self.session.publish_observation(self.scene,self.rows[-1],goal_intent=self.request or shadow_request,token=token)
                     target=getattr(self,'follow_target',None)
                     follow_key=(target if target is not None and planning_request is not None and
                                 planning_request['request_id']==target[0] and
                                 planning_request.get('completion_policy')=='continuous' else None)
                     preview_key=None if preview_request is None else (preview['owner'],preview_request['request_id'],
                         preview_request['goal_revision'] if follow_key is None else follow_key)
+                    if shadow_request is not None:preview_key=('bag-shadow',shadow_request['goal_revision'])
                     if self.request is None and preview_key!=self.manual_preview_key:
                         self.reference.invalidate('manual_preview_changed')
                     self.manual_preview_key=preview_key
@@ -364,7 +398,8 @@ class ControlLoop:
                             locked_follow_goal=getattr(self,'follow_held',False))
                         with self.metrics.span('reference_tick'):status=self.reference.tick(now=now,clock_domain=self.clock_domain)
                         self.record('reference',dict(event='status',as_of=now,reason=status['reason'],blocked=self.reference.blocked,
-                            waiting=status['waiting'],start_evidence=status['start_evidence']))
+                            waiting=status['waiting'],start_evidence=status['start_evidence'],
+                            request_id=planning_request['request_id'],source=planning_request.get('source')))
                     ready_request=None if status is None else status.get('request')
                     available_reference=None if status is None else status.get('result',self.reference.current)
                     held=getattr(self,'follow_held',False)
@@ -384,7 +419,7 @@ class ControlLoop:
                             selected=(result.get('follow_goal_adjustment') or {}).get('selected_goal')
                             self.follow_issued=(copy.deepcopy(preview_request),copy.deepcopy(selected))
                     display_request=ready_request or planning_request
-                    control_request=self.request
+                    control_request=self.request or shadow_request
                     if follow_key is not None and control_request is not None:
                         control_request=ready_request
                         if control_request is not None and not self.commands.follow_goal(self.follow.handle,control_request):
@@ -400,7 +435,11 @@ class ControlLoop:
                         reference_request=None if available_reference is None else available_reference['result']['request']
                     with self.metrics.span('dwa_control'):
                         packet=self.controller.step(control_request,self.scene,list(self.rows),control_reference,
-                            now=now,clock_domain=self.clock_domain,dt=dt,reason=environment_fault)
+                            now=now,clock_domain=self.clock_domain,dt=dt,reason=environment_fault,
+                            goal_diagnostic=shadow_request is None)
+                    if shadow_request is not None:
+                        bag_shadow.note_result(shadow_request,status['status'],status['reason'],
+                            proposal=packet.get('proposal'),control_reason=packet.get('reason'))
                     self.reference.note_control(packet,monotonic_s=mono)
                     self.safety.packet(packet);self.record('control',packet);self.count+=1
                     if tracing:
@@ -488,7 +527,7 @@ class ControlLoop:
 
     def _follow_inputs(self, scene):
         import numpy as np
-        from navigation.planning.inputs import association_status
+        from navigation.planning.inputs import association_status, navigation_grid
         if scene is None or self.asset is None or association_status(scene,self.asset,self.reference.planning):
             raise ValueError('follow_search_map_unavailable')
         record=scene.record
@@ -496,7 +535,7 @@ class ControlLoop:
         transform=np.asarray(record['prior']['map_from_local'],dtype=float)
         geometry=self.controller.controller.geometry
         return dict(stamp_s=record['as_of'],clock_domain=record['clock_domain'],scene=scene,
-            geometry=geometry,global_grid=self.asset.snapshot,local_pose=geometry.pose(local),
+            geometry=geometry,global_grid=navigation_grid(self.asset),local_pose=geometry.pose(local),
             pose=geometry.pose(transform@local))
 
     def _pause_follow(self, handle):

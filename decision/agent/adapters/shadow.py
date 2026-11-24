@@ -60,10 +60,11 @@ def bound_planning_observation(evidence, request, state):
     return copy.deepcopy(evidence)
 
 
-def load_catalog_map(catalog):
+def load_catalog_map(catalog, *, directory=None):
     from perception.environment.storage import StaticEnvironmentMap
-    asset = StaticEnvironmentMap(ROOT/catalog.value['map_asset'])
     value = catalog.value
+    asset = StaticEnvironmentMap(ROOT/value['map_asset'] if directory is None else directory,
+                                 navigation_annotations=catalog.annotations())
     if (asset.manifest['snapshot_id'] != value.get('map_snapshot_id') or
             asset.manifest['frame_id'] != value['frame_id'] or
             value.get('localization_map_id',asset.snapshot.metadata.get('map_id')) != asset.snapshot.metadata.get('map_id')):

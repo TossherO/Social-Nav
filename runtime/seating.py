@@ -193,6 +193,7 @@ class SeatingWorker:
 
     def _route(self, planner, request, scene, now, *, manual_table=None):
         from navigation.planning.footprint import footprint_status
+        from navigation.planning.inputs import navigation_grid
         from perception.environment.navigation import navigation_geometry
         from navigation.planning.planner import transform_poses
 
@@ -215,7 +216,7 @@ class SeatingWorker:
             return path.get('reason') or 'seating_approach_not_feasible', False
         if not path.get('current_path_valid'):
             return 'seating_local_path_'+path.get('local_check',{}).get('status','unavailable'), False
-        revised_goal = mapped and footprint_status(self.asset.snapshot,self.geometry,goal,margin) in ('occupied','unknown')
+        revised_goal = mapped and footprint_status(navigation_grid(self.asset),self.geometry,goal,margin) in ('occupied','unknown')
         return None, revised_goal
 
     def _map_from_local(self, scene):

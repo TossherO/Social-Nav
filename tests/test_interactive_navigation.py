@@ -23,6 +23,34 @@ from tests.chassis_fixtures import frame
 
 
 class PlaybackTests(unittest.TestCase):
+    def test_panel_controls_follow_candidate_playback_and_execution_state(self):
+        from runtime.interactive import panel_controls
+
+        def controls(status=None, *, live=False, execute=False, selected=False, ready=False):
+            return panel_controls(status, live=live, execute=execute, preview_selected=selected,
+                                  preview_ready=ready, runtime_ready=status is not None)
+
+        self.assertEqual({key for key, enabled in controls().items() if enabled}, {'exit'})
+        candidate = controls(live=True, selected=True)
+        self.assertTrue(candidate['adjust'])
+        self.assertFalse(candidate['confirm'])
+        self.assertTrue(controls(live=True, selected=True, ready=True)['confirm'])
+
+        active_live = controls(dict(live=True), live=True, execute=True)
+        self.assertTrue(active_live['arm'] and active_live['cancel'])
+        self.assertFalse(active_live['pause'] or active_live['resume'])
+        self.assertFalse(controls(dict(live=True), live=True)['arm'])
+
+        playing = controls(dict(paused=False, shadow_navigation=dict(available=True, enabled=False)))
+        self.assertTrue(playing['pause'] and playing['shadow_start'])
+        self.assertFalse(playing['resume'] or playing['shadow_stop'] or playing['arm'])
+        pausing = controls(dict(paused=False, pause_requested=True,
+                                shadow_navigation=dict(available=True, enabled=True)))
+        self.assertTrue(pausing['resume'] and pausing['shadow_stop'])
+        self.assertFalse(pausing['pause'] or pausing['shadow_start'])
+        ended = controls(dict(paused=True, source_ended=True))
+        self.assertFalse(ended['pause'] or ended['resume'])
+
     def test_initial_pose_keyboard_adjustments_are_local_and_bounded(self):
         from runtime.interactive import adjust_initial_pose
         pose=[.1,.2,np.pi/2,2.,3.,4.]
@@ -46,6 +74,56 @@ class PlaybackTests(unittest.TestCase):
         command=runtime_command(args,config,[0.,0.,0.,0.,0.,0.])
         index=command.index('--environment-window-m')
         self.assertEqual(command[index+1],'12.0')
+
+    def test_session_and_child_use_same_static_annotation_catalog(self):
+        from perception.environment.layers import GridSnapshot
+        from perception.environment.storage import content_hash
+        from runtime.__main__ import parser as runtime_parser
+        from runtime.interactive import parser, runtime_command, session_inputs
+        from runtime.static_map import load_static_map
+
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            (root/'COMPLETE').touch()
+            cells=np.full((60, 60), -1, np.int8)
+            cells[20, 20]=0
+            grid=GridSnapshot(dict(frame_id='map', map_id='floor-map', snapshot_id='static',
+                shape=list(cells.shape), origin_xy=[0., 0.], resolution=.2),
+                dict(occupancy=cells))
+            layers=root/'layers.npz'
+            grid.save(layers)
+            (root/'manifest.yaml').write_text(yaml.safe_dump(dict(kind='static_environment',
+                time_scope='offline_final_prior', frame_id='map', snapshot_id='static',
+                layers_sha256=content_hash(layers), source=dict(map_fingerprint='map-fingerprint'))))
+            catalog=dict(frame_id='map', floor_id='test-floor', localization_map_id='floor-map',
+                map_snapshot_id='static', places=[dict(place_id='far', reference='base_link', pose=[8., 8.])])
+            catalog_path=root/'catalog.json'
+            catalog_path.write_text(json.dumps(catalog))
+            hint=root/'hint.json'
+            hint.write_text(json.dumps(dict(map=dict(fingerprint='map-fingerprint'))))
+            configuration=root/'interactive.yaml'
+            configuration.write_text(yaml.safe_dump(dict(map=directory, static_map=directory,
+                catalog=str(catalog_path), initial_pose_hint=str(hint),
+                motion_config='navigation/planning/configs/motion.yaml')))
+            with patch('perception.mapping_localization.results.map_fingerprint', return_value='map-fingerprint'), \
+                    patch('perception.mapping_localization.coverage.full_map_coverage'):
+                config, interactive_asset, _=session_inputs(configuration)
+
+            args=parser().parse_args(['--live','--output',str(root/'output')])
+            command=runtime_command(args,config,[0.]*6)
+            child=runtime_parser().parse_args(command[4:])
+            self.assertEqual(child.catalog,str(catalog_path))
+            child_asset=load_static_map(child.static_map,child.catalog)
+            self.assertEqual(interactive_asset.navigation_window,child_asset.navigation_window)
+            self.assertEqual(interactive_asset.navigation_snapshot.metadata,child_asset.navigation_snapshot.metadata)
+            original=load_static_map(child.static_map)
+            self.assertGreater(child_asset.navigation_window[2],original.navigation_window[2])
+            self.assertEqual(interactive_asset.snapshot.layers['occupancy'].shape,cells.shape)
+            self.assertEqual(interactive_asset.manifest['snapshot_id'],'static')
+            for field in ('frame_id','localization_map_id','map_snapshot_id'):
+                catalog_path.write_text(json.dumps(dict(catalog,**{field:'other-floor'})))
+                with self.subTest(field=field), self.assertRaisesRegex(ValueError,'map asset do not match'):
+                    load_static_map(child.static_map,child.catalog)
 
     def test_follow_backend_is_frozen_for_floor_handoff(self):
         from runtime.interactive import parser,runtime_command
@@ -216,9 +294,9 @@ class PlaybackTests(unittest.TestCase):
             token=session.command_generation
             with patch('perception.visualization.surface.DisplayGrids'), \
                  patch('perception.visualization.interactive.preview_geometry',return_value={}) as geometry:
-                loop._preview_frozen(token,0)
+                loop._preview_frozen(token,0,loop.request)
                 clear,display=loop.display.frozen_basemap.call_args_list
-                self.assertEqual(call(True),clear)
+                self.assertEqual(call(True,row=loop.rows[-1]),clear)
                 snapshot=display.args[1]
                 saved=json.loads((Path(folder)/'preview.json').read_text())
                 self.assertEqual(saved,session.preview)
@@ -229,42 +307,42 @@ class PlaybackTests(unittest.TestCase):
                 cells,conditional=decode_display_map(snapshot)
                 self.assertEqual(100,cells[45,44]);self.assertFalse(conditional[45,44])
                 self.assertEqual(0,cells[45,45]);self.assertTrue(conditional[45,45])
-                loop._preview_frozen(token,0)
+                loop._preview_frozen(token,0,loop.request)
                 self.assertEqual(2,loop.display.frozen_basemap.call_count)
 
                 # A new command arrives between the planning result and publication.
                 session.note_command('goal',goal)
                 geometry.side_effect=lambda *args:session.note_command('cancel',{}) or {}
-                loop._preview_frozen(session.command_generation,0)
-                self.assertEqual(call(True),loop.display.frozen_basemap.call_args)
+                loop._preview_frozen(session.command_generation,0,loop.request)
+                self.assertEqual(call(True,row=loop.rows[-1]),loop.display.frozen_basemap.call_args)
                 self.assertIsNone(session.preview)
                 loop.request=None
-                loop._preview_frozen(session.command_generation,0)
-                self.assertEqual(call(True),loop.display.frozen_basemap.call_args)
+                loop._preview_frozen(session.command_generation,0,loop.request)
+                self.assertEqual(call(True,row=loop.rows[-1]),loop.display.frozen_basemap.call_args)
 
                 # An environment fault arriving during the next query rejects its snapshot.
                 loop.request=goal
                 session.note_command('goal',goal)
                 geometry.side_effect=lambda *args:setattr(loop,'environment_epoch',1) or {}
-                loop._preview_frozen(session.command_generation,0)
-                self.assertEqual(call(True),loop.display.frozen_basemap.call_args)
+                loop._preview_frozen(session.command_generation,0,loop.request)
+                self.assertEqual(call(True,row=loop.rows[-1]),loop.display.frozen_basemap.call_args)
                 self.assertIsNone(session.preview)
 
                 loop.scene=None
-                loop._preview_frozen(session.command_generation,1)
+                loop._preview_frozen(session.command_generation,1,loop.request)
                 self.assertEqual('observation_unavailable',session.preview['reason'])
-                self.assertEqual(call(True),loop.display.frozen_basemap.call_args)
+                self.assertEqual(call(True,row=loop.rows[-1]),loop.display.frozen_basemap.call_args)
                 loop.scene=scene
                 resumed=dict(paused=False,epoch=2,source_ended=False,stamp_s=10.,offset_s=2.)
                 geometry.side_effect=lambda *args:session.update_playback(resumed) or {}
-                loop._preview_frozen(session.command_generation,1)
-                self.assertEqual(call(True),loop.display.frozen_basemap.call_args)
+                loop._preview_frozen(session.command_generation,1,loop.request)
+                self.assertEqual(call(True,row=loop.rows[-1]),loop.display.frozen_basemap.call_args)
                 self.assertIsNone(session.preview)
 
             loop.display=None;loop.preview_token=None
             session.update_playback(dict(resumed,paused=True,epoch=3))
             with patch('navigation.planning.runtime.encode_display_map') as encode:
-                loop._preview_frozen(session.command_generation,1)
+                loop._preview_frozen(session.command_generation,1,loop.request)
             encode.assert_not_called()
             self.assertTrue(session.preview['reference_available'])
 

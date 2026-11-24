@@ -1,6 +1,7 @@
 # 只供本车非执行观察入口使用；实机执行使用 interactive.yaml。
 map: outputs/perception/floor2_current/levelled_ground_refined/map
 static_map: outputs/perception/floor2_current/levelled_ground_refined_static_manual
+catalog: outputs/decision/agent/floor2_current/floor2_catalog.json
 # 未指定 coverage 时，根据当前定位图自动生成全图关联范围。
 initial_pose_hint: outputs/perception/floor2_current/levelled_ground_refined_height_hint.json
 motion_config: navigation/planning/configs/motion.yaml

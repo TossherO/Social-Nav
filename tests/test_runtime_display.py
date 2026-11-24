@@ -1,5 +1,6 @@
 """Display sampling is independent, bounded and never refreshes observation time."""
 from collections import deque, OrderedDict
+import json
 from pathlib import Path
 import tempfile
 import threading
@@ -17,22 +18,32 @@ from runtime.config import ROOT,runtime_settings
 class RuntimeDisplayTests(unittest.TestCase):
     def setUp(self):self.settings=runtime_settings(ROOT/'configs/runtime.yaml')['display']
 
-    def test_interactive_and_standalone_views_show_one_navigation_basemap(self):
+    def test_interactive_and_standalone_views_default_to_navigation_over_static_map(self):
         directory=ROOT/'perception/visualization/configs'
         for name in ('interactive','runtime'):
-            manager=yaml.safe_load((directory/(name+'.rviz')).read_text())['Visualization Manager']
+            view=yaml.safe_load((directory/(name+'.rviz')).read_text())
+            manager=view['Visualization Manager']
+            self.assertIn('social_nav_rviz/SessionPanel',[panel['Class'] for panel in view['Panels']])
             by_topic={layer['Topic']:layer for layer in manager['Displays'] if 'Topic' in layer}
             main=by_topic['/social_nav_runtime_view/navigation_basemap']
-            self.assertTrue(main['Enabled'])
+            static_topic='/social_nav_interactive/static_basemap' if name=='interactive' else '/social_nav_runtime_view/static_basemap'
+            static=by_topic[static_topic]
+            self.assertEqual((main['Name'],static['Name']),('Navigation basemap','Static map'))
+            self.assertTrue(main['Enabled'] and static['Enabled'])
             self.assertEqual((main['Color Transformer'],main['Decay Time']),('RGB8',0))
+            search=by_topic['/social_nav_runtime_view/reference_search_map']
+            self.assertEqual((search['Name'],search['Class']),('Reference search snapshot','rviz/PointCloud2'))
+            self.assertFalse(search['Enabled'])
+            window=next(layer for layer in manager['Displays'] if
+                        layer.get('Marker Topic')=='/social_nav_runtime_view/navigation_window')
+            self.assertEqual((window['Name'],window['Class']),('Navigation window','rviz/Marker'))
+            self.assertTrue(window['Enabled'])
             self.assertFalse(by_topic['/social_nav_runtime_view/ground_map']['Enabled'])
             if name=='interactive':
-                static='/social_nav_interactive/ground_map'
-                self.assertFalse(by_topic[static]['Enabled'])
                 tools=[tool for tool in manager['Tools'] if tool['Class'] in
                        ('social_nav_rviz/GroundInitialPose','social_nav_rviz/GroundGoal')]
                 self.assertEqual(len(tools),2)
-                self.assertTrue(all(static in tool.values() for tool in tools))
+                self.assertTrue(all('/social_nav_interactive/ground_map' in tool.values() for tool in tools))
 
     def test_independent_limits_latest_items_and_no_copy_for_disabled_group(self):
         buffer=DisplayBuffer(self.settings);made=[]
@@ -60,7 +71,7 @@ class RuntimeDisplayTests(unittest.TestCase):
         buffer=DisplayBuffer(self.settings)
         self.assertTrue(buffer.offer('map','old',lambda:'old',now=1.))
         buffer.clear_environment('odom',10.)
-        self.assertEqual(buffer.take(),('map',('odom',10.)))
+        self.assertEqual(buffer.take(),('map_clear',('odom',10.)))
         self.assertFalse(buffer.offer('map','new',lambda:'new',now=1.01))
         self.assertTrue(buffer.offer('map','new',lambda:'new',now=2.))
         self.assertEqual(buffer.take(),('map','new'))
@@ -169,6 +180,7 @@ class RuntimeDisplayTests(unittest.TestCase):
                 position=SimpleNamespace(),orientation=SimpleNamespace())))
         received={name:[] for name in ('occupancy','raw_occupancy','ground_map')}
         display=object.__new__(RuntimeDisplay);display.grids=DisplayGrids(asset=asset)
+        display._show_basemap=lambda:None
         display.rospy=SimpleNamespace(Time=SimpleNamespace(from_sec=lambda value:value))
         display.OccupancyGrid=message
         display.publishers={name:SimpleNamespace(publish=rows.append,get_num_connections=lambda:1) for name,rows in received.items()}
@@ -180,6 +192,179 @@ class RuntimeDisplayTests(unittest.TestCase):
             self.assertEqual(output.header.stamp,grid.metadata['stamp_s'])
             self.assertEqual(output.header.frame_id,grid.metadata['frame_id'])
         np.testing.assert_array_equal(received['ground_map'][0].layers['occupancy'],grid.layers['navigation_occupancy'])
+
+    def basemap_display(self, asset):
+        try:
+            import rospy
+        except ImportError:
+            self.skipTest('source perception/scripts/ros1_env.sh to check ROS display messages')
+        display=object.__new__(RuntimeDisplay)
+        display.rospy=rospy
+        display.buffer=DisplayBuffer(self.settings)
+        display.clock_rate=2.;display.max_grid_age=.5;display.max_association_age=.55
+        display.local_key=display.local_frame=display.search_key=display.basemap_status=None
+        display.local_surface=display.search_surface=None
+        display.navigation_view=SimpleNamespace(reference_max_age_s=5.)
+        display.frozen=False;display.frozen_snapshot=display.frozen_row=None
+        display.frozen_association=None
+        display.last_navigation=display.last_view=None
+        display.last_environment_grid=None
+        display.error=None
+        display.grids=SimpleNamespace(asset=asset)
+        display.String=SimpleNamespace
+        received={name:[] for name in ('navigation_basemap','navigation_window','static_basemap','basemap_source','reference_search_map')}
+        display.publishers={name:SimpleNamespace(publish=messages.append) for name,messages in received.items()}
+        return display,received
+
+    def test_static_background_publishes_once_without_map_localization(self):
+        from perception.environment.layers import GridSnapshot
+        from perception.sensors.pointcloud import pointcloud_fields
+        from tests.test_environment_navigation import prior_asset
+        asset=prior_asset()
+        source=asset.snapshot
+        asset.navigation_snapshot=GridSnapshot(dict(source.metadata,origin_xy=[1.,2.],shape=[4,3]),
+            {name:values[20:24,10:13] for name,values in source.layers.items()})
+        display,received=self.basemap_display(asset)
+        display.publish_static=True
+        display.buffer.take=lambda **kwargs: next(entries)
+        entries=iter([('idle',None),('idle',None),None])
+        display._work()
+        self.assertIsNone(display.error)
+        self.assertEqual(len(received['static_basemap']),1)
+        self.assertEqual(received['static_basemap'][0].header.frame_id,'map')
+        self.assertEqual(received['static_basemap'][0].header.stamp.to_sec(),0.)
+        fields=pointcloud_fields(received['static_basemap'][0],('x','y'))
+        self.assertEqual(len(fields['x']),12)
+        np.testing.assert_allclose(np.unique(fields['x']),[1.05,1.15,1.25])
+        np.testing.assert_allclose(np.unique(fields['y']),[2.05,2.15,2.25,2.35])
+        self.assertFalse(received['navigation_basemap'])
+        self.assertFalse(received['reference_search_map'])
+        self.assertEqual([json.loads(m.data) for m in received['basemap_source']],
+            [dict(static_available=True,static_frame='map',local_available=False,frozen=False,search_query_id=None)])
+
+    def test_overlay_uses_grid_geometry_and_valid_current_floor_association(self):
+        from perception.environment.layers import GridSnapshot
+        from tests.test_environment_navigation import observation,prior_asset
+        asset=prior_asset()
+        source=asset.snapshot
+        asset.navigation_snapshot=GridSnapshot(dict(source.metadata,origin_xy=[1.5,1.4],shape=[4,3]),
+            {name:values[14:18,15:18] for name,values in source.layers.items()})
+        display,received=self.basemap_display(asset)
+        from visualization_msgs.msg import Marker
+        from perception.visualization.surface import LOCAL_FREE_COLOR,LOCAL_OCCUPIED_COLOR
+        cells=np.array([[0,-1,100],[-1,-1,-1]],dtype=np.int8)
+        grid=observation(cells,origin=(.2,.4))
+        transform=np.array([[0.,-1,0,2],[1,0,0,1],[0,0,1,-.3],[0,0,0,1]])
+        association=dict(grid.metadata['association'],map_revision=7,map_from_local=transform.tolist())
+        grid.metadata['association']=association
+        row=dict(session_id='test',generation=0,frame_id='odom',stamp_s=10.,health=0,
+                 has_map_pose=True,map_frame='map',map_revision=7)
+        display.last_environment_grid=grid
+        display.buffer.observe(row,(10.,0.),association)
+        display._show_basemap(mono=.1)
+        display._show_basemap(mono=.15)
+        cloud,=received['navigation_basemap']
+        window,=received['navigation_window']
+        self.assertEqual((cloud.header.frame_id,cloud.header.stamp.to_sec()),('map',10.))
+        self.assertEqual(window.header,cloud.header)
+        self.assertEqual((window.type,window.action),(Marker.LINE_STRIP,Marker.ADD))
+        self.assertEqual(cloud.width,2)
+        points=np.frombuffer(cloud.data,dtype=[('x','<f4'),('y','<f4'),('z','<f4'),('rgb','<u4')])
+        np.testing.assert_allclose(np.c_[points['x'],points['y']],[[1.55,1.25],[1.55,1.45]])
+        # The lower point is outside the fixed static window and keeps local Z.
+        np.testing.assert_allclose(points['z'],[-1.135,-.835])
+        np.testing.assert_array_equal(points['rgb'],[LOCAL_FREE_COLOR,LOCAL_OCCUPIED_COLOR])
+        np.testing.assert_allclose([[p.x,p.y] for p in window.points],[[1.6,1.2],[1.6,1.5],[1.4,1.5],[1.4,1.2],[1.6,1.2]])
+        self.assertTrue(json.loads(received['basemap_source'][-1].data)['local_available'])
+
+        # Same odometry generation can regain localization on a new association.
+        replacement=dict(association,association_generation=1)
+        display.buffer.observe(row,(10.,0.),replacement)
+        display._show_basemap(mono=.15)
+        self.assertEqual(received['navigation_basemap'][-1].width,0)
+        self.assertEqual(received['navigation_window'][-1].action,Marker.DELETE)
+        self.assertEqual(received['navigation_window'][-1].header,received['navigation_basemap'][-1].header)
+        self.assertTrue(json.loads(received['basemap_source'][-1].data)['static_available'])
+        self.assertFalse(json.loads(received['basemap_source'][-1].data)['local_available'])
+        self.assertFalse(received['static_basemap'])
+
+        for invalid in (dict(association,map_id='other-floor'),dict(association,valid=False),
+                        dict(association,local_generation=2),dict(association,measurement_stamp_s=9.7),
+                        dict(association,measurement_stamp_s=10.1)):
+            display.buffer.observe(row,(10.,0.),invalid)
+            display._show_basemap(mono=.15)
+        self.assertEqual(len(received['navigation_basemap']),2)
+        display.buffer.observe(row,(10.,0.),association)
+        display._show_basemap(mono=.15)
+        display._show_basemap(mono=.24)  # source association expires before the local grid
+        self.assertEqual([c.width for c in received['navigation_basemap']],[2,0,2,0])
+
+    def test_search_publication_is_independent_of_local_overlay_and_pause(self):
+        from tests.test_environment_navigation import observation,prior_asset
+        from perception.visualization.surface import coloured_cloud
+        display,received=self.basemap_display(prior_asset())
+        grid=observation(np.zeros((2,2),np.int8))
+        association=dict(grid.metadata['association'],map_revision=7)
+        grid.metadata['association']=association
+        row=dict(session_id='test',generation=0,frame_id='odom',stamp_s=10.,health=0,
+                 has_map_pose=True,map_frame='map',map_revision=7)
+        packet=dict(row=row,mono=0.,now_s=10.,clock_rate=2.,scene=dict(as_of=10.,prior=association))
+        snapshot=dict(reference_binding='reference',job_id=4,frame_id='map',stamp_s=10.)
+        display.last_environment_grid=grid
+        display.buffer.observe(row,(10.,0.),association)
+        display.search_surface=SimpleNamespace(cloud=lambda s:coloured_cloud([0],[0],[0],[0],'map',s['stamp_s']))
+        display.last_navigation=(row,packet);display.last_view=dict(search_map=snapshot)
+        display._show_basemap(mono=.1)
+        display._show_basemap(mono=.15)
+        self.assertEqual(len(received['navigation_basemap']),1)
+        self.assertEqual(len(received['reference_search_map']),1)
+        self.assertEqual(received['reference_search_map'][0].header.stamp.to_sec(),10.)
+        self.assertEqual(json.loads(received['basemap_source'][-1].data)['search_query_id'],4)
+        display.last_view['search_map']=None  # canceled or unavailable during recomputation
+        display._show_basemap(mono=.15)
+        self.assertEqual(len(received['navigation_basemap']),1)
+        self.assertEqual(received['reference_search_map'][-1].width,0)
+        self.assertIsNone(json.loads(received['basemap_source'][-1].data)['search_query_id'])
+        display.last_view['search_map']=dict(snapshot,job_id=5)
+        display._show_basemap(mono=.15)
+        self.assertEqual(json.loads(received['basemap_source'][-1].data)['search_query_id'],5)
+        display.last_navigation=None
+        display.frozen_basemap(True,snapshot,row=row)
+        display._publish(*display.buffer.take())
+        later=dict(row,stamp_s=10.2)
+        display.buffer.observe(later,(10.2,99.),dict(association,valid=False,stamp_s=10.2))
+        display._show_basemap(mono=100.)
+        self.assertTrue(json.loads(received['basemap_source'][-1].data)['frozen'])
+        self.assertEqual(json.loads(received['basemap_source'][-1].data)['search_query_id'],4)
+        self.assertEqual(len(received['navigation_basemap']),1)
+        display.frozen_basemap(True,row=row)
+        display._publish(*display.buffer.take())
+        self.assertEqual(received['reference_search_map'][-1].width,0)
+        self.assertEqual(len(received['navigation_basemap']),1)
+        display.frozen_basemap(False)
+        display._publish(*display.buffer.take())
+        self.assertEqual(received['navigation_basemap'][-1].width,0)
+        self.assertFalse(json.loads(received['basemap_source'][-1].data)['frozen'])
+
+    def test_mapless_overlay_uses_local_frame_and_clears_on_lifecycle_change(self):
+        from tests.test_environment_navigation import observation
+        display,received=self.basemap_display(None)
+        row=dict(session_id='test',generation=0,frame_id='odom',stamp_s=10.,health=0)
+        grid=observation(np.zeros((2,2),np.int8))
+        grid.metadata.pop('association')
+        display.last_environment_grid=grid
+        display.buffer.observe(row,(10.,0.))
+        display._show_basemap(mono=.1)
+        self.assertEqual(received['navigation_basemap'][-1].header.frame_id,'odom')
+        self.assertEqual(json.loads(received['basemap_source'][-1].data),
+            dict(static_available=False,static_frame=None,local_available=True,frozen=False,search_query_id=None))
+        display.buffer.observe(dict(row,generation=1),(10.,0.))
+        display._show_basemap(mono=.1)
+        self.assertEqual(received['navigation_basemap'][-1].width,0)
+        display.buffer.observe(row,(10.,0.))
+        display._show_basemap(mono=.1)
+        display._show_basemap(stopped=True,mono=.1)
+        self.assertEqual([message.width for message in received['navigation_basemap']],[4,0,4,0])
 
     def test_control_display_keeps_original_clock_anchor_and_owns_metadata(self):
         display=object.__new__(RuntimeDisplay);display.buffer=DisplayBuffer(self.settings)

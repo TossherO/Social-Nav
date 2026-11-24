@@ -7,7 +7,7 @@ import time
 import numpy as np
 
 from navigation.planning.continuity import check_reference,content_valid,context_binding,goal_binding,local_goal
-from navigation.planning.inputs import association_status,request_status,scene_status
+from navigation.planning.inputs import association_status,navigation_grid,request_status,scene_status
 from navigation.planning.planner import se2,transform_poses
 from perception.mapping_localization.context import pose_matrix
 from .surface import DisplaySurface,sample_ground,sample_poses,complete_display_heights
@@ -136,10 +136,9 @@ class NavigationView:
         return self._project(out,surface)
 
     def _project(self,out,surface):
-        if self.asset is not None:
-            snapshot=out.get('search_map')
-            label='selected static map' if snapshot is None else 'reference search #%s'%snapshot['job_id']
-            out['text']+='\nMAP: '+label
+        snapshot=out.get('search_map')
+        if snapshot is not None:
+            out['text']+='\nReference search #%s'%snapshot['job_id']
         pose=out['pose'];out['footprint']=out['heading']=np.empty((0,3));out['goal_z']=np.nan
         if pose is not None:
             polygon=self.geometry.polygon(pose);polygon=np.vstack([polygon,polygon[0]])
@@ -157,7 +156,7 @@ class NavigationView:
                 if key=='reference':
                     if self.asset is not None and data.get('local_to_map') is not None:
                         mapped=transform_poses(data['display_poses'],data['local_to_map'])
-                        heights,sources=sample_ground(self.asset.snapshot,mapped[:,:2],self.z)
+                        heights,sources=sample_ground(navigation_grid(self.asset),mapped[:,:2],self.z)
                         missing=~np.isfinite(data['heights']) & np.isfinite(heights)
                         if missing.any():
                             points=np.c_[mapped[missing,:2],heights[missing],np.ones(missing.sum())]

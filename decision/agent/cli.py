@@ -11,14 +11,14 @@ def main():
     parser = argparse.ArgumentParser(description='单VLM工具循环：仿真、观察及显式开启的实机目标执行')
     sub = parser.add_subparsers(dest='command', required=True)
     p = sub.add_parser('catalog', help='只读查看地点，不读取API凭证')
-    p.add_argument('--catalog', default=str(CONFIG_DIR/'floor1.json'))
+    p.add_argument('--catalog', help='语义目录，默认使用二楼 Agent 预设')
     p.add_argument('--map-condition', choices=('complete','simple','none'))
     p = sub.add_parser('status', help='只读检查任务，不自动恢复执行')
     p.add_argument('--session', required=True)
     for name in ('run', 'shadow', 'execute', 'manual'):
         p = sub.add_parser(name)
         p.add_argument('--instruction', required=name!='manual')
-        p.add_argument('--catalog', default=str(CONFIG_DIR/('simulation.json' if name == 'run' else 'floor1.json')))
+        p.add_argument('--catalog', default=str(CONFIG_DIR/'simulation.json') if name == 'run' else None)
         p.add_argument('--map-condition', choices=('complete','simple','none'), help='地图先验条件；当前仅complete支持目标执行')
         p.add_argument('--output', required=True)
         p.add_argument('--actions', help='显式工具动作JSON数组；不读取凭证或调用API，不接收旧计划格式')
@@ -61,6 +61,9 @@ def main():
     p = sub.add_parser('evaluate', help='运行少量合成工具反馈场景，不调用API')
     p.add_argument('--output', required=True)
     args = parser.parse_args()
+    if hasattr(args, 'catalog') and args.catalog is None:
+        from .workflows.manual import floor_files
+        args.catalog = str(floor_files('floor2')[1])
     if args.command == 'catalog':
         emit(Catalog.load(args.catalog,condition=args.map_condition).prompt())
     elif args.command == 'status':

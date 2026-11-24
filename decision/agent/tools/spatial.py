@@ -7,7 +7,7 @@ import math
 from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from perception.environment.context import fingerprint, layer_binding
+from perception.environment.context import fingerprint, fixed_map_extent, include_extent_positions, layer_binding
 
 
 def se2(pose):
@@ -15,47 +15,10 @@ def se2(pose):
     return np.array([[c,-s,pose[0]],[s,c,pose[1]],[0,0,1.]])
 
 
-def extent(grid):
-    m = grid.metadata
-    x, y = m['origin_xy']
-    h, w = grid.layers['occupancy'].shape
-    return [x, y, x+w*m['resolution'], y+h*m['resolution']]
-
-
 def display_extent(grid, annotations, *, extras=(), padding_m=1.):
-    """Crop unknown-only borders without hiding fixed annotations or live poses.
-
-    Return map coordinates, not a new raster or a new occupancy classification.
-    An entirely unknown map retains its original extent.
-    """
-    asset=np.asarray(extent(grid),dtype=float)
-    cells=grid.layers['occupancy'];known=(cells==0)|(cells==100)
-    rows=np.flatnonzero(known.any(axis=1));cols=np.flatnonzero(known.any(axis=0))
-    if len(rows) and len(cols):
-        origin=np.asarray(grid.metadata['origin_xy']);res=grid.metadata['resolution']
-        bounds=np.r_[origin+np.array([cols[0],rows[0]])*res-padding_m,
-                     origin+np.array([cols[-1]+1,rows[-1]+1])*res+padding_m]
-        bounds[:2]=np.maximum(bounds[:2],asset[:2]);bounds[2:]=np.minimum(bounds[2:],asset[2:])
-        policy='known_occupancy_with_padding'
-    else:
-        bounds=asset.copy();policy='all_unknown_original_extent'
-    fixed=[]
-    for point in annotations.get('points',[]):
-        if point.get('place_id')!='mission_start' and point.get('pose') is not None:
-            fixed.append(point['pose'][:2])
-    for region in annotations.get('regions',[]):fixed.extend(region['polygon'])
-    def include(points):
-        if not points:return False
-        xy=np.asarray(points,dtype=float)
-        if xy.ndim!=2 or xy.shape[1]!=2 or not np.isfinite(xy).all():raise ValueError('Invalid display positions')
-        low,high=xy.min(0),xy.max(0)
-        expand=bool((low<bounds[:2]).any() or (high>bounds[2:]).any())
-        if expand:
-            bounds[:2]=np.minimum(bounds[:2],low-padding_m)
-            bounds[2:]=np.maximum(bounds[2:],high+padding_m)
-        return expand
-    annotation_expanded=include(fixed)
-    live_expanded=include(list(extras))
+    """Crop unknown-only borders while keeping fixed annotations and live poses visible."""
+    bounds, asset, policy, annotation_expanded = fixed_map_extent(grid, annotations, padding_m=padding_m)
+    live_expanded = include_extent_positions(bounds, list(extras), padding_m=padding_m)
     return dict(bounds=bounds.tolist(),asset_bounds=asset.tolist(),policy=policy,padding_m=padding_m,
                 annotation_expanded=annotation_expanded,live_positions_expanded=live_expanded)
 

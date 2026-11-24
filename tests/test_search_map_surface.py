@@ -8,7 +8,7 @@ import numpy as np
 from navigation.planning.runtime import encode_display_map
 from perception.environment.layers import GridSnapshot
 from perception.sensors.pointcloud import pointcloud_fields
-from perception.visualization.surface import SearchMapSurface
+from perception.visualization.surface import CONDITIONAL_COLOR, FREE_COLOR, OCCUPIED_COLOR, SearchMapSurface, ground_cloud
 
 
 def display_snapshot(grid, stamp=7.25):
@@ -46,7 +46,7 @@ class SearchMapSurfaceTests(unittest.TestCase):
         self.assertEqual((cloud.header.frame_id, cloud.header.stamp), ('static_map', 7.25))
         self.assertEqual((cloud.height, cloud.width, cloud.point_step, cloud.row_step), (1, 5, 16, 80))
         fields = pointcloud_fields(cloud, ('x', 'y', 'z', 'rgb'))
-        np.testing.assert_array_equal(fields['rgb'], [0xD7DDE3, 0xE7A343, 0xF05848, 0xF05848, 0xD7DDE3])
+        np.testing.assert_array_equal(fields['rgb'], [FREE_COLOR, CONDITIONAL_COLOR, OCCUPIED_COLOR, OCCUPIED_COLOR, FREE_COLOR])
         np.testing.assert_allclose(fields['x'], [3.3, 3.9, 5.7, 4.5, 5.7])
         np.testing.assert_allclose(fields['y'], [-.7, -.7, -.7, -.1, -.1])
         np.testing.assert_allclose(fields['z'], [2.005, 2.005, 4.005, 3.005, 4.005])
@@ -64,7 +64,7 @@ class SearchMapSurfaceTests(unittest.TestCase):
         cloud = surface.cloud(display_snapshot(grid, stamp=8.))
         fields = pointcloud_fields(cloud, ('z', 'rgb'))
         np.testing.assert_allclose(fields['z'], [.005])
-        np.testing.assert_array_equal(fields['rgb'], [0xF05848])
+        np.testing.assert_array_equal(fields['rgb'], [OCCUPIED_COLOR])
         self.assertEqual(cloud.header.stamp, 8.)
         self.assertEqual(empty.data, b'')
 
@@ -74,3 +74,25 @@ class SearchMapSurfaceTests(unittest.TestCase):
         for field, value in (('shape', (5, 2)), ('frame_id', 'odom'), ('resolution', .1), ('origin_xy', [0., 0.])):
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'grid geometry'):
                 surface.cloud(dict(packet, **{field: value}))
+
+    def test_search_and_path_use_cropped_origin_and_terrain(self):
+        fixed = GridSnapshot(dict(self.meta, origin_xy=[3.6, -.4], shape=[1, 4]),
+            {name: values[1:, 1:] for name, values in self.prior.layers.items()})
+        surface = SearchMapSurface(SimpleNamespace(snapshot=self.prior, navigation_snapshot=fixed))
+        fields = pointcloud_fields(surface.cloud(display_snapshot(fixed)), ('x', 'y', 'z'))
+        np.testing.assert_allclose(fields['x'], [5.1])
+        np.testing.assert_allclose(fields['y'], [-.1])
+        np.testing.assert_allclose(fields['z'], [4.005])
+        points = surface.path_points(np.array([[5.1, -.1], [3.3, -.7]]), .03)
+        np.testing.assert_allclose(points[0], [5.1, -.1, 4.03])
+        self.assertTrue(np.isnan(points[1, 2]))
+        with self.assertRaisesRegex(ValueError, 'grid geometry'):
+            surface.cloud(display_snapshot(self.prior))
+
+    def test_local_navigation_cloud_includes_known_cells_without_ground(self):
+        grid = GridSnapshot(self.meta, dict(occupancy=self.prior.layers['occupancy']))
+        self.assertEqual(ground_cloud(grid).width, 0)
+        cloud = ground_cloud(grid, fill_known=True)
+        fields = pointcloud_fields(cloud, ('z', 'rgb'))
+        np.testing.assert_array_equal(fields['rgb'], [OCCUPIED_COLOR, OCCUPIED_COLOR, FREE_COLOR])
+        np.testing.assert_allclose(fields['z'], .005)

@@ -3,6 +3,17 @@ from collections import OrderedDict
 
 import numpy as np
 
+from navigation.planning.inputs import navigation_grid as static_navigation_grid
+
+
+FREE_COLOR = 0x9EA9B4
+OCCUPIED_COLOR = 0xCF5D53
+CONDITIONAL_COLOR = 0xCB974A
+UNKNOWN_COLOR = 0x707885
+ESTIMATED_COLOR = 0x72A0B7
+LOCAL_FREE_COLOR = 0x72C8C3
+LOCAL_OCCUPIED_COLOR = 0xF47B63
+
 
 class DisplayGrids:
     """Download selected display layers once per snapshot in the display worker."""
@@ -142,7 +153,7 @@ class SearchMapSurface:
     def __init__(self, asset, offset=.005):
         from perception.environment.geometry import nearest_support
 
-        grid = asset.snapshot
+        grid = static_navigation_grid(asset)
         meta, layers = grid.metadata, grid.layers
         self.shape = layers['occupancy'].shape
         self.frame_id = meta['frame_id']
@@ -170,7 +181,7 @@ class SearchMapSurface:
                     distance, nearest = nearest_support(known)
                     nearby = ~known & (distance * self.resolution <= 1.)
                     height[nearby] = ground_z[nearest[0][nearby], nearest[1][nearby]]
-        height += offset
+        self.offset = offset
         self.height = height.ravel()
 
     def path_points(self,xy,offset):
@@ -183,8 +194,6 @@ class SearchMapSurface:
 
     def cloud(self, snapshot):
         from navigation.planning.runtime import decode_display_map
-        from sensor_msgs.msg import PointField
-        from .scans import pointcloud_message
 
         if (tuple(snapshot['shape']) != self.shape or snapshot['frame_id'] != self.frame_id or
                 snapshot['resolution'] != self.resolution or tuple(snapshot['origin_xy']) != self.origin_xy):
@@ -194,38 +203,120 @@ class SearchMapSurface:
         cells = cells.ravel()
         indices = np.flatnonzero(cells >= 0)
         rows, columns = np.divmod(indices, self.shape[1])
-        data = np.empty(indices.size, dtype=[('x', '<f4'), ('y', '<f4'), ('z', '<f4'), ('rgb', '<u4')])
-        data['x'], data['y'], data['z'] = self.x[columns], self.y[rows], self.height[indices]
-        data['rgb'] = 0xD7DDE3
+        rgb = np.full(indices.size, FREE_COLOR, dtype=np.uint32)
         if conditional is not None:
-            data['rgb'][conditional.ravel()[indices]] = 0xE7A343
-        data['rgb'][cells[indices] == 100] = 0xF05848
-
-        message = pointcloud_message(np.empty((0, 3)), self.frame_id, snapshot['stamp_s'])
-        message.fields.append(PointField(name='rgb', offset=12, datatype=PointField.UINT32, count=1))
-        message.width = indices.size
-        message.point_step = data.dtype.itemsize
-        message.row_step = message.width * message.point_step
-        message.data = data.tobytes()
-        return message
+            rgb[conditional.ravel()[indices]] = CONDITIONAL_COLOR
+        rgb[cells[indices] == 100] = OCCUPIED_COLOR
+        return coloured_cloud(self.x[columns], self.y[rows], self.height[indices] + self.offset, rgb,
+                              self.frame_id, snapshot['stamp_s'])
 
 
-def ground_cloud(grid,offset=.005):
-    """A coloured surface with fitted heights distinguished from supported ground."""
+def coloured_cloud(x, y, z, rgb, frame, stamp):
     from .scans import pointcloud_message
     from sensor_msgs.msg import PointField
-    layers,meta=grid.layers,grid.metadata
-    support=layers.get('ground_support',np.zeros_like(layers['occupancy'],bool))
-    fitted=layers.get('ground_estimated',np.zeros_like(layers['occupancy'],bool))
-    good=(support|fitted)&np.isfinite(layers.get('ground_z',np.nan))
-    y,x=np.nonzero(good);r=meta['resolution'];origin=meta['origin_xy']
-    xyz=np.c_[origin[0]+(x+.5)*r,origin[1]+(y+.5)*r,layers['ground_z'][y,x]+offset] if len(y) else np.empty((0,3))
-    message=pointcloud_message(xyz,meta['frame_id'],meta['stamp_s'])
-    data=np.empty(len(xyz),dtype=[('x','<f4'),('y','<f4'),('z','<f4'),('rgb','<u4')])
-    for i,k in enumerate(('x','y','z')):data[k]=xyz[:,i]
-    values=layers['occupancy'][y,x]
-    data['rgb']=np.where(fitted[y,x]&~support[y,x],0x90BCD5,
-                         np.where(values==0,0xD7DDE3,np.where(values==100,0xF05848,0xC89F50)))
-    message.fields.append(PointField(name='rgb',offset=12,datatype=PointField.UINT32,count=1))
-    message.point_step=16;message.row_step=len(xyz)*16;message.data=data.tobytes()
+
+    message = pointcloud_message([], frame, stamp)
+    data = np.empty(len(x), dtype=[('x', '<f4'), ('y', '<f4'), ('z', '<f4'), ('rgb', '<u4')])
+    data['x'], data['y'], data['z'], data['rgb'] = x, y, z, rgb
+    message.fields.append(PointField(name='rgb', offset=12, datatype=PointField.UINT32, count=1))
+    message.width = len(x)
+    message.point_step = data.dtype.itemsize
+    message.row_step = message.width * message.point_step
+    message.data = data.tobytes()
     return message
+
+
+def _ground_layers(grid):
+    layers = grid.layers
+    shape = layers['occupancy'].shape
+    ground = layers['ground_z'] if 'ground_z' in layers else np.full(shape, np.nan, np.float32)
+    support = layers['ground_support'] if 'ground_support' in layers else np.zeros(shape, bool)
+    fitted = layers['ground_estimated'] if 'ground_estimated' in layers else np.zeros(shape, bool)
+    return ground, support, fitted
+
+
+def _ground_plane(grid, ground, good):
+    tracking = grid.metadata.get('ground_tracking', {})
+    plane = np.asarray(tracking.get('plane_world', []))
+    if tracking.get('status') == 'tracked' and plane.shape == (3,) and np.isfinite(plane).all():
+        return plane
+    return np.array([0., 0., np.median(ground[good]) if good.any() else 0.])
+
+
+def _ground_points(grid, *, fill_known, local_overlay=False):
+    cells, meta = grid.layers['occupancy'], grid.metadata
+    ground, support, fitted = _ground_layers(grid)
+    good = (support | fitted) & np.isfinite(ground)
+    if local_overlay:
+        visible = cells >= 0
+    elif fill_known:
+        visible = good | (cells >= 0)
+    else:
+        visible = good
+    y, x = np.nonzero(visible)
+    resolution = meta['resolution']
+    origin_x, origin_y = meta['origin_xy']
+    xy = np.column_stack((origin_x + (x + .5) * resolution, origin_y + (y + .5) * resolution))
+    height = ground[y, x]
+    values = cells[y, x]
+    free, occupied = (LOCAL_FREE_COLOR, LOCAL_OCCUPIED_COLOR) if local_overlay else (FREE_COLOR, OCCUPIED_COLOR)
+    rgb = np.where(values == 0, free, np.where(values == 100, occupied, UNKNOWN_COLOR))
+    if not local_overlay:
+        rgb[fitted[y, x] & ~support[y, x] & (values != 100)] = ESTIMATED_COLOR
+    missing = ~good[y, x]
+    if missing.any():
+        plane = _ground_plane(grid, ground, good)
+        height[missing] = xy[missing] @ plane[:2] + plane[2]
+    return np.column_stack((xy, height)), rgb
+
+
+def ground_cloud(grid, offset=.005, *, fill_known=False):
+    """Draw terrain heights, optionally showing every known navigation occupancy cell."""
+    points, rgb = _ground_points(grid, fill_known=fill_known)
+    x, y, z = points.T
+    return coloured_cloud(x, y, z + offset, rgb, grid.metadata['frame_id'], grid.metadata['stamp_s'])
+
+
+class NavigationGridSurface:
+    """Render the current window using its own transform and display heights."""
+
+    def __init__(self, asset):
+        self.static = None if asset is None else static_navigation_grid(asset)
+        if self.static is not None:
+            self.ground, self.support, self.fitted = _ground_layers(self.static)
+            self.plane = _ground_plane(self.static, self.ground,
+                (self.support | self.fitted) & np.isfinite(self.ground))
+
+    def _project(self, points, transform, offset):
+        if transform is not None:
+            points = points @ transform[:3, :3].T + transform[:3, 3]
+            meta = self.static.metadata
+            ij = np.floor((points[:, :2] - meta['origin_xy']) / meta['resolution']).astype(int)
+            rows, columns = self.ground.shape
+            within = ((ij >= 0) & (ij < (columns, rows))).all(axis=1)
+            indices = np.flatnonzero(within)
+            x, y = ij[indices].T
+            static_z = self.ground[y, x]
+            supported = (self.support[y, x] | self.fitted[y, x]) & np.isfinite(static_z)
+            visible = supported | (self.static.layers['occupancy'][y, x] >= 0)
+            fallback = points[indices, :2] @ self.plane[:2] + self.plane[2]
+            static_z = np.where(supported, static_z, fallback)
+            # Keep the overlay above static cells when local display heights
+            # fall below their background. XY and planner inputs are unchanged.
+            points[indices[visible], 2] = np.maximum(points[indices[visible], 2], static_z[visible])
+        points[:, 2] += offset
+        return points
+
+    def layer(self, grid, transform):
+        meta = grid.metadata
+        frame = meta['frame_id'] if transform is None else self.static.metadata['frame_id']
+        points, rgb = _ground_points(grid, fill_known=True, local_overlay=True)
+        x, y, z = self._project(points, transform, .015).T
+        cloud = coloured_cloud(x, y, z, rgb, frame, meta['stamp_s'])
+        height, width = grid.layers['occupancy'].shape
+        xy = np.asarray(meta['origin_xy']) + meta['resolution'] * np.array(
+            [(0, 0), (width, 0), (width, height), (0, height), (0, 0)])
+        ground, support, fitted = _ground_layers(grid)
+        plane = _ground_plane(grid, ground, (support | fitted) & np.isfinite(ground))
+        boundary = np.column_stack((xy, xy @ plane[:2] + plane[2]))
+        return cloud, self._project(boundary, transform, .065)

@@ -22,8 +22,8 @@ Visualization Manager:
       Decay Time: 0
       Style: Points
       Size (Pixels): 3
-      Color Transformer: FlatColor
-      Color: 90; 210; 235
+      Color Transformer: AxisColor
+      Axis: Z
     - Class: rviz/PointCloud2
       Name: Recent scans
       Enabled: false
@@ -38,7 +38,9 @@ Visualization Manager:
       Name: Local trajectory
       Enabled: true
       Topic: /localization/path
-      Color: 255; 110; 40
+      Color: 255; 156; 61
+      Line Style: Billboards
+      Line Width: 0.06
     - Class: rviz/MarkerArray
       Name: People detections and tracks
       Enabled: true

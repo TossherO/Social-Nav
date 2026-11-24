@@ -8,8 +8,9 @@ import time
 
 
 class InteractiveSession:
-    def __init__(self, *, live, safety, output, execute=False):
+    def __init__(self, *, live, safety, output, execute=False, bag_shadow=None):
         self.live, self.safety, self.output, self.execute = live, safety, output, execute
+        self.bag_shadow = bag_shadow
         self.lock = threading.RLock()
         self.parent = self.child = None
         if not live:
@@ -24,10 +25,26 @@ class InteractiveSession:
 
     def note_command(self, kind, value):
         with self.lock:
+            if self.bag_shadow is not None:
+                self.bag_shadow.toggle(False, reason='manual_override')
+                self.goal_intent = None
             self.command_generation += 1
             self.preview = None
 
     def handle(self, kind, value):
+        if kind == 'shadow_navigation':
+            if self.live or self.execute or self.bag_shadow is None:
+                raise ValueError('Recorded-route planning requires a bag without hardware output')
+            if set(value) != {'enabled'} or type(value['enabled']) is not bool:
+                raise ValueError('Shadow navigation requires a Boolean enabled value')
+            with self.lock, self.bag_shadow.lock:
+                if self.bag_shadow.enabled == value['enabled']:
+                    return dict(accepted=True, changed=False, **self.bag_shadow.status())
+                self.bag_shadow.toggle(value['enabled'])
+                self.preview = None
+                self.goal_intent = None
+                self.command_generation += 1
+                return dict(accepted=True, changed=True, **self.bag_shadow.status())
         if kind == 'session_status':
             if value != {}:
                 raise ValueError('Session status takes an empty object')
@@ -64,12 +81,18 @@ class InteractiveSession:
             self.source_ended = packet['source_ended']
             self.offset_s, self.stamp_s = packet['offset_s'], packet['stamp_s']
 
-    def publish_observation(self, scene, row, *, goal_intent=None):
+    def publish_observation(self, scene, row, *, goal_intent=None, token=None):
         with self.lock:
-            self.goal_intent = copy.deepcopy(goal_intent)
+            if token is None or token == self.command_generation:
+                self.goal_intent = copy.deepcopy(goal_intent)
             self.observation = dict(localization=copy.deepcopy(row),
                 prior=None if scene is None else copy.deepcopy(scene.record['prior']),
                 scene_stamp_s=None if scene is None else scene.record['as_of'])
+
+    def clear_preview(self, token):
+        with self.lock:
+            if token == self.command_generation:
+                self.preview = None
 
     def publish_preview(self, value, token):
         with self.lock:
@@ -101,6 +124,8 @@ class InteractiveSession:
                         stamp_s=self.stamp_s, offset_s=self.offset_s,
                         observation=copy.deepcopy(self.observation), preview=copy.deepcopy(self.preview),
                         goal_intent=copy.deepcopy(self.goal_intent),
+                        shadow_navigation=(dict(available=False,enabled=False,state='unavailable')
+                                           if self.bag_shadow is None else self.bag_shadow.status()),
                         executable=False, execution_feedback=False)
 
     def close(self):

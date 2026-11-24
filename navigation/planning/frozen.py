@@ -4,7 +4,8 @@ from .continuity import reference_envelope
 from .planner import Planner
 
 
-def preview(request, scene, rows, controller, planning, *, asset=None, dt=.1, on_mapped_grid=None):
+def preview(request, scene, rows, controller, planning, *, asset=None, dt=.1, on_mapped_grid=None,
+            scope='frozen_bag_observation'):
     now = scene.record['as_of']
     clock = scene.record['clock_domain']
     if clock != 'runtime_bag':
@@ -18,7 +19,7 @@ def preview(request, scene, rows, controller, planning, *, asset=None, dt=.1, on
     controller.clear()
     proposal = controller.command(request, scene, feedback, reference, now=now, clock_domain=clock, dt=dt)
     trajectory = None if controller.result is None else controller.result.get('trajectory')
-    return dict(scope='frozen_bag_observation', executable=False, execution_feedback=False,
+    return dict(scope=scope, executable=False, execution_feedback=False,
                 task_completed=False, as_of=now, scene_binding=scene.record['input_fingerprint'],
                 request=request, reference=reference, proposal=proposal, feedback=feedback,
                 trajectory=trajectory, reason=result.get('reason') or proposal.get('reason'),

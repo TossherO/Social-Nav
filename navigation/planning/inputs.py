@@ -82,6 +82,28 @@ def cell_of(grid, xy):
     return np.floor((np.asarray(xy)-grid.metadata['origin_xy'])/grid.metadata['resolution']).astype(int)
 
 
+def navigation_grid(asset):
+    return getattr(asset, 'navigation_snapshot', asset.snapshot)
+
+
+def navigation_binding(asset):
+    """Bind planning results to their working raster and keep the map identity separate."""
+    if asset is None:return None
+    metadata=navigation_grid(asset).metadata
+    return dict(window=getattr(asset,'navigation_window',None),frame_id=metadata['frame_id'],
+                resolution=metadata['resolution'],origin_xy=metadata['origin_xy'],shape=metadata['shape'])
+
+
+def outside(grid, xy, *, clearance=0.):
+    metadata=grid.metadata
+    origin=np.asarray(metadata['origin_xy'])
+    end=origin+np.asarray(metadata['shape'][::-1])*metadata['resolution']
+    xy=np.asarray(xy)
+    # The crop origin and extent may reach a source grid line by different arithmetic.
+    tolerance=4*np.spacing(np.maximum(np.abs(origin),np.abs(end)))
+    return bool(((xy-clearance)<origin-tolerance).any() or ((xy+clearance)>=end-tolerance).any())
+
+
 def association_status(scene, asset, config):
     r = scene.record; a = r['prior']; stamp = float(r['as_of'])
     if not a.get('valid'): return 'association_unavailable'
@@ -138,11 +160,11 @@ def request_status(request,scene,now,clock):
     return None
 
 
-def load_input(*, scene=None, static_map=None):
+def load_input(*, scene=None, static_map=None, navigation_window=None):
     bundle = SceneInputs.load(scene) if scene else None
-    asset = StaticEnvironmentMap(static_map) if static_map else None
+    asset = StaticEnvironmentMap(static_map,navigation_window=navigation_window) if static_map else None
     if bundle: validate_grid(bundle.geometry)
-    if asset: validate_grid(asset.snapshot)
+    if asset: validate_grid(navigation_grid(asset))
     if bundle is None and asset is None: raise ValueError('A static map or complete scene is required')
     return bundle, asset
 

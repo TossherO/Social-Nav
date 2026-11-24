@@ -39,7 +39,7 @@ class RvizPluginTests(unittest.TestCase):
                 build('int social_nav_rviz_session_panel_abi(void) { return 2; }')
                 with self.assertRaisesRegex(RuntimeError,'outdated or unloadable'):
                     verify_rviz_tools(sys.executable)
-                build('int social_nav_rviz_session_panel_abi(void) { return 1; }')
+                build('int social_nav_rviz_session_panel_abi(void) { return 3; }')
                 self.assertEqual(verify_rviz_tools(sys.executable),library)
                 manifest.write_text('<library/>')
                 with self.assertRaisesRegex(RuntimeError,'missing from the plugin manifest'):

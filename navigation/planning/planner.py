@@ -5,10 +5,12 @@ import time
 import numpy as np
 from perception.environment.context import fingerprint
 from perception.environment.changes import PriorRevisions, reference_grid
+from perception.environment.layers import GridSnapshot
 from perception.environment.navigation import navigation_geometry
 from .backend import GlobalPlanner
 from .footprint import footprint_status, footprint_details, goal_obstruction, path_poses, swept_check, wrap
-from .inputs import association_status, scene_status, cell_of, validate_grid,request_status,validate_map_keepout_circle
+from .inputs import (association_status, scene_status, cell_of, validate_grid, request_status,
+                     validate_map_keepout_circle, navigation_grid, navigation_binding, outside)
 from .curvature import motion_valid,reference_tails
 
 
@@ -22,6 +24,69 @@ def transform_poses(poses, transform):
     result[:, :2] = result[:, :2] @ transform[:2, :2].T+transform[:2, 2]
     result[:, 2] += np.arctan2(transform[1, 0], transform[0, 0])
     return result
+
+
+def mapped_endpoint_reason(grid, geometry, start, goal, margin):
+    for name, pose in (('start',start),('goal',goal)):
+        if outside(grid,pose[:2]):return name+'_outside'
+        if len(pose)==3 and outside(grid,geometry.polygon(pose),clearance=margin):
+            return name+'_footprint_outside'
+        if len(pose)==2:
+            polygon=geometry.footprint
+            sides=np.cross(polygon,np.roll(polygon,-1,axis=0))
+            if ((sides>0).all() or (sides<0).all()) and outside(
+                    grid,pose,clearance=geometry.inscribed_radius+margin):
+                return name+'_footprint_outside'
+    return None
+
+
+def limit_local_grid(local, mapped, map_from_local, blocked=()):
+    """Constrain a mapped approach in the local planning raster."""
+    cells=local.layers['occupancy']
+    metadata=local.metadata
+    resolution=metadata['resolution']
+    origin=np.asarray(metadata['origin_xy'])
+    rotation=map_from_local[:2,:2]
+    translation=map_from_local[:2,2]
+    bounds=mapped.metadata
+    lower=np.asarray(bounds['origin_xy'])
+    upper=lower+np.asarray(bounds['shape'][::-1])*bounds['resolution']
+    corners=origin+np.array([[0,0],[1,0],[0,1],[1,1]])*np.asarray(cells.shape[::-1])*resolution
+    corners=corners@rotation.T+translation
+    tolerance=1e-10
+    contained=((corners>=lower-tolerance)&(corners<=upper+tolerance)).all()
+    if contained and not blocked:return local
+    excluded=np.zeros(cells.shape,bool)
+    if not contained:
+        x=(np.arange(cells.shape[1])+.5)*resolution+origin[0]
+        y=(np.arange(cells.shape[0])+.5)*resolution+origin[1]
+        for axis,(dx,dy) in enumerate(rotation):
+            centres=dx*x+dy*y[:,None]+translation[axis]
+            half_extent=resolution/2*(abs(dx)+abs(dy))
+            excluded|=(centres-half_extent<lower[axis]-tolerance)|(centres+half_extent>upper[axis]+tolerance)
+    if blocked:
+        from .overlay import near_hits, overlap_states, projection, retain_obstacles
+        empty=GridSnapshot(bounds,dict(occupancy=np.zeros(bounds['shape'],np.int8)))
+        retained=retain_obstacles(empty,blocked)
+        occupancy=retained.layers['occupancy']
+        y,x,points=projection(local,retained,map_from_local)
+        rows=near_hits(points,rotation,resolution,bounds,occupancy==100)
+        if len(rows):
+            _,hit=overlap_states(points[rows],rotation.T,resolution,retained,occupancy)
+            excluded[y[rows[hit]],x[rows[hit]]]=True
+    clipped=cells.copy();clipped[excluded]=100;clipped.flags.writeable=False
+    lineage=dict(source_snapshot_id=metadata['snapshot_id'],work_snapshot_id=bounds['snapshot_id'],
+                 map_from_local=map_from_local.tolist(),retained_obstacles=tuple(blocked))
+    return GridSnapshot(dict(metadata,snapshot_id='work_limited_local:'+fingerprint(lineage),
+                             work_extent=lineage),dict(local.layers,occupancy=clipped))
+
+
+def path_within_work_extent(grid,geometry,poses,margin,max_samples):
+    """Check swept bodies against the fixed exterior, independently of local evidence."""
+    if not outside(grid,poses[:,:2],clearance=geometry.radius+margin):return True
+    empty=np.broadcast_to(np.int8(0),grid.metadata['shape'])
+    extent=GridSnapshot(grid.metadata,dict(occupancy=empty))
+    return swept_check(extent,geometry,poses,margin,max_samples,prefix=False)['status']=='free'
 
 
 def goal_cell_issue(grid,geometry,goal,margin):
@@ -71,6 +136,7 @@ class Planner:
         self._pose_backend=None
         self._local_planner=None
         self._prior_revisions=PriorRevisions()
+        self._prior_clock_domain=None
         self._previous_reference=None
 
     def reset(self):
@@ -81,6 +147,7 @@ class Planner:
         self._pose_binding,self._pose_grid=None,None
         self._pose_backend=None
         self._prior_revisions.reset()
+        self._prior_clock_domain=None
         self._previous_reference=None
         if self._local_planner is not None:self._local_planner.reset()
 
@@ -91,14 +158,22 @@ class Planner:
         if reason:raise ValueError(reason)
         from perception.environment.free_memory import remembered_free
         self._reference_work=None
-        return self._prior_revisions.apply(asset.snapshot,scene.geometry,scene.record['prior'],
-            scene_binding=scene.record['input_fingerprint'],bounds=bounds,overlay_current=False,geometry_only=geometry_only,
-            confirmed_free=remembered_free(scene,asset=asset,now=now))
+        return self._revise_prior(scene,navigation_grid(asset),remembered_free(scene,asset=asset,now=now),
+                                  bounds=bounds,geometry_only=geometry_only)
+
+    def _revise_prior(self,scene,source,confirmed_free,*,bounds=None,geometry_only=True):
+        record=scene.record
+        if self._prior_clock_domain!=record['clock_domain']:
+            self._prior_revisions.reset()
+            self._prior_clock_domain=record['clock_domain']
+        return self._prior_revisions.apply(source,scene.geometry,record['prior'],
+            scene_binding=record['input_fingerprint'],bounds=bounds,overlay_current=False,
+            geometry_only=geometry_only,confirmed_free=confirmed_free)
 
     def _mapped_reference(self, scene, asset, contact, local_from_map, blocked, follow_last_position, timing):
         from perception.environment.free_memory import remembered_free
         from .overlay import reference_overlay,retain_obstacles
-        source=asset.snapshot
+        source=navigation_grid(asset)
         r=scene.record
         # The worker sends a tuple of built-in integers. Unusual inputs still
         # go through the original validation rather than comparing equal to a
@@ -114,9 +189,7 @@ class Planner:
         if self._prior_revisions.last is not None and scene.geometry.metadata['stamp_s']<self._prior_revisions.last:
             self._mapped_cost_input=None
         began=time.perf_counter()
-        revised=self._prior_revisions.apply(source,scene.geometry,r['prior'],
-            scene_binding=r['input_fingerprint'],overlay_current=False,geometry_only=True,
-            confirmed_free=remembered_free(scene,asset=asset))
+        revised=self._revise_prior(scene,source,remembered_free(scene,asset=asset))
         timing['reference_prior_revision']=(time.perf_counter()-began)*1000
         began=time.perf_counter()
         retained=retain_obstacles(revised,blocked)
@@ -150,6 +223,9 @@ class Planner:
                 local_generation=scene.record['generation'], association=scene.record['prior'])
         result['input_binding'] = binding
         try:
+            if asset is not None and (request.get('mode') in ('static','mapped') or
+                                      request.get('completion_policy')=='continuous'):
+                binding['navigation_grid']=navigation_binding(asset)
             self._query(request, scene, asset, now, clock_domain, result, reference_obstacles, on_mapped_grid)
         except (ValueError, KeyError, TypeError) as error:
             result.update(status='invalid_input', reason=str(error), path=[], current_path_valid=False)
@@ -184,7 +260,7 @@ class Planner:
         if 'map_keepout_circle' in r:
             validate_map_keepout_circle(circle)
         follow_last_position='follow_last_evidence_binding' in r
-        mapped_local=False
+        mapped_local=False;work_grid=None
         local_approach=r.get('use_local_approach') is True
         if mode not in ('static', 'mapped', 'local'): raise ValueError('Unknown planning mode')
         goal = np.asarray(r['goal'], dtype=float)
@@ -205,7 +281,7 @@ class Planner:
         out['algorithm'] = algorithm
         if mode == 'static':
             if asset is None: raise ValueError('Static query needs an explicit static map')
-            grid = asset.snapshot
+            grid = work_grid = navigation_grid(asset)
             start = np.asarray(r['start'], dtype=float)
             if start.shape != (3,) or not np.isfinite(start).all(): raise ValueError('Static start must be [x,y,yaw]')
             out['start_source'] = 'explicit_static_diagnostic'
@@ -231,7 +307,7 @@ class Planner:
                 reason = association_status(scene, asset, self.config)
                 if reason:
                     out.update(status='unavailable', reason=reason, goal_state='paused'); return
-                grid = asset.snapshot
+                grid = work_grid = navigation_grid(asset)
                 transform = np.asarray(scene.record['prior']['map_from_local'])
                 start = self.geometry.pose(transform @ np.asarray(scene.record['localization']['world_from_lidar']))
                 if local_approach:
@@ -247,6 +323,21 @@ class Planner:
                     mode='mapped'
             else:
                 grid = local_grid; start = local_pose
+        if not local_approach and r['frame_id'] != (scene.record['frame_id'] if mapped_local else grid.metadata['frame_id']):
+            raise ValueError('Goal frame does not match planning frame')
+        if mode in ('static', 'mapped') and not mapped_local and r.get('map_snapshot_id') != asset.manifest['snapshot_id']:
+            raise ValueError('Goal static map identity mismatch')
+        has_work_extent=work_grid is not None and getattr(asset,'navigation_window',None) is not None
+        if has_work_extent:
+            reason=mapped_endpoint_reason(work_grid,self.geometry,global_start if local_approach else start,
+                np.asarray(r['goal'],float) if local_approach else goal,self.config['safety_margin_m'])
+            if reason:
+                display_start=global_start if local_approach else local_pose if mapped_local else start
+                out.update(status='no_path',reason=reason,grid_snapshot_id=work_grid.metadata['snapshot_id'],
+                           start=display_start.tolist(),goal=r['goal'])
+                return
+        if local_approach and has_work_extent:
+            grid=limit_local_grid(grid,work_grid,map_from_local,reference_obstacles)
         # This obstacle is fixed in the selected map even when the lidar sees free
         # space under a tabletop. Insert it before search and swept-footprint checks.
         retained_count = len(reference_obstacles)
@@ -291,18 +382,14 @@ class Planner:
             grid=reference_grid(grid,geometry_only=True)
         manual_free_cells = getattr(asset, 'manual_free_cells', None) if mode in ('static','mapped') else 0
         if manual_free_cells is None:
-            manual = asset.snapshot.layers.get('manual_edit')
-            manual_free_cells = (int(np.count_nonzero(manual & (asset.snapshot.layers['occupancy']==0)))
+            manual = work_grid.layers.get('manual_edit')
+            manual_free_cells = (int(np.count_nonzero(manual & (work_grid.layers['occupancy']==0)))
                                  if manual is not None else 0)
         out['manual_free_present'] = manual_free_cells > 0
         out['unobserved_free_assumed']=(grid.metadata.get('free_assumption')=='no_filtered_endpoint_in_cell' or
                                         out['manual_free_present'])
         out['reference_policy']=grid.metadata.get('reference_policy',
             'unobserved_cells_assumed_free' if out['unobserved_free_assumed'] else 'observed_free_only')
-        if not local_approach and r['frame_id'] != (scene.record['frame_id'] if mapped_local else grid.metadata['frame_id']):
-            raise ValueError('Goal frame does not match planning frame')
-        if mode in ('static', 'mapped') and not mapped_local and r.get('map_snapshot_id') != asset.manifest['snapshot_id']:
-            raise ValueError('Goal static map identity mismatch')
         out.update(start=start.tolist(), goal=goal.tolist(), frame_id=grid.metadata['frame_id'],
                    grid_snapshot_id=grid.metadata['snapshot_id'], conservative_radius_m=self.geometry.radius,
                    safety_margin_m=self.config['safety_margin_m'])
@@ -361,16 +448,17 @@ class Planner:
             reused=False
             if old is not None:
                 old_source,old_context,old_stamp,old_cells,old_conditional=old
-                reused=(asset.snapshot is old_source and context==old_context and scene_record['as_of']>=old_stamp and
+                reused=(work_grid is old_source and context==old_context and scene_record['as_of']>=old_stamp and
                     (cells is old_cells or (cells.dtype==old_cells.dtype and np.array_equal(cells,old_cells))) and
                     (conditional is old_conditional or (conditional is not None and old_conditional is not None
                         and conditional.dtype==old_conditional.dtype and np.array_equal(conditional,old_conditional))))
             cost_binding=self._cost_binding if reused else object()
-            mapped_cost_input=(asset.snapshot,context,scene_record['as_of'],cells,conditional)
+            mapped_cost_input=(work_grid,context,scene_record['as_of'],cells,conditional)
         else:
             cost_binding = (grid.metadata['snapshot_id'], fingerprint(grid.metadata),
                 out['input_binding']['scene'] if mode == 'local' else fingerprint(out['input_binding']['static_map']),
-                cost_parameters)
+                cost_parameters, fingerprint(out['input_binding'].get('navigation_grid')),
+                None if not local_approach else fingerprint(map_from_local.tolist()))
         timing['costmap_comparison']=(time.perf_counter()-compare_begin)*1000
         out['costmap_reused']=cost_binding==self._cost_binding
         if cost_binding != self._cost_binding:
@@ -466,6 +554,11 @@ class Planner:
             uncertain=check['status'] in ('unknown','uncertified_clearance','budget_exceeded','search_budget_exceeded')
             out.update(status='unavailable' if uncertain else 'no_path',
                        reason='returned_path_'+check['status']); return
+        if local_approach and has_work_extent and not path_within_work_extent(
+                work_grid,self.geometry,transform_poses(poses,map_from_local),self.config['safety_margin_m'],
+                self.config['max_path_samples']):
+            out.update(status='no_path',reason='returned_path_outside_work_extent')
+            return
         out.update(status='path_found', reason=None, path=poses.tolist(), current_path_valid=True,
                    path_length_m=float(np.linalg.norm(np.diff(poses[:,:2],axis=0),axis=1).sum()))
         if alternatives:
@@ -539,7 +632,9 @@ class Planner:
                         child['map_keepout_circle'] = circle
                     local=self._local_planner.query(child,scene=scene,asset=asset,now=now,clock_domain=clock)
                     out['local_replan']=local
-                    if local['status']=='path_found':
+                    if local['status']=='path_found' and (not has_work_extent or path_within_work_extent(
+                            work_grid,self.geometry,transform_poses(local['path'],np.linalg.inv(local_from_map)),
+                            self.config['safety_margin_m'],self.config['max_path_samples'])):
                         out['current_local_path'].update(poses=local['path'],valid=True,source='local_replan',
                             reference_goal=child_goal,reference_distance_m=travel)
                 out['timing_ms']['local_replan']=(time.perf_counter()-began)*1000
@@ -585,12 +680,15 @@ class PlanningSession:
         self.goal_revisions[key[0]] = key[1]
         self.goals[key] = goal
         map_binding = None if asset is None else dict(snapshot_id=asset.manifest['snapshot_id'], layers_sha256=asset.manifest['layers_sha256'])
-        self.latest = (self.epoch, fingerprint(request), None if scene is None else scene.record['input_fingerprint'], fingerprint(map_binding))
+        uses_work_grid=request.get('mode') in ('static','mapped') or request.get('completion_policy')=='continuous'
+        self.latest = (self.epoch, fingerprint(request), None if scene is None else scene.record['input_fingerprint'],
+                       fingerprint(map_binding), fingerprint(navigation_binding(asset) if uses_work_grid else None))
         return self.latest
 
     def accept(self, ticket, result):
         if (ticket != self.latest or ticket[1] != result['request_binding'] or ticket[2] != result['input_binding']['scene']
                 or ticket[3] != fingerprint(result['input_binding']['static_map'])
+                or ticket[4] != fingerprint(result['input_binding'].get('navigation_grid'))
                 or result.get('result_binding') != fingerprint({k:v for k,v in result.items() if k != 'result_binding'})):
             return False
         self.current = result if result['status'] == 'path_found' and result['current_path_valid'] else None

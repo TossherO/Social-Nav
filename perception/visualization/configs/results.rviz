@@ -23,8 +23,8 @@ Visualization Manager:
       Queue Size: 1
       Style: Points
       Size (Pixels): 2
-      Color Transformer: AxisColor
-      Axis: Z
+      Color Transformer: FlatColor
+      Color: 158; 169; 180
     - Class: rviz/MarkerArray
       Name: Recorded trajectory and pose
       Enabled: true
@@ -40,9 +40,9 @@ Visualization Manager:
       Queue Size: 1
       Decay Time: 0
       Style: Points
-      Size (Pixels): 2
-      Color Transformer: FlatColor
-      Color: 70; 220; 250
+      Size (Pixels): 3
+      Color Transformer: AxisColor
+      Axis: Z
   Tools:
     - Class: rviz/Interact
     - Class: rviz/MoveCamera
