@@ -12,6 +12,8 @@ uint8[] ground_support
 uint8[] ground_conflict
 # Optional cells awaiting new free evidence after a long-lived obstacle expired.
 uint8[] obstacle_expiry_unknown
+# Obstacle endpoints classified from this observation only. Empty when unavailable.
+uint8[] current_obstacle_hits
 uint8[] observed
 float64[] last_observed
 float32[] coverage

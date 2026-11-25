@@ -69,28 +69,40 @@ class ReferenceObstacles:
         people=scene.record.get('people',{})
         data=people.get('data',{})
         current=people.get('status')=='valid' and data.get('stamp_s')==stamp
+        complete=current
         objects=observed_objects(scene.geometry)
         circles=[(obj['xy'],max(.55,obj['radius_m'])) for obj in objects]
+        uncertain=[]
         if current:
             owned={obj['identity'][-1] for obj in objects}
             for track in data['tracks']:
                 if (str(track.get('track_id')) in owned or not track.get('confirmed') or
                         track.get('state') not in ('observed','predicted')):
                     continue
-                age=stamp-track['last_observed_stamp_s']
+                last=track.get('last_observed_stamp_s')
                 box=np.asarray(track['box'],float)
-                if 0<=age<=RECENT_PERSON_S and box.shape==(8,) and np.isfinite(box).all() and box[7]>=.5:
+                valid_box=box.shape==(8,) and np.isfinite(box).all() and box[7]>=.5
+                if type(last) not in (int,float) or not np.isfinite(last) or last>stamp:
+                    complete=False
+                    if valid_box:
+                        uncertain.append((box[:2],.55))
+                    continue
+                age=stamp-last
+                if 0<=age<=RECENT_PERSON_S and valid_box:
                     circles.append((box[:2],.55))
         near=set()
-        for local_xy,radius in circles:
-            map_xy=(np.asarray(local_xy)-transform[:2,2])@transform[:2,:2]
-            near.update(circle_indices(prior,map_xy,radius+self.person_margin_m).tolist())
-        self.recent_people.update(dict.fromkeys(near,stamp))
-        return current,near
+        for candidates,verified in ((circles,True),(uncertain,False)):
+            for local_xy,radius in candidates:
+                map_xy=(np.asarray(local_xy)-transform[:2,2])@transform[:2,:2]
+                covered=circle_indices(prior,map_xy,radius+self.person_margin_m).tolist()
+                near.update(covered)
+                # Preserve temporal support only for verified tracks or objects.
+                if verified:self.recent_people.update(dict.fromkeys(covered,stamp))
+        return complete,near
 
     def _confirm_new(self, scene, prior, physical, points, indices, rotation, occupied, stamp, people_current, near):
         """Count distinct scans within a bounded window, finalizing outside person coverage."""
-        delayed=np.flatnonzero([int(i) in self.recent_people or int(i) in self.pending for i in indices])
+        delayed=np.flatnonzero([int(i) in near or int(i) in self.recent_people or int(i) in self.pending for i in indices])
         ready=np.ones(len(indices),bool)
         if not len(delayed):
             return ready

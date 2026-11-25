@@ -22,8 +22,11 @@ def people_boxes(row, stamp, identity, frame, settings, *, clock_domain=None, al
         boxes = [];track_ids=[];predicted=[]
         hold = settings.get('prediction_mask_hold_s', 0.)
         for track in row.get('tracks', []):
+            last = track.get('last_observed_stamp_s')
+            if type(last) not in (int,float) or not np.isfinite(last) or last > row['stamp_s']:
+                continue
             box = np.asarray(track['box'], dtype=float)
-            observed_age = stamp-float(track['last_observed_stamp_s'])
+            observed_age = stamp-last
             observed = track['state'] == 'observed' and 0 <= observed_age <= settings['max_people_age_s']
             recent = (allow_recent_predictions and track['state'] == 'predicted'
                       and track['hits'] >= max(3, settings['min_hits']) and 0 < observed_age <= hold)

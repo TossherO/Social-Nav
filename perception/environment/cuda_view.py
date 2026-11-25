@@ -190,7 +190,10 @@ def native_view(tree, floor, support, origin, config, stamp, endpoints, *, requi
         columns = {name:out[index] for index,name in enumerate(VIEW_DTYPES) if index<11 or policy is not None}
         if people:
             columns['person_background_free'] = out[16]
-        fresh_free = apply_obstacle_memory(columns,obstacle_projection,config['free_vertical_coverage'],device=device)
+        ray_support = (support==1) & (not (metadata or {}).get('ground_tracking',{}).get('history_suspended'))
+        free_ray_columns = tree.free_ray_columns(obstacle_projection[2],obstacle_projection[3],
+                                                floor,ray_support,origin,config,metrics=metrics)
+        fresh_free = apply_obstacle_memory(columns,obstacle_projection,free_ray_columns,device=device)
         if device is None:
             from .layers import view_distance_fields
             for name,value in view_distance_fields(columns['occupancy'],config['resolution']).items():
@@ -205,7 +208,8 @@ def native_view(tree, floor, support, origin, config, stamp, endpoints, *, requi
                 raise RuntimeError(tree.lib.sn_occupancy_error().decode())
             tree.obstacle_fresh_free = fresh_free.cpu().numpy() if obstacle_projection[2].any() else None
             if metrics is not None:
-                metrics.transfer('h2d',sum(a.nbytes for a in obstacle_projection),'environment_obstacle_retention')
+                metrics.transfer('h2d',sum(a.nbytes for a in (*obstacle_projection[:3],obstacle_projection[4],
+                                  free_ray_columns)),'environment_obstacle_retention')
                 if tree.obstacle_fresh_free is not None:
                     metrics.transfer('d2h',tree.obstacle_fresh_free.nbytes,'environment_newly_free_obstacles')
     layers = _decode_layers(out, policy=policy, people=people, device=device)

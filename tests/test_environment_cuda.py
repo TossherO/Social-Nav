@@ -35,6 +35,13 @@ class CudaEnvironmentTests(unittest.TestCase):
         from tests.test_environment_dynamic import check_long_obstacle
         check_long_obstacle(self, 'cuda',device=torch.device('cuda:0'))
 
+    def test_obstacle_expiry_requires_post_cutoff_rays_in_the_current_collision_band(self):
+        import torch
+        from tests.test_environment_dynamic import check_obstacle_expiry_ray_evidence
+        for device in (None,torch.device('cuda:0')):
+            with self.subTest(device=device):
+                check_obstacle_expiry_ray_evidence(self, 'cuda',device=device)
+
     def test_near_short_reads_only_measured_free_from_device_grid(self):
         import torch
         from tests.test_environment_dynamic import check_near_short_obstacles

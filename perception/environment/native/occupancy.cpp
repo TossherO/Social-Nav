@@ -20,6 +20,7 @@ struct Voxel {
     float log_odds=0;
     double stamp=0, hit_stamp=0, ordinary_stamp=-INFINITY;
     PointEvidence evidence=OrdinaryHit;
+    bool last_free_ray=false;
 };
 struct Votes {
     int hits=0, free=0;
@@ -134,7 +135,7 @@ int sn_occupancy_update_masked(void* ptr, const float* xyz, int n, const double*
                 it=t.seen.erase(it);
             } else ++it;
         }
-        std::unordered_set<Key> hits, moving_hits, unconfirmed_hits, misses;
+        std::unordered_set<Key> hits, moving_hits, unconfirmed_hits, omitted_hits, misses;
         std::unordered_set<Key> review_free, physical_hits;
         octomap::KeyRay ray;
         for(int i=0;i<n;++i) {
@@ -150,6 +151,7 @@ int sn_occupancy_update_masked(void* ptr, const float* xyz, int n, const double*
                     unconfirmed_hits.insert(pack(key));
                 } else if(transient && transient[i]==MovablePersonHit) {
                     if(!omit_transient) moving_hits.insert(pack(key));
+                    else omitted_hits.insert(pack(key));
                 } else hits.insert(pack(key));
             }
             if(ray_stride<=0 || i%ray_stride) continue;
@@ -178,6 +180,7 @@ int sn_occupancy_update_masked(void* ptr, const float* xyz, int n, const double*
                 std::min(t.octree.getClampingThresMaxLog(),
                     v.log_odds+(hit?t.octree.getProbHitLog():t.octree.getProbMissLog())));
             v.stamp=stamp;
+            v.last_free_ray=!hit;
             if(hit) {
                 v.evidence=evidence;v.hit_stamp=stamp;
                 if(evidence==OrdinaryHit)v.ordinary_stamp=stamp;
@@ -189,6 +192,11 @@ int sn_occupancy_update_masked(void* ptr, const float* xyz, int n, const double*
         for(const auto k:moving_hits) if(!hits.count(k) && !unconfirmed_hits.count(k)) update(k,true,MovablePersonHit);
         for(const auto k:unconfirmed_hits) if(!hits.count(k)) update(k,true,UnconfirmedHit);
         for(const auto k:hits) update(k,true);
+        for(const auto k:omitted_hits) {
+            // A physical return still invalidates free proof when its occupancy is tracked separately.
+            auto found=t.seen.find(k);
+            if(found!=t.seen.end()) found->second.last_free_ray=false;
+        }
         if(t.static_retention) {
             for(const auto k:hits)
                 if(!inside(t.octree.keyToCoord(unpack(k)),box)) t.outside_hits.push_back(k);
@@ -233,6 +241,25 @@ int sn_occupancy_read(void* ptr, float* output, int capacity, double stamp) {
         }
         return i;
     } catch(const std::exception& e) { error=e.what(); return -1; }
+}
+int sn_occupancy_free_ray_columns(void* ptr, const int32_t* columns, const double* cutoff,
+    int n, double free_probability, uint8_t* out) {
+    auto& t=*static_cast<Tree*>(ptr);
+    for(int i=0;i<n;++i) {
+        const int32_t* key=columns+4*i;
+        const int x=key[0], y=key[1], first=key[2], count=key[3];
+        bool clear=x>=-32768 && x<32768 && y>=-32768 && y<32768 &&
+            first>=-32768 && first<32768 && count>0 && count<=32768-first;
+        for(int z=first;clear && z<first+count;++z) {
+            const auto found=t.seen.find(pack(octomap::OcTreeKey(x+32768,y+32768,z+32768)));
+            if(found==t.seen.end()) { clear=false; break; }
+            const auto& v=found->second;
+            const float probability=1.f-1.f/(1.f+std::exp(v.log_odds));
+            clear=v.last_free_ray && v.stamp>cutoff[i] && probability<=float(free_probability);
+        }
+        out[i]=clear;
+    }
+    return 0;
 }
 // Exclusive person columns: ordinary occupied evidence always wins.
 int sn_occupancy_person_columns(void* ptr,const double* floor,int height,int width,

@@ -132,18 +132,28 @@ class ControlLoop:
         return epoch,fault,offered
 
     def _search_scene(self,scene):
-        from perception.environment.scene import assemble_scene,people_observation
         from perception.environment.navigation import CAPSULE_FIELDS
-        if self.device.metadata['snapshot_id']!=scene.geometry.metadata['snapshot_id']:raise ValueError('Reference/device observation mismatch')
-        if 'navigation_fusion' in self.device.metadata and all(k in scene.geometry.layers for k in CAPSULE_FIELDS):
-            # The producer already exported and bound this exact capsule. Its
-            # host arrays remain owned by the scene through the search lease.
+        from perception.environment.obstacle_memory import EXPIRY_LAYER
+
+        device = self.device
+        host = scene.geometry
+        observation_fields = ('snapshot_id', 'stamp_s', 'session_id', 'generation', 'frame_id',
+                              'shape', 'resolution', 'origin_xy', 'geometry_status', 'world_from_lidar',
+                              'association', 'navigation_fusion')
+        if any(device.metadata.get(name) != host.metadata.get(name) for name in observation_fields):
+            raise ValueError('Reference/device observation mismatch')
+        fused = 'navigation_fusion' in host.metadata
+        associated = scene.record['prior'].get('valid')
+        names = CAPSULE_FIELDS if fused else ('occupancy', 'person_background_free', EXPIRY_LAYER)
+        if not fused or associated:
+            names += ('ground_support', 'coverage')
+        if associated:
+            names += ('last_observed', 'near_field_free')
+        missing = [name for name in names if name not in host.layers and name in device._layers]
+        if not missing:
             return scene
-        names=CAPSULE_FIELDS if 'navigation_fusion' in self.device.metadata else ('occupancy','ground_support','coverage','last_observed','near_field_free')
-        fields=[k for k in names if k in self.device._layers]
-        grid=self.device.materialize(consumer='reference_search',fields=fields,metrics=self.metrics)
-        return assemble_scene(grid,clock_domain=scene.record['clock_domain'],people=people_observation(scene),
-                              stamp_ns=scene.record.get('stamp_ns'),settings=self.scene_settings)
+        grid = device.materialize(consumer='reference_search', fields=missing, metrics=self.metrics)
+        return scene.with_additional_geometry_layers(grid.layers)
 
     def _preview_frozen(self, token, environment_epoch, request, *, shadow=False):
         """Publish the search raster only for the preview accepted by the bag session."""

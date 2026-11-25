@@ -28,7 +28,13 @@ template<class T> struct Buffer {
     }
     ~Buffer() { if(data) cudaFree(data); }
 };
-struct Voxel { double stamp, hit_stamp,ordinary_stamp=-INFINITY; float odds; uint8_t valid; PointEvidence evidence; };
+struct Voxel {
+    double stamp, hit_stamp, ordinary_stamp=-INFINITY;
+    float odds;
+    uint8_t valid;
+    PointEvidence evidence;
+    bool last_free_ray;
+};
 struct NearCell {
     double classified, free_seen, hit_stamp, expires, hit_min, hit_max;
     float free_ground, free_coverage, ground;
@@ -69,6 +75,7 @@ struct Tree {
     Buffer<NearCell> memory_a,memory_b; Buffer<unsigned> memory_flags;
     Buffer<double> view,ring,hit_bounds; Buffer<int> memory_counts; Buffer<float> distance_rows;
     Buffer<uint8_t> view_transient;Buffer<unsigned> person_columns;
+    Buffer<int32_t> ray_columns; Buffer<double> ray_cutoffs; Buffer<uint8_t> ray_clear;
     bool memory_initialized=false,history_suspended=false; int memory_height=0,memory_width=0;
     double memory_x=0,memory_y=0,memory_resolution=0,memory_stamp=0;
     Tree(double r,int d):device(d),resolution(r) { Guard g(d); count_device.reserve(1); }
@@ -98,6 +105,7 @@ __global__ void trace(unsigned* flags,Grid grid,const float* xyz,int n,float3 or
         const int evidence=transient?transient[i]:OrdinaryHit;
         if(evidence==UnconfirmedHit) mark(flags,grid,endpoint,8);
         else if(evidence==OrdinaryHit || !omit) mark(flags,grid,endpoint,evidence==MovablePersonHit?2:4);
+        else mark(flags,grid,endpoint,16);
     }
     if(!stride || i%stride) return;
     if(length>maxrange) {
@@ -134,19 +142,22 @@ __global__ void apply(Voxel* voxels,const unsigned* flags,int size,double stamp,
     int i=blockIdx.x*blockDim.x+threadIdx.x,valid=0;
     if(i<size) {
         auto& v=voxels[i]; unsigned f=flags[i];
-        if(f) {
+        if(f&15) {
             bool hit=f&14;
             // OctoMap stores its sensor-model log odds and additions in float.
             float previous=(hit && invalidate_free)?fmaxf(0.f,v.odds):v.odds;
             float odds=previous+(hit?float(0.8472978603872034):float(-0.4054651081081643));
             v.odds=fmaxf(float(-2.000027830777221),fminf(float(3.5110306383048497),odds));
             v.stamp=stamp; v.valid=1;
+            v.last_free_ray=!hit;
             if(hit) {
                 v.evidence=(f&4)?OrdinaryHit:(f&8)?UnconfirmedHit:MovablePersonHit;
                 v.hit_stamp=stamp;
                 if(v.evidence==OrdinaryHit)v.ordinary_stamp=stamp;
             }
         }
+        // A physical return still invalidates free proof when its occupancy is tracked separately.
+        if(f&16)v.last_free_ray=false;
         valid=v.valid;
     }
     counts[threadIdx.x]=valid; __syncthreads();
@@ -213,6 +224,22 @@ __global__ void read_voxels(const Voxel* voxels,Grid grid,double stamp,float* ou
     int j=atomicAdd(count,1); float3 p=grid.center(k);
     out[5*j]=p.x; out[5*j+1]=p.y; out[5*j+2]=p.z;
     out[5*j+3]=1.f-1.f/(1.f+expf(v.odds)); out[5*j+4]=stamp-v.stamp;
+}
+__global__ void free_ray_columns(const Voxel* voxels, Grid grid, const int32_t* columns,
+    const double* cutoff, int n, float free_probability, uint8_t* out) {
+    int i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=n)return;
+    const int32_t* key=columns+4*i;
+    int3 voxel=make_int3(key[0],key[1],key[2]);
+    const int count=key[3];
+    bool clear=count>0 && count<=grid.dim.z && grid.contains(voxel);
+    for(int j=0;clear && j<count;++j,++voxel.z) {
+        if(!grid.contains(voxel)) { clear=false; break; }
+        const auto& v=voxels[grid.slot(voxel)];
+        const float probability=1.f-1.f/(1.f+expf(v.odds));
+        clear=v.valid && v.last_free_ray && v.stamp>cutoff[i] && probability<=free_probability;
+    }
+    out[i]=clear;
 }
 template<class T> void upload(Buffer<T>& target,const T* input,size_t count) {
     if(!count) return; target.reserve(count); check(cudaMemcpy(target.data,input,count*sizeof(T),cudaMemcpyHostToDevice));
@@ -326,6 +353,20 @@ int sn_occupancy_read(void* ptr,float* output,int capacity,double stamp) {
         read_voxels<<<blocks(size),256>>>(t.voxels.data,t.grid,stamp,t.snapshot.data,t.count_device.data);
         check(cudaGetLastError()); check(cudaMemcpy(output,t.snapshot.data,size_t(t.count)*5*sizeof(float),cudaMemcpyDeviceToHost));
         return t.count;
+    } catch(const std::exception& e) { error=e.what(); return -1; }
+}
+int sn_occupancy_free_ray_columns(void* ptr, const int32_t* columns, const double* cutoff,
+    int n, double free_probability, uint8_t* out) {
+    try {
+        auto& t=*static_cast<Tree*>(ptr); Guard guard(t.device);
+        if(n<=0)return 0;
+        if(!t.initialized) { std::fill(out,out+n,0);return 0; }
+        upload(t.ray_columns,columns,size_t(n)*4);upload(t.ray_cutoffs,cutoff,n);
+        t.ray_clear.reserve(n);
+        free_ray_columns<<<blocks(n),256>>>(t.voxels.data,t.grid,t.ray_columns.data,t.ray_cutoffs.data,
+            n,float(free_probability),t.ray_clear.data);
+        check(cudaGetLastError());check(cudaMemcpy(out,t.ray_clear.data,n*sizeof(uint8_t),cudaMemcpyDeviceToHost));
+        return 0;
     } catch(const std::exception& e) { error=e.what(); return -1; }
 }
 int sn_occupancy_project(void* ptr,const double* floor,const uint8_t* support,const int32_t* required,

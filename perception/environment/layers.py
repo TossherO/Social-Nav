@@ -421,7 +421,14 @@ class LocalEnvironmentMap:
 
     def update(self, points, transform, stamp, identity, *, frame='odom', association=None,
                scan_duration=None, ray_origins=None, people=None, clock_domain=None, device=None, metrics=None,
-               localization_source=None,sensor_frame=None,static_asset=None):
+               localization_source=None,sensor_frame=None,static_asset=None,include_host_obstacle_hits=False):
+        """Update the map and optionally include the current hit raster in the host snapshot.
+
+        With a static asset, direct device callers read the host raster from
+        support_observation for the same completed scan.
+        """
+        if include_host_obstacle_hits and device is not None:
+            raise ValueError('The current obstacle hit layer requires a host snapshot')
         config = self.config
         if not np.isfinite(stamp):
             raise ValueError('Environment observation time must be finite')
@@ -559,7 +566,7 @@ class LocalEnvironmentMap:
             near_field=backend if self.near_field else 'disabled',ground_fit='cpu',ground_support='cpu',people_mask='cpu')
         remaining=owners<0;view_points=world[remaining]
         view_mask=hit_mask[remaining]
-        if static_asset is not None:
+        if static_asset is not None or include_host_obstacle_hits:
             hits = np.zeros(floor.shape, dtype=bool)
             hits[y,x] = True
             hits.flags.writeable = False
@@ -587,13 +594,21 @@ class LocalEnvironmentMap:
                 person_only=getattr(self.tree,'person_only',None))
         if projection is not None and backend=='cpu':
             updated = {key:value.copy() for key,value in snapshot.layers.items()}
-            fresh_free = apply_obstacle_memory(updated,projection,config['free_vertical_coverage'])
+            ray_support = support
+            if self.ground_conflict_view is not None:
+                ray_support = support & ~self.ground_conflict_view
+            if ground_status.get('history_suspended'):
+                ray_support = np.zeros_like(support)
+            free_ray_columns = self.tree.free_ray_columns(projection[2],projection[3],floor,ray_support,origin,config)
+            fresh_free = apply_obstacle_memory(updated,projection,free_ray_columns)
             self.obstacles.clear(fresh_free)
             updated.update(view_distance_fields(updated['occupancy'],resolution))
             snapshot = GridSnapshot(snapshot.metadata,updated)
         if 'person_background_free' in snapshot.layers:
             snapshot.metadata['dynamic_navigation']=dict(policy='exclusive_person_on_certified_historical_free',
                 eligible_cells=int(snapshot.layers['person_background_free'].sum()),current_occupancy_preserved=True)
+        if include_host_obstacle_hits:
+            snapshot.layers['current_obstacle_hits'] = self.support_observation['current_obstacle_hits']
         metadata,layers=snapshot.metadata,snapshot.layers
         for array in layers.values():
             array.flags.writeable = False

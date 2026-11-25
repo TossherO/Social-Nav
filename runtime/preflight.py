@@ -28,6 +28,19 @@ def probe(python, code, payload=None, *, gpu=None):
     return result.stdout.strip()
 
 
+def verify_grid_message(message_type):
+    from genmsg import MsgContext, msg_loader
+    source = ROOT/'perception/environment/ros/msg/EnvironmentGrid.msg'
+    spec = msg_loader.load_msg_from_file(MsgContext.create_default(), str(source), 'social_nav_environment/EnvironmentGrid')
+    expected = list(zip(spec.names, spec.types))
+    installed = list(zip(message_type.__slots__, message_type._slot_types))
+    if installed != expected:
+        missing = [name for name, kind in expected if (name, kind) not in installed]
+        detail = ', '.join(missing) if missing else 'field order or extra fields'
+        raise RuntimeError('Rebuild ROS EnvironmentGrid messages to match the project: '+detail)
+    return 'runtime ROS imports and EnvironmentGrid fields match the project schema'
+
+
 def serial_access(path):
     """Metadata/owner query only: no os.open, ioctl, read or write on the device."""
     path = resolve(path).resolve(strict=True)
@@ -141,7 +154,8 @@ def inspect(config_path, *, motion_path=None, motion_profile=None, vehicle_profi
     if settings is not None:
         specs = {
             'environment': (settings['environment_library'], ['sn_occupancy_new_cuda', 'sn_occupancy_suspend_free_history',
-                                                             'sn_occupancy_local_ground_conflicts',
+                                                             'sn_occupancy_local_ground_conflicts', 'sn_occupancy_uncertain_person_hits',
+                                                             'sn_occupancy_refresh_view_distances', 'sn_occupancy_free_ray_columns',
                                                              'sn_navigation_support_with_ground_conflicts']),
             'dwa': (settings['dwa_library'], ['sn_dwa_predict']),
             'collision': (settings['collision_library'], ['sn_collision_batch_stream']),
@@ -161,8 +175,7 @@ def inspect(config_path, *, motion_path=None, motion_profile=None, vehicle_profi
             'import rosbag,rospy,sensor_msgs.msg; print("ROS native imports available; no master started")'))
     check('project_ros_messages', lambda: probe(sys.executable,
         'import rospy,sensor_msgs.msg; from social_nav_environment.msg import EnvironmentGrid; '
-        'assert "ground_conflict" in EnvironmentGrid.__slots__, "Rebuild ROS environment messages for local ground conflicts"; '
-        'print("runtime ROS imports and local ground conflict field available")'))
+        'from runtime.preflight import verify_grid_message; print(verify_grid_message(EnvironmentGrid))'))
 
     def detector_config():
         from perception.detection_tracking.inference.config import load_config

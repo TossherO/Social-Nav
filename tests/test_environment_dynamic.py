@@ -115,6 +115,90 @@ def check_long_obstacle(test, backend, *, device=None):
     test.assertTrue(scan(15.7,[]).layers[EXPIRY_LAYER][first])
 
 
+def check_obstacle_expiry_ray_evidence(test, backend, *, device=None):
+    from perception.environment.geometry import voxel_height_band
+    from perception.environment.obstacle_memory import EXPIRY_LAYER
+
+    config = load_config()
+    config['compute']['backend'] = backend
+    config['near_field']['enabled'] = False
+    config['window_m'] = 4.
+    config['obstacle_ttl_s'] = .3
+    model = LocalEnvironmentMap(config)
+    test.addCleanup(model.close)
+    resolution = config['resolution']
+    model.ground_conflict_view = None
+    floor = np.full((40,40),-.85,np.float32)
+    support = np.ones(floor.shape,bool)
+    low,count = voxel_height_band(floor[:1,:1],resolution,config['min_obstacle_height_m'],config['max_height_m'])
+    test.assertEqual(count.item(),17)
+    heights = (np.arange(low.item(),low.item()+count.item())+.5)*resolution
+    target = np.array([-.55,.05])
+
+    def scan(stamp, points=(), *, rays=None, sensor_x=0., identity=('expiry',0), ground=floor):
+        pose = np.eye(4)
+        pose[0,3] = sensor_x
+        points = np.asarray(points).reshape(-1,3)-pose[:3,3]
+        ground_status = dict(status='tracked',plane_world=[0.,0.,float(ground[0,0])])
+        with patch.object(model,'_plane_ground',return_value=(ground,support,ground_status)):
+            snapshot = model.update(points,pose,stamp,identity,device=device,ray_origins=rays)
+        if device is not None:
+            snapshot = snapshot.materialize(consumer='test_obstacle_expiry_rays')
+        return snapshot.layers
+
+    def sweep(stamp, z, *, ground=floor):
+        return scan(stamp,np.c_[np.full(len(z),.55),np.full(len(z),target[1]),z],
+                    rays=np.c_[np.full(len(z),-1.55),np.full(len(z),target[1]),z],ground=ground)
+
+    cell = (20,14)
+    hit = [[*target,-.35]]
+    def seed(start=10.):
+        for stamp in np.linspace(start,start+2.,11):
+            scan(stamp,hit)
+        test.assertEqual(model.obstacles.history[3][cell],start+4.)
+
+    seed()
+    test.assertEqual(sweep(14.,heights)['occupancy'][cell],100)
+    partial = sweep(14.1,heights[:-1])
+    test.assertEqual(partial['occupancy'][cell],-1)
+    test.assertTrue(partial[EXPIRY_LAYER][cell])
+    endpoint = scan(14.2,[[*target,-.85]])
+    test.assertTrue(endpoint[EXPIRY_LAYER][cell])
+    shifted_floor = floor+.1
+    shifted = sweep(14.3,heights[-1:],ground=shifted_floor)
+    test.assertTrue(shifted[EXPIRY_LAYER][cell])
+    complete = sweep(14.4,heights[-1:]+resolution,ground=shifted_floor)
+    test.assertEqual(complete['occupancy'][cell],0)
+    test.assertFalse(complete[EXPIRY_LAYER][cell])
+    scan(14.5,sensor_x=6.)
+    test.assertNotIn(EXPIRY_LAYER,scan(14.6))
+
+    model.reset()
+    epoch = 1_792_725_600.
+    seed(epoch+10.)
+    cutoff = epoch+14.
+    test.assertEqual(sweep(cutoff,heights)['occupancy'][cell],100)
+    first = sweep(np.nextafter(cutoff,np.inf),heights)
+    test.assertEqual(first['occupancy'][cell],0)
+    test.assertFalse(first[EXPIRY_LAYER][cell])
+
+    for moved_before_expiry in (True,False):
+        model.reset()
+        seed()
+        if not moved_before_expiry:
+            test.assertTrue(scan(14.1)[EXPIRY_LAYER][cell])
+        scan(13.9 if moved_before_expiry else 14.2,sensor_x=6.)
+        returned = scan(14.3)
+        test.assertEqual(returned['occupancy'][cell],-1)
+        test.assertTrue(returned[EXPIRY_LAYER][cell])
+        rehit = scan(14.4,hit)
+        test.assertEqual(rehit['occupancy'][cell],100)
+        test.assertFalse(rehit[EXPIRY_LAYER][cell])
+        test.assertTrue(scan(15.3)[EXPIRY_LAYER][cell])
+        scan(15.4,sensor_x=6.)
+        test.assertNotIn(EXPIRY_LAYER,scan(15.5,identity=('expiry',1)))
+
+
 def check_near_short_obstacles(test, *, device=None):
     from perception.environment.obstacle_memory import ObstacleMemory
 
@@ -173,6 +257,9 @@ class DynamicTests(unittest.TestCase):
     def test_long_obstacle_renews_then_expires_to_unknown(self):
         check_long_obstacle(self, 'cpu')
 
+    def test_obstacle_expiry_requires_post_cutoff_rays_in_the_current_collision_band(self):
+        check_obstacle_expiry_ray_evidence(self, 'cpu')
+
     def test_near_short_requires_measured_free_or_confirmed_person_without_existing_obstacle(self):
         check_near_short_obstacles(self)
 
@@ -211,7 +298,7 @@ class DynamicTests(unittest.TestCase):
                     obstacle_min_z=np.full(shape,np.nan),obstacle_max_z=np.full(shape,np.nan))
         no = np.zeros(shape,bool)
         projection=(no,np.full(shape,-np.inf),~no,np.full(shape,10.),no)
-        fresh_free=apply_obstacle_memory(layers,projection,1.)
+        fresh_free=apply_obstacle_memory(layers,projection,np.array([[False,True,True]]))
         np.testing.assert_array_equal(layers['occupancy'],[[-1,-1,0]])
         np.testing.assert_array_equal(layers[EXPIRY_LAYER],[[True,True,False]])
         np.testing.assert_array_equal(fresh_free,[[False,False,True]])

@@ -232,7 +232,7 @@ def _run(args, resources, handles):
     from perception.environment.layers import LocalEnvironmentMap
     from perception.environment.occupancy import OccupancyTree,VoxelBudgetExceeded
     from .environment import EnvironmentFault,LatestMapWorker
-    from perception.environment.scene import assemble_scene,people_observation
+    from perception.environment.scene import assemble_scene
     from perception.mapping_localization.context import pose_matrix
     from perception.mapping_localization.results import file_fingerprint
     from navigation.planning.inputs import load_config as planning_config
@@ -243,7 +243,7 @@ def _run(args, resources, handles):
     from navigation.control.shadow import DwaShadowController,load_config as shadow_config
     from navigation.planning.runtime import Worker
     from .safety import SafetyProcess,SafetyTelemetry
-    from .export import SceneExporter
+    from .export import SceneExporter,materialize_scene
     from .command import CommandInbox
     from .control import ControlLoop
     clock_domain='runtime_live' if args.live else 'runtime_bag'
@@ -261,7 +261,7 @@ def _run(args, resources, handles):
     journal = resources['journal'] = AsyncScanJournal(output/'environment/scans.sqlite',env_config['scan_recording'],dict(config=env_config,
         sensor_frame=det_cfg['ros']['localization_child_frame'],evidence='frontend_accepted_deskewed_points_not_feature_keyframes')) if record_scans else None
     display=None
-    exporter = resources['exporter'] = SceneExporter(output/'scenes',env_config['scene'],metrics=metrics,prior_directory=args.static_map,clock_domain=clock_domain) if args.record_views else None
+    exporter = resources['exporter'] = SceneExporter(output/'scenes',env_config['scene'],metrics=metrics,prior_directory=args.static_map) if args.record_views else None
     decision_recorder=None
     if args.record_decision_inputs:
         from .decision import DecisionRecorder
@@ -271,12 +271,14 @@ def _run(args, resources, handles):
     motion_document=yaml.safe_load(motion_path.read_text())
     motion_source=dict(path=str(motion_path),fingerprint=file_fingerprint(motion_path),
         profile=args.motion_profile or (motion_document.get('default_profile') if isinstance(motion_document,dict) else None))
-    planning=planning_config();motion=load_motion_config(motion_path,profile=args.motion_profile);geometry=VehicleGeometry.historical(ROOT/planning['geometry_reference'])
+    planning=planning_config();motion=load_motion_config(motion_path,profile=args.motion_profile)
     if args.vehicle_profile:
         from navigation.control.vehicle import load_vehicle_profile
         geometry,motion,_=load_vehicle_profile(args.vehicle_profile,motion,require_execution=args.execute)
+    else:
+        geometry=VehicleGeometry.historical(ROOT/planning['geometry_reference'])
     environment = resources['environment'] = LocalEnvironmentMap(
-        env_config,tree_factory=factory,lidar_from_base_xyz=geometry.lidar_from_base[:3,3])
+        env_config,tree_factory=factory,lidar_from_base_xyz=None if geometry.assumed else geometry.lidar_from_base[:3,3])
     planning['motion_constraints']={k:motion[k] for k in ('min_turning_radius_m','allow_reverse','allow_in_place_rotation')}
     planning['pose_search']['native_library']=str(ROOT/'outputs/runtime/build/planning/libsocial_nav_pose_search.so')
     motion.update(collision_backend='cuda',collision_library=str(ROOT/settings['collision_library']))
@@ -584,11 +586,12 @@ def _run(args, resources, handles):
                                 arrays.get('ray_origins'),arrays['deskewed'][:,4]):raise RuntimeError('Scan journal failed: '+str(journal.summary()))
                         next_env=stamp if not np.isfinite(next_env) else next_env
                         while next_env<=stamp+1e-6:next_env+=1/env_config['update_hz']
-                        if args.record_views and last_device is not None and stamp>=next_export-1e-6:
+                        if (exporter is not None and scene is not None and scene.record['stamp_ns']==row['stamp_ns']
+                                and stamp>=next_export-1e-6):
                             rgb=None if 'rgb' not in arrays else dict(pixels=arrays['rgb'].copy(),stamp_s=packet['rgb_stamp'],
                                 frame_id=packet['rgb_frame'],stamp_ns=packet['rgb_stamp_ns'],
                                 reference=dict(source='live' if args.live else 'bag',bag=None if bag is None else str(bag),stamp_s=packet['rgb_stamp']))
-                            exporter.submit(last_device,people,rgb=rgb,name=packet['observation_id'],stamp_ns=row['stamp_ns'])
+                            exporter.submit(last_device,scene,rgb=rgb,name=packet['observation_id'])
                             next_export=stamp+1/settings['scene_export_hz']
                     clock=(packet['source_clock_s'],packet['source_mono'])
                     current_scene=scene if scene is not None and scene.record['stamp_ns']==row['stamp_ns'] else None
@@ -623,9 +626,7 @@ def _run(args, resources, handles):
                 map_worker.flush();latest=map_worker.latest()
                 scene,last_device=(None,None) if latest is None else latest
             if last_device is not None:
-                final=last_device.materialize(consumer='final_review',metrics=metrics)
-                final_scene=assemble_scene(final,clock_domain=clock_domain,people=None if scene is None else people_observation(scene),
-                    stamp_ns=None if scene is None else scene.record.get('stamp_ns'),settings=env_config['scene'])
+                final_scene=materialize_scene(last_device,scene,consumer='final_review',metrics=metrics)
                 final_scene.save(output/'final_scene')
     except (Exception,KeyboardInterrupt) as error:
         failure=type(error).__name__+': '+str(error);raise

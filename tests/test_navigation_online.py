@@ -7,7 +7,7 @@ from navigation.planning.inputs import load_config
 from navigation.planning.motion import load_motion_config
 from navigation.planning.footprint import VehicleGeometry
 from navigation.planning.reference import ReferenceRuntime,load_config as reference_config
-from navigation.planning.online import PlanningBridge,goal_request
+from navigation.planning.online import PlanningBridge,goal_request,planning_scene
 from tests.navigation_fixtures import FakeWorker,scene_at
 from tests.navigation_fixtures import request
 
@@ -36,6 +36,89 @@ class OnlineTests(unittest.TestCase):
         self.assertEqual(self.bridge.scene.record['as_of'],10.)
         self.assertEqual(self.bridge.scene.record['people']['data']['stamp_s'],10.)
         self.assertNotEqual(scene.record['input_fingerprint'],self.bridge.scene.record['input_fingerprint'])
+
+    def test_reference_hits_use_the_same_causal_people_in_either_callback_order(self):
+        from tests.test_environment_navigation import observation,prior_asset
+        from tests.test_environment_scene import person
+        from tests.test_navigation_prediction import track
+        asset=prior_asset()
+        target=(25,25)
+        index=np.ravel_multi_index(target,(60,60))
+        settings=self.bridge.scene_settings
+        for echo in (False,True):
+            outcomes={}
+            for order in ('direct','people_first','grid_first','separate_steps'):
+                outcomes[order]=[]
+                with ReferenceRuntime(load_config(),self.bridge.motion,self.bridge.geometry,worker_factory=FakeWorker) as runtime:
+                    bridge=PlanningBridge(runtime,self.bridge.geometry,self.bridge.motion,settings,asset=asset,clock_domain='synthetic')
+                    for i in range(8):
+                        stamp=round(10.+i*.1,1)
+                        row=person(stamp)
+                        row.update(clock_domain='synthetic',localization_binding=dict(session_id='test',generation=0,frame_id='odom'))
+                        row['tracks']=[dict(track(2.55,2.55,stamp=stamp),state='observed')] if i<2 else []
+                        cell=np.zeros((60,60),np.int8);cell[target]=100
+                        grid=observation(cell,stamp=stamp)
+                        mask=np.zeros(cell.shape,bool);mask[target]=not echo or i==0
+                        grid.layers['current_obstacle_hits']=mask
+                        if order=='direct':
+                            runtime.observe(planning_scene(grid,clock_domain='synthetic',settings=settings,people=row),
+                                            asset,now=stamp)
+                        else:
+                            bridge.push_state(dict(self.bridge.rows[-1],stamp_s=stamp))
+                            if order=='people_first':bridge.push_people(row)
+                            bridge.push_grid(grid)
+                            if order=='separate_steps':
+                                last=runtime.obstacles.last
+                                old=dict(row,localization_binding=dict(row['localization_binding'],generation=1))
+                                bridge.push_people(old)
+                                bridge.step(stamp)
+                                self.assertEqual(runtime.obstacles.last,last)
+                                self.assertEqual(bridge.scene.geometry.layers['occupancy'][target],100)
+                            if order!='people_first':bridge.push_people(row)
+                            bridge.step(stamp)
+                            bridge.push_grid(grid)
+                            bridge.step(stamp)
+                        votes=runtime.obstacles.pending.get(index,((),))[0]
+                        outcomes[order].append((index in runtime.obstacles.blocked,votes))
+            self.assertEqual(outcomes['direct'][0],(False,(10.,)))
+            self.assertEqual(outcomes['direct'][2][0],not echo)
+            for order in ('people_first','grid_first','separate_steps'):
+                self.assertEqual(outcomes[order],outcomes['direct'])
+
+    def test_reference_join_releases_without_people_and_malformed_track_does_not_raise(self):
+        from tests.test_environment_navigation import observation,prior_asset
+        from tests.test_environment_scene import person
+        from tests.test_navigation_prediction import track
+        self.bridge.asset=prior_asset()
+        cell=np.zeros((60,60),np.int8);cell[25,25]=100
+        grid=observation(cell)
+        with patch('navigation.planning.online.time.monotonic',return_value=100.) as mono:
+            self.bridge.push_grid(grid)
+            self.bridge.step(10.)
+            self.assertIsNone(self.runtime.obstacles.last)
+            mono.return_value+=self.bridge.scene_settings['join_wait_s']+.01
+            self.bridge.step(10.)
+        self.assertEqual(self.runtime.obstacles.last,10.)
+        self.assertTrue(self.runtime.obstacles.blocked)
+        row=person(10.1)
+        row['localization_binding']=dict(session_id='test',generation=0,frame_id='odom')
+        row['tracks']=[dict(track(3.55,3.55,stamp=10.1),state='observed')]
+        row['tracks'][0].pop('last_observed_stamp_s')
+        target=(35,35)
+        cell[target]=100
+        grid=observation(cell,stamp=10.1)
+        grid.layers['current_obstacle_hits']=np.zeros(cell.shape,bool)
+        grid.layers['current_obstacle_hits'][target]=True
+        self.bridge.push_grid(grid)
+        self.bridge.push_people(row)
+        self.bridge.step(10.1)
+        self.assertEqual(self.runtime.obstacles.last,10.1)
+        self.assertEqual(self.bridge.scene.record['as_of'],10.1)
+        self.assertNotIn('last_observed_stamp_s',self.bridge.scene.record['people']['data']['tracks'][0])
+        index=np.ravel_multi_index(target,cell.shape)
+        self.assertEqual(self.runtime.obstacles.pending[index][0],(10.1,))
+        self.assertNotIn(index,self.runtime.obstacles.recent_people)
+        self.assertNotIn(index,self.runtime.obstacles.blocked)
 
     def poses(self,generation=0,health=0):
         for t in [9.7,9.8,9.9,10.]:

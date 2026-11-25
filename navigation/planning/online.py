@@ -7,7 +7,7 @@ import threading
 import time
 import numpy as np
 from perception.environment.context import fingerprint
-from perception.environment.scene import assemble_scene,snapshot_from_message
+from perception.environment.scene import assemble_scene,latest_past,local_identity,snapshot_from_message
 from .motion import estimate_motion
 from .continuity import goal_binding
 
@@ -19,6 +19,13 @@ def planning_scene(snapshot,*,clock_domain,settings,people=None):
     # assemble_scene has just bound these bytes; consumers verify at their own
     # acceptance boundary, rather than hashing all layers twice during assembly.
     return scene
+
+
+def people_for_grid(people,snapshot):
+    identity=local_identity(snapshot.metadata)
+    keys=('session_id','generation','frame_id')
+    return [row for row in people if isinstance(row.get('localization_binding'),dict)
+            and tuple(row['localization_binding'].get(key) for key in keys)==identity]
 
 
 def goal_request(value, *, allow_local_approach=False):
@@ -47,7 +54,9 @@ class PlanningBridge:
     def __init__(self,runtime,geometry,motion,scene_settings,*,asset=None,clock_domain):
         self.runtime=runtime;self.geometry=geometry;self.motion=motion;self.scene_settings=scene_settings
         self.asset=asset;self.clock_domain=clock_domain;self.lock=threading.Lock()
-        self.rows=deque(maxlen=256);self.commands=deque();self.pending=None;self.barrier=None
+        self.rows=deque(maxlen=256);self.commands=deque();self.barrier=None
+        self.pending=deque(maxlen=scene_settings['queue_size'])
+        self.reference_pending=deque()
         self.request=None;self.scene=None;self.last_submission=None;self.last_clock=None
         self.reason='waiting_for_goal';self.command_error=None
         self.people=deque(maxlen=64);self.people_changed=False;self.snapshot=None
@@ -65,12 +74,12 @@ class PlanningBridge:
                 old=self.rows[-1]
                 if (tuple(row[k] for k in ('session_id','generation','frame_id'))!=
                         tuple(old[k] for k in ('session_id','generation','frame_id')) or row['stamp_s']<old['stamp_s']):
-                    self.barrier='localization_reset';self.pending=None;self.rows.clear()
+                    self.barrier='localization_reset';self.pending.clear();self.rows.clear()
             if row['health']!=0:self.barrier=self.barrier or 'current_localization_invalid'
             self.rows.append(copy.deepcopy(row))
 
     def push_grid(self,message):
-        with self.lock:self.pending=message
+        with self.lock:self.pending.append((message,time.monotonic()))
 
     def push_command(self,kind,value):
         with self.lock:
@@ -82,15 +91,39 @@ class PlanningBridge:
         if self.scene is not None or self.runtime.latest is not None or reason in ('seek','localization_reset','command_queue_overflow'):
             self.runtime.invalidate(reason)
         self.scene=None;self.snapshot=None;self.scene_selection=None;self.last_submission=None;self.reason=reason
+        self.reference_pending.clear()
         if drop_goal:self.request=None
+
+    def _observe_reference(self,people,now):
+        # Keep raw geometry available immediately. Commit the persistent ledger
+        # only when the ordered people stream reaches the cutoff or the join expires.
+        mono=time.monotonic()
+        while self.reference_pending:
+            snapshot,arrived=self.reference_pending[0]
+            if local_identity(snapshot.metadata)!=local_identity(self.scene.record):
+                self.reference_pending.popleft()
+                continue
+            stamp=snapshot.metadata['stamp_s']
+            matched=people_for_grid(people,snapshot)
+            caught_up=any(row['stamp_s']>=stamp for row in matched)
+            full=len(self.reference_pending)>self.pending.maxlen
+            if not caught_up and not full and mono-arrived<self.scene_settings['join_wait_s']:
+                break
+            self.reference_pending.popleft()
+            source=latest_past(matched,stamp)
+            if self.scene_selection==(id(snapshot),fingerprint(source)):
+                scene=self.scene
+            else:
+                scene=planning_scene(snapshot,clock_domain=self.clock_domain,settings=self.scene_settings,people=source)
+            self.runtime.observe(scene,self.asset,now=now)
 
     def step(self,now):
         with self.lock:
             rows=list(self.rows);commands=list(self.commands);self.commands.clear()
-            pending=self.pending;self.pending=None;barrier=self.barrier;self.barrier=None
-            people=list(self.people);changed=self.people_changed;self.people_changed=False
+            pending=list(self.pending);self.pending.clear();barrier=self.barrier;self.barrier=None
+            people=list(self.people);people_changed=self.people_changed;self.people_changed=False
         if self.last_clock is not None and now<self.last_clock-1e-6:
-            barrier='seek';pending=None
+            barrier='seek';pending=[]
             with self.lock:self.rows.clear();self.people.clear()
         self.last_clock=now
         if barrier:
@@ -122,28 +155,34 @@ class PlanningBridge:
                 else:raise ValueError('Unknown command')
                 self.command_error=None
             except (ValueError,TypeError) as error:self.command_error=str(error)
-        if pending is not None or changed and self.snapshot is not None:
+        if pending or people_changed and self.snapshot is not None:
             try:
-                snapshot=snapshot_from_message(pending) if pending is not None else self.snapshot
-                past=[p for p in people if p['stamp_s']<=snapshot.metadata['stamp_s']]
-                source=max(past,key=lambda p:p['stamp_s']) if past else None
-                selection=(id(snapshot),fingerprint(source))
-                if selection!=self.scene_selection:
-                    scene=planning_scene(snapshot,clock_domain=self.clock_domain,settings=self.scene_settings,people=source)
-                    self.snapshot=snapshot;self.scene_selection=selection
-                    if self.scene is None or self.scene.record['input_fingerprint']!=scene.record['input_fingerprint']:
-                        self.scene=scene;self.last_submission=None
+                for message,arrived in pending:
+                    snapshot=snapshot_from_message(message)
+                    if self.asset is not None:
+                        self.reference_pending.append((snapshot,arrived))
+                    self.snapshot=snapshot
+                if self.snapshot is not None:
+                    source=latest_past(people_for_grid(people,self.snapshot),self.snapshot.metadata['stamp_s'])
+                    selection=(id(self.snapshot),fingerprint(source))
+                    if selection!=self.scene_selection or self.scene is None:
+                        scene=planning_scene(self.snapshot,clock_domain=self.clock_domain,settings=self.scene_settings,people=source)
+                        self.scene_selection=selection
+                        if self.scene is None or self.scene.record['input_fingerprint']!=scene.record['input_fingerprint']:
+                            self.scene=scene;self.last_submission=None
             except (ValueError,KeyError,TypeError) as error:self._invalidate('invalid_environment_grid: '+str(error))
         latest=rows[-1] if rows else None
         if self.scene is not None:
             record=self.scene.record
             reason=None
             if latest is None or latest['health']!=0:reason='current_localization_invalid'
-            elif [latest[k] for k in ('session_id','generation','frame_id')]!=[record[k] for k in ('session_id','generation','frame_id')]:
+            elif local_identity(latest)!=local_identity(record):
                 reason='localization_lifecycle_mismatch'
             elif not 0<=now-latest['stamp_s']<=self.motion['max_result_age_s']:reason='localization_future_or_stale'
             if reason:self._invalidate(reason)
-        self.runtime.observe(self.scene,self.asset,now=now)
+        if self.scene is not None:
+            try:self._observe_reference(people,now)
+            except (ValueError,KeyError,TypeError) as error:self._invalidate('invalid_environment_grid: '+str(error))
         if self.request is not None and self.scene is not None:
             key=(fingerprint(self.request),self.scene.record['input_fingerprint'])
             if key!=self.last_submission:
@@ -187,6 +226,8 @@ def run(args,planning,motion,geometry,settings):
     from perception.environment.storage import StaticEnvironmentMap
     from perception.mapping_localization.ros.context_node import state_row
     from .reference import ReferenceRuntime
+    if 'current_obstacle_hits' not in EnvironmentGrid.__slots__:
+        raise RuntimeError('Rebuild ROS environment messages for current obstacle hit evidence')
     rospy.init_node('social_nav_planning',disable_signals=False)
     clock='ros_sim_time' if rospy.get_param('/use_sim_time',False) else 'ros_time'
     asset=StaticEnvironmentMap(args.static_map) if args.static_map else None

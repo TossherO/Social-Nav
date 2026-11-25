@@ -34,7 +34,7 @@ class PeopleModel:
             self.origin=data['stamp_s'];self.source=data['input_fingerprint']
             if len(data['tracks'])>config['max_tracks']:raise ValueError('people_prediction_budget_exceeded')
             for track in data['tracks']:
-                last=track['last_observed_stamp_s']
+                last=track.get('last_observed_stamp_s')
                 if type(last) not in (int,float) or not np.isfinite(last):raise ValueError('invalid_person_support_time')
                 if last>self.origin:raise ValueError('future_person_support')
                 if self.as_of-last>config['max_track_age_s']:continue

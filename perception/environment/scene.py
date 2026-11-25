@@ -1,5 +1,5 @@
 """One causal observation envelope for geometry, RGB, people and optional prior."""
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import copy
 import hashlib
 
@@ -10,6 +10,8 @@ from perception.detection_tracking.inference.geometry import validate_transform
 from .context import fingerprint, layer_binding
 from .near_field import HISTORY_DTYPES,DYNAMIC_DTYPES,GROUND_DTYPES
 from .obstacle_memory import EXPIRY_LAYER
+
+GRID_EVIDENCE_DTYPES = {EXPIRY_LAYER: bool, 'current_obstacle_hits': bool}
 
 
 def latest_past(rows, stamp):
@@ -64,13 +66,45 @@ class SceneInputs:
     prior_geometry: object = None
     _navigation_checks: dict = field(default_factory=dict, compare=False, repr=False)
 
-    def verify(self):
+    def _verify_geometry_binding(self):
         record = self.record
         if fingerprint({k:v for k,v in record.items() if k != 'input_fingerprint'}) != record['input_fingerprint']:
             raise ValueError('Scene metadata changed after observation binding')
         binding = layer_binding(self.geometry)
         if binding != record['geometry']['layer_binding']:
             raise ValueError('Scene geometry changed after observation binding')
+        return binding
+
+    def with_additional_geometry_layers(self, layers):
+        """Bind additional read-only layers from the same source observation."""
+        self._verify_geometry_binding()
+        if self.geometry.layers.keys() & layers.keys():
+            raise ValueError('Cannot replace bound scene geometry layers')
+        shape = tuple(self.geometry.metadata['shape'])
+        if any(values.shape != shape or values.flags.writeable for values in layers.values()):
+            raise ValueError('Additional scene layers must match the grid and be read-only')
+        geometry = replace(self.geometry, layers={**self.geometry.layers, **layers}, _binding_cache=None)
+        record = copy.deepcopy(self.record)
+        record.pop('input_fingerprint')
+        record['geometry']['layer_binding'] = layer_binding(geometry)
+        record['input_fingerprint'] = fingerprint(record)
+        return SceneInputs(record, geometry, self.rgb, self.prior_geometry)
+
+    def with_rgb(self, rgb, settings):
+        """Add the optional source image without rebuilding other scene inputs."""
+        self._verify_geometry_binding()
+        record = copy.deepcopy(self.record)
+        record.pop('input_fingerprint')
+        record['rgb'], pixels = _assemble_rgb(rgb, record['as_of'], record.get('stamp_ns'), settings)
+        if record['localization']['status'] == 'valid':
+            complete = record['rgb']['status'] == record['people']['status'] == 'valid'
+            record['health'] = 'valid' if complete else 'degraded'
+        record['input_fingerprint'] = fingerprint(record)
+        return SceneInputs(record, self.geometry, pixels, self.prior_geometry)
+
+    def verify(self):
+        record = self.record
+        binding = self._verify_geometry_binding()
         from .navigation import navigation_geometry
         navigation_geometry(self, _layer_binding=binding)
         prior = record.get('prior_geometry',{})
@@ -118,6 +152,26 @@ class SceneInputs:
                 stream.write(data.tobytes())
 
 
+def _assemble_rgb(rgb, stamp, stamp_ns, settings):
+    if rgb is None:
+        return unavailable('no_rgb_at_or_before_cutoff'), None
+    age = rgb_age_s(stamp, float(rgb['stamp_s']), stamp_ns, rgb.get('stamp_ns'))
+    if not np.isfinite(age) or age < 0 or age > settings['max_rgb_age_s']:
+        return unavailable('future_or_stale_rgb'), None
+    values = np.asarray(rgb['pixels'])
+    if values.dtype != np.uint8 or values.ndim != 3 or values.shape[2] != 3 or not values.size:
+        raise ValueError('Scene RGB must be a decoded uint8 RGB image')
+    if not isinstance(rgb.get('reference'),dict) or not rgb['reference']:
+        raise ValueError('Scene RGB needs an explicit observation source')
+    pixels = values.copy();pixels.flags.writeable = False
+    status = dict(status='valid',stamp_s=rgb['stamp_s'],age_s=age,frame_id=rgb['frame_id'],
+        shape=list(values.shape),sha256=hashlib.sha256(pixels.tobytes()).hexdigest(),
+        reference=copy.deepcopy(rgb['reference']))
+    if rgb.get('stamp_ns') is not None:
+        status['stamp_ns'] = rgb['stamp_ns']
+    return status, pixels
+
+
 def assemble_scene(snapshot, *, clock_domain, rgb=None, people=None, settings, stamp_ns=None):
     """Cutoff is the grid's acquisition time, not callback time. Never extrapolate people."""
     meta = snapshot.metadata
@@ -134,23 +188,7 @@ def assemble_scene(snapshot, *, clock_domain, rgb=None, people=None, settings, s
         geometry['near_field_memory']=copy.deepcopy(meta['near_field_memory'])
     if 'navigation_fusion' in meta:
         geometry['navigation_fusion']=copy.deepcopy(meta['navigation_fusion'])
-    rgb_status, pixels = unavailable('no_rgb_at_or_before_cutoff'),None
-    if rgb is not None:
-        age = rgb_age_s(stamp,float(rgb['stamp_s']),stamp_ns,rgb.get('stamp_ns'))
-        if not np.isfinite(age) or age < 0 or age > settings['max_rgb_age_s']:
-            rgb_status = unavailable('future_or_stale_rgb')
-        else:
-            values = np.asarray(rgb['pixels'])
-            if values.dtype != np.uint8 or values.ndim != 3 or values.shape[2] != 3 or not values.size:
-                raise ValueError('Scene RGB must be a decoded uint8 RGB image')
-            if not isinstance(rgb.get('reference'),dict) or not rgb['reference']:
-                raise ValueError('Scene RGB needs an explicit observation source')
-            pixels = values.copy();pixels.flags.writeable = False
-            rgb_status = dict(status='valid',stamp_s=rgb['stamp_s'],age_s=age,frame_id=rgb['frame_id'],
-                shape=list(values.shape),sha256=hashlib.sha256(pixels.tobytes()).hexdigest(),
-                reference=copy.deepcopy(rgb['reference']))
-            if rgb.get('stamp_ns') is not None:
-                rgb_status['stamp_ns'] = rgb['stamp_ns']
+    rgb_status, pixels = _assemble_rgb(rgb, stamp, stamp_ns, settings)
     people_status = unavailable('no_people_at_or_before_cutoff')
     if people is not None:
         age = stamp-float(people['stamp_s'])
@@ -207,7 +245,7 @@ def assign_grid_layers(message, layers):
     """Both regular genpy and numpy_msg accept these optional empty array values."""
     from .navigation import NAVIGATION_DTYPES
     for name,dtype in dict(HISTORY_DTYPES,**DYNAMIC_DTYPES,**GROUND_DTYPES,**NAVIGATION_DTYPES,
-                           **{EXPIRY_LAYER:bool}).items():
+                           **GRID_EVIDENCE_DTYPES).items():
         if hasattr(message,name):setattr(message,name,b'' if dtype in (bool,np.uint8) else np.empty(0,dtype))
     for name,values in layers.items():
         if not hasattr(message,name):raise ValueError('Grid message cannot preserve layer '+name)
@@ -239,7 +277,7 @@ def snapshot_from_message(message):
         array.flags.writeable = False
         layers[name] = array
     from .navigation import NAVIGATION_DTYPES
-    extra=dict(HISTORY_DTYPES,**DYNAMIC_DTYPES,**GROUND_DTYPES,**NAVIGATION_DTYPES,**{EXPIRY_LAYER:bool})
+    extra=dict(HISTORY_DTYPES,**DYNAMIC_DTYPES,**GROUND_DTYPES,**NAVIGATION_DTYPES,**GRID_EVIDENCE_DTYPES)
     for name,dtype in extra.items():
         values=getattr(message,name,())
         if not len(values):continue  # Older bags keep their original message definition.

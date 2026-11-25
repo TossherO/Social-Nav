@@ -2,14 +2,16 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 import numpy as np
 from navigation.planning.footprint import VehicleGeometry
 from navigation.planning.inputs import load_config
 from navigation.planning.motion import load_motion_config
 from navigation.planning.reference import ReferenceRuntime
 from navigation.planning.runtime import ReferenceQuery, Worker
-from perception.environment.layers import load_config as environment_config
+from perception.environment.layers import GridSnapshot, load_config as environment_config
 from perception.environment.scene import assemble_scene
+from runtime.control import ControlLoop
 from tests.navigation_fixtures import FakeWorker, asset, bundle, request
 
 
@@ -21,6 +23,102 @@ def reference_fixture():
         clock_domain='synthetic',local_identity=['test',0,'odom'])
     return SimpleNamespace(cfg=cfg,motion=load_motion_config(),geometry=geometry,scene=bundle(),
         req=request('local',goal=[4.,2.,0.],goal_behavior='stop'),feedback=feedback)
+
+
+class SearchSceneTests(unittest.TestCase):
+    def test_fused_scene_reuses_host_evidence_with_or_without_expiry(self):
+        from perception.environment.free_memory import ConfirmedFreeMemory, remembered_free
+        from perception.environment.navigation import safety_capsule
+        from perception.environment.obstacle_memory import EXPIRY_LAYER
+        from perception.environment.support import NavigationSupport
+        from tests.test_environment_navigation import observation, prior_asset
+        from tests.test_environment_support import points
+
+        config = environment_config()
+        asset = prior_asset()
+        reference_fields = ('coverage', 'ground_support', 'last_observed', 'near_field_free')
+        for expiry, person_background in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(expiry=expiry, person_background=person_background):
+                support = NavigationSupport(config)
+                memory = ConfirmedFreeMemory()
+                for stamp, value in ((10., 0), (10.1, -1)):
+                    raw = observation(np.full((60, 60), value, np.int8), stamp=stamp)
+                    if expiry and value == -1:
+                        raw.layers[EXPIRY_LAYER] = np.zeros((60, 60), bool)
+                        raw.layers[EXPIRY_LAYER][25, 25] = True
+                    if person_background:
+                        raw.layers['person_background_free'] = np.zeros((60, 60), bool)
+                    fused = support.apply(raw, asset, observation=points(raw))
+                    capsule = safety_capsule(fused, extra_fields=reference_fields)
+                    for layer in capsule.layers.values():
+                        layer.flags.writeable = False
+                    host = memory.update(capsule, asset)
+                scene = assemble_scene(host, clock_domain='synthetic', settings=config['scene'], stamp_ns=10100000000)
+                device = SimpleNamespace(metadata=fused.metadata, _layers=fused.layers, materialize=Mock())
+                search = ControlLoop._search_scene(SimpleNamespace(device=device), scene)
+                self.assertIs(search.verify(), scene)
+                device.materialize.assert_not_called()
+                dates = remembered_free(search, asset=asset)
+                self.assertEqual(np.count_nonzero(np.isfinite(dates)), 3600 - expiry)
+                np.testing.assert_array_equal(np.unique(dates[np.isfinite(dates)]), [10.])
+                self.assertEqual(search.record['stamp_ns'], 10100000000)
+                self.assertEqual(search.record['as_of'], 10.1)
+                self.assertEqual(EXPIRY_LAYER in search.geometry.layers, expiry)
+                self.assertTrue(all(not layer.flags.writeable for layer in search.geometry.layers.values()))
+
+                partial = GridSnapshot(host.metadata, {k:v for k,v in host.layers.items() if k != 'coverage'})
+                bound = assemble_scene(partial, clock_domain='synthetic', settings=config['scene'], stamp_ns=10100000000)
+                device.materialize.return_value = GridSnapshot(fused.metadata, {'coverage': fused.layers['coverage']})
+                extended = ControlLoop._search_scene(SimpleNamespace(device=device, metrics=None), bound).verify()
+                device.materialize.assert_called_once_with(consumer='reference_search', fields=['coverage'], metrics=None)
+                self.assertEqual(extended.record, search.record)
+                self.assertEqual(extended.geometry.layers.keys(), host.layers.keys())
+
+    def test_unfused_scene_downloads_only_missing_search_fields(self):
+        from perception.environment.obstacle_memory import EXPIRY_LAYER
+        from tests.test_environment_navigation import observation
+        from tests.test_environment_scene import person, rgb
+
+        raw = observation()
+        raw.layers.update(person_background_free=np.zeros((60, 60), bool),
+                          current_obstacle_hits=np.zeros((60, 60), bool),
+                          **{EXPIRY_LAYER: np.zeros((60, 60), bool)})
+        for layer in raw.layers.values():
+            layer.flags.writeable = False
+        fields = ('occupancy', 'person_background_free', EXPIRY_LAYER, 'last_observed', 'near_field_free',
+                  'current_obstacle_hits')
+        host = GridSnapshot(raw.metadata, {name: raw.layers[name] for name in fields})
+        detection = dict(person(), localization_binding=dict(session_id='test', generation=0, frame_id='odom'))
+        scene = assemble_scene(host, clock_domain='synthetic', settings=environment_config()['scene'],
+                               stamp_ns=10000000000, people=detection, rgb=rgb())
+        extra = {name: raw.layers[name] for name in ('ground_support', 'coverage')}
+        materialize = Mock(return_value=GridSnapshot(raw.metadata, extra))
+        device = SimpleNamespace(metadata=dict(raw.metadata), _layers=raw.layers, materialize=materialize)
+        loop = SimpleNamespace(device=device, metrics=None)
+        search = ControlLoop._search_scene(loop, scene).verify()
+        materialize.assert_called_once_with(consumer='reference_search', fields=list(extra), metrics=None)
+        self.assertEqual(search.record['health'], 'valid')
+        self.assertEqual(search.record['as_of'], scene.record['as_of'])
+        self.assertEqual(search.record['stamp_ns'], scene.record['stamp_ns'])
+        self.assertEqual(search.record['clock_domain'], scene.record['clock_domain'])
+        self.assertEqual(search.record['people'], scene.record['people'])
+        self.assertIs(search.rgb, scene.rgb)
+        self.assertNotEqual(search.record['input_fingerprint'], scene.record['input_fingerprint'])
+        for name in fields:
+            self.assertIs(search.geometry.layers[name], host.layers[name])
+        self.assertTrue(all(not layer.flags.writeable for layer in search.geometry.layers.values()))
+        self.assertIs(ControlLoop._search_scene(loop, search), search)
+        self.assertEqual(materialize.call_count, 1)
+        for name, value in (('stamp_s', 11.), ('generation', 1)):
+            with self.subTest(name=name):
+                device.metadata = dict(raw.metadata, **{name: value})
+                with self.assertRaisesRegex(ValueError, 'Reference/device observation mismatch'):
+                    ControlLoop._search_scene(loop, scene)
+        self.assertEqual(materialize.call_count, 1)
+        device.metadata = dict(raw.metadata)
+        scene.record['stamp_ns'] += 1
+        with self.assertRaisesRegex(ValueError, 'Scene metadata changed after observation binding'):
+            ControlLoop._search_scene(loop, scene)
 
 
 class SharedReferenceTests(unittest.TestCase):

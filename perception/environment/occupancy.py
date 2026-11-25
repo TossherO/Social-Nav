@@ -153,6 +153,34 @@ class OccupancyTree:
             raise RuntimeError(self.lib.sn_occupancy_error().decode())
         return votes
 
+    def free_ray_columns(self, pending, cutoff, floor, support, origin, config, *, metrics=None):
+        """Check the current collision band against actual post-cutoff ray misses."""
+        confirmed = np.zeros(floor.shape, bool)
+        y,x = np.nonzero(pending & support)
+        if not len(x):
+            return confirmed
+        from .geometry import voxel_height_band
+        resolution = config['resolution']
+        first,count = voxel_height_band(floor[y,x], resolution, config['min_obstacle_height_m'],
+                                       config['max_height_m'])
+        origin_x,origin_y = np.rint(origin/resolution).astype(np.int64)
+        keys = np.column_stack((x+origin_x,y+origin_y,first,count)).astype(np.int32)
+        deadline = cutoff[y,x]
+        result = np.empty(len(x), np.uint8)
+        method = getattr(self.lib,'sn_occupancy_free_ray_columns',None)
+        if method is None:
+            raise RuntimeError('Rebuild the environment library for post-expiry ray evidence')
+        i32,fp64,u8 = C.POINTER(C.c_int32),C.POINTER(C.c_double),C.POINTER(C.c_uint8)
+        method.argtypes = [C.c_void_p,i32,fp64,C.c_int,C.c_double,u8]
+        if method(self.ptr,keys.ctypes.data_as(i32),deadline.ctypes.data_as(fp64),len(x),
+                  config['free_probability'],result.ctypes.data_as(u8))<0:
+            raise RuntimeError(self.lib.sn_occupancy_error().decode())
+        confirmed[y,x] = result
+        if metrics is not None and self.backend=='cuda':
+            metrics.transfer('h2d',keys.nbytes+deadline.nbytes,'environment_expired_obstacle_columns')
+            metrics.transfer('d2h',result.nbytes,'environment_free_ray_columns')
+        return confirmed
+
     def project(self, floor, support, origin, config, stamp, *, endpoints, view_metadata=None,
                 near_field=None, transient_mask=None, device=None, metrics=None,ground_conflict=None,
                 obstacle_projection=None):

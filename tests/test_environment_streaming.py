@@ -81,6 +81,69 @@ class StreamingTests(unittest.TestCase):
         plain.serialize(before);vectorized.serialize(after)
         self.assertEqual(before.getvalue(),after.getvalue())
 
+    def test_ros_environment_publishes_only_current_obstacle_endpoint_hits(self):
+        import io
+        from unittest.mock import Mock,patch
+        try:
+            import rospy
+            from social_nav_environment.msg import EnvironmentGrid
+            from social_nav_localization.msg import LocalizationState
+        except ImportError:
+            self.skipTest('System ROS and generated environment messages are required')
+        from perception.environment.ros.node import EnvironmentNode
+        from perception.environment.scene import snapshot_from_message
+        from perception.visualization.scans import pointcloud_message
+        cfg=load_config()
+        cfg['window_m']=4.
+        cfg['compute']['backend']='cpu'
+        cfg['dynamic']['enabled']=cfg['near_field']['enabled']=False
+        ros=Mock(Time=rospy.Time)
+        ros.get_param.side_effect=lambda key,default:default
+        ros.Publisher.side_effect=lambda *a,**k:Mock(get_num_connections=lambda:0)
+        with patch('perception.environment.ros.node.load_config',return_value=cfg), \
+                patch('perception.environment.ros.node.threading.Thread'):
+            node=EnvironmentNode(ros)
+        self.addCleanup(node.engine.close)
+        node.engine.ground_conflict_view=None
+        ground=np.zeros((40,40),np.float32)
+        support=np.ones(ground.shape,bool)
+        pose=LocalizationState()
+        pose.header.frame_id='odom';pose.child_frame_id='rslidar';pose.session_id='local'
+        pose.pose.orientation.w=1.
+        obstacle=[.55,.05,.5]
+        for stamp,points in ((10.,[obstacle]),(10.2,[obstacle]),(10.4,[obstacle]),(10.6,[[.55,.05,0.]])):
+            cloud=pointcloud_message(points,'rslidar',stamp)
+            pose.header.stamp=cloud.header.stamp
+            with patch.object(node.engine,'_plane_ground',return_value=(ground,support,dict(status='synthetic'))), \
+                    patch.object(rospy.Time,'now',return_value=cloud.header.stamp):
+                node.process(cloud.header.stamp.to_nsec(),cloud,pose,None,{})
+            self.assertEqual(node.counts['geometry_errors'],0,node.status)
+            message=node.grid_pub.publish.call_args.args[0]
+            stream=io.BytesIO();message.serialize(stream)
+            dec=snapshot_from_message(EnvironmentGrid().deserialize(stream.getvalue()))
+            self.assertEqual(dec.metadata['stamp_s'],cloud.header.stamp.to_sec())
+            self.assertEqual(dec.layers['occupancy'][20,25],100)
+            self.assertEqual(int(dec.layers['current_obstacle_hits'].sum()),int(stamp<10.6))
+            self.assertEqual(dec.layers['current_obstacle_hits'][20,25],stamp<10.6)
+        pose.health=LocalizationState.INVALID
+        pose.header.stamp=rospy.Time.from_sec(10.8)
+        node.process(pose.header.stamp.to_nsec(),None,pose,None,{})
+        message=node.grid_pub.publish.call_args.args[0]
+        stream=io.BytesIO();message.serialize(stream)
+        dec=snapshot_from_message(EnvironmentGrid().deserialize(stream.getvalue()))
+        self.assertNotIn('current_obstacle_hits',dec.layers)
+
+    def test_host_obstacle_hits_cannot_be_requested_on_a_device_snapshot(self):
+        from perception.environment.layers import LocalEnvironmentMap
+        cfg=load_config()
+        cfg['compute']['backend']='cpu'
+        engine=LocalEnvironmentMap(cfg)
+        self.addCleanup(engine.close)
+        with self.assertRaisesRegex(ValueError,'requires a host snapshot'):
+            engine.update(np.empty((0,3)),np.eye(4),10.,('local',0),device=object(),
+                          include_host_obstacle_hits=True)
+        self.assertIsNone(engine.last_stamp)
+
     def test_world_voxel_band_alignment_and_epoch_observation_time(self):
         config=load_config(); config.update(resolution=.15)
         floor=np.zeros((3,3));support=np.ones((3,3),bool)

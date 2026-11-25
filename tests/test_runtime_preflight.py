@@ -126,6 +126,47 @@ class TrialConfigTests(unittest.TestCase):
 
 
 class PreflightTests(unittest.TestCase):
+    def test_preflight_rejects_missing_environment_kernel_before_use(self):
+        symbols = ('sn_occupancy_new_cuda', 'sn_occupancy_suspend_free_history', 'sn_occupancy_local_ground_conflicts',
+                   'sn_navigation_support_with_ground_conflicts', 'sn_occupancy_uncertain_person_hits',
+                   'sn_occupancy_refresh_view_distances', 'sn_occupancy_free_ray_columns')
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            library = root/'libenvironment.so'
+            config = root/'runtime.yaml'
+            config.write_text(yaml.safe_dump({'environment_library': str(library)}))
+            real_probe = preflight.probe
+
+            def probe(python, code, payload=None, **kwargs):
+                if isinstance(payload, list) and payload[0] == str(library):
+                    return real_probe(python, code, payload)
+                return 'outside this test'
+
+            with patch.object(preflight, 'probe', side_effect=probe), patch.object(preflight.shutil, 'which', return_value=None):
+                for missing in symbols[-3:]:
+                    with self.subTest(missing=missing):
+                        source = '\n'.join('void '+name+'(void) {}' for name in symbols if name != missing)
+                        subprocess.run(['gcc', '-x', 'c', '-', '-shared', '-fPIC', '-o', str(library)],
+                                       input=source, text=True, check=True)
+                        report = preflight.inspect(root/'absent.yaml', runtime_path=config)
+                        check = next(c for c in report['checks'] if c['name'] == 'library_abi:'+library.name)
+                        self.assertEqual(check['status'], 'error')
+                        self.assertIn(missing, check['detail'])
+
+    def test_ros_schema_check_identifies_missing_generated_fields(self):
+        try:
+            from genmsg import MsgContext, msg_loader
+        except ImportError:
+            self.skipTest('ROS genmsg unavailable')
+        spec = msg_loader.load_msg_from_file(MsgContext.create_default(),
+            str(preflight.ROOT/'perception/environment/ros/msg/EnvironmentGrid.msg'), 'social_nav_environment/EnvironmentGrid')
+        for missing in ('obstacle_expiry_unknown', 'current_obstacle_hits'):
+            with self.subTest(missing=missing):
+                old_fields = [(name, kind) for name, kind in zip(spec.names, spec.types) if name != missing]
+                names, types = zip(*old_fields)
+                with self.assertRaisesRegex(RuntimeError, missing):
+                    preflight.verify_grid_message(SimpleNamespace(__slots__=names, _slot_types=types))
+
     def test_interactive_profile_precedence_does_not_apply_to_custom_flat_files(self):
         from runtime.interactive import motion_selection
         config=dict(motion_config='navigation/planning/configs/motion.yaml',motion_profile='trial')

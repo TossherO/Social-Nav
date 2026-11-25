@@ -53,6 +53,8 @@ class EnvironmentNode:
         from social_nav_environment.srv import QueryEnvironment
         from std_srvs.srv import Trigger
         from rospy.numpy_msg import numpy_msg
+        if 'current_obstacle_hits' not in EnvironmentGrid.__slots__:
+            raise RuntimeError('Rebuild ROS environment messages for current obstacle hit evidence')
         self.rospy = rospy
         self.GridMessage, self.OccupancyMessage = numpy_msg(EnvironmentGrid),numpy_msg(OccupancyGrid)
         self.config = load_config(rospy.get_param('~config', None))
@@ -232,7 +234,7 @@ class EnvironmentNode:
                 duration = float(np.ptp(fields['curvature']))/1000
             snapshot = self.engine.update(points,matrix,pose.header.stamp.to_sec(),(pose.session_id,pose.generation),
                 frame=pose.header.frame_id,association=association,scan_duration=duration,ray_origins=origins,
-                people=people,clock_domain=self.clock)
+                people=people,clock_domain=self.clock,include_host_obstacle_hits=True)
             snapshot.metadata['stamp_ns'] = stamp
             snapshot.metadata.update(localization_source=pose.source,sensor_frame=pose.child_frame_id)
             self.latest = snapshot
@@ -279,6 +281,8 @@ class EnvironmentNode:
             return
         layers = {}
         for key,values in self.latest.layers.items():
+            if key == 'current_obstacle_hits':
+                continue
             fill = -1 if key == 'occupancy' else False if values.dtype == bool else np.nan
             layers[key] = np.full_like(values,fill)
         meta = dict(self.latest.metadata,stamp_s=pose.header.stamp.to_sec(),
