@@ -98,11 +98,12 @@ class PeopleModel:
         return centre,radius
 
     def navigation_grid(self,scene,*,include_confirmed_free=False):
-        """A separate collision view; the bound perception map stays unchanged.
+        """Build the collision grid used alongside timed person checks.
 
-        Only exclusive person hits over previously certified free background
-        may be represented by time-dependent people instead of frozen cells.
-        Missing/unknown motion or mismatched mask sources retain raw geometry.
+        Matched person circles use their track motion when known and keep
+        their current centre otherwise. Unmatched circles stay in the grid.
+        The older mask format restores background cells only when the mask
+        source matches and all selected tracks have known motion.
         """
         if self._navigation_grid is not None:return self._navigation_grid
         from perception.environment.context import layer_binding

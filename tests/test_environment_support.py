@@ -15,6 +15,45 @@ def points(raw,xyz=(),moving=()):
                 endpoints=np.asarray(xyz,np.float64).reshape(-1,3),transient_mask=np.asarray(moving,np.uint8))
 
 
+def check_measured_clear_and_fresh_hits(test, backend):
+    if backend=='cuda':
+        import torch
+        from perception.environment.device import DeviceGridSnapshot
+        if not torch.cuda.is_available():test.skipTest('CUDA unavailable')
+    prior=prior_asset()
+    for moving in (None,0,1):
+        with test.subTest(backend=backend, fresh_hit=moving):
+            support=NavigationSupport(load_config())
+            def apply(raw, observation):
+                if backend=='cuda':
+                    raw=DeviceGridSnapshot.seal(raw.metadata,
+                        {key:torch.from_numpy(value).to('cuda:0') for key,value in raw.layers.items()})
+                result=support.apply(raw,prior,observation=observation)
+                return result if backend=='cpu' else finalize(result.materialize(consumer='support_test'))
+
+            cell=(20,20)
+            def state(result):
+                return tuple(result.layers[name][cell] for name in
+                    ('navigation_occupancy','navigation_source','navigation_source_stamp'))
+
+            initial=observation(stamp=10.)
+            test.assertEqual(state(apply(initial,points(initial,[[2.05,2.05,-.3]],[0]))),(100,10,10.))
+            current=observation(stamp=10.1)
+            current.layers['occupancy'][cell]=0
+            # 7 cm above the raw cell ground and 13 cm above the local plane.
+            current.metadata['ground_tracking']['plane_world']=[0.,0.,-.91]
+            hit=points(current,[[2.05,2.05,-.78]],[moving]) if moving is not None else points(current)
+            hit['cleared_obstacle_cells']=np.zeros(current.layers['occupancy'].shape,bool)
+            hit['cleared_obstacle_cells'][cell]=True
+            test.assertEqual(state(apply(current,hit)),
+                             (0,1,10.1) if moving is None else (100,10,10.1))
+
+            later=observation(stamp=10.4)
+            later.layers['occupancy'][cell]=-1
+            test.assertEqual(state(apply(later,points(later))),
+                             (100,10,10.1) if moving==0 else (0,3,1.))
+
+
 class SupportTests(unittest.TestCase):
     def setUp(self):
         self.config=load_config();self.support=NavigationSupport(self.config);self.prior=prior_asset()
@@ -112,6 +151,9 @@ class SupportTests(unittest.TestCase):
         self.assertEqual(self.apply(self.raw(12.3)).layers['navigation_occupancy'][20,20],100)
         self.assertEqual(self.apply(self.raw(12.5)).layers['navigation_occupancy'][20,20],0)
 
+    def test_current_measured_clear_preserves_only_fresh_hits(self):
+        check_measured_clear_and_fresh_hits(self,'cpu')
+
     def test_raw_occupied_always_wins_and_reset_drops_endpoint_history(self):
         raw=self.raw();raw.layers['occupancy'][20,20]=100
         result=self.apply(raw);self.assertEqual(result.layers['navigation_source'][20,20],2)
@@ -149,6 +191,9 @@ class SupportTests(unittest.TestCase):
 
 
 class SupportCudaTests(unittest.TestCase):
+    def test_current_measured_clear_preserves_only_fresh_hits(self):
+        check_measured_clear_and_fresh_hits(self,'cuda')
+
     def test_native_integer_columns_and_ordinary_hit_survive_later_person(self):
         import torch
         from perception.environment.occupancy import OccupancyTree
@@ -197,6 +242,10 @@ class SupportCudaTests(unittest.TestCase):
                 raw.layers[EXPIRY_LAYER][22,26]=True
                 xyz=[[2.05,2.05,-.3]] if j<2 else []
                 obs=points(raw,xyz,[j] if xyz else [])
+                if j==2:
+                    raw.layers['occupancy'][20,18]=0
+                    obs['cleared_obstacle_cells']=np.zeros(raw.layers['occupancy'].shape,bool)
+                    obs['cleared_obstacle_cells'][20,18]=True
                 expected=host.apply(raw,prior,observation=obs)
                 with torch.cuda.stream(stream):
                     device=DeviceGridSnapshot.seal(raw.metadata,{k:torch.from_numpy(v).to('cuda:0') for k,v in raw.layers.items()})

@@ -13,6 +13,10 @@ UNKNOWN_COLOR = 0x707885
 ESTIMATED_COLOR = 0x72A0B7
 LOCAL_FREE_COLOR = 0x72C8C3
 LOCAL_OCCUPIED_COLOR = 0xF47B63
+LOCAL_UNKNOWN_COLOR = 0xBA9BE5
+LOCAL_SURFACE_OFFSET_M = .015
+STATIC_SURFACE_OFFSET_M = -.015
+DISPLAY_LINE_CLEARANCE_M = .04
 
 
 class DisplayGrids:
@@ -24,7 +28,8 @@ class DisplayGrids:
     def remember_host(self,source,host):
         """The map producer supplies the immutable host fields of this exact device snapshot."""
         if host.metadata['snapshot_id']!=source.metadata['snapshot_id']:return
-        fields=('occupancy','ground_z','ground_support','navigation_occupancy','navigation_source')
+        fields=('occupancy','ground_z','ground_support','navigation_occupancy','navigation_source',
+                'observed','obstacle_expiry_unknown','ground_conflict')
         layers={name:host.layers[name] for name in fields if name in host.layers and not host.layers[name].flags.writeable}
         # One producer replaces the tuple. The display worker reads one consistent pair of entries.
         self.host_layers=((source.owner,layers),)+self.host_layers[:1]
@@ -37,7 +42,8 @@ class DisplayGrids:
         key=getattr(source,'owner',source.metadata['snapshot_id'])
         raw,views=self.cache.get(key,(None,{}))
         if ground:
-            fields=('occupancy','ground_z','ground_support','navigation_occupancy','navigation_source')
+            fields=('occupancy','ground_z','ground_support','navigation_occupancy','navigation_source',
+                    'observed','obstacle_expiry_unknown','ground_conflict')
         else:
             fields=('occupancy','navigation_occupancy') if navigation else ('occupancy',)
         missing=[name for name in fields if name in source._layers and (raw is None or name not in raw.layers)]
@@ -131,8 +137,12 @@ def map_from_local_pose(row):
 
 
 class DisplaySurface:
-    def __init__(self,grid,row,*,offset=.03,mode='ground',plane_radius=1.5,max_age=.5):
+    def __init__(self,grid,row,*,offset=.03,mode='ground',plane_radius=1.5,max_age=.5,terrain=None):
         self.grid=None;self.offset=offset;self.mode=mode;self.plane_radius=plane_radius
+        self.terrain=terrain;self.map_transform=None;self.plane=None;self.ground_layers=None
+        if (mode=='ground' and terrain is not None and terrain.static is not None and row.get('has_map_pose')
+                and row.get('map_frame')==terrain.static.metadata['frame_id']):
+            self.map_transform=map_from_local_pose(row)
         self.resolution=.1
         if grid is not None:
             meta=grid.metadata
@@ -155,6 +165,45 @@ class DisplaySurface:
             near=(source==0)&(np.linalg.norm(xy-center,axis=1)<=self.plane_radius)
             z[near]=xy[near]@plane[:2]+plane[2]+self.offset;source[near]=2
         return z,source
+
+    def above(self, points, clearance=DISPLAY_LINE_CLEARANCE_M):
+        """Lift display-only XYZ over the same local and static surfaces drawn by RViz."""
+        result=np.array(points,dtype=float,copy=True).reshape(-1,3)
+        if self.mode!='ground' or not len(result):
+            return result
+        indices=np.flatnonzero(np.isfinite(result).all(axis=1))
+        if not len(indices):
+            return result
+        xy=result[indices,:2]
+        if self.grid is not None:
+            grid=self.grid
+            if self.ground_layers is None:
+                self.ground_layers=_ground_layers(grid)
+            ground,support,fitted=self.ground_layers
+            ij=np.floor((xy-grid.metadata['origin_xy'])/grid.metadata['resolution']).astype(int)
+            within=np.flatnonzero(((ij>=0)&(ij<np.asarray(ground.shape[::-1]))).all(axis=1))
+            x,y=ij[within].T
+            take=(np.ones(len(within),bool) if 'navigation_fusion' in grid.metadata
+                  else _local_visible(grid.layers,y,x))
+            rows=within[take];x,y=ij[rows].T
+            floor=ground[y,x]
+            missing=~np.isfinite(floor)|~(support[y,x]|fitted[y,x])
+            if missing.any():
+                if self.plane is None:
+                    self.plane=_ground_plane(grid,ground,(support|fitted)&np.isfinite(ground))
+                floor[missing]=xy[rows[missing]]@self.plane[:2]+self.plane[2]
+            points_in_grid=indices[rows]
+            result[points_in_grid,2]=np.maximum(result[points_in_grid,2],floor+LOCAL_SURFACE_OFFSET_M+clearance)
+        transform=self.map_transform
+        if transform is not None and transform[2,2]>.9:
+            mapped=result[indices]@transform[:3,:3].T+transform[:3,3]
+            floor=self.terrain.visible_static_heights(mapped[:,:2])
+            tile_offset=np.full(len(indices),STATIC_SURFACE_OFFSET_M)
+            if self.grid is not None:
+                tile_offset[rows]=LOCAL_SURFACE_OFFSET_M
+            lift=np.fmax(0.,floor+tile_offset+clearance-mapped[:,2])
+            result[indices,2]+=lift/transform[2,2]
+        return result
 
 
 def sample_poses(poses,spacing):
@@ -205,6 +254,7 @@ class SearchMapSurface:
         # A horizontal plane at the mapped median (or Z=0 without any ground)
         # keeps known search cells visible outside measured ground coverage.
         ground_z = layers.get('ground_z')
+        self.terrain_extent = (layers['occupancy'] >= 0).copy()
         height = np.zeros(self.shape, dtype=np.float32)
         if ground_z is not None:
             known = np.zeros(self.shape, dtype=bool)
@@ -212,6 +262,7 @@ class SearchMapSurface:
                 if layer in layers:
                     known |= layers[layer]
             known &= np.isfinite(ground_z)
+            self.terrain_extent |= known
             if known.any():
                 measured = ground_z[known]
                 height.fill(np.median(measured))
@@ -240,12 +291,13 @@ class SearchMapSurface:
 
         cells, conditional = decode_display_map(snapshot)
         cells = cells.ravel()
-        indices = np.flatnonzero(cells >= 0)
+        indices = np.flatnonzero((cells >= 0) | self.terrain_extent.ravel())
         rows, columns = np.divmod(indices, self.shape[1])
         rgb = np.full(indices.size, FREE_COLOR, dtype=np.uint32)
         if conditional is not None:
             rgb[conditional.ravel()[indices]] = CONDITIONAL_COLOR
         rgb[cells[indices] == 100] = OCCUPIED_COLOR
+        rgb[cells[indices] == -1] = UNKNOWN_COLOR
         return coloured_cloud(self.x[columns], self.y[rows], self.height[indices] + self.offset, rgb,
                               self.frame_id, snapshot['stamp_s'])
 
@@ -282,12 +334,22 @@ def _ground_plane(grid, ground, good):
     return np.array([0., 0., np.median(ground[good]) if good.any() else 0.])
 
 
-def _ground_points(grid, *, fill_known, local_overlay=False):
+def _local_visible(layers,y=slice(None),x=slice(None)):
+    visible=layers['occupancy'][y,x]>=0
+    for name in ('observed','obstacle_expiry_unknown','ground_conflict'):
+        if name in layers:
+            visible |= layers[name][y,x]
+    return visible
+
+
+def _ground_points(grid, *, fill_known, local_overlay=False, full_window=False):
     cells, meta = grid.layers['occupancy'], grid.metadata
     ground, support, fitted = _ground_layers(grid)
     good = (support | fitted) & np.isfinite(ground)
-    if local_overlay:
-        visible = cells >= 0
+    if full_window:
+        visible = np.ones(cells.shape, bool)
+    elif local_overlay:
+        visible = _local_visible(grid.layers)
     elif fill_known:
         visible = good | (cells >= 0)
     else:
@@ -299,7 +361,8 @@ def _ground_points(grid, *, fill_known, local_overlay=False):
     height = ground[y, x]
     values = cells[y, x]
     free, occupied = (LOCAL_FREE_COLOR, LOCAL_OCCUPIED_COLOR) if local_overlay else (FREE_COLOR, OCCUPIED_COLOR)
-    rgb = np.where(values == 0, free, np.where(values == 100, occupied, UNKNOWN_COLOR))
+    unknown = LOCAL_UNKNOWN_COLOR if local_overlay else UNKNOWN_COLOR
+    rgb = np.where(values == 0, free, np.where(values == 100, occupied, unknown))
     if not local_overlay:
         rgb[fitted[y, x] & ~support[y, x] & (values != 100)] = ESTIMATED_COLOR
     missing = ~good[y, x]
@@ -349,13 +412,51 @@ class NavigationGridSurface:
         points[:, 2] += offset
         return points
 
-    def layer(self, grid, transform, *, cloud=True, boundary=True):
+    def preview(self, raw, local, map_from_local, geometry):
+        """Draw changed static cells and expired occupancy for the current observation."""
+        from navigation.planning.overlay import near_hits, reference_overlay_cells
+        from navigation.planning.planner import se2
+        from perception.environment.geometry import square_overlaps
+
+        meta=self.static.metadata
+        world=np.asarray(local.metadata['world_from_lidar'])
+        local_from_map=se2(geometry.pose(world))@np.linalg.inv(se2(geometry.pose(map_from_local@world)))
+        y,x,local_xy,hit,free,_=reference_overlay_cells(
+            self.static,local,raw.layers['occupancy'],local_from_map)
+        prior=self.static.layers['occupancy'][y,x]
+        expired=np.zeros(len(y),bool)
+        expiry=raw.layers.get('obstacle_expiry_unknown')
+        if expiry is not None and expiry.any():
+            rotation=local_from_map[:2,:2]
+            rows=near_hits(local_xy,rotation,meta['resolution'],local.metadata,expiry)
+            rows=rows[~(hit[rows]|free[rows]) & (prior[rows]!=100)]
+            for indices,ly,lx,_,_ in square_overlaps(
+                    local_xy[rows],rotation.T,meta['resolution'],local,include_contacts=False):
+                expired[rows[indices]]|=expiry[ly,lx]
+        occupied=hit&(prior!=100)
+        draw=occupied|free|expired
+        rgb=np.where(occupied[draw],LOCAL_OCCUPIED_COLOR,
+                     np.where(free[draw],LOCAL_FREE_COLOR,LOCAL_UNKNOWN_COLOR))
+        xy=(np.c_[x[draw],y[draw]]+.5)*meta['resolution']+meta['origin_xy']
+        height=self.visible_static_heights(xy)
+        missing=~np.isfinite(height)
+        if missing.any():
+            positions=local_xy[draw][missing]
+            ground,support,fitted=_ground_layers(local)
+            plane=_ground_plane(local,ground,(support|fitted)&np.isfinite(ground))
+            local_z,_=sample_ground(local,positions)
+            local_z=np.where(np.isfinite(local_z),local_z,positions@plane[:2]+plane[2])
+            height[missing]=np.c_[positions,local_z]@map_from_local[2,:3]+map_from_local[2,3]
+        return coloured_cloud(xy[:,0],xy[:,1],height+LOCAL_SURFACE_OFFSET_M,rgb,
+                              meta['frame_id'],local.metadata['stamp_s'])
+
+    def layer(self, grid, transform, *, cloud=True, boundary=True, full_window=False):
         meta = grid.metadata
         frame = meta['frame_id'] if transform is None else self.static.metadata['frame_id']
         message = None
         if cloud:
-            points, rgb = _ground_points(grid, fill_known=True, local_overlay=True)
-            x, y, z = self._project(points, transform, .015).T
+            points, rgb = _ground_points(grid, fill_known=True, local_overlay=True, full_window=full_window)
+            x, y, z = self._project(points, transform, LOCAL_SURFACE_OFFSET_M).T
             message = coloured_cloud(x, y, z, rgb, frame, meta['stamp_s'])
         if not boundary:
             return message, None

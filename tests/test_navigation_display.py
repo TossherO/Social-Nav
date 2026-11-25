@@ -1,6 +1,7 @@
 """Display coordinates, source times and invalidation without ROS or a GPU."""
 import copy
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -10,7 +11,7 @@ from navigation.planning.continuity import goal_binding,reference_envelope
 from navigation.planning.footprint import VehicleGeometry
 from navigation.planning.inputs import load_config
 from navigation.planning.motion import load_motion_config
-from navigation.planning.planner import Planner,se2,transform_poses
+from navigation.planning.planner import Planner,se2
 from perception.visualization.navigation import NavigationView,display_packet
 from perception.visualization.surface import DisplayGrids,DisplaySurface,line_segments,navigation_grid
 from tests.navigation_fixtures import asset,bundle,request,grid
@@ -21,7 +22,6 @@ def ground_grid(z=-1.,stamp=10.):
     snapshot.layers.update(ground_z=np.broadcast_to(np.asarray(z,np.float32),snapshot.metadata['shape']).copy(),
         ground_support=np.ones(snapshot.metadata['shape'],bool))
     return snapshot
-
 
 def navigation_display_fixture():
     from perception.environment.layers import load_config as environment_config
@@ -82,7 +82,7 @@ class NavigationDisplayTests(unittest.TestCase):
         np.testing.assert_allclose(view['reference']['points'][0],[2,2,0],atol=1e-7)
         self.assertIn('candidate',view['text'])
 
-    def test_mapped_reference_uses_canonical_planar_conversion(self):
+    def test_mapped_reference_keeps_map_coordinates(self):
         current=bundle();static=asset()
         # Rotate/translate the local origin while keeping the mapped start inside the static map.
         mapped=np.eye(4);mapped[:2,:2]=se2([0.,0.,np.pi/2])[:2,:2];mapped[:2,3]=[4.,0.]
@@ -94,14 +94,60 @@ class NavigationDisplayTests(unittest.TestCase):
         packet=self.packet(current,req,static)
         view=NavigationView(self.geometry,self.cfg,asset=static).update(self.row,packet,mono=0.)
         self.assertIsNotNone(view['reference'],view['text'])
-        expected=transform_poses(np.asarray(packet['reference']['result']['path']),np.linalg.inv(se2([4.,0.,np.pi/2])))
+        expected=np.asarray(packet['reference']['result']['path'])
         np.testing.assert_allclose(view['reference']['points'],expected,atol=1e-7)
-        np.testing.assert_allclose(view['reference']['points'][0],[2.,2.,0.],atol=1e-7)
+        np.testing.assert_allclose(view['reference']['points'][0],[2.,2.,np.pi/2],atol=1e-7)
+        self.assertEqual(view['reference']['frame_id'],'map')
         np.testing.assert_allclose(view['goal'],[4.,2.,0.],atol=1e-7)
         packet['scene']['prior']['valid']=False
         invalid=NavigationView(self.geometry,self.cfg,asset=static).update(self.row,packet,mono=0.)
         self.assertIsNone(invalid['reference']);self.assertIsNone(invalid['trajectory'])
         self.assertIsNone(invalid['goal']);self.assertIn('association_unavailable',invalid['text'])
+
+    def test_mapped_path_and_line_do_not_shift_after_localization_correction(self):
+        try:
+            import rospy
+            from nav_msgs.msg import Path
+        except ImportError:
+            self.skipTest('ROS messages unavailable')
+        from perception.visualization.people import marker_array
+        from perception.visualization.runtime import RuntimeDisplay
+
+        static=asset();req=request('mapped',goal=[4.,2.,0.],goal_behavior='stop')
+        packet=self.packet(self.scene,req,static)
+        original=copy.deepcopy(packet['reference'])
+        renderer=NavigationView(self.geometry,self.cfg,asset=static)
+        display=object.__new__(RuntimeDisplay)
+        display.rospy=rospy;display.Path=Path;display._navigation_marker_view=None
+        display._publish_map_transform=lambda row:None
+        messages=[];markers=[]
+        display.publishers={name:SimpleNamespace(get_num_connections=lambda:0) for name in
+                            ('path','lidar_path','trajectory')}
+        display.publishers['reference']=SimpleNamespace(get_num_connections=lambda:1,publish=messages.append)
+        display.publishers['navigation']=SimpleNamespace(get_num_connections=lambda:1)
+        display._publish_marker_update=lambda name,specs,**kwargs:markers.append(marker_array(specs))
+        expected=np.asarray(original['result']['path'])[:, :2]
+        for stamp,shift in ((10.,0.),(10.1,.4)):
+            row=dict(self.row,stamp_s=stamp,has_map_pose=True,map_frame='map',
+                     map_position=[2.+shift,2.,-2.],map_quaternion_xyzw=[0,0,0,1])
+            current=copy.deepcopy(packet)
+            current['scene']['prior']['map_from_local'][0][3]=shift
+            view=renderer.update(row,current,grid=ground_grid(stamp=stamp),mono=stamp-10.)
+            display._publish_navigation(view)
+            path=messages[-1]
+            line=next(marker for marker in markers[-1].markers if marker.ns=='reference')
+            sample_time=rospy.Time.from_sec(stamp)
+            self.assertEqual(view['reference']['stamp_s'],10.)
+            self.assertEqual(current['reference'],original)
+            self.assertTrue(all(message.header.frame_id=='map' and message.header.stamp==sample_time
+                                for message in (path,line,*path.poses)))
+            xy=np.array([[pose.pose.position.x,pose.pose.position.y] for pose in path.poses])
+            np.testing.assert_allclose(xy[[0,-1]],expected[[0,-1]],atol=1e-7)
+            np.testing.assert_allclose([[p.x,p.y] for p in line.points],
+                                       np.stack((xy[:-1],xy[1:]),axis=1).reshape(-1,2),atol=1e-7)
+            if shift:
+                np.testing.assert_allclose(xy,previous_xy,atol=1e-7)
+            previous_xy=xy
 
     def test_stale_cancel_changed_goal_and_reset_clear_predictions(self):
         packet=self.packet();renderer=NavigationView(self.geometry,self.cfg)
@@ -180,9 +226,10 @@ class NavigationDisplayTests(unittest.TestCase):
         row=dict(self.row,stamp_s=10.1,position=[2.1,2.,-3.])
         second=renderer.update(row,None,grid=ground_grid(-2.,10.1),mono=.1)
         self.assertAlmostEqual(second['z'],-1.97)
-        np.testing.assert_allclose([p[2] for p in second['history']],[-.97,-1.97])
-        self.assertTrue(np.allclose(first['footprint'][:,2],-.88))
-        self.assertTrue(np.allclose(second['footprint'][:,2],-1.88))
+        np.testing.assert_allclose([p[2] for p in second['history']],[-.97,-1.945])
+        np.testing.assert_allclose([p[2] for p in renderer.history],[-.97,-1.97])
+        self.assertTrue(np.allclose(first['footprint'][:,2],-.865))
+        self.assertTrue(np.allclose(second['footprint'][:,2],-1.865))
         self.assertEqual(second['raw_history'][1][1][2],-3.)
 
     def test_body_draws_above_the_higher_visible_map_with_the_same_tf(self):
@@ -194,9 +241,10 @@ class NavigationDisplayTests(unittest.TestCase):
         renderer = NavigationView(self.geometry, self.cfg, asset=static, vehicle_clearance_m=.12)
         view = renderer.update(row, None, grid=local, mono=0.)
         for key in ('footprint', 'heading'):
-            np.testing.assert_allclose(view[key][:, 2], -1.08)
+            np.testing.assert_allclose(view[key][:, 2], -1.065)
         np.testing.assert_allclose(view['pose'], [2., 2., 0.])
-        self.assertAlmostEqual(view['history'][0][2], -1.77, places=6)
+        self.assertAlmostEqual(view['history'][0][2], -1.145, places=6)
+        self.assertAlmostEqual(renderer.history[0][2], -1.77, places=6)
 
     def test_reference_bridges_missing_display_heights_but_keeps_supported_slope(self):
         packet=self.packet();snapshot=ground_grid(np.arange(60)[None,:]*.1-3.)
@@ -208,7 +256,7 @@ class NavigationDisplayTests(unittest.TestCase):
         self.assertTrue((path['height_sources']==5).any())
         indices=np.floor(path['display_poses'][:,0]/.1).astype(int)
         valid=path['height_sources']!=5
-        np.testing.assert_allclose(path['heights'][valid],indices[valid]*.1-3.+.03,atol=1e-6)
+        np.testing.assert_allclose(path['heights'][valid],indices[valid]*.1-3.+.055,atol=1e-6)
         segments=line_segments(np.c_[path['display_poses'][:,:2],path['heights']]).reshape(-1,2,3)
         self.assertTrue(np.isfinite(segments).all())
         self.assertIn('approximate display heights',view['text'])
@@ -219,7 +267,7 @@ class NavigationDisplayTests(unittest.TestCase):
         static=asset();static.snapshot=ground_grid(-1.)
         renderer=NavigationView(self.geometry,self.cfg,asset=static)
         data=dict(points=np.array([[2.,2.,0.],[8.,2.,0.]]),stamp_s=10.,
-                  local_to_map=np.eye(3),map_from_local=np.eye(4))
+                  local_from_map=np.eye(3),map_from_local=np.eye(4))
         output=dict(pose=None,goal=None,ground_source=0,text='',localization_row=self.row,
                     reference=data,trajectory=None)
         view=renderer._project(output,DisplaySurface(local,self.row))
@@ -349,6 +397,23 @@ class FrozenDisplayTests(unittest.TestCase):
 
 
 class NavigationMapDisplayTests(unittest.TestCase):
+    def test_observed_unknown_is_purple_and_unobserved_gaps_are_transparent(self):
+        from perception.visualization.surface import (
+            LOCAL_FREE_COLOR, LOCAL_OCCUPIED_COLOR, LOCAL_UNKNOWN_COLOR, _ground_points)
+
+        snapshot = ground_grid()
+        cells = snapshot.layers['occupancy']
+        cells[:] = -1
+        cells[0, :2] = [0, 100]
+        for index, name in enumerate(('observed', 'obstacle_expiry_unknown', 'ground_conflict'), start=2):
+            snapshot.layers[name] = np.zeros(cells.shape, bool)
+            snapshot.layers[name][0, index] = True
+        points, colors = _ground_points(snapshot, fill_known=True, local_overlay=True)
+        np.testing.assert_allclose(points[:, 0], [.05, .15, .25, .35, .45])
+        np.testing.assert_array_equal(colors,
+            [LOCAL_FREE_COLOR, LOCAL_OCCUPIED_COLOR, *([LOCAL_UNKNOWN_COLOR] * 3)])
+        np.testing.assert_array_equal(snapshot.layers['occupancy'][0, :5], [0, 100, -1, -1, -1])
+
     def setUp(self):
         self.raw,self.derived,self.asset=navigation_display_fixture()
 

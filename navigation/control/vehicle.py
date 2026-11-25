@@ -27,7 +27,7 @@ def controller_settings(motion):
     return dict(declared)
 
 
-def load_vehicle_profile(path, motion, *, require_execution=False):
+def _read_vehicle_geometry(path):
     path = Path(path).expanduser().resolve()
     data = path.read_bytes()
     profile = yaml.safe_load(data)
@@ -36,12 +36,24 @@ def load_vehicle_profile(path, motion, *, require_execution=False):
     verification = profile.get('verification', {})
     if not profile.get('vehicle_id') or not verification.get('source'):
         raise ValueError('Vehicle identity and measurement source are required')
-    for name in ('geometry_confirmed', 'motion_confirmed', 'protocol_confirmed'):
-        if verification.get(name) is not True:
-            raise ValueError('Vehicle profile is not confirmed: '+name)
+    if verification.get('geometry_confirmed') is not True:
+        raise ValueError('Vehicle profile is not confirmed: geometry_confirmed')
     source = dict(path=str(path), sha256=hashlib.sha256(data).hexdigest(),
                   vehicle_id=profile['vehicle_id'], verification=verification)
     geometry = VehicleGeometry(**profile['geometry'], source=source, assumed=False)
+    return geometry, profile
+
+
+def load_observation_geometry(path):
+    return _read_vehicle_geometry(path)[0]
+
+
+def load_vehicle_profile(path, motion, *, require_execution=False):
+    geometry, profile = _read_vehicle_geometry(path)
+    source = geometry.source
+    for name in ('motion_confirmed', 'protocol_confirmed'):
+        if profile['verification'].get(name) is not True:
+            raise ValueError('Vehicle profile is not confirmed: '+name)
     limits = profile['measured_limits']
     names = ('max_forward_mps', 'max_reverse_mps', 'max_angular_rps',
              'max_acceleration_mps2', 'max_angular_acceleration_rps2')

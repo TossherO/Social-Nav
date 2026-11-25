@@ -214,24 +214,25 @@ class SessionPanel : public rviz::Panel {
     add(grid,"暂停回放","pause","pause",2,1);add(grid,"继续回放","resume","resume",2,2);
     add(grid,"启动影子导航","shadow_start","shadow_start",3,0);
     add(grid,"停止影子导航","shadow_stop","shadow_stop",3,1);
+    add(grid,"标记异常区域","review","review",3,2);
     add(grid,"轮椅使能","arm","arm",4,0);add(grid,"取消目标 / 解除使能","cancel","cancel",4,1);
     add(grid,"退出会话","exit","exit",4,2);
 
     auto* maps=new QGridLayout();layout->addLayout(maps);
-    static_button_=new QPushButton(QString::fromUtf8("静态底图"));
-    navigation_button_=new QPushButton(QString::fromUtf8("导航底图"));
-    search_button_=new QPushButton(QString::fromUtf8("搜索快照"));
+    static_button_=new QPushButton(QString::fromUtf8("静态地图"));
+    local_button_=new QPushButton(QString::fromUtf8("局部地图"));
+    navigation_button_=new QPushButton(QString::fromUtf8("导航地图"));
     map_buttons_=new QButtonGroup(this);
-    for (auto* button : {static_button_,navigation_button_,search_button_}) {
+    for (auto* button : {static_button_,local_button_,navigation_button_}) {
       button->setCheckable(true);
       button->setEnabled(false);
       map_buttons_->addButton(button);
     }
-    maps->addWidget(static_button_,0,0);maps->addWidget(navigation_button_,0,1);
-    maps->addWidget(search_button_,0,2);
+    maps->addWidget(static_button_,0,0);maps->addWidget(local_button_,0,1);
+    maps->addWidget(navigation_button_,0,2);
     connect(static_button_,&QPushButton::clicked,this,[this]() {selectBasemap(MapView::Static);});
     connect(navigation_button_,&QPushButton::clicked,this,[this]() {selectBasemap(MapView::Navigation);});
-    connect(search_button_,&QPushButton::clicked,this,[this]() {selectBasemap(MapView::Search);});
+    connect(local_button_,&QPushButton::clicked,this,[this]() {selectBasemap(MapView::Local);});
 
     map_legend_=new QLabel(this);
     map_legend_->setTextFormat(Qt::RichText);
@@ -271,7 +272,11 @@ class SessionPanel : public rviz::Panel {
     basemap_subscriber_=node_.subscribe<std_msgs::String>("/social_nav_runtime_view/basemap_source",1,
         [this](const std_msgs::String::ConstPtr& message) {
           const auto source=QJsonDocument::fromJson(QByteArray::fromStdString(message->data)).object();
-          QMetaObject::invokeMethod(this,[this,source]() {basemap_source_=source;updateBasemapControls();},
+          QMetaObject::invokeMethod(this,[this,source]() {
+            basemap_source_=source;
+            adoptInitialMapFrame();
+            updateBasemapControls();
+          },
                                     Qt::QueuedConnection);
         });
     for (const auto key : {"w","a","s","d","q","e"}) {
@@ -297,10 +302,10 @@ class SessionPanel : public rviz::Panel {
   }
   void onInitialize() override {
     manager_ready_=true;
-    QTimer::singleShot(0,this,[this]() {updateBasemapControls();});
+    QTimer::singleShot(0,this,[this]() {adoptInitialMapFrame();updateBasemapControls();});
   }
  private:
-  enum class MapView { Static, Navigation, Search };
+  enum class MapView { Static, Local, Navigation };
 
   QPushButton* add(QGridLayout* grid,const char* title,const char* command,const char* control,int row,int col) {
     auto* button=new QPushButton(QString::fromUtf8(title));grid->addWidget(button,row,col);
@@ -329,7 +334,8 @@ class SessionPanel : public rviz::Panel {
         !object.value("accepted").isBool()) return;
     pending_request_.clear();
     const auto error=object.value("error").toString();
-    if (object.value("accepted").toBool()) status_->setText(QString::fromUtf8("会话已接收操作"));
+    const auto message=object.value("message").toString();
+    if (object.value("accepted").toBool()) status_->setText(message.isEmpty()?QString::fromUtf8("会话已接收操作"):message);
     else if (error.isEmpty()) status_->setText(QString::fromUtf8("会话拒绝了操作"));
     else status_->setText(QString::fromUtf8("操作未接收：")+error);
   }
@@ -411,87 +417,89 @@ class SessionPanel : public rviz::Panel {
     return nullptr;
   }
   void selectBasemap(MapView view) {
-    if (auto* display=findDisplay("Static map")) display->setEnabled(view!=MapView::Search);
-    if (auto* display=findDisplay("Navigation basemap")) display->setEnabled(view==MapView::Navigation);
-    if (auto* display=findDisplay("Navigation window")) display->setEnabled(view==MapView::Navigation);
-    if (auto* display=findDisplay("Reference search snapshot")) display->setEnabled(view==MapView::Search);
+    const auto set=[this](const char* name,bool enabled) {
+      if (auto* display=findDisplay(name)) display->setEnabled(enabled);
+    };
+    set("Static map",view!=MapView::Local);
+    set("Local map",view==MapView::Local);
+    set("Navigation basemap",view==MapView::Navigation);
+    set("Navigation search grid",false);
+    updateBasemapControls();
   }
-  void updateMapLegend(bool show_static,bool show_navigation,bool show_window,bool show_search) {
+  void updateMapLegend(bool show_static,bool show_local,bool show_preview,bool show_search) {
     // Swatches match the RViz point cloud palettes in visualization/surface.py.
     const auto swatch=[](const char* color,const char* label) {
       return QString::fromLatin1("<span style=\"color:%1\">&#9632;</span>&nbsp;%2")
           .arg(QString::fromLatin1(color),QString::fromUtf8(label));
     };
     QStringList entries;
-    if (show_search) {
-      entries << swatch("#9EA9B4","搜索空闲") << swatch("#CF5D53","搜索占据") << swatch("#CB974A","条件代价");
-    } else {
-      if (show_static) {
-        entries << swatch("#9EA9B4","静态空闲") << swatch("#CF5D53","静态占据")
-                << swatch("#707885","静态未知") << swatch("#72A0B7","估计地面");
-      }
-      if (show_navigation) {
-        entries << swatch("#72C8C3","局部空闲") << swatch("#F47B63","局部占据");
-      }
-      if (show_window) entries << swatch("#59FFDB","局部范围");
-    }
+    if (show_static || show_search)
+      entries << swatch("#9EA9B4","空闲") << swatch("#CF5D53","占据") << swatch("#707885","未知");
+    if (show_static) entries << swatch("#72A0B7","估计地面");
+    if (show_search) entries << swatch("#CB974A","条件代价");
+    if (show_local) entries << swatch("#72C8C3","局部空闲") << swatch("#F47B63","局部占据")
+                           << swatch("#BA9BE5","局部未知");
+    if (show_preview) entries << swatch("#72C8C3","新增空闲") << swatch("#F47B63","当前占据")
+                             << swatch("#BA9BE5","占据过期");
     const auto legend=entries.join(" &nbsp; ");
     if (map_legend_->text()!=legend) map_legend_->setText(legend);
     map_legend_->setVisible(!entries.isEmpty());
   }
-  void updateBasemapControls() {
-    auto* static_map=findDisplay("Static map");
-    auto* navigation=findDisplay("Navigation basemap");
-    auto* window=findDisplay("Navigation window");
-    auto* search=findDisplay("Reference search snapshot");
-    if (!basemap_subscriber_.getNumPublishers()) basemap_source_={};
+  void adoptInitialMapFrame() {
     const auto fixed_frame=basemap_source_.value("static_frame").toString();
-    if (static_map && !initial_map_frame_seen_ && !fixed_frame.isEmpty()) {
-      initial_map_frame_seen_=true;
-      // The standalone view starts in odom for mapless runs. Select the asset frame
-      // before localization and reconnect latched layers cleared by the frame change.
-      if (vis_manager_->getFixedFrame()=="odom" && fixed_frame!="odom") {
-        vis_manager_->setFixedFrame(fixed_frame);
-        for (auto* display : {static_map,navigation,window,search}) {
-          if (display && display->isEnabled()) {
-            display->setEnabled(false);
-            display->setEnabled(true);
-          }
+    if (initial_map_frame_seen_ || fixed_frame.isEmpty() || !findDisplay("Static map")) return;
+    initial_map_frame_seen_=true;
+    // Reconnect only enabled latched layers after the standalone view adopts the asset frame.
+    if (vis_manager_->getFixedFrame()=="odom" && fixed_frame!="odom") {
+      vis_manager_->setFixedFrame(fixed_frame);
+      for (const auto* name : {"Static map","Local map","Navigation basemap","Navigation search grid"}) {
+        auto* display=findDisplay(name);
+        if (display && display->isEnabled()) {
+          display->setEnabled(false);
+          display->setEnabled(true);
         }
       }
     }
-    const auto query=basemap_source_.value("search_query_id");
-    const bool search_available=query.isDouble();
-    if (search && search->isEnabled() && !search_available) selectBasemap(MapView::Navigation);
-    static_button_->setEnabled(static_map!=nullptr);
-    navigation_button_->setEnabled(navigation && window);
-    search_button_->setEnabled(search && search_available);
+  }
+  void updateBasemapControls() {
+    auto* static_map=findDisplay("Static map");
+    auto* local=findDisplay("Local map");
+    auto* navigation=findDisplay("Navigation basemap");
+    auto* search=findDisplay("Navigation search grid");
+    if (!basemap_subscriber_.getNumPublishers()) basemap_source_={};
+    const bool show_static=static_map && static_map->isEnabled();
+    const bool show_local=local && local->isEnabled();
+    const bool show_navigation=navigation && navigation->isEnabled();
     const bool show_search=search && search->isEnabled();
-    const bool show_navigation=(navigation && navigation->isEnabled()) || (window && window->isEnabled());
-    updateMapLegend(static_map && static_map->isEnabled(),navigation && navigation->isEnabled(),
-                    window && window->isEnabled(),show_search);
+    const auto query=basemap_source_.value("search_query_id");
+    static_button_->setEnabled(static_map!=nullptr);
+    local_button_->setEnabled(local!=nullptr);
+    navigation_button_->setEnabled(navigation!=nullptr);
     map_buttons_->setExclusive(false);
-    search_button_->setChecked(show_search);
-    navigation_button_->setChecked(!show_search && show_navigation);
-    static_button_->setChecked(!show_search && !show_navigation && static_map && static_map->isEnabled());
+    static_button_->setChecked(show_static && !show_local && !show_navigation && !show_search);
+    local_button_->setChecked(show_local && !show_static && !show_navigation && !show_search);
+    navigation_button_->setChecked(show_navigation && (!static_map || show_static) && !show_local && !show_search);
     map_buttons_->setExclusive(true);
 
-    QStringList layers;
-    if (!show_search && static_map && static_map->isEnabled()) {
-      const auto topic=static_map->subProp("Topic")->getValue().toString();
-      if (topic=="/social_nav_interactive/static_basemap" || basemap_source_.value("static_available").toBool())
-        layers.append(QString::fromUtf8("静态地图"));
-    }
-    if (!show_search && show_navigation && basemap_source_.value("local_available").toBool())
-      layers.append(basemap_source_.value("frozen").toBool()
-          ? QString::fromUtf8("暂停时的局部导航图") : QString::fromUtf8("局部导航图"));
-    const auto search_status=search_available
-        ? QString::fromUtf8("搜索快照可用，查询 #%1").arg(query.toVariant().toLongLong())
-        : QString::fromUtf8("搜索快照不可用");
-    if (!static_map && !navigation && !window && !search) map_source_->clear();
-    else if (show_search) map_source_->setText(search_status);
-    else map_source_->setText((layers.isEmpty() ? QString::fromUtf8("底图不可用") : layers.join(" + "))+
-                              "\n"+search_status);
+    const bool fused=basemap_source_.value("local_available").toBool();
+    const bool mapped=!basemap_source_.value("static_frame").toString().isEmpty();
+    const bool mapped_preview=show_navigation && fused && mapped;
+    updateMapLegend(show_static,show_local || (show_navigation && fused && !mapped),mapped_preview,show_search);
+    QStringList status;
+    if (show_search) status << (query.isDouble()
+        ? QString::fromUtf8("全局规划栅格 #%1").arg(query.toVariant().toLongLong())
+        : QString::fromUtf8("等待下一次全局规划查询"));
+    if (mapped_preview && basemap_source_.value("replay_static_baseline").toBool())
+      status << QString::fromUtf8("回放预览 · 使用所选静态地图");
+    if (show_local && !basemap_source_.value("raw_local_available").toBool())
+      status << QString::fromUtf8("等待局部地图");
+    if (show_navigation && !fused)
+      status << QString::fromUtf8("等待导航地图");
+    if (basemap_source_.value("frozen").toBool() && (show_local || show_navigation || show_search))
+      status << QString::fromUtf8("回放已暂停");
+    const auto source=status.join('\n');
+    if (map_source_->text()!=source) map_source_->setText(source);
+    map_source_->setVisible(!source.isEmpty());
   }
   ros::NodeHandle node_;
   ros::Publisher publisher_;
@@ -500,7 +508,7 @@ class SessionPanel : public rviz::Panel {
   QList<QPair<QPushButton*,QString>> buttons_;
   QList<QShortcut*> adjustment_shortcuts_;
   QButtonGroup* map_buttons_;
-  QPushButton *static_button_,*navigation_button_,*search_button_;
+  QPushButton *static_button_,*local_button_,*navigation_button_;
   QLabel *status_,*playback_,*shadow_,*chassis_,*map_source_,*map_legend_;
   QString pending_request_;
   bool connected_=false;
@@ -515,4 +523,4 @@ PLUGINLIB_EXPORT_CLASS(social_nav_rviz::ConfirmInitialPoseTool,rviz::Tool)
 PLUGINLIB_EXPORT_CLASS(social_nav_rviz::SessionPanel,rviz::Panel)
 
 // Startup checks use this symbol to detect stale RViz plugins.
-extern "C" int social_nav_rviz_session_panel_abi() { return 4; }
+extern "C" int social_nav_rviz_session_panel_abi() { return 7; }

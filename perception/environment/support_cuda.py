@@ -10,9 +10,10 @@ from .obstacle_memory import EXPIRY_LAYER
 def library(path):
     lib=C.CDLL(str(path))
     capability=getattr(lib,'sn_occupancy_local_ground_conflicts',None)
-    if capability is None or capability()!=1:
-        raise RuntimeError('Rebuild environment CUDA library: local ground conflicts are required')
-    lib.sn_navigation_support_with_ground_conflicts.argtypes=[C.c_void_p]*10+[C.c_int,C.c_void_p]+[C.c_int]*6+[C.c_void_p,C.c_int]
+    project=getattr(lib,'sn_navigation_support_with_measured_clear',None)
+    if capability is None or capability()!=1 or project is None:
+        raise RuntimeError('Rebuild environment CUDA library: measured obstacle clearing and local ground conflicts are required')
+    project.argtypes=[C.c_void_p]*11+[C.c_int,C.c_void_p]+[C.c_int]*6+[C.c_void_p,C.c_int]
     lib.sn_occupancy_error.restype=C.c_char_p
     return lib
 
@@ -39,14 +40,18 @@ def project(snapshot,layers,asset,prior,plane,proof,observation,previous,origin,
     if EXPIRY_LAYER in layers:
         expiry=layers[EXPIRY_LAYER]
         excluded=expiry if excluded is None else (excluded|expiry)
-    buffers=[layers['occupancy'],layers['last_observed'],prior,previous,hits,output,allowed,points,moving,excluded]
+    recent_clear=observation.get('cleared_obstacle_cells')
+    cleared=None if recent_clear is None else torch.from_numpy(np.array(recent_clear,order='C',copy=True)).to(device)
+    buffers=[layers['occupancy'],layers['last_observed'],prior,previous,hits,output,allowed,points,moving,excluded,cleared]
     stream=torch.cuda.current_stream(device)
     native=library(library_path or Path(__file__).resolve().parents[2]/'outputs/perception/ros1_ws/devel/lib/libsocial_nav_occupancy_cuda.so')
-    result=native.sn_navigation_support_with_ground_conflicts(*[None if t is None else t.data_ptr() for t in buffers],len(points),params.ctypes.data,
+    result=native.sn_navigation_support_with_measured_clear(*[None if t is None else t.data_ptr() for t in buffers],len(points),params.ctypes.data,
         *shape,*pm['shape'],*np.rint(delta).astype(int),stream.cuda_stream,device.index)
     if result<0:raise RuntimeError(native.sn_occupancy_error().decode())
     for tensor in buffers:
         if tensor is not None:tensor.record_stream(stream)
     if metrics is not None:
         metrics.transfer('h2d',observation['endpoints'].nbytes+observation['transient_mask'].nbytes,'navigation_current_endpoints')
+        if recent_clear is not None:
+            metrics.transfer('h2d',recent_clear.nbytes,'navigation_measured_free_cells')
     return output[0].to(torch.int8),output[1].to(torch.uint8),output[2],hits

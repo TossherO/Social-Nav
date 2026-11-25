@@ -11,7 +11,7 @@ import yaml
 
 from perception.environment.dynamic import people_boxes, person_points, StaticEvidence
 from perception.environment.fusion import fuse_scans
-from perception.environment.layers import GridSnapshot, LocalEnvironmentMap, load_config
+from perception.environment.layers import LocalEnvironmentMap, load_config
 from perception.environment.maps import static_geometry
 from perception.environment.occupancy import OccupancyTree
 from perception.environment.people import PeopleObservations
@@ -198,59 +198,38 @@ def check_obstacle_expiry_ray_evidence(test, backend, *, device=None):
         scan(15.4,sensor_x=6.)
         test.assertNotIn(EXPIRY_LAYER,scan(15.5,identity=('expiry',1)))
 
-
-def check_near_short_obstacles(test, *, device=None):
-    from perception.environment.obstacle_memory import ObstacleMemory
-
-    memory = ObstacleMemory()
-    shape = (2,8)
-    origin = np.zeros(2)
-    resolution = .6
-    memory.align(origin,shape,resolution)
-    y = np.zeros(shape[1],int)
-    x = np.arange(shape[1])
-    old_free = np.array([[0,0,-1,-1,-1,0,-1,0],[-1]*shape[1]],np.int8)
-    person_y,person_x = y[[2,3]],x[[2,3]]
-    memory.remember_sources(person_y,person_x,9.9,near_short=np.zeros(2,bool),
-        unconfirmed=np.array([True,False]),person_cells=(person_y,person_x))
-    meta = dict(origin_xy=origin.tolist(),shape=list(shape),resolution=resolution,stamp_s=9.9,
-                rays_used=True,free_vertical_coverage_required=1.)
-    layers = dict(occupancy=old_free,ground_support=np.ones(shape,bool),coverage=np.ones(shape,np.float32),
-                  last_observed=np.full(shape,9.9),near_field_free=np.zeros(shape,bool),
-                  ground_conflict=np.zeros(shape,bool))
-    layers['near_field_free'][0,1] = True
-    layers['ground_conflict'][0,5] = True
-    previous = GridSnapshot(meta,layers)
-    if device is not None:
-        import torch
-        from perception.environment.device import DeviceGridSnapshot
-        previous = DeviceGridSnapshot.seal(meta,{k:torch.from_numpy(v).to(device) for k,v in layers.items()})
-
-    radius = load_config()['near_obstacle_radius_m']
-    test.assertEqual(radius,3.5)
-    def observe(stamp,snapshot):
-        short = memory.near_short_only(y,x,stamp,center=np.full(2,resolution/2),resolution=resolution,radius=radius,
-            evidence_age=.5,max_gap=.35,ordinary_ttl=2.,previous=snapshot)
-        provisional = memory.unconfirmed(y,x,stamp,.5)|short
-        memory.observe(y,x,stamp,max_gap=.35,min_span=2.,hold=2.)
-        memory.remember_sources(y,x,stamp,near_short=short,unconfirmed=provisional,person_cells=None)
-        return short,provisional
-
-    expected = [True,False,True,False,False,False,False,False]
-    short,provisional = observe(10.,previous)
-    np.testing.assert_array_equal(short,expected)
-    test.assertTrue(provisional.all())
-    observe(10.2,None)
-    short,provisional = observe(10.4,None)
-    np.testing.assert_array_equal(short,expected)
-    np.testing.assert_array_equal(provisional,expected)
-    for step in range(3,11):
-        observe(10.+step*.2,None)
-    test.assertTrue(memory.projection()[0][0,0])
-    test.assertTrue(memory.projection()[0][0,2])
+    # Missing rays keep the vote. Complete post-hit rays remove the old
+    # ordinary occupancy immediately, even with strong accumulated log odds.
+    model.reset()
+    for stamp in (10.,10.06,10.12):
+        scan(stamp,hit)
+    test.assertEqual(sweep(10.18,heights[heights<-.4])['occupancy'][cell],100)
+    test.assertEqual(sweep(10.24,heights)['occupancy'][cell],0)
+    test.assertTrue(model.support_observation['cleared_obstacle_cells'][cell])
+    test.assertFalse(np.isfinite(model.obstacles.history[0][cell]))
+    scan(10.3,hit)
+    test.assertTrue(model.obstacles.unconfirmed(np.array([cell[0]]),np.array([cell[1]]),10.4,.5).item())
+    scan(10.4,hit)
+    test.assertFalse(model.obstacles.unconfirmed(np.array([cell[0]]),np.array([cell[1]]),10.41,.5).item())
 
 
 class DynamicTests(unittest.TestCase):
+    def test_default_mask_accepts_low_confidence_confirmed_tracks(self):
+        settings = load_config()['dynamic']
+        people = observation(10.)
+        people['tracks'][0].update(hits=1)
+        people['tracks'][0]['box'][7] = .35
+        args = (people, 10., ('local',0), 'odom')
+        self.assertEqual(settings['min_score'], .2)
+        self.assertEqual(len(people_boxes(*args, settings)[0]), 1)
+        self.assertEqual(len(people_boxes(*args, dict(settings, min_score=.5))[0]), 0)
+        people['tracks'][0]['box'][7] = .19
+        self.assertEqual(len(people_boxes(*args, settings)[0]), 0)
+        self.assertEqual(len(people_boxes(*args, dict(settings, min_score=0.))[0]), 1)
+        people['tracks'][0]['box'][7] = .35
+        people['tracks'][0]['confirmed'] = False
+        self.assertEqual(len(people_boxes(*args, settings)[0]), 0)
+
     def test_obstacle_confirmation_without_people_uses_distinct_scans_and_world_cells(self):
         check_uniform_obstacle_confirmation(self, 'cpu')
 
@@ -260,15 +239,49 @@ class DynamicTests(unittest.TestCase):
     def test_obstacle_expiry_requires_post_cutoff_rays_in_the_current_collision_band(self):
         check_obstacle_expiry_ray_evidence(self, 'cpu')
 
-    def test_near_short_requires_measured_free_or_confirmed_person_without_existing_obstacle(self):
-        check_near_short_obstacles(self)
+    def test_direct_map_configuration_uses_default_clear_confirmation_window(self):
+        from perception.environment.geometry import voxel_height_band
 
-    def test_current_owned_returns_seed_near_short_mode_for_later_unowned_hits(self):
+        config=load_config()
+        config['compute']['backend']='cpu'
+        config['near_field']['enabled']=False
+        config['window_m']=4.
+        ground=np.full((40,40),-.85,np.float32)
+        support=np.ones(ground.shape,bool)
+        low,count=voxel_height_band(ground[:1,:1],.1,config['min_obstacle_height_m'],config['max_height_m'])
+        heights=(np.arange(low.item(),low.item()+count.item())+.5)*.1
+        endpoints=np.c_[np.full(len(heights),.55),np.full(len(heights),.05),heights]
+        origins=np.c_[np.full(len(heights),-1.55),endpoints[:,1:]]
+        results=[]
+        for omit in (False,True):
+            options=dict(config)
+            if omit:del options['obstacle_confirmation_window_s']
+            model=LocalEnvironmentMap(options)
+            self.addCleanup(model.close)
+            model.ground_conflict_view=None
+            with patch.object(model,'_plane_ground',return_value=(ground,support,
+                              dict(status='tracked',plane_world=[0.,0.,-.85]))):
+                for stamp in (10.,10.06,10.12):
+                    model.update([[-.55,.05,-.35]],np.eye(4),stamp,('test',0))
+                result=model.update(endpoints,np.eye(4),10.24,('test',0),ray_origins=origins)
+            self.assertTrue(model.support_observation['cleared_obstacle_cells'][20,14])
+            self.assertEqual(result.layers['occupancy'][20,14],0)
+            results.append(result)
+        for key, expected in results[0].layers.items():
+            actual = results[1].layers[key]
+            if key == 'clearance':
+                # OpenCV's float32 distance transform can round the same distance differently.
+                np.testing.assert_allclose(actual, expected, rtol=np.finfo(np.float32).eps,
+                                           atol=0, equal_nan=True, err_msg=key)
+            else:
+                np.testing.assert_equal(actual, expected, err_msg=key)
+
+    def test_current_owned_returns_do_not_vote_for_ordinary_occupancy(self):
         config = load_config()
         config['compute']['backend'] = 'cpu'
         config['near_field']['enabled'] = False
         config['window_m'] = 4.
-        model = LocalEnvironmentMap(config,lidar_from_base_xyz=np.zeros(3))
+        model = LocalEnvironmentMap(config)
         self.addCleanup(model.close)
         model.ground_conflict_view = None
         floor = np.zeros((40,40),np.float32)
@@ -283,9 +296,9 @@ class DynamicTests(unittest.TestCase):
 
         scan(10.,body,people)
         self.assertTrue((model.support_observation['person_owner']==0).all())
-        for stamp in (10.1,10.2,10.3):
+        for stamp in (10.1,10.2):
             local = scan(stamp,body)
-            self.assertEqual(local.metadata['near_short_obstacle_cells'],1)
+            self.assertEqual(local.metadata['unconfirmed_obstacle_points'],3)
             self.assertEqual(local.layers['occupancy'][20,24],100)
         self.assertEqual(scan(10.6,np.empty((0,3))).layers['occupancy'][20,24],-1)
 
@@ -316,7 +329,7 @@ class DynamicTests(unittest.TestCase):
             row = observation(10.); row.update(changes)
             self.assertEqual(len(select(row)[0]), 0)
         for changes in (dict(state='predicted'), dict(confirmed=False), dict(hits=0),
-                        dict(box=[1.5, 0, 0, 1.2, 1.2, 1.8, 0, .1])):
+                        dict(box=[1.5, 0, 0, 1.2, 1.2, 1.8, 0, -.1])):
             row = observation(10.); row['tracks'][0].update(changes)
             self.assertEqual(len(select(row)[0]), 0)
 

@@ -42,11 +42,6 @@ class CudaEnvironmentTests(unittest.TestCase):
             with self.subTest(device=device):
                 check_obstacle_expiry_ray_evidence(self, 'cuda',device=device)
 
-    def test_near_short_reads_only_measured_free_from_device_grid(self):
-        import torch
-        from tests.test_environment_dynamic import check_near_short_obstacles
-        check_near_short_obstacles(self,device=torch.device('cuda:0'))
-
     def test_suspended_history_matches_cpu_and_preserves_obstacle_updates(self):
         from tests.test_environment_near_field import suspended_history_sequence,person_background_sequence
         cpu=suspended_history_sequence('cpu');gpu=suspended_history_sequence('cuda')

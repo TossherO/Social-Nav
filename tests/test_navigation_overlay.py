@@ -22,7 +22,7 @@ class ReferenceOverlayTests(unittest.TestCase):
         return reference_overlay(self.prior,local or self.local,self.local.layers['occupancy'],
             np.eye(3) if transform is None else transform,self.scene)
 
-    def person_observation(self, stamp, person_xy, target, hit, occupied):
+    def person_observation(self, stamp, person_xy, target, hit, occupied, *, score=.99):
         from perception.environment.layers import load_config as environment_config
         from perception.environment.scene import assemble_scene
         from tests.test_environment_scene import person
@@ -31,6 +31,7 @@ class ReferenceOverlayTests(unittest.TestCase):
         local = bundle().geometry
         people = person(stamp)
         people['tracks'] = [dict(track(*person_xy,stamp=stamp),state='observed')]
+        people['tracks'][0]['box'][7] = score
         people['localization_binding']['session_id'] = local.metadata['session_id']
         local.metadata['stamp_s'] = stamp
         local.metadata['association'].update(stamp_s=stamp,measurement_stamp_s=stamp-.05)
@@ -56,7 +57,7 @@ class ReferenceOverlayTests(unittest.TestCase):
                 (10.9,(4.55,2.55),True,True,False),  # The previous vote expired.
                 (11.1,(4.55,2.55),True,True,True),
                 (11.2,(4.55,2.55),False,False,True)]:
-            scene=self.person_observation(stamp,person_xy,target,hit,occupied)
+            scene=self.person_observation(stamp,person_xy,target,hit,occupied,score=.30)
             cells=scene.geometry.layers['occupancy']
             ledger.update(scene,self.prior,np.eye(3),('floor',0))
             self.assertEqual(index in ledger.blocked,retained)
@@ -73,7 +74,7 @@ class ReferenceOverlayTests(unittest.TestCase):
                 (10.15,(4.55,2.55),False,True),
                 (10.7,(4.55,2.55),False,True),
                 (12.1,(4.55,2.55),False,False)]:
-            scene=self.person_observation(stamp,person_xy,target,hit,occupied)
+            scene=self.person_observation(stamp,person_xy,target,hit,occupied,score=.30)
             ledger.update(scene,self.prior,np.eye(3),('floor',0))
             self.assertFalse(ledger.blocked)
 
@@ -84,8 +85,9 @@ class ReferenceOverlayTests(unittest.TestCase):
         from tests.navigation_fixtures import FakeWorker
 
         geometry=VehicleGeometry([[-.2,-.2],[.2,-.2],[.2,.2],[-.2,.2]],np.eye(4),source='synthetic')
-        with ReferenceRuntime(load_config(),load_motion_config(),geometry,worker_factory=FakeWorker) as runtime:
+        with ReferenceRuntime(load_config(),load_motion_config(),geometry,person_min_score=.35,worker_factory=FakeWorker) as runtime:
             self.assertEqual((runtime.obstacles.confirm_scans,runtime.obstacles.confirm_window_s),(2,.5))
+            self.assertEqual(runtime.obstacles.person_min_score,.35)
             ledger=ReferenceObstacles(confirm_scans=5,confirm_window_s=1.)
             for stamp,near,hit,retained in [
                     (10.0,True,True,False),

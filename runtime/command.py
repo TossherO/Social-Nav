@@ -690,7 +690,7 @@ class CommandInbox:
             try:
                 request=connection.recv()
                 if set(request)!={'kind','value'}:raise ValueError('Use kind and value')
-                if request['kind'] in ('session_status','playback','arm','shadow_navigation'):
+                if request['kind'] in ('session_status','playback','arm','shadow_navigation','save_anomaly_review'):
                     if self.session is None:raise ValueError('Interactive session is not enabled')
                     if request['kind']=='shadow_navigation':
                         with self.lock:
@@ -783,7 +783,7 @@ class CommandInbox:
 
 def send_request(path,kind,value,*,timeout=2.):
     """Submit one intent; the reply acknowledges receipt, never execution."""
-    if kind not in ('session_status','playback','arm','shadow_navigation'):value=validate(kind,value)
+    if kind not in ('session_status','playback','arm','shadow_navigation','save_anomaly_review'):value=validate(kind,value)
     elif not isinstance(value,dict):raise ValueError('Session commands require an object')
     if not 0<timeout<=10:raise ValueError('Command timeout must be in (0,10] seconds')
     return exchange_request(path,kind,value,timeout=timeout)

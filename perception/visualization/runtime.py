@@ -95,19 +95,22 @@ class DisplayBuffer:
         with self.condition:
             return 'people_clear' in self.pending
 
-    def frozen_basemap(self,paused,snapshot,row=None):
+    def frozen_basemap(self,paused,snapshot,row=None,*,grid=None,review_epoch=None):
         identity=(paused,None if snapshot is None else (snapshot['reference_binding'],snapshot['job_id']),
-                  None if row is None else tuple(row[k] for k in ('session_id','generation','frame_id','stamp_s','health')))
+                  None if row is None else tuple(row[k] for k in ('session_id','generation','frame_id','stamp_s','health')),
+                  None if grid is None else grid.metadata['snapshot_id'],review_epoch)
         with self.condition:
-            if self.stopping or self.identities.get('frozen_map',(False,None,None))==identity:return
+            if self.stopping or self.identities.get('frozen_map',(False,None,None,None,None))==identity:return
             self.identities['frozen_map']=identity
             self.pending.pop('navigation',None)
             association=None
-            if row is not None and self.latest_observation is not None:
+            if grid is not None:
+                association=grid.metadata.get('association')
+            elif row is not None and self.latest_observation is not None:
                 candidate=self.latest_observation[2]
                 if candidate is not None and candidate['stamp_s']<=row['stamp_s']:
                     association=candidate
-            self.pending['frozen_map']=(paused,snapshot,None if row is None else dict(row),association)
+            self.pending['frozen_map']=(paused,snapshot,None if row is None else dict(row),association,grid,review_epoch)
             self.condition.notify()
 
     def close(self):
@@ -116,7 +119,7 @@ class DisplayBuffer:
 
 class RuntimeDisplay:
     def __init__(self,settings,geometry,planning,*,asset=None,reference_max_age_s=5.,trajectory_max_age_s=.5,
-                 metrics=None,clock_rate=1.,publish_static=True):
+                 metrics=None,clock_rate=1.,publish_static=True,replay=False):
         import rospy
         from sensor_msgs.msg import PointCloud2,Image
         from nav_msgs.msg import Path,OccupancyGrid
@@ -135,14 +138,17 @@ class RuntimeDisplay:
             self.map_tf=publisher('tf','/tf',TFMessage,queue_size=4)
         self.Image,self.Path,self.OccupancyGrid=Image,Path,OccupancyGrid
         self.String=String
-        latched=('path','occupancy','navigation_basemap','navigation_window','static_basemap','reference_search_map','basemap_source')
+        latched=('path','occupancy','local_basemap','navigation_basemap','navigation_window','static_basemap',
+                 'reference_search_map','basemap_source')
         self.publishers={name:publisher(name,'/social_nav_runtime_view/'+name,kind,latch=name in latched)
-            for name,kind in [('scan',PointCloud2),('ground_map',PointCloud2),('navigation_basemap',PointCloud2),
+            for name,kind in [('scan',PointCloud2),('ground_map',PointCloud2),('local_basemap',PointCloud2),('navigation_basemap',PointCloud2),
                 ('navigation_window',Marker),('reference_search_map',PointCloud2),
                 ('static_basemap',PointCloud2),('basemap_source',String),('rgb',Image),('path',Path),('lidar_path',Path),
                 ('reference',Path),('trajectory',Path),('navigation',MarkerArray),('occupancy',OccupancyGrid),
                 ('raw_occupancy',OccupancyGrid),('people',MarkerArray)]}
         self.buffer=DisplayBuffer(settings);self.error=None;self.published=Counter()
+        self.navigation_basemap_samples=deque(maxlen=512)
+        self.replay=replay
         self.publish_ms={name:deque(maxlen=512) for name in (*GROUPS,'map_clear','people_clear','frozen_map')};self.submit_ms=deque(maxlen=512)
         from .navigation import NavigationView
         from .surface import DisplayGrids
@@ -154,9 +160,11 @@ class RuntimeDisplay:
         self.clock_rate=clock_rate;self.max_grid_age=planning['max_geometry_age_s'];self.publish_static=publish_static
         self.search_surface=None;self.local_surface=None
         self.layer_state={};self.local_frame=None;self.environment_meta=None
+        self.raw_basemap_frame=None
         self.last_navigation_source=None;self.navigation_epochs=None
         self.max_association_age=planning['max_association_age_s']
         self.frozen=False;self.frozen_snapshot=None;self.frozen_row=None;self.frozen_association=None
+        self.frozen_grid=None;self.frozen_review_epoch=None;self.on_review_displayed=None
         self.last_environment_grid=None
         self.navigation_lock=threading.Lock();self.navigation_result=None;self.last_navigation=None;self.last_view=None
         from .people import MarkerUpdates,PeopleScene
@@ -198,8 +206,8 @@ class RuntimeDisplay:
     def clear_environment(self,frame,stamp):
         self.buffer.clear_environment(frame,stamp)
 
-    def frozen_basemap(self,paused,snapshot=None,*,row=None):
-        self.buffer.frozen_basemap(paused,snapshot,row)
+    def frozen_basemap(self,paused,snapshot=None,*,row=None,grid=None,review_epoch=None):
+        self.buffer.frozen_basemap(paused,snapshot,row,grid=grid,review_epoch=review_epoch)
 
     def navigation(self,result,reference,request,scene,row,control,reason,*,now,clock_domain,clock_rate,clock_mono,grid=None,goal_hint=None,search_map=None):
         # Finalized results are replaced, never mutated after publication.
@@ -278,7 +286,8 @@ class RuntimeDisplay:
             was_frozen=self.frozen
             previous_row=self.frozen_row
             previous_navigation_row=self._current_row()
-            self.frozen,self.frozen_snapshot,self.frozen_row,association=item
+            (self.frozen,self.frozen_snapshot,self.frozen_row,association,
+             self.frozen_grid,self.frozen_review_epoch)=item
             if association is not None or previous_row!=self.frozen_row:
                 self.frozen_association=association
             if self.frozen:
@@ -313,7 +322,11 @@ class RuntimeDisplay:
             if self.buffer.people_clear_pending():return
             people,row=item
             identity=self.people.identity
-            specs=self.people.update(people,sensor_only=row['health']!=0)
+            surface=None
+            if row['health']==0 and people['health']=='valid' and self.subscribed('people'):
+                grid=self._display_ground_grid(self.last_environment_grid,row)
+                surface=self.navigation_view.display_surface(row,grid,mode='ground')
+            specs=self.people.update(people,sensor_only=row['health']!=0,surface=surface)
             if specs is not None:
                 self._publish_map_transform(row)
                 self._publish_marker_update('people',specs,reset=self.people.identity!=identity)
@@ -321,6 +334,7 @@ class RuntimeDisplay:
             self.people.clear()
             self._publish_marker_update('people',[],reset=True)
         elif group=='map_clear':
+            if self.frozen_grid is not None:return
             frame,stamp=item
             row=self._current_row() or getattr(self,'_path_latch',(None,False))[0]
             if row is not None:
@@ -338,6 +352,7 @@ class RuntimeDisplay:
             self.frozen_snapshot=None
             self._show_basemap()
         elif group=='map':
+            if self.frozen_grid is not None:return
             self.last_environment_grid=item
             self._show_basemap()
         elif group=='rgb':
@@ -376,20 +391,25 @@ class RuntimeDisplay:
         if self.frozen and not new and not reconnected:return
         if new or reconnected:
             # Plane-mode paths and the search diagnostics need no device terrain.
-            source=self.last_navigation_source
-            if source is None and self.frozen:source=self.last_environment_grid
+            source=self.frozen_grid
+            if source is None:
+                source=self.last_navigation_source if self.last_navigation_source is not None else self.last_environment_grid
             self.last_navigation_grid=None
-            if (source is not None and self.subscribed(*NAVIGATION_HEIGHT_TOPICS) and row['health']==0 and
-                    self.navigation_view.height_mode=='ground' and
-                    all(source.metadata[k]==row[k] for k in ('session_id','generation','frame_id')) and
-                    -1e-6<=row['stamp_s']-source.metadata['stamp_s']<=self.max_grid_age):
-                self.last_navigation_grid=self.grids.get(source)
+            if self.subscribed(*NAVIGATION_HEIGHT_TOPICS) and self.navigation_view.height_mode=='ground':
+                self.last_navigation_grid=self._display_ground_grid(source,row)
         view=self.navigation_view.update(row,packet,grid=self.last_navigation_grid,stopped=self.frozen)
         if self.frozen:view['text']='BAG PAUSED | see frozen preview'
         if new or reconnected or self.last_view is None or any(
                 (view[k] is None)!=(self.last_view[k] is None) for k in ('reference','trajectory','goal','search_map')):
             self._publish_navigation(view)
             self.navigation_epochs=epochs
+
+    def _display_ground_grid(self,source,row):
+        if (source is not None and row['health']==0 and
+                all(source.metadata[k]==row[k] for k in ('session_id','generation','frame_id')) and
+                -1e-6<=row['stamp_s']-source.metadata['stamp_s']<=self.max_grid_age):
+            return self.grids.get(source)
+        return None
 
     def _current_row(self):
         if self.frozen:return self.frozen_row
@@ -413,7 +433,7 @@ class RuntimeDisplay:
             self._path_latch=(row,False)
 
     def _show_basemap(self, *, stopped=False, mono=None):
-        layers=('occupancy','raw_occupancy','ground_map','navigation_basemap','navigation_window',
+        layers=('occupancy','raw_occupancy','ground_map','local_basemap','navigation_basemap','navigation_window',
                 'reference_search_map','basemap_source')
         if not self.subscribed(*layers) and not any(key is not None for key,_ in self.layer_state.values()):return
         from perception.environment.navigation import association_reason
@@ -454,7 +474,8 @@ class RuntimeDisplay:
                                       not self._matching_associations(scene['prior'],association)))):
             snapshot=None
 
-        grid=self.last_environment_grid if available else None
+        source=self.frozen_grid if self.frozen_grid is not None else self.last_environment_grid
+        grid=source if available else None
         if grid is not None:
             meta=grid.metadata
             if (any(meta[k]!=row[k] for k in IDENTITY) or
@@ -463,6 +484,8 @@ class RuntimeDisplay:
                     not -1e-6<=now-meta['stamp_s']<=self.max_grid_age):
                 grid=None
         self._publish_environment_layers(grid)
+        self._publish_local_basemap(grid)
+        raw_available=grid is not None
 
         transform=None
         if grid is not None and asset is not None:
@@ -472,7 +495,10 @@ class RuntimeDisplay:
                 grid=None
             else:
                 transform=np.asarray(meta['association']['map_from_local'])
-        self._publish_basemap_layers(grid,transform,snapshot,static_frame)
+        self._publish_basemap_layers(grid,transform,snapshot,static_frame,raw_available=raw_available)
+        if (grid is not None and grid is self.frozen_grid and self.frozen_review_epoch is not None
+                and self.on_review_displayed is not None and self.subscribed('navigation_basemap','local_basemap')):
+            self.on_review_displayed(self.frozen_review_epoch,grid.metadata['snapshot_id'])
 
     def _layer_action(self,name,key,*,latched=False):
         previous=self.layer_state.get(name)
@@ -514,6 +540,20 @@ class RuntimeDisplay:
         if raw=='publish':self._publish_occupancy('raw_occupancy',self.grids.get(source,navigation=False,ground=False))
         if ground=='publish':self._publish_local_cloud(ground_cloud(display))
 
+    def _publish_local_basemap(self,source):
+        from .surface import NavigationGridSurface,coloured_cloud
+
+        key=None if source is None else source.metadata['snapshot_id']
+        action=self._layer_action('local_basemap',key,latched=True)
+        if action=='publish':
+            grid=self.grids.get(source,navigation=False)
+            self.raw_basemap_frame=grid.metadata['frame_id']
+            cloud,_=NavigationGridSurface(None).layer(grid,None,boundary=False)
+        elif action=='clear':
+            cloud=coloured_cloud([],[],[],[],self.raw_basemap_frame,0.)
+        else:return
+        self.publishers['local_basemap'].publish(cloud)
+
     def _mapped_observation(self,row,association,now,asset):
         if asset is None or not association or not row.get('has_map_pose') or not association.get('valid'):
             return False
@@ -534,7 +574,7 @@ class RuntimeDisplay:
     def _matching_associations(source,current):
         return bool(source and source.get('valid') and all(source.get(k)==current.get(k) for k in MAP_BINDING))
 
-    def _publish_basemap_layers(self,grid,transform,snapshot,static_frame):
+    def _publish_basemap_layers(self,grid,transform,snapshot,static_frame,*,raw_available=False):
         from geometry_msgs.msg import Point
         from visualization_msgs.msg import Marker
         from .surface import NavigationGridSurface,SearchMapSurface,coloured_cloud
@@ -553,11 +593,20 @@ class RuntimeDisplay:
                 display=self.grids.get(grid)
                 frame=grid.metadata['frame_id'] if transform is None else static_frame
                 stamp=grid.metadata['stamp_s']
-                cloud,boundary=self.local_surface.layer(display,transform,cloud=show_cloud=='publish',boundary=show_window=='publish')
+                cloud,boundary=self.local_surface.layer(display,transform,
+                    cloud=transform is None and show_cloud=='publish',boundary=show_window=='publish',
+                    full_window='navigation_fusion' in display.metadata)
+                if transform is not None and show_cloud=='publish':
+                    raw=self.grids.get(grid,navigation=False)
+                    cloud=self.local_surface.preview(raw,display,transform,self.navigation_view.geometry)
                 self.local_frame=frame
             if show_cloud:
                 if cloud is None:cloud=coloured_cloud([],[],[],[],frame,stamp)
                 self.publishers['navigation_basemap'].publish(cloud)
+                if show_cloud=='publish':
+                    samples=self.navigation_basemap_samples
+                    if samples and stamp<samples[-1][0]:samples.clear()
+                    samples.append((stamp,time.monotonic()))
             if show_window:
                 action=Marker.DELETE if boundary is None else Marker.ADD
                 marker=self._header(Marker(ns='navigation_window',id=0,type=Marker.LINE_STRIP,action=action),frame,stamp)
@@ -580,7 +629,9 @@ class RuntimeDisplay:
             self.publishers['reference_search_map'].publish(cloud)
 
         status=dict(static_available=static_frame is not None,static_frame=static_frame,local_available=local_key is not None,
-            frozen=self.frozen,search_query_id=None if snapshot is None else snapshot['job_id'])
+            raw_local_available=raw_available,frozen=self.frozen,
+            replay_static_baseline=self.replay and static_frame is not None,
+            search_query_id=None if snapshot is None else snapshot['job_id'])
         if self._layer_action('basemap_source',tuple(status.items()),latched=True):
             self.publishers['basemap_source'].publish(self.String(data=json.dumps(status)))
 
@@ -599,7 +650,7 @@ class RuntimeDisplay:
         frame,stamp=view['frame_id'],view['stamp_s']
         for name in ('path','lidar_path','reference','trajectory'):
             if self.publishers[name].get_num_connections()==0:continue
-            data=view.get(name);source=stamp
+            data=view.get(name);source=stamp;curve_frame=frame
             if name=='path':
                 rows=[]
                 for t,p,height in view['history']:
@@ -607,15 +658,16 @@ class RuntimeDisplay:
                     else:rows.append((t,[*p[:2],height],[0,0,np.sin(p[2]/2),np.cos(p[2]/2)]))
             elif name=='lidar_path':rows=view['raw_history']
             else:
-                source=stamp if data is None else data['stamp_s']
                 rows=[]
                 if data is not None:
+                    source=data.get('display_stamp_s',data['stamp_s'])
+                    curve_frame=data.get('frame_id',frame)
                     for (x,y,yaw),height in zip(data['display_poses'],data['heights']):
                         if not np.isfinite(height):break
                         rows.append((source,[x,y,height],[0,0,np.sin(yaw/2),np.cos(yaw/2)]))
-            path=self._header(self.Path(),frame,source)
+            path=self._header(self.Path(),curve_frame,source)
             for t,position,quaternion in rows:
-                pose=self._header(PoseStamped(),frame,t)
+                pose=self._header(PoseStamped(),curve_frame,t)
                 pose.pose.position.x,pose.pose.position.y,pose.pose.position.z=map(float,position)
                 pose.pose.orientation.x,pose.pose.orientation.y,pose.pose.orientation.z,pose.pose.orientation.w=map(float,quaternion)
                 path.poses.append(pose)
@@ -660,8 +712,10 @@ class RuntimeDisplay:
             data=None if name=='history' else view.get(name)
             points=np.array([[p[0],p[1],height] for _,p,height in view['history']]) if name=='history' else (
                 np.empty((0,3)) if data is None else np.c_[data['display_poses'][:,:2],data['heights']])
-            curve_frame=frame
-            if name=='reference' and data is not None and 'search_xy' in data and self.navigation_view.height_mode=='ground':
+            curve_frame=frame if data is None else data.get('frame_id',frame)
+            if (name=='reference' and data is not None and 'search_xy' in data and
+                    curve_frame!=view['search_map']['frame_id'] and
+                    self.navigation_view.height_mode=='ground' and self.subscribed('reference_search_map')):
                 if self.search_surface is None:
                     from .surface import SearchMapSurface
                     self.search_surface=SearchMapSurface(self.grids.asset)
@@ -670,7 +724,7 @@ class RuntimeDisplay:
             segments=line_segments(points)
             if not len(segments):continue
             add(name,number,'box',color,(width,0.,0.),points=segments,
-                source_frame=curve_frame,source_stamp=stamp if data is None else data['stamp_s'])
+                source_frame=curve_frame,source_stamp=stamp if data is None else data.get('display_stamp_s',data['stamp_s']))
         pose=view['pose']
         body_segments=line_segments(view['footprint']) if pose is not None else []
         if len(body_segments):
@@ -725,8 +779,13 @@ class RuntimeDisplay:
     def close(self):
         self.buffer.close();self.worker.join(timeout=3)
         percentile=lambda rows:None if not rows else float(np.percentile(rows,95))
+        samples=self.navigation_basemap_samples
+        def frequency(column):
+            duration=samples[-1][column]-samples[0][column] if len(samples)>1 else 0.
+            return (len(samples)-1)/duration if duration>0. else None
         return dict(error=self.error,dropped=sum(self.buffer.superseded.values()),
             superseded=dict(self.buffer.superseded),published=dict(self.published),settings=self.buffer.settings,
             submit_wall_p95_ms=percentile(self.submit_ms),
             publish_wall_p95_ms={k:percentile(v) for k,v in self.publish_ms.items()},
+            navigation_basemap=dict(samples=len(samples),source_hz=frequency(0),wall_hz=frequency(1)),
             complete=not self.worker.is_alive() and self.error is None)

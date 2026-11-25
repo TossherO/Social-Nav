@@ -52,7 +52,7 @@ class PeopleScene:
         self.identity, self.last_stamp, self.history = None, None, {}
         self.track_slots = {}
 
-    def update(self, result, sensor_only=False):
+    def update(self, result, sensor_only=False, *, surface=None):
         stamp, frame = float(result['stamp_s']), result['frame_id']
         if not math.isfinite(stamp) or stamp < 0 or not frame or not result['detection_frame_id']:
             raise ValueError('Invalid person observation time/frame')
@@ -81,7 +81,13 @@ class PeopleScene:
             if sensor and transform is not None:
                 corners = corners @ transform[:3, :3].T + transform[:3, 3]
                 sensor = False
+            lift = 0.
+            if localized and surface is not None:
+                bottom = corners[:4]
+                lift = float(np.max(surface.above(bottom)[:, 2] - bottom[:, 2]))
+                corners[:, 2] += lift
             add(namespace, 'box', color, corners[_EDGE_POINTS], sensor=sensor, slot=slot)
+            return lift
 
         detections = result['detections'] if result['health'] != 'invalid' else ()
         for slot, box in enumerate(validate_boxes(detections)):
@@ -104,17 +110,18 @@ class PeopleScene:
             color = ((.33, 1, .54, 1) if track['confirmed'] else (.49, .68, 1, 1)) if observed else (1, .59, .32, 1)
             key = (track['track_id'], track['lifecycle_generation'])
             slot = self.track_slots.get(key, 0)
-            wire(box, 'tracks', color, slot=slot)
+            lift = wire(box, 'tracks', color, slot=slot)
+            center = box[:3]+[0, 0, lift]
             label = 'ID %s / g%s %s %.2f' % (key[0].rsplit(':', 1)[-1], key[1],
                 'OBS' if observed and track['confirmed'] else 'TENT' if observed else 'PRED', box[7])
-            add('labels', 'text', color, position=box[:3]+[0, 0, box[5]/2+.3], text=label, slot=slot)
+            add('labels', 'text', color, position=center+[0, 0, box[5]/2+.3], text=label, slot=slot)
             velocity = track['velocity_xyz_mps']
             if velocity is not None:
                 velocity = np.asarray(velocity, dtype=float)
                 if velocity.shape != (3,) or not np.isfinite(velocity).all():
                     raise ValueError('Invalid displayed velocity')
                 if np.linalg.norm(velocity) > .01:
-                    add('velocity', 'arrow', color, [box[:3], box[:3]+velocity], slot=slot)
+                    add('velocity', 'arrow', color, [center, center+velocity], slot=slot)
             if observed and track['confirmed']:
                 active.add(key)
                 history = self.history.setdefault(key, deque(maxlen=self.max_points))

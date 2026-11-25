@@ -1,6 +1,8 @@
 # 本文件仅管理调度与数据传输；模型、地图、运动和安全参数由各模块配置维护。
 # 读取传感器和运行原生定位的 Python 解释器。
 input_python: /usr/bin/python3
+# 观察和回放未显式指定车辆档案时，从此档案读取车体几何。
+observation_vehicle_profile: configs/wheelchair_vehicle.yaml
 # 扫描共享缓冲槽位数。
 shared_scan_slots: 4
 # 每个扫描共享槽位的字节上限。
@@ -19,8 +21,8 @@ display:
   scan_hz: 10.0
   # 行人显示发布频率，单位为赫兹。
   people_hz: 10.0
-  # 环境地图显示发布频率，单位为赫兹。
-  map_hz: 5.0
+  # 地图显示发布上限，为异步调度的到达抖动留余量。常规环境图目标仍为 7.5 Hz。
+  map_hz: 15.0
   # RGB 图像显示发布频率，单位为赫兹。
   rgb_hz: 2.0
   # 导航结果显示发布频率，单位为赫兹。

@@ -42,12 +42,18 @@ def projection(prior, local, transform):
 
 class ReferenceObstacles:
     """Keep observed obstructions on static free cells for one map association."""
-    def __init__(self, *, confirm_scans=2, confirm_window_s=.5, person_margin_m=.2):
+    def __init__(self, *, confirm_scans=2, confirm_window_s=.5, person_margin_m=.2, person_min_score=None):
         if type(confirm_scans) is not int or confirm_scans < 2:
             raise ValueError('Person-adjacent obstacle confirmation requires at least two scans')
+        if person_min_score is None:
+            from perception.environment.layers import load_config
+            person_min_score=load_config()['dynamic']['min_score']
+        if type(person_min_score) not in (int,float) or not 0<=person_min_score<=1:
+            raise ValueError('Invalid person confidence threshold')
         self.confirm_scans=confirm_scans
         self.confirm_window_s=confirm_window_s
         self.person_margin_m=person_margin_m
+        self.person_min_score=person_min_score
         self.version=0
         self.key=None
         self.reset()
@@ -81,7 +87,7 @@ class ReferenceObstacles:
                     continue
                 last=track.get('last_observed_stamp_s')
                 box=np.asarray(track['box'],float)
-                valid_box=box.shape==(8,) and np.isfinite(box).all() and box[7]>=.5
+                valid_box=box.shape==(8,) and np.isfinite(box).all() and box[7]>=self.person_min_score
                 if type(last) not in (int,float) or not np.isfinite(last) or last>stamp:
                     complete=False
                     if valid_box:
@@ -222,22 +228,11 @@ def near_hits(points, rotation, resolution, metadata, occupied):
     return np.flatnonzero(possible&near[clipped[:,1],clipped[:,0]])
 
 
-def reference_overlay(prior, local, raw, local_from_map, scene):
-    """Caller checks scene/association/asset first; reuse the planner's base SE2."""
-    m,pm=local.metadata,prior.metadata;transform=np.asarray(local_from_map)
-    report=dict(source_scene=scene.record['input_fingerprint'],source_as_of=scene.record['as_of'],
-        source_layers=scene.record['geometry']['layer_binding'],source_prior=pm['snapshot_id'],
-        local_from_map=transform.tolist(),projection='positive_area_SE2_overlap_at_current_base',
-        unknown_to_free=0,occupied_overlaps_rejected=0,current_occupied_added=0,
-        persistent=False,static_occupied_preserved=True,
-        free_source='raw_local_free_and_verified_navigation_free')
-    association=np.asarray(scene.record['prior']['map_from_local'])
-    if np.arccos(np.clip(association[2,2],-1.,1.))>.15:
-        return prior,dict(report,status='unavailable',reason='map_local_tilt_exceeds_planar_limit')
-    # Map only the bounded local raster. No additional device download is needed.
-    rotation=transform[:2,:2]
-    y,x,points=projection(prior,local,transform)
-    if not len(x):return prior,dict(report,status='outside_prior')
+def reference_overlay_cells(prior, local, raw, local_from_map):
+    """Return the mapped window and occupancy changes without copying the static raster."""
+    m,pm=local.metadata,prior.metadata
+    rotation=local_from_map[:2,:2]
+    y,x,points=projection(prior,local,local_from_map)
     rows=near_hits(points,rotation,pm['resolution'],m,local.layers['occupancy']==100)
     ij=np.floor((points-m['origin_xy'])/m['resolution']).astype(int)
     shape=np.asarray(m['shape'])[::-1]
@@ -245,12 +240,6 @@ def reference_overlay(prior, local, raw, local_from_map, scene):
     if len(rows):
         _,hit[rows]=overlap_states(points[rows],rotation.T,pm['resolution'],local,raw)
     old=prior.layers['occupancy'][y,x]
-    changed_hit=hit&(old!=100)
-    report['current_occupied_added']=int(changed_hit.sum())
-    # A current hit is hard occupancy, including where an older static obstacle
-    # was marked conditional and would otherwise be removed by reference_grid.
-    conditional=prior.layers.get('conditional_obstacle')
-    clear_conditional=hit if conditional is not None else None
     unknown=old==-1
     # Free centre is only a cheap necessary condition. Every accepted target
     # still goes through the complete overlap check below.
@@ -258,15 +247,37 @@ def reference_overlay(prior, local, raw, local_from_map, scene):
     rows=np.flatnonzero(inside&unknown&~hit);xx,yy=ij[rows].T
     rows=rows[(local.layers['occupancy'][yy,xx]==0)&(raw[yy,xx]==0)]
     free=np.zeros(len(x),bool)
+    rejected=0
     if len(rows):
         free[rows],rejected=overlap_states(points[rows],rotation.T,pm['resolution'],local,raw)
-        report['occupied_overlaps_rejected']=int(rejected.sum())
-    report.update(status='valid',unknown_to_free=int(free.sum()))
+    return y,x,points,hit,free,int(np.sum(rejected))
+
+
+def reference_overlay(prior, local, raw, local_from_map, scene):
+    """Caller checks scene/association/asset first; reuse the planner's base SE2."""
+    transform=np.asarray(local_from_map)
+    report=dict(source_scene=scene.record['input_fingerprint'],source_as_of=scene.record['as_of'],
+        source_layers=scene.record['geometry']['layer_binding'],source_prior=prior.metadata['snapshot_id'],
+        local_from_map=transform.tolist(),projection='positive_area_SE2_overlap_at_current_base',
+        unknown_to_free=0,occupied_overlaps_rejected=0,current_occupied_added=0,
+        persistent=False,static_occupied_preserved=True,
+        free_source='raw_local_free_and_verified_navigation_free')
+    association=np.asarray(scene.record['prior']['map_from_local'])
+    if np.arccos(np.clip(association[2,2],-1.,1.))>.15:
+        return prior,dict(report,status='unavailable',reason='map_local_tilt_exceeds_planar_limit')
+    y,x,_,hit,free,rejected=reference_overlay_cells(prior,local,raw,transform)
+    if not len(x):return prior,dict(report,status='outside_prior')
+    changed_hit=hit&(prior.layers['occupancy'][y,x]!=100)
+    conditional=prior.layers.get('conditional_obstacle')
+    # A current hit removes a static obstacle's conditional-free designation.
+    clear_conditional=hit if conditional is not None else None
+    report.update(status='valid',unknown_to_free=int(free.sum()),current_occupied_added=int(changed_hit.sum()),
+                  occupied_overlaps_rejected=rejected)
     if not free.any() and not changed_hit.any() and not (conditional is not None and (conditional[y[hit],x[hit]]).any()):return prior,report
     cells=prior.layers['occupancy'].copy();cells[y[free],x[free]]=0;cells[y[hit],x[hit]]=100
     cells.flags.writeable=False;layers=dict(occupancy=cells)
     if conditional is not None:
         conditional=conditional.copy();conditional[y[clear_conditional],x[clear_conditional]]=False
         conditional.flags.writeable=False;layers['conditional_obstacle']=conditional
-    return GridSnapshot(dict(pm,snapshot_id='reference_overlay:'+fingerprint(report),
+    return GridSnapshot(dict(prior.metadata,snapshot_id='reference_overlay:'+fingerprint(report),
         reference_overlay=report,layer_scope='temporary_reference_occupancy_and_risk'),layers),report

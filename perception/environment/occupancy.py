@@ -153,8 +153,8 @@ class OccupancyTree:
             raise RuntimeError(self.lib.sn_occupancy_error().decode())
         return votes
 
-    def free_ray_columns(self, pending, cutoff, floor, support, origin, config, *, metrics=None):
-        """Check the current collision band against actual post-cutoff ray misses."""
+    def free_ray_columns(self, pending, cutoff, floor, support, origin, config, *, metrics=None, clear_hits=False):
+        """Verify all collision heights using newer ray misses, optionally clearing prior hits."""
         confirmed = np.zeros(floor.shape, bool)
         y,x = np.nonzero(pending & support)
         if not len(x):
@@ -167,9 +167,10 @@ class OccupancyTree:
         keys = np.column_stack((x+origin_x,y+origin_y,first,count)).astype(np.int32)
         deadline = cutoff[y,x]
         result = np.empty(len(x), np.uint8)
-        method = getattr(self.lib,'sn_occupancy_free_ray_columns',None)
+        name = 'sn_occupancy_clear_observed_columns' if clear_hits else 'sn_occupancy_free_ray_columns'
+        method = getattr(self.lib,name,None)
         if method is None:
-            raise RuntimeError('Rebuild the environment library for post-expiry ray evidence')
+            raise RuntimeError('Rebuild the environment library for measured free columns')
         i32,fp64,u8 = C.POINTER(C.c_int32),C.POINTER(C.c_double),C.POINTER(C.c_uint8)
         method.argtypes = [C.c_void_p,i32,fp64,C.c_int,C.c_double,u8]
         if method(self.ptr,keys.ctypes.data_as(i32),deadline.ctypes.data_as(fp64),len(x),
@@ -177,7 +178,8 @@ class OccupancyTree:
             raise RuntimeError(self.lib.sn_occupancy_error().decode())
         confirmed[y,x] = result
         if metrics is not None and self.backend=='cuda':
-            metrics.transfer('h2d',keys.nbytes+deadline.nbytes,'environment_expired_obstacle_columns')
+            consumer='environment_ordinary_obstacle_columns' if clear_hits else 'environment_expired_obstacle_columns'
+            metrics.transfer('h2d',keys.nbytes+deadline.nbytes,consumer)
             metrics.transfer('d2h',result.nbytes,'environment_free_ray_columns')
         return confirmed
 

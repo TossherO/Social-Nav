@@ -225,8 +225,8 @@ __global__ void read_voxels(const Voxel* voxels,Grid grid,double stamp,float* ou
     out[5*j]=p.x; out[5*j+1]=p.y; out[5*j+2]=p.z;
     out[5*j+3]=1.f-1.f/(1.f+expf(v.odds)); out[5*j+4]=stamp-v.stamp;
 }
-__global__ void free_ray_columns(const Voxel* voxels, Grid grid, const int32_t* columns,
-    const double* cutoff, int n, float free_probability, uint8_t* out) {
+__global__ void free_ray_columns(Voxel* voxels, Grid grid, const int32_t* columns,
+    const double* cutoff, int n, float free_probability, uint8_t* out, bool clear_hits) {
     int i=blockIdx.x*blockDim.x+threadIdx.x;
     if(i>=n)return;
     const int32_t* key=columns+4*i;
@@ -237,7 +237,15 @@ __global__ void free_ray_columns(const Voxel* voxels, Grid grid, const int32_t* 
         if(!grid.contains(voxel)) { clear=false; break; }
         const auto& v=voxels[grid.slot(voxel)];
         const float probability=1.f-1.f/(1.f+expf(v.odds));
-        clear=v.valid && v.last_free_ray && v.stamp>cutoff[i] && probability<=free_probability;
+        clear=v.valid && v.last_free_ray && v.stamp>cutoff[i] && (clear_hits || probability<=free_probability);
+    }
+    if(clear && clear_hits) {
+        voxel.z=key[2];
+        const float free_odds=logf(free_probability/(1.f-free_probability))-1e-5f;
+        for(int j=0;j<count;++j,++voxel.z) {
+            auto& v=voxels[grid.slot(voxel)];
+            v.odds=fminf(v.odds,free_odds);v.ordinary_stamp=-INFINITY;
+        }
     }
     out[i]=clear;
 }
@@ -280,15 +288,16 @@ __global__ void person_endpoints(const double* xyz,int n,const uint8_t* moving,c
 extern "C" {
 int sn_occupancy_uncertain_person_hits() { return 1; }
 int sn_occupancy_local_ground_conflicts() { return 1; }
-int sn_navigation_support_with_ground_conflicts(const int8_t* raw,const double* seen,const double* prior,
+int sn_navigation_support_with_measured_clear(const int8_t* raw,const double* seen,const double* prior,
     const double* previous,double* hits,double* out,uint8_t* allowed,const double* points,
-    const uint8_t* moving,const uint8_t* conflicts,int count,const double* params,int h,int w,int ph,int pw,int dx,int dy,
+    const uint8_t* moving,const uint8_t* conflicts,const uint8_t* cleared,
+    int count,const double* params,int h,int w,int ph,int pw,int dx,int dy,
     void* stream,int device) {
     try {
         Guard guard(device);SupportPolicy p{};std::copy(params,params+30,p.v);
         p.h=h;p.w=w;p.ph=ph;p.pw=pw;p.dx=dx;p.dy=dy;
         auto s=static_cast<cudaStream_t>(stream);
-        support_cells<<<blocks(h*w),256,0,s>>>(raw,seen,prior,previous,hits,out,allowed,conflicts,p);
+        support_cells<<<blocks(h*w),256,0,s>>>(raw,seen,prior,previous,hits,out,allowed,conflicts,cleared,p);
         if(count)support_hits<<<blocks(count),256,0,s>>>(points,moving,count,hits,p);
         support_overlay<<<blocks(h*w),256,0,s>>>(raw,allowed,hits,out,p);
         check(cudaGetLastError());return 0;
@@ -355,8 +364,8 @@ int sn_occupancy_read(void* ptr,float* output,int capacity,double stamp) {
         return t.count;
     } catch(const std::exception& e) { error=e.what(); return -1; }
 }
-int sn_occupancy_free_ray_columns(void* ptr, const int32_t* columns, const double* cutoff,
-    int n, double free_probability, uint8_t* out) {
+static int check_free_ray_columns(void* ptr, const int32_t* columns, const double* cutoff,
+    int n, double free_probability, uint8_t* out, bool clear_hits) {
     try {
         auto& t=*static_cast<Tree*>(ptr); Guard guard(t.device);
         if(n<=0)return 0;
@@ -364,10 +373,18 @@ int sn_occupancy_free_ray_columns(void* ptr, const int32_t* columns, const doubl
         upload(t.ray_columns,columns,size_t(n)*4);upload(t.ray_cutoffs,cutoff,n);
         t.ray_clear.reserve(n);
         free_ray_columns<<<blocks(n),256>>>(t.voxels.data,t.grid,t.ray_columns.data,t.ray_cutoffs.data,
-            n,float(free_probability),t.ray_clear.data);
+            n,float(free_probability),t.ray_clear.data,clear_hits);
         check(cudaGetLastError());check(cudaMemcpy(out,t.ray_clear.data,n*sizeof(uint8_t),cudaMemcpyDeviceToHost));
         return 0;
     } catch(const std::exception& e) { error=e.what(); return -1; }
+}
+int sn_occupancy_free_ray_columns(void* ptr,const int32_t* columns,const double* cutoff,
+    int n,double free_probability,uint8_t* out) {
+    return check_free_ray_columns(ptr,columns,cutoff,n,free_probability,out,false);
+}
+int sn_occupancy_clear_observed_columns(void* ptr,const int32_t* columns,const double* cutoff,
+    int n,double free_probability,uint8_t* out) {
+    return check_free_ray_columns(ptr,columns,cutoff,n,free_probability,out,true);
 }
 int sn_occupancy_project(void* ptr,const double* floor,const uint8_t* support,const int32_t* required,
     int height,int width,const double* origin,const double* p,double stamp,const double* endpoints,int n,double* out) {

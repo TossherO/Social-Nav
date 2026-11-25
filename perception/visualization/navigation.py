@@ -11,7 +11,7 @@ from navigation.planning.inputs import association_status,navigation_grid,reques
 from navigation.planning.planner import se2,transform_poses
 from perception.mapping_localization.context import pose_matrix
 from .surface import (DisplaySurface, NavigationGridSurface, complete_display_heights,
-                      map_from_local_pose, sample_ground, sample_poses)
+                      sample_ground, sample_poses)
 
 
 IDENTITY=('session_id','generation','frame_id')
@@ -37,14 +37,19 @@ class NavigationView:
         self.reference_max_age_s=reference_max_age_s;self.trajectory_max_age_s=trajectory_max_age_s
         self.history=deque(maxlen=2000);self.raw_history=deque(maxlen=2000);self.identity=None
 
+    def display_surface(self,row,grid,*,mode=None):
+        if self.static_surface is None and self.asset is not None:
+            self.static_surface=NavigationGridSurface(self.asset)
+        return DisplaySurface(grid,row,offset=self.z,mode=mode or self.height_mode,
+            plane_radius=self.plane_radius,max_age=self.planning['max_geometry_age_s'],terrain=self.static_surface)
+
     def update(self,row,packet,*,grid=None,mono=None,stopped=False):
         mono=time.monotonic() if mono is None else mono
         identity=tuple(row[k] for k in IDENTITY)
         # Independent control may have a newer measured pose than perception.
         same=packet is not None and tuple(packet['row'][k] for k in IDENTITY)==identity
         if same and packet['row']['stamp_s']>row['stamp_s']:row=packet['row']
-        surface=DisplaySurface(grid,row,offset=self.z,mode=self.height_mode,plane_radius=self.plane_radius,
-            max_age=self.planning['max_geometry_age_s'])
+        surface=self.display_surface(row,grid)
         valid=row['health']==0
         pose,z,ground_source=self.observe(row,surface)
         out=dict(frame_id=row['frame_id'],stamp_s=row['stamp_s'],localization_row=row,history=list(self.history),
@@ -81,17 +86,17 @@ class NavigationView:
             try:
                 check_reference(reference,request,scene,self.asset,self.reference_max_age_s)
                 if not 0<=now-reference['as_of']<=self.reference_max_age_s:raise ValueError('reference_future_or_stale')
-                points=np.asarray(reference['result']['path'],float)
-                local_to_map=None
+                result_frame=reference['result']['frame_id']
+                data=dict(points=np.asarray(reference['result']['path'],float),frame_id=result_frame,
+                          stamp_s=reference['as_of'],display_stamp_s=reference['as_of'])
                 if request['mode']=='mapped':
-                    # Exactly the same planar map-to-local convention as DWA.
+                    # Use the planner's planar transform only to sample local terrain.
                     world=np.asarray(record['localization']['world_from_lidar'])
-                    mapped=self.geometry.pose(np.asarray(record['prior']['map_from_local'])@world)
-                    transform=se2(self.geometry.pose(world))@np.linalg.inv(se2(mapped))
-                    points=transform_poses(points,transform)
-                    local_to_map=np.linalg.inv(transform)
-                out['reference']=dict(points=points,stamp_s=reference['as_of'],local_to_map=local_to_map,
-                    map_from_local=copy.deepcopy(record['prior']['map_from_local']) if local_to_map is not None else None)
+                    map_from_local=np.asarray(record['prior']['map_from_local'])
+                    mapped=self.geometry.pose(map_from_local@world)
+                    data.update(local_from_map=se2(self.geometry.pose(world))@np.linalg.inv(se2(mapped)),
+                                map_from_local=map_from_local,display_stamp_s=row['stamp_s'])
+                out['reference']=data
                 ref_reason='ready (age %.2fs)'%(now-reference['as_of'])
             except (ValueError,KeyError,TypeError) as error:ref_reason=str(error)
         snapshot=packet.get('search_map')
@@ -161,55 +166,47 @@ class NavigationView:
             polygon=self.geometry.polygon(pose);polygon=np.vstack([polygon,polygon[0]])
             polygon=sample_poses(np.c_[polygon,np.zeros(len(polygon))],surface.resolution)[:,:2]
             heading=np.vstack([pose[:2],pose[:2]+.8*np.array([np.cos(pose[2]),np.sin(pose[2])])])
-            body=self._vehicle_points(np.vstack((polygon,heading)),surface,out['localization_row'])
+            body=self._vehicle_points(np.vstack((polygon,heading)),surface)
             out['footprint'],out['heading']=body[:-len(heading)],body[-len(heading):]
+        history=out.get('history')
+        if history and surface.mode=='ground':
+            draw=surface.above([[p[0],p[1],z] for _,p,z in history])
+            out['history']=[(stamp,p,height) for (stamp,p,_),height in zip(history,draw[:,2])]
         if out['goal'] is not None:out['goal_z']=float(surface.sample([out['goal'][:2]])[0][0])
         status={0:'unknown (markers omitted)',1:'supported cells',2:'fitted near vehicle',3:'fixed XY diagnostic',4:'static supported cells',5:'estimated static ground'}[out['ground_source']]
         for key in ('reference','trajectory'):
             data=out[key]
             if data is not None:
                 data['display_poses']=sample_poses(data['points'],surface.resolution)
-                data['heights'],data['height_sources']=surface.sample(data['display_poses'][:,:2])
+                xy=data['display_poses'][:,:2]
+                transform=data.get('map_from_local')
+                mapped=transform is not None and surface.mode=='ground'
+                local_xy=transform_poses(data['display_poses'],data['local_from_map'])[:,:2] if mapped else xy
+                data['heights'],data['height_sources']=surface.sample(local_xy)
                 if key=='reference':
-                    if self.asset is not None and data.get('local_to_map') is not None:
-                        mapped=transform_poses(data['display_poses'],data['local_to_map'])
-                        heights,sources=sample_ground(navigation_grid(self.asset),mapped[:,:2],self.z)
+                    if mapped:
+                        # Convert the static fallback into local Z at the sampled XY.
+                        z_offset=local_xy@transform[2,:2]+transform[2,3]
+                        heights,sources=sample_ground(navigation_grid(self.asset),xy,self.z)
                         missing=~np.isfinite(data['heights']) & np.isfinite(heights)
-                        if missing.any():
-                            points=np.c_[mapped[missing,:2],heights[missing],np.ones(missing.sum())]
-                            local=points@np.linalg.inv(np.asarray(data['map_from_local'],float)).T
-                            data['heights'][missing]=local[:,2]
-                            data['height_sources'][missing]=np.where(sources[missing]==5,5,4)
+                        data['heights'][missing]=(heights[missing]-z_offset[missing])/transform[2,2]
+                        data['height_sources'][missing]=np.where(sources[missing]==5,5,4)
                     fallback=out['localization_row']['position'][2]+self.z
                     data['heights'],approx=complete_display_heights(data['heights'],fallback)
                     data['height_sources'][approx]=5
-                    if 'search_xy' in data and self.height_mode=='ground':
-                        status+=' | reference on search terrain'
-                        continue
                     if approx.any():status+=' | reference approximate display heights %d'%int(approx.sum())
                 if key=='trajectory':data['heights']+=.02
+                data['heights']=surface.above(np.c_[local_xy,data['heights']],
+                    clearance=.06 if key=='trajectory' else .04)[:,2]
+                if mapped:
+                    data['heights']=np.fmax(data['heights']*transform[2,2]+z_offset,heights)
                 status+=' | %s height %d/%d'%(key,int(np.isfinite(data['heights']).sum()),len(data['heights']))
         out['text']+='\nGROUND: '+status
         return out
 
-    def _vehicle_points(self, xy, surface, row):
+    def _vehicle_points(self, xy, surface):
         z, _ = surface.sample(xy)
         if surface.mode == 'plane':
             return np.c_[xy, z+self.vehicle_clearance_m]
-        body = np.c_[xy, z-surface.offset+self.vehicle_clearance_m]
-        if self.asset is None or not row.get('has_map_pose') or not np.isfinite(z).any():
-            return body
-        if self.static_surface is None:
-            self.static_surface = NavigationGridSurface(self.asset)
-        if row.get('map_frame') != self.static_surface.static.metadata['frame_id']:
-            return body
-        transform = map_from_local_pose(row)
-        vertical = transform[2, 2]
-        if vertical <= .9:
-            return body
-        known = np.flatnonzero(np.isfinite(z))
-        mapped = body[known] @ transform[:3, :3].T + transform[:3, 3]
-        reference_z = self.static_surface.visible_static_heights(mapped[:, :2])
-        extra = np.fmax(0., reference_z+self.vehicle_clearance_m-mapped[:, 2])
-        body[known, 2] += extra/vertical
-        return body
+        return surface.above(np.c_[xy,z-surface.offset+self.vehicle_clearance_m],
+            clearance=self.vehicle_clearance_m)

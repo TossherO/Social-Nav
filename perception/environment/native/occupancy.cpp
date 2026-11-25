@@ -242,8 +242,8 @@ int sn_occupancy_read(void* ptr, float* output, int capacity, double stamp) {
         return i;
     } catch(const std::exception& e) { error=e.what(); return -1; }
 }
-int sn_occupancy_free_ray_columns(void* ptr, const int32_t* columns, const double* cutoff,
-    int n, double free_probability, uint8_t* out) {
+static int check_free_ray_columns(void* ptr, const int32_t* columns, const double* cutoff,
+    int n, double free_probability, uint8_t* out, bool clear_hits) {
     auto& t=*static_cast<Tree*>(ptr);
     for(int i=0;i<n;++i) {
         const int32_t* key=columns+4*i;
@@ -255,11 +255,24 @@ int sn_occupancy_free_ray_columns(void* ptr, const int32_t* columns, const doubl
             if(found==t.seen.end()) { clear=false; break; }
             const auto& v=found->second;
             const float probability=1.f-1.f/(1.f+std::exp(v.log_odds));
-            clear=v.last_free_ray && v.stamp>cutoff[i] && probability<=float(free_probability);
+            clear=v.last_free_ray && v.stamp>cutoff[i] && (clear_hits || probability<=float(free_probability));
+        }
+        if(clear && clear_hits) for(int z=first;z<first+count;++z) {
+            auto& v=t.seen.at(pack(octomap::OcTreeKey(x+32768,y+32768,z+32768)));
+            v.log_odds=std::min(v.log_odds,float(std::log(free_probability/(1.-free_probability)))-1e-5f);
+            v.ordinary_stamp=-INFINITY;
         }
         out[i]=clear;
     }
     return 0;
+}
+int sn_occupancy_free_ray_columns(void* ptr,const int32_t* columns,const double* cutoff,
+    int n,double free_probability,uint8_t* out) {
+    return check_free_ray_columns(ptr,columns,cutoff,n,free_probability,out,false);
+}
+int sn_occupancy_clear_observed_columns(void* ptr,const int32_t* columns,const double* cutoff,
+    int n,double free_probability,uint8_t* out) {
+    return check_free_ray_columns(ptr,columns,cutoff,n,free_probability,out,true);
 }
 // Exclusive person columns: ordinary occupied evidence always wins.
 int sn_occupancy_person_columns(void* ptr,const double* floor,int height,int width,

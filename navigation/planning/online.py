@@ -231,8 +231,10 @@ def run(args,planning,motion,geometry,settings):
     rospy.init_node('social_nav_planning',disable_signals=False)
     clock='ros_sim_time' if rospy.get_param('/use_sim_time',False) else 'ros_time'
     asset=StaticEnvironmentMap(args.static_map) if args.static_map else None
-    with ReferenceRuntime(planning,motion,geometry,settings) as runtime:
-        bridge=PlanningBridge(runtime,geometry,motion,load_config(args.environment_config)['scene'],asset=asset,clock_domain=clock)
+    environment=load_config(args.environment_config)
+    with ReferenceRuntime(planning,motion,geometry,settings,
+                          person_min_score=environment.get('dynamic',{}).get('min_score')) as runtime:
+        bridge=PlanningBridge(runtime,geometry,motion,environment['scene'],asset=asset,clock_domain=clock)
         state_pub=rospy.Publisher('/navigation/planning/state',String,queue_size=1,latch=True)
         path_pub=rospy.Publisher('/navigation/planning/trajectory',Path,queue_size=1,latch=True)
         shadow=None

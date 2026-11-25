@@ -173,6 +173,7 @@ def panel_controls(status, *, live, execute, preview_selected, preview_ready, ru
     shadow = status.get('shadow_navigation') or {}
     return dict(adjust=preview_selected, confirm=preview_ready,
                 pause=playback_available and not paused, resume=playback_available and paused,
+                review=not live and bool(status.get('review_available')),
                 shadow_start=not live and bool(shadow.get('available')) and not shadow.get('enabled', False),
                 shadow_stop=not live and bool(shadow.get('enabled')),
                 arm=live and execute and bool(status), cancel=runtime_ready, exit=True)
@@ -251,6 +252,7 @@ def runtime_command(args, config, pose):
             command += ['--t2-jpeg-quality',str(args.t2_jpeg_quality)]
     if getattr(args,'t2_raw_rgb',False):command += ['--t2-raw-rgb']
     if getattr(args,'record_t2_requests',False):command += ['--record-t2-requests']
+    if getattr(args,'test_person_extraction',False):command += ['--test-person-extraction']
     if getattr(args,'agent_seating',False):
         command += ['--agent-seating']
     if getattr(args,'agent_execution',False):
@@ -298,10 +300,12 @@ def parser():
     p.add_argument('--agent-seating',action='store_true',help='Prepare RGB and lidar for current table-edge proposals')
     p.add_argument('--agent-execution', action='store_true', help='Allow Agent goal intents in this manually armed execution session')
     p.add_argument('--trace-timing', action='store_true', help='Record bounded scalar stage timings for diagnosis')
-    p.add_argument('--roll-gravity-deg', type=float, help='Explicit live fixed-map gravity correction limit in degrees')
+    p.add_argument('--roll-gravity-deg', type=float, help='Fixed-map gravity correction limit in degrees (bag default: 8)')
     p.add_argument('--environment-update-hz', type=float, help='Override environment update rate (at most 10 Hz)')
     p.add_argument('--environment-window-m', type=float, help='Override the square local environment window in metres')
     p.add_argument('--vehicle-profile')
+    p.add_argument('--test-person-extraction',action='store_true',
+                   help='Bag only: accept all confidence scores for tracked person point extraction')
     p.add_argument('--execute', action='store_true', help='Enable supervised live hardware output; separate arming is still required')
     p.add_argument('--chassis-port')
     p.add_argument('--no-rviz', action='store_true', help='Use an already open RViz or ROS test publisher')
@@ -312,12 +316,14 @@ def main(argv=None):
     p = parser(); args = p.parse_args(argv)
     if not math.isfinite(args.start) or args.start < 0 or not math.isfinite(args.rate) or args.rate <= 0:
         p.error('Bag start/rate must be finite and nonnegative/positive')
+    if args.test_person_extraction and not args.bag:
+        p.error('--test-person-extraction requires --bag')
     if args.environment_update_hz is not None and (not math.isfinite(args.environment_update_hz) or not 0 < args.environment_update_hz <= 10):
         p.error('Environment update rate must be finite and in (0,10] Hz')
     if args.environment_window_m is not None and (not math.isfinite(args.environment_window_m) or not 0 < args.environment_window_m <= 60):
         p.error('Environment window must be finite and in (0,60] metres')
-    if args.roll_gravity_deg is not None and (not args.live or not math.isfinite(args.roll_gravity_deg) or not 0 < args.roll_gravity_deg <= 15):
-        p.error('--roll-gravity-deg requires live input and a finite value in (0,15] degrees')
+    if args.roll_gravity_deg is not None and (not math.isfinite(args.roll_gravity_deg) or not 0 < args.roll_gravity_deg <= 15):
+        p.error('--roll-gravity-deg requires a finite value in (0,15] degrees')
     if args.live and (args.start != 0 or args.rate != 1 or args.pause_at is not None or args.shadow_route_run):
         p.error('Live input does not accept bag playback options')
     if args.handoff_seed and (not args.live or not args.agent_observations or args.execute or args.pose_file or args.initial_z is not None):
@@ -423,6 +429,9 @@ def main(argv=None):
     from perception.detection_tracking.inference.config import load_config as detection_config
     sensor_settings = detection_config()['ros']
     initial_preview = PreviewState()
+    review_frame = None
+    review_corners = []
+    review_lock = threading.Lock()
     from perception.mapping_localization.initial_pose import quaternion_rpy
     from perception.environment.layers import load_config as environment_config
     initial_roll,initial_pitch,_ = quaternion_rpy(hint['pose']['quaternion_xyzw'])
@@ -471,10 +480,10 @@ def main(argv=None):
             source_file=str(resolve(args.handoff_seed or args.pose_file)),reference='rslidar',map=config['map'],pose_rpy_xyz=seed,
             registration_verified=False),indent=2))
 
-    def send(kind, value):
+    def send(kind, value, *, timeout=2.):
         if runtime is None or runtime.poll() is not None or not socket_path.exists():
             raise ValueError('Initialize the LiDAR pose and wait for the runtime to start')
-        return send_request(socket_path, kind, value)
+        return send_request(socket_path, kind, value, timeout=timeout)
 
     from navigation.planning.manual_goal import ManualGoals
     bridge = ManualGoals(send, task_id='interactive-'+uuid.uuid4().hex,
@@ -635,17 +644,76 @@ def main(argv=None):
             stamp_s=message.header.stamp.to_sec()))
 
     def point(message):
-        report(lambda: bridge.point(frame=message.header.frame_id,
-            position=[message.point.x, message.point.y, message.point.z], stamp_s=message.header.stamp.to_sec()))
+        position = [message.point.x,message.point.y,message.point.z]
+        def accept_point():
+            with review_lock:
+                if review_frame is not None:
+                    if message.header.frame_id!=asset.manifest['frame_id'] or not all(map(math.isfinite,position)):
+                        raise ValueError('请在地图坐标系内选择有效的对角点。')
+                    status=send('session_status',{})
+                    observed_frame=(status.get('epoch'),status.get('review_snapshot_id'))
+                    if not status.get('review_available') or observed_frame!=review_frame:
+                        raise ValueError('暂停画面已变化，请重新开始圈定。')
+                    if not review_corners:
+                        review_corners.append(position)
+                        rospy.loginfo('已选第一个对角点，请选择矩形的另一角。')
+                        return dict(accepted=True)
+                    result=send('save_anomaly_review',dict(epoch=review_frame[0],snapshot_id=review_frame[1],frame=message.header.frame_id,
+                                corners=[review_corners[0],position]),timeout=8.)
+                    if result.get('accepted'):
+                        review_corners.clear()
+                        mark_review(result)
+                        rospy.loginfo('异常审核证据已保存到 %s',result['path'])
+                    return result
+            return bridge.point(frame=message.header.frame_id,position=position,stamp_s=message.header.stamp.to_sec())
+        report(accept_point)
+
+    def mark_review(result=None):
+        from geometry_msgs.msg import Point
+        marker=Marker()
+        marker.header.frame_id=asset.manifest['frame_id']
+        marker.ns='anomaly_review'
+        marker.action=Marker.DELETE if result is None else Marker.ADD
+        marker.type=Marker.LINE_STRIP
+        marker.pose.orientation.w=1.
+        marker.scale.x=.04
+        marker.color.r,marker.color.g,marker.color.b,marker.color.a=1.,.9,.2,1.
+        if result is not None:
+            x0,y0,x1,y1=result['bounds_xy']
+            z=max(p[2] for p in result['corners_xyz'])+.06
+            marker.points=[Point(x,y,z) for x,y in ((x0,y0),(x1,y0),(x1,y1),(x0,y1),(x0,y0))]
+        label_pub.publish(marker)
+
+    def begin_review():
+        nonlocal review_frame
+        if args.live:
+            raise ValueError('区域审核只用于 bag 回放。')
+        status=send('session_status',{})
+        if not status.get('review_available'):
+            raise ValueError('请暂停回放并等待地图定位就绪。')
+        with review_lock:
+            review_frame=(status['epoch'],status['review_snapshot_id'])
+            review_corners.clear()
+            mark_review()
+        text='用 RViz 的 Publish Point 依次点击矩形的两个对角点。'
+        rospy.loginfo('%s',text)
+        return dict(accepted=True,message=text)
 
     def cancel():
         bag_ready=not args.live and runtime is not None and runtime.poll() is None and socket_path.exists()
         return cancel_operator_goal(bridge,send,bag_ready=bag_ready,execute=args.execute)
 
     def set_playback_paused(paused):
+        nonlocal review_frame
         if args.live:
             raise ValueError('Playback controls require a bag session')
-        return send('playback', dict(paused=paused))
+        result=send('playback', dict(paused=paused))
+        if not paused and result.get('accepted'):
+            with review_lock:
+                review_frame=None
+                review_corners.clear()
+                mark_review()
+        return result
 
     def set_armed(enabled):
         if not args.execute:
@@ -669,6 +737,7 @@ def main(argv=None):
                     show_initial_candidate(value)
                     return dict(accepted=True,state='initial_pose_preview',preview_revision=initial_preview.revision)
             if command=='confirm':return confirm_initial()
+            if command=='review':return begin_review()
             if command in ('pause', 'resume'):return set_playback_paused(command=='pause')
             if command in ('shadow_start', 'shadow_stop'):
                 return send('shadow_navigation', dict(enabled=command=='shadow_start'))
@@ -696,6 +765,8 @@ def main(argv=None):
         response = dict(request_id=request_id, accepted=result.get('accepted') is True)
         if not response['accepted'] and result.get('error'):
             response['error'] = result['error']
+        if response['accepted'] and result.get('message'):
+            response['message'] = result['message']
         panel_reply_pub.publish(String(data=json.dumps(response, ensure_ascii=False)))
 
     last_goal = object()
@@ -749,7 +820,7 @@ def main(argv=None):
 
     def keyboard():
         commands = {'c':'confirm', 'p':'pause', 'r':'resume', 's':'cancel', 'a':'arm', 'q':'exit',
-                    'shadow_start':'shadow_start', 'shadow_stop':'shadow_stop'}
+                    'shadow_start':'shadow_start', 'shadow_stop':'shadow_stop', 'review':'review'}
         for line in sys.stdin:
             command = commands.get(line.strip().lower())
             if command is not None:
@@ -782,8 +853,8 @@ def main(argv=None):
             cell_sizes={
                 '/social_nav_interactive/static_basemap':static_resolution,
                 '/social_nav_runtime_view/reference_search_map':static_resolution,
-                '/social_nav_runtime_view/navigation_basemap':local_resolution,
-                '/social_nav_runtime_view/ground_map':local_resolution,
+                '/social_nav_runtime_view/navigation_basemap':static_resolution,
+                '/social_nav_runtime_view/local_basemap':local_resolution,
             }
             for layer in manager['Displays']:
                 if layer.get('Topic') in cell_sizes:

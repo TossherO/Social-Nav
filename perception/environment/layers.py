@@ -98,7 +98,8 @@ def load_config(path=None):
         for name in ('min_hits', 'min_cluster_points', 'static_min_observations'):
             if type(dynamic[name]) is not int or not 1 <= dynamic[name] <= 255:
                 raise ValueError('Dynamic-filter count budgets must be integers in [1,255]')
-        if not 0 < dynamic['min_score'] <= 1 or type(dynamic['enabled']) is not bool:
+        score = dynamic['min_score']
+        if type(score) not in (int, float) or not 0 <= score <= 1 or type(dynamic['enabled']) is not bool:
             raise ValueError('Invalid dynamic-filter confidence or enabled flag')
     static = values['static']
     static.setdefault('tile_size_m', 16.)
@@ -269,13 +270,9 @@ def finish_evidence(occupancy, observed, seen, coverage, bottom, top, floor, sup
 
 class LocalEnvironmentMap:
     """Maintain a rolling map of current local evidence in the continuous odom frame."""
-    def __init__(self, config=None, tree_factory=OccupancyTree, *, lidar_from_base_xyz=None):
+    def __init__(self, config=None, tree_factory=OccupancyTree):
         self.config = copy.deepcopy(config or load_config())
         validate_current_policy(self.config)
-        self.lidar_from_base_xyz = None if lidar_from_base_xyz is None else np.array(lidar_from_base_xyz,float)
-        if self.lidar_from_base_xyz is not None and (self.lidar_from_base_xyz.shape!=(3,)
-                or not np.isfinite(self.lidar_from_base_xyz).all()):
-            raise ValueError('Vehicle base origin in the LiDAR frame needs three finite coordinates')
         compute = self.config.get('compute', {})
         self.tree_factory = (lambda resolution: OccupancyTree(resolution,
             backend=compute.get('backend','cuda'), device=compute.get('device',0))) if tree_factory is OccupancyTree else tree_factory
@@ -509,12 +506,12 @@ class LocalEnvironmentMap:
         timing = self.obstacle_timing
         self.obstacles.align(origin,floor.shape,resolution)
         unconfirmed = self.obstacles.unconfirmed(y,x,stamp,timing['obstacle_confirmation_window_s'])
-        base = None if self.lidar_from_base_xyz is None else (transform[:2,:3]@self.lidar_from_base_xyz+sensor[:2])
-        previous = self.snapshots[next(reversed(self.snapshots))] if self.snapshots else None
-        near_short = self.obstacles.near_short_only(y,x,stamp,center=base,resolution=resolution,
-            radius=timing['near_obstacle_radius_m'],evidence_age=timing['near_obstacle_evidence_age_s'],
-            max_gap=timing['long_obstacle_max_gap_s'],ordinary_ttl=config['obstacle_ttl_s'],previous=previous)
-        unconfirmed |= near_short
+        ray_support = support
+        if self.ground_conflict_view is not None:
+            ray_support = support & ~self.ground_conflict_view
+        if ground_status.get('history_suspended'):
+            ray_support = np.zeros_like(support)
+
         hit_mask[endpoints[unconfirmed[point_cells]]] = UNCONFIRMED_HIT
         short_ttl = config.get('dynamic', {}).get('transient_ttl_s', .2)
         count = self.tree.update(world,sensor,bounds,stamp,config,rays=rays,ray_origins=ray_origins,read=False,
@@ -522,14 +519,8 @@ class LocalEnvironmentMap:
         # Commit one actual vote per cell only after the occupancy update succeeds.
         self.obstacles.observe(y,x,stamp,max_gap=timing['long_obstacle_max_gap_s'],
             min_span=timing['long_obstacle_min_span_s'],hold=timing['long_obstacle_hold_s'])
-        person_cells = None
-        if objects is not None and base is not None:
-            person_points_seen = owners>=0
-            person_points_seen[person_points_seen] = ~predicted[owners[person_points_seen]]
-            _,yy,xx = obstacle_endpoints(world,person_points_seen,floor,origin,config,ground_status)
-            person_cells = yy,xx
-        self.obstacles.remember_sources(y,x,stamp,near_short=near_short,unconfirmed=unconfirmed,
-                                        person_cells=person_cells)
+        cleared = self.obstacles.clear_observed(self.tree,floor,ray_support,origin,config,stamp,
+            confirmation_window_s=timing['obstacle_confirmation_window_s'],metrics=metrics) if rays else None
         projection = self.obstacles.projection()
         if metrics is not None and self.tree.backend=='cuda':
             metrics.transfer('h2d',world.astype(np.float32,copy=False).nbytes+
@@ -554,12 +545,14 @@ class LocalEnvironmentMap:
         metadata['ground_tracking'] = ground_status
         metadata['dynamic_filter'] = person_status
         metadata['unconfirmed_obstacle_points'] = int(unconfirmed[point_cells].sum())
-        metadata['near_short_obstacle_cells'] = int(near_short.sum())
         if objects is not None:metadata['person_objects']=objects
         self.support_observation = dict(stamp_s=float(stamp),identity=(*identity,frame),
             endpoints=np.ascontiguousarray(world,np.float64),
             transient_mask=(hit_mask != 0).astype(np.uint8),
             person_owner=owners)
+        if cleared is not None and cleared.any():
+            cleared.flags.writeable = False
+            self.support_observation['cleared_obstacle_cells'] = cleared
         backend=self.config.get('compute',{}).get('backend','cuda')
         metadata['hit_invalidates_free']=config.get('hit_invalidates_free',False)
         metadata['compute_components']=dict(occupancy=backend,projection=backend,distance_fields=backend,
@@ -594,11 +587,6 @@ class LocalEnvironmentMap:
                 person_only=getattr(self.tree,'person_only',None))
         if projection is not None and backend=='cpu':
             updated = {key:value.copy() for key,value in snapshot.layers.items()}
-            ray_support = support
-            if self.ground_conflict_view is not None:
-                ray_support = support & ~self.ground_conflict_view
-            if ground_status.get('history_suspended'):
-                ray_support = np.zeros_like(support)
             free_ray_columns = self.tree.free_ray_columns(projection[2],projection[3],floor,ray_support,origin,config)
             fresh_free = apply_obstacle_memory(updated,projection,free_ray_columns)
             self.obstacles.clear(fresh_free)

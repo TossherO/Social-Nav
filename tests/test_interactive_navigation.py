@@ -51,6 +51,42 @@ class PlaybackTests(unittest.TestCase):
         self.assertFalse(pausing['pause'] or pausing['shadow_start'])
         ended = controls(dict(paused=True, source_ended=True))
         self.assertFalse(ended['pause'] or ended['resume'])
+        self.assertTrue(controls(dict(paused=True,review_available=True))['review'])
+
+    def test_region_review_preserves_the_frozen_observation(self):
+        from perception.environment.scene import SceneInputs
+        from tests.navigation_fixtures import bundle
+
+        with tempfile.TemporaryDirectory() as folder:
+            session=InteractiveSession(live=False,safety=None,output=Path(folder))
+            self.addCleanup(session.close)
+            source=bundle()
+            device=SimpleNamespace(metadata=source.geometry.metadata,_layers={})
+            corners=[[2.,3.,0.],[1.,4.,0.]]
+            snapshot_id=source.geometry.metadata['snapshot_id']
+            selection=dict(epoch=1,snapshot_id=snapshot_id,frame='map',corners=corners)
+            with self.assertRaisesRegex(ValueError,'暂停'):
+                session.handle('save_anomaly_review',selection)
+            session.update_playback(dict(epoch=1,paused=True,source_ended=False,offset_s=3.,stamp_s=10.1))
+            row=dict(source.geometry.metadata,health=0,has_map_pose=True,map_frame='map')
+            session.freeze_review(source,device,row,epoch=1,max_grid_age_s=.5,max_association_age_s=.5)
+            self.assertFalse(session.status()['review_available'])
+            session.confirm_review_display(1,'different-snapshot')
+            self.assertFalse(session.status()['review_available'])
+            session.confirm_review_display(1,snapshot_id)
+            self.assertTrue(session.status()['review_available'])
+            with self.assertRaisesRegex(ValueError,'变化'):
+                session.handle('save_anomaly_review',dict(selection,epoch=0))
+            with self.assertRaisesRegex(ValueError,'变化'):
+                session.handle('save_anomaly_review',dict(selection,snapshot_id='different-snapshot'))
+            result=session.handle('save_anomaly_review',selection)
+            directory=Path(result['path'])
+            stored=json.loads((directory/'review.json').read_text())
+            self.assertEqual(stored['bounds_xy'],[1.,3.,2.,4.])
+            self.assertEqual(stored['playback_stamp_s'],10.1)
+            self.assertEqual(stored['map_stamp_s'],source.record['as_of'])
+            saved=SceneInputs.load(directory/'scene')
+            self.assertEqual(saved.record['input_fingerprint'],source.record['input_fingerprint'])
 
     def test_initial_pose_keyboard_adjustments_are_local_and_bounded(self):
         from runtime.interactive import adjust_initial_pose
@@ -75,6 +111,12 @@ class PlaybackTests(unittest.TestCase):
         command=runtime_command(args,config,[0.,0.,0.,0.,0.,0.])
         index=command.index('--environment-window-m')
         self.assertEqual(command[index+1],'12.0')
+
+    def test_person_extraction_experiment_is_forwarded_to_bag_runtime(self):
+        from runtime.interactive import parser,runtime_command
+        args=parser().parse_args(['--bag','/tmp/example.bag','--output','/tmp/example','--test-person-extraction'])
+        config=dict(map='map',static_map='prior',coverage=None,motion_config='motion')
+        self.assertIn('--test-person-extraction',runtime_command(args,config,[0.]*6))
 
     def test_session_and_child_use_same_static_annotation_catalog(self):
         from perception.environment.layers import GridSnapshot

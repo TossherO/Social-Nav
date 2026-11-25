@@ -73,12 +73,13 @@ def planning_config(planning,settings=None):
 
 
 class ReferenceRuntime:
-    def __init__(self,planning,motion,geometry,settings=None,*,worker_factory=Worker):
+    def __init__(self,planning,motion,geometry,settings=None,*,person_min_score=None,worker_factory=Worker):
         self.motion=motion;self.geometry=geometry;self.settings=copy.deepcopy(settings) if settings is not None else load_config()
         self.planning=planning_config(planning,self.settings)
         self.obstacles=ReferenceObstacles(confirm_scans=self.settings.get('person_obstacle_confirm_scans',2),
                                           confirm_window_s=self.settings.get('person_obstacle_confirm_window_s',.5),
-                                          person_margin_m=self.settings.get('person_obstacle_margin_m',.2))
+                                          person_margin_m=self.settings.get('person_obstacle_margin_m',.2),
+                                          person_min_score=person_min_score)
         self.worker=worker_factory(self.planning,geometry)
         self.events=deque(maxlen=512);self.sequence=0;self.epoch=0;self.context=None
         self.latest=None;self.current=None;self.reference=None;self.reason='waiting_for_observation'

@@ -12,11 +12,6 @@ Visualization Manager:
     Fixed Frame: odom
     Frame Rate: 20
   Displays:
-    - Class: rviz/Grid
-      Name: Grid
-      Enabled: false
-      Cell Size: 1
-      Plane Cell Count: 40
     - Class: rviz/PointCloud2
       Name: Current scan
       Enabled: true
@@ -40,7 +35,7 @@ Visualization Manager:
       Style: Squares
       Size (m): 0.1
       Color Transformer: RGB8
-      Alpha: 0.9
+      Alpha: 1
       Decay Time: 0
     - Class: rviz/PointCloud2
       Name: Static map
@@ -52,71 +47,26 @@ Visualization Manager:
       Color Transformer: RGB8
       Alpha: 0.9
       Decay Time: 0
-    - Class: rviz/Marker
-      Name: Navigation window
-      Enabled: true
-      Marker Topic: /social_nav_runtime_view/navigation_window
-      Queue Size: 1
     - Class: rviz/PointCloud2
-      Name: Reference search snapshot
+      Name: Navigation search grid
       Enabled: false
       Topic: /social_nav_runtime_view/reference_search_map
       Queue Size: 1
       Style: Squares
       Size (m): 0.1
       Color Transformer: RGB8
-      Alpha: 0.9
+      Alpha: 1
       Decay Time: 0
     - Class: rviz/PointCloud2
-      Name: Local navigation map (DWA diagnostic)
+      Name: Local map
       Enabled: false
-      Topic: /social_nav_runtime_view/ground_map
+      Topic: /social_nav_runtime_view/local_basemap
       Queue Size: 1
       Style: Squares
       Size (m): 0.1
       Color Transformer: RGB8
-      Alpha: 0.45
+      Alpha: 1
       Decay Time: 0
-    - Class: rviz/Map
-      Name: Navigation occupancy (XY diagnostic)
-      Enabled: false
-      Topic: /social_nav_runtime_view/occupancy
-      Alpha: 0.5
-      Color Scheme: map
-    - Class: rviz/Map
-      Name: Raw local occupancy (XY diagnostic)
-      Enabled: false
-      Topic: /social_nav_runtime_view/raw_occupancy
-      Alpha: 0.5
-      Color Scheme: map
-    - Class: rviz/Path
-      Name: Observed base path (latest continuous segment)
-      Enabled: false
-      Topic: /social_nav_runtime_view/path
-      Color: 255; 160; 40
-      Line Style: Billboards
-      Line Width: 0.06
-    - Class: rviz/Path
-      Name: Raw LiDAR path (3D diagnostic)
-      Enabled: false
-      Topic: /social_nav_runtime_view/lidar_path
-      Color: 190; 120; 60
-      Line Style: Billboards
-      Line Width: 0.02
-    - Class: rviz/Path
-      Name: DWA prediction (not executed)
-      Enabled: false
-      Topic: /social_nav_runtime_view/trajectory
-      Color: 80; 220; 255
-      Line Style: Billboards
-      Line Width: 0.10
-    - Class: rviz/Path
-      Name: Spatial reference (continuous prefix)
-      Enabled: false
-      Topic: /social_nav_runtime_view/reference
-      Color: 235; 235; 235
-      Line Style: Billboards
-      Line Width: 0.075
     - Class: rviz/MarkerArray
       Name: Terrain paths, vehicle and planning status
       Enabled: true

@@ -97,6 +97,9 @@ class NavigationSupport:
                     not np.isfinite(points).all() or moving.dtype!=np.uint8 or moving.shape!=(len(points),) or
                     not moving.flags.c_contiguous or not np.isin(moving,[0,1]).all()):
                 raise ValueError('Invalid static support endpoints or transient mask')
+            cleared=observation.get('cleared_obstacle_cells')
+            if cleared is not None and (cleared.dtype!=bool or cleared.shape!=tuple(m['shape'])):
+                raise ValueError('Measured free mask must match the local occupancy grid')
         # Filter in the local frame before projection. Association Z error must
         # not turn floor returns into obstacles or hide real obstacle heights.
         ground=m.get('ground_tracking',{});local_plane=ground.get('plane_world')
@@ -137,6 +140,9 @@ class NavigationSupport:
             if not np.allclose(delta,np.rint(delta),rtol=0,atol=1e-6):raise ValueError('Support grid lattice changed')
             dx,dy=np.rint(delta).astype(int)
             self.hits=np.stack([shift_array(v,dx,dy,-np.inf) for v in self.hits])
+        cleared=observation.get('cleared_obstacle_cells')
+        if cleared is not None:
+            self.hits[:,cleared&(cells==0)]=-np.inf
         points=observation['endpoints'];ij=np.floor((points[:,:2]-m['origin_xy'])/m['resolution']).astype(int)
         inside=((ij>=0)&(ij<np.asarray(shape[::-1]))).all(axis=1)
         keep=inside

@@ -28,7 +28,7 @@ def parser():
     p.add_argument('--mode',choices=['mapping','localization','odometry'])
     p.add_argument('--lio-backend',choices=['cpu','cuda'],help='Override module CUDA default for FAST-LIO matching')
     p.add_argument('--roll-backend',choices=['cpu','cuda'],help='Override module CUDA default for ROLL; unused by pure odometry')
-    p.add_argument('--roll-gravity-deg',type=float,help='Explicit live fixed-map gravity correction limit in degrees')
+    p.add_argument('--roll-gravity-deg',type=float,help='Fixed-map gravity correction limit in degrees (bag default: 8)')
     p.add_argument('--deskew-backend',choices=['cpu','cuda'],help='Override module CUDA default for deskew')
     p.add_argument('--linearization-backend',choices=['cpu','cuda'],help='Experimental CUDA observation reduction; CPU by default')
     p.add_argument('--map',dest='map_directory');p.add_argument('--pose',nargs=6,type=float);p.add_argument('--pose-file')
@@ -63,6 +63,8 @@ def parser():
     p.add_argument('--bag-shadow',action='store_true',help='Offer recorded-route planning review in an interactive bag')
     p.add_argument('--shadow-route-run',help='Reuse a successful fixed-map localization run for the same bag and map')
     p.add_argument('--vehicle-profile',help='Explicit measured vehicle geometry, limits and protocol')
+    p.add_argument('--test-person-extraction',action='store_true',
+                   help='Bag only: accept all confidence scores for tracked person point extraction')
     p.add_argument('--execute',action='store_true',help='Enable supervised live hardware output; separate operator arming required')
     p.add_argument('--chassis-port',help='Exclusive serial device, only with --execute')
     p.add_argument('--commands',help='Explicit timed goal/cancel/override list for causal shadow replay')
@@ -149,10 +151,13 @@ def _runtime_inputs(args):
     config,run=algorithm_config(mode=mode,source_run=source,map_directory=args.map_directory,pose=args.pose,pose_file=args.pose_file,
         bag=bag,start=args.start,calibration=args.lidar_imu_calibration,coverage=args.coverage,lio_backend=args.lio_backend,
         roll_backend=args.roll_backend,deskew_backend=args.deskew_backend,linearization_backend=args.linearization_backend)
-    if args.roll_gravity_deg is not None:
-        if not args.live or mode!='localization' or not np.isfinite(args.roll_gravity_deg) or not 0<args.roll_gravity_deg<=15:
-            raise ValueError('--roll-gravity-deg requires live localization and a finite value in (0,15] degrees')
-        config['roll']['coverageGate']['maxGravity']=float(np.deg2rad(args.roll_gravity_deg))
+    gravity_deg=args.roll_gravity_deg
+    if gravity_deg is None and mode=='localization' and bag is not None and source is None:
+        gravity_deg=8.
+    if gravity_deg is not None:
+        if mode!='localization' or not np.isfinite(gravity_deg) or not 0<gravity_deg<=15:
+            raise ValueError('--roll-gravity-deg requires fixed-map localization and a finite value in (0,15] degrees')
+        config['roll']['coverageGate']['maxGravity']=float(np.deg2rad(gravity_deg))
     if args.rate<=0:raise ValueError('Integrated timing/independent safety requires positive real-time replay rate')
     if args.goal is not None and len(args.goal) not in (2,3):raise ValueError('Goal requires x y [yaw]')
     if args.environment_update_hz is not None and (not np.isfinite(args.environment_update_hz) or not 0<args.environment_update_hz<=10):
@@ -162,6 +167,10 @@ def _runtime_inputs(args):
     settings=runtime_settings(args.runtime_config)
     from perception.environment.layers import load_config as environment_config
     env_config=environment_config();env_config['compute'].update(backend='cuda',device=0)
+    if args.test_person_extraction:
+        if bag is None or args.live:
+            raise ValueError('--test-person-extraction requires bag playback')
+        env_config['dynamic']['min_score']=0.
     if args.environment_update_hz is not None:env_config['update_hz']=args.environment_update_hz
     if args.environment_window_m is not None:
         support=env_config.get('navigation_support',{})
@@ -275,10 +284,12 @@ def _run(args, resources, handles):
     if args.vehicle_profile:
         from navigation.control.vehicle import load_vehicle_profile
         geometry,motion,_=load_vehicle_profile(args.vehicle_profile,motion,require_execution=args.execute)
+    elif settings.get('observation_vehicle_profile'):
+        from navigation.control.vehicle import load_observation_geometry
+        geometry=load_observation_geometry(ROOT/settings['observation_vehicle_profile'])
     else:
         geometry=VehicleGeometry.historical(ROOT/planning['geometry_reference'])
-    environment = resources['environment'] = LocalEnvironmentMap(
-        env_config,tree_factory=factory,lidar_from_base_xyz=None if geometry.assumed else geometry.lidar_from_base[:3,3])
+    environment = resources['environment'] = LocalEnvironmentMap(env_config,tree_factory=factory)
     planning['motion_constraints']={k:motion[k] for k in ('min_turning_radius_m','allow_reverse','allow_in_place_rotation')}
     planning['pose_search']['native_library']=str(ROOT/'outputs/runtime/build/planning/libsocial_nav_pose_search.so')
     motion.update(collision_backend='cuda',collision_library=str(ROOT/settings['collision_library']))
@@ -294,7 +305,9 @@ def _run(args, resources, handles):
     if args.route:
         from navigation.planning.route_replay import RouteReplay
         route_replay=RouteReplay(args.route,bag,args.route_floor,geometry,planning,settings['route_replay'],asset)
-    reference = resources['reference'] = ReferenceRuntime(planning,motion,geometry,worker_factory=lambda *parts:Worker(*parts,metrics=metrics))
+    reference = resources['reference'] = ReferenceRuntime(planning,motion,geometry,
+        person_min_score=env_config.get('dynamic',{}).get('min_score'),
+        worker_factory=lambda *parts:Worker(*parts,metrics=metrics))
     batch=DeviceDwaBatch(device=device,library=ROOT/settings['dwa_library'],metrics=metrics)
     shadow=shadow_config();shadow['period_s']=settings['control_period_s']
     controller=DwaShadowController(planning,motion,geometry,asset=asset,device_batch=batch,settings=shadow,execution=args.execute)
@@ -314,10 +327,8 @@ def _run(args, resources, handles):
         display = resources['display'] = RuntimeDisplay(settings['display'],geometry,planning,asset=asset,
             reference_max_age_s=reference.settings['max_age_s'],
             trajectory_max_age_s=controller.controller.safety_settings['max_input_age_s'],metrics=metrics,
-            clock_rate=args.rate,publish_static=not args.interactive_session)
-        # Live search snapshots also supply the displayed path heights and the
-        # session panel's query identity. Frozen previews keep their own snapshot.
-        reference.display_subscribed=lambda:display.subscribed('reference_search_map','navigation','basemap_source')
+            clock_rate=args.rate,publish_static=not args.interactive_session,replay=not args.live)
+        reference.display_subscribed=lambda:display.subscribed('reference_search_map')
     state_parent, state_input = _socket_pair(handles)
     safety = resources['safety'] = SafetyProcess(state_parent,planning,motion,geometry,clock_domain=clock_domain,asset=asset,
         slots=settings['shared_safety_slots'],slot_bytes=settings['shared_safety_slot_bytes'],settings=shadow,
@@ -337,6 +348,8 @@ def _run(args, resources, handles):
                 route_run=args.shadow_route_run, output=output)
         interactive = resources['interactive_session'] = InteractiveSession(live=args.live,safety=safety,output=output,
                                                                           execute=args.execute,bag_shadow=bag_shadow)
+        if display is not None and not args.live:
+            display.on_review_displayed=interactive.confirm_review_display
     commands = resources['commands'] = CommandInbox(output/'commands.sock',safety,session=interactive,agent_execution=args.agent_execution,
                           follow_enabled=args.agent_follow_candidates)
     commands.agent_state.configure_vehicle(geometry,motion)
@@ -678,7 +691,7 @@ def _run(args, resources, handles):
             manifest['static_navigation']=dict(static_map=args.static_map,catalog=args.catalog,
                 snapshot_id=asset.manifest['snapshot_id'],navigation_window=asset.navigation_window)
         manifest['interactive']=dict(enabled=args.interactive_session,execution_requested=args.execute,
-            vehicle_source=motion.get('vehicle_source'),chassis_port=args.chassis_port,
+            vehicle_source=motion.get('vehicle_source'),geometry_source=geometry.source,chassis_port=args.chassis_port,
             physical_acceptance=False,task_completed=False)
         manifest['t2_follow']=dict(enabled=follow_decision is not None,
                                    backend=None if follow_decision is None else follow_decision.backend)

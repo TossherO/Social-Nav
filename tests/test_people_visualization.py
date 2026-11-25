@@ -102,6 +102,25 @@ class PeopleVisualizationTests(unittest.TestCase):
         self.assertTrue(all(s['stamp_s'] == 1 for s in specs))
         self.assertFalse(any(s['namespace'] == 'velocity' for s in specs))
 
+    def test_world_boxes_lift_with_the_terrain_without_changing_observations(self):
+        from perception.visualization.surface import DisplaySurface
+        from tests.test_navigation_display import ground_grid
+
+        result = observation(10.)
+        result['tracks'][0]['velocity_xyz_mps'] = [1, 0, 0]
+        grid = ground_grid(-.2)
+        row = dict(grid.metadata)
+        surface = DisplaySurface(grid, row)
+        specs = {spec['namespace']: spec for spec in PeopleScene().update(result, surface=surface)}
+        for name in ('detections', 'tracks'):
+            self.assertAlmostEqual(specs[name]['points'][:, 2].min(), -.145)
+            self.assertAlmostEqual(np.ptp(specs[name]['points'][:, 2]), 1.7)
+        self.assertAlmostEqual(specs['labels']['position'][2], 1.855)
+        self.assertAlmostEqual(specs['velocity']['points'][0, 2], .705)
+        self.assertEqual(result['tracks'][0]['box'][2], 0)
+        sensor = PeopleScene().update(result, sensor_only=True, surface=surface)[0]
+        self.assertAlmostEqual(sensor['points'][:, 2].min(), -.85)
+
     def test_prediction_degradation_and_identity_reset_do_not_extend_observed_trails(self):
         scene = PeopleScene()
         scene.update(observation(1))
@@ -202,22 +221,31 @@ class PeopleVisualizationTests(unittest.TestCase):
         except ImportError:
             self.skipTest('source perception/scripts/ros1_env.sh to check ROS display messages')
         from perception.visualization.people import MarkerUpdates
+        from perception.visualization.navigation import NavigationView
         from perception.visualization.runtime import DisplayBuffer, RuntimeDisplay
+        from perception.visualization.surface import DisplayGrids
+        from tests.test_navigation_display import ground_grid
         display = RuntimeDisplay.__new__(RuntimeDisplay)
         display.rospy = rospy
         display.buffer = DisplayBuffer({})
         display.people = PeopleScene(stable_marker_ids=True)
+        display.last_environment_grid = ground_grid(-.2, stamp=1.)
+        display.grids = DisplayGrids()
+        display.max_grid_age = .5
+        display.navigation_view = NavigationView(None, {'max_geometry_age_s': .5})
         display._marker_updates = {'people': MarkerUpdates()}
         events = []
         display.publishers = {'people': SimpleNamespace(
             publish=lambda message: events.append(('marker', message)), get_num_connections=lambda: 1)}
         display._publish_map_transform = lambda row: events.append(('transform', row))
-        row = dict(stamp_s=1., health=0)
+        row = dict(display.last_environment_grid.metadata, health=0)
         display._publish('people', (observation(), row))
         display._publish('people', (observation(), row))  # duplicate or delayed render
         self.assertEqual([name for name, _ in events], ['transform', 'marker'])
         self.assertIs(events[0][1], row)
         self.assertTrue(all(m.header.stamp.to_sec() == row['stamp_s'] for m in events[1][1].markers[1:]))
+        detection = next(m for m in events[1][1].markers if m.ns == 'detections')
+        self.assertAlmostEqual(min(p.z for p in detection.points), -.145)
 
     def test_streaming_markers_attach_periodic_recovery_to_a_measurement(self):
         try:
@@ -282,10 +310,13 @@ class PeopleVisualizationTests(unittest.TestCase):
         except ImportError:
             self.skipTest('source perception/scripts/ros1_env.sh to check ROS display messages')
         from perception.visualization.people import MarkerUpdates
+        from perception.visualization.navigation import NavigationView
         from perception.visualization.runtime import DisplayBuffer, RuntimeDisplay
 
         display = RuntimeDisplay.__new__(RuntimeDisplay)
         display.people = PeopleScene(stable_marker_ids=True)
+        display.last_environment_grid = None
+        display.navigation_view = NavigationView(None, {'max_geometry_age_s': .5})
         display.buffer = DisplayBuffer({'people_hz': 10.})
         display.last_view = None
         display._marker_updates = {'people': MarkerUpdates()}

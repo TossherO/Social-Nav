@@ -155,14 +155,19 @@ class ControlLoop:
         grid = device.materialize(consumer='reference_search', fields=missing, metrics=self.metrics)
         return scene.with_additional_geometry_layers(grid.layers)
 
-    def _preview_frozen(self, token, environment_epoch, request, *, shadow=False):
+    def _preview_frozen(self, token, environment_epoch, request, *, shadow=False, review_epoch=None, row=None):
         """Publish the search raster only for the preview accepted by the bag session."""
-        key=(token,self.scene is not None,None if request is None else request['request_id'])
+        row=self.rows[-1] if row is None else row
+        snapshot_id=None if self.scene is None else self.scene.geometry.metadata['snapshot_id']
+        key=(token,snapshot_id,review_epoch,None if request is None else request['request_id'])
         if key==self.preview_token:
             return
         self.preview_token=key
+        display_options=dict(row=row)
+        if review_epoch is not None:
+            display_options.update(grid=self.device,review_epoch=review_epoch)
         if self.display is not None:
-            self.display.frozen_basemap(True,row=self.rows[-1])
+            self.display.frozen_basemap(True,**display_options)
         if request is None:
             self.session.clear_preview(token)
             return
@@ -178,7 +183,7 @@ class ControlLoop:
 
             self.batch.bind(self.device)
             scene=self._search_scene(self.scene)
-            result=preview(request,scene,list(self.rows),self.controller.controller,
+            result=preview(request,scene,[r for r in self.rows if r['stamp_s']<=row['stamp_s']],self.controller.controller,
                 self.reference.planning,asset=self.asset,dt=self.settings['control_period_s'],
                 scope=request['source'] if shadow else 'frozen_bag_observation',
                 on_mapped_grid=capture if self.display is not None and self.reference.display_enabled else None)
@@ -199,7 +204,7 @@ class ControlLoop:
                 return
             if self.session.publish_preview(result,token):
                 if snapshot is not None:
-                    self.display.frozen_basemap(True,snapshot,row=self.rows[-1])
+                    self.display.frozen_basemap(True,snapshot,**display_options)
                 if shadow:
                     status='reference_ready' if result.get('reference_available') else 'unavailable'
                     reference_reason=result['reference']['result'].get('reason')
@@ -323,12 +328,19 @@ class ControlLoop:
                     if freezing:
                         if paused and pause_requested and self.rows:
                             previous_environment_epoch,environment_fault,_=self._take_environment(previous_environment_epoch)
+                            row=self.rows[-1]
+                            frozen=self.session.freeze_review(self.scene,self.device,row,epoch=epoch,
+                                max_grid_age_s=self.reference.planning['max_geometry_age_s'],
+                                max_association_age_s=self.reference.planning['max_association_age_s'])
+                            if frozen is not None:
+                                self.scene,self.device,row=frozen
                             shadow_request=None if bag_shadow is None or self.request is not None else bag_shadow.select(
-                                self.scene if environment_fault is None else None,self.rows[-1],now=self.rows[-1]['stamp_s'],
+                                self.scene if environment_fault is None else None,row,now=row['stamp_s'],
                                 clock_domain=self.clock_domain,planning=self.reference.planning,source_ended=source_ended)
                             request=self.request or shadow_request
-                            self.session.publish_observation(self.scene,self.rows[-1],goal_intent=request,token=token)
-                            self._preview_frozen(token,previous_environment_epoch,request,shadow=shadow_request is not None)
+                            self.session.publish_observation(self.scene,row,goal_intent=request,token=token)
+                            self._preview_frozen(token,previous_environment_epoch,request,shadow=shadow_request is not None,
+                                                 review_epoch=epoch if frozen is not None else None,row=row)
                         elif self.preview_token is not None:
                             self.preview_token=None
                             if self.display is not None:

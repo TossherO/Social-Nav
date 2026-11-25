@@ -150,13 +150,21 @@ def inspect(config_path, *, motion_path=None, motion_profile=None, vehicle_profi
         from .config import runtime_settings
         return runtime_settings(resolve(runtime_path or 'configs/runtime.yaml'))
     settings = check('runtime_config', runtime_config)
+    if not (vehicle_profile or execution) and settings is not None and settings.get('observation_vehicle_profile'):
+        def observation_geometry():
+            from navigation.control.vehicle import load_observation_geometry
+            path = settings['observation_vehicle_profile']
+            asset('observation_vehicle_profile',path)
+            return load_observation_geometry(resolve(path)).source
+        check('observation_vehicle_profile',observation_geometry)
     libraries = {}
     if settings is not None:
         specs = {
             'environment': (settings['environment_library'], ['sn_occupancy_new_cuda', 'sn_occupancy_suspend_free_history',
                                                              'sn_occupancy_local_ground_conflicts', 'sn_occupancy_uncertain_person_hits',
                                                              'sn_occupancy_refresh_view_distances', 'sn_occupancy_free_ray_columns',
-                                                             'sn_navigation_support_with_ground_conflicts']),
+                                                             'sn_occupancy_clear_observed_columns',
+                                                             'sn_navigation_support_with_measured_clear']),
             'dwa': (settings['dwa_library'], ['sn_dwa_predict']),
             'collision': (settings['collision_library'], ['sn_collision_batch_stream']),
             'lio': ('outputs/runtime/build/localization/libsocial_nav_lio.so', ['sn_lio_create', 'sn_lio_step']),

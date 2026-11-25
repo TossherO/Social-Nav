@@ -12,6 +12,9 @@ def runtime_settings(path):
     """Partial machine overrides inherit current transport/display defaults."""
     defaults=yaml.safe_load((ROOT/'configs/runtime.yaml').read_text())
     settings=merge_config(defaults,yaml.safe_load(Path(path).read_text()))
+    profile=settings.get('observation_vehicle_profile')
+    if profile is not None and (not isinstance(profile,str) or not profile.strip()):
+        raise ValueError('observation_vehicle_profile must be a vehicle profile path or null')
     for pool in ('scan', 'safety'):
         validate_pool_capacity(settings[f'shared_{pool}_slots'], settings[f'shared_{pool}_slot_bytes'])
     for key in ('control_period_s', 'scene_export_hz', 'sensor_input_timeout_s', 'startup_timeout_s', 'finalization_timeout_s'):

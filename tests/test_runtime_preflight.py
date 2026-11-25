@@ -36,10 +36,10 @@ class RvizPluginTests(unittest.TestCase):
                 build('int old_plugin(void) { return 1; }')
                 with self.assertRaisesRegex(RuntimeError,'outdated or unloadable'):
                     verify_rviz_tools(sys.executable)
-                build('int social_nav_rviz_session_panel_abi(void) { return 3; }')
+                build('int social_nav_rviz_session_panel_abi(void) { return 6; }')
                 with self.assertRaisesRegex(RuntimeError,'outdated or unloadable'):
                     verify_rviz_tools(sys.executable)
-                build('int social_nav_rviz_session_panel_abi(void) { return 4; }')
+                build('int social_nav_rviz_session_panel_abi(void) { return 7; }')
                 self.assertEqual(verify_rviz_tools(sys.executable),library)
                 manifest.write_text('<library/>')
                 with self.assertRaisesRegex(RuntimeError,'missing from the plugin manifest'):
@@ -128,8 +128,9 @@ class TrialConfigTests(unittest.TestCase):
 class PreflightTests(unittest.TestCase):
     def test_preflight_rejects_missing_environment_kernel_before_use(self):
         symbols = ('sn_occupancy_new_cuda', 'sn_occupancy_suspend_free_history', 'sn_occupancy_local_ground_conflicts',
-                   'sn_navigation_support_with_ground_conflicts', 'sn_occupancy_uncertain_person_hits',
-                   'sn_occupancy_refresh_view_distances', 'sn_occupancy_free_ray_columns')
+                   'sn_navigation_support_with_measured_clear', 'sn_occupancy_uncertain_person_hits',
+                   'sn_occupancy_refresh_view_distances', 'sn_occupancy_free_ray_columns',
+                   'sn_occupancy_clear_observed_columns')
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             library = root/'libenvironment.so'
@@ -143,7 +144,7 @@ class PreflightTests(unittest.TestCase):
                 return 'outside this test'
 
             with patch.object(preflight, 'probe', side_effect=probe), patch.object(preflight.shutil, 'which', return_value=None):
-                for missing in symbols[-3:]:
+                for missing in (*symbols[-3:],symbols[3]):
                     with self.subTest(missing=missing):
                         source = '\n'.join('void '+name+'(void) {}' for name in symbols if name != missing)
                         subprocess.run(['gcc', '-x', 'c', '-', '-shared', '-fPIC', '-o', str(library)],

@@ -21,9 +21,6 @@ voxel_ttl_s: 16.0
 obstacle_ttl_s: 2.0
 # 新增局部障碍须在此时间内收到同一栅格的第三次独立扫描命中，才能进入普通保留。
 obstacle_confirmation_window_s: 0.5
-# 自车近处采用短期占据例外的半径和近期证据的最大年龄。
-near_obstacle_radius_m: 3.5
-near_obstacle_evidence_age_s: 0.5
 # 局部长时占据的相邻命中最大间隔、持续命中时长和最后命中后的保留时间，单位为秒。
 long_obstacle_max_gap_s: 0.35
 long_obstacle_min_span_s: 2.0
@@ -147,9 +144,9 @@ dynamic:
   prediction_mask_hold_s: 0.25
   # 等待相关数据的时间，单位为秒。
   wait_s: 0.12
-  # 接受检测或跟踪结果的最低得分。
-  min_score: 0.5
-  # 确认人物跟踪所需的最少命中次数。
+  # 与当前三维检测模型的输出得分阈值一致。
+  min_score: 0.2
+  # 环境地图使用已确认实测人物框所需的最少命中次数。
   min_hits: 1
   # 人物处理范围的外扩余量，单位为米。
   padding_m: 0.12

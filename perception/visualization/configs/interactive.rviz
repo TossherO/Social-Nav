@@ -35,13 +35,8 @@ Visualization Manager:
       Style: Squares
       Size (m): 0.1
       Color Transformer: RGB8
-      Alpha: 0.9
+      Alpha: 1
       Decay Time: 0
-    - Class: rviz/Marker
-      Name: Navigation window
-      Enabled: true
-      Marker Topic: /social_nav_runtime_view/navigation_window
-      Queue Size: 1
     - Class: rviz/PointCloud2
       Name: Static map
       Enabled: true
@@ -53,21 +48,15 @@ Visualization Manager:
       Alpha: 0.9
       Decay Time: 0
     - Class: rviz/PointCloud2
-      Name: Reference search snapshot
+      Name: Navigation search grid
       Enabled: false
       Topic: /social_nav_runtime_view/reference_search_map
       Queue Size: 1
       Style: Squares
       Size (m): 0.1
       Color Transformer: RGB8
-      Alpha: 0.9
+      Alpha: 1
       Decay Time: 0
-    - Class: rviz/Map
-      Name: Selected static map (XY diagnostic)
-      Enabled: false
-      Topic: /social_nav_interactive/map
-      Alpha: 0.5
-      Color Scheme: map
     - Class: rviz/PointCloud2
       Name: Unverified initial scan preview
       Enabled: true
@@ -93,13 +82,15 @@ Visualization Manager:
       Axis: Z
       Decay Time: 0
     - Class: rviz/PointCloud2
-      Name: Local navigation map (DWA diagnostic)
+      Name: Local map
       Enabled: false
-      Topic: /social_nav_runtime_view/ground_map
+      Topic: /social_nav_runtime_view/local_basemap
+      Queue Size: 1
       Style: Squares
       Size (m): 0.1
       Color Transformer: RGB8
-      Alpha: 0.6
+      Alpha: 1
+      Decay Time: 0
     - Class: rviz/MarkerArray
       Name: Current reference, DWA and wheelchair
       Enabled: true
@@ -115,20 +106,6 @@ Visualization Manager:
       Enabled: true
       Marker Topic: /social_nav_interactive/preview_paths
       Queue Size: 1
-    - Class: rviz/Path
-      Name: Frozen reference (continuous prefix diagnostic)
-      Enabled: false
-      Topic: /social_nav_interactive/preview_reference
-      Color: 245; 245; 245
-      Line Style: Billboards
-      Line Width: 0.06
-    - Class: rviz/Path
-      Name: Frozen DWA (continuous prefix diagnostic)
-      Enabled: false
-      Topic: /social_nav_interactive/preview_trajectory
-      Color: 70; 220; 255
-      Line Style: Billboards
-      Line Width: 0.08
     - Class: rviz/Marker
       Name: Frozen planning status
       Enabled: true

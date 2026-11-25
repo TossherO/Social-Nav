@@ -2,11 +2,14 @@
 // XY zonotope must have measured static FREE, compatible ground and old time.
 struct SupportPolicy { double v[30]; int h,w,ph,pw,dx,dy; };
 __global__ void support_cells(const int8_t* raw,const double* seen,const double* prior,
-    const double* previous,double* hits,double* out,uint8_t* allowed,const uint8_t* conflicts,SupportPolicy p) {
+    const double* previous,double* hits,double* out,uint8_t* allowed,const uint8_t* conflicts,
+    const uint8_t* cleared,SupportPolicy p) {
     int i=blockIdx.x*blockDim.x+threadIdx.x,n=p.h*p.w;if(i>=n)return;
     const double* v=p.v;const double* t=v+18;const double* plane=v+15;
     int x=i%p.w,y=i/p.w,ox=x-p.dx,oy=y-p.dy;
-    for(int k=0;k<2;++k)hits[k*n+i]=previous && ox>=0 && ox<p.w && oy>=0 && oy<p.h?previous[k*n+oy*p.w+ox]:-INFINITY;
+    // Drop only carried-over evidence. The next kernel records this scan's endpoints.
+    bool retain=previous && ox>=0 && ox<p.w && oy>=0 && oy<p.h && !(cleared && cleared[i] && raw[i]==0);
+    for(int k=0;k<2;++k)hits[k*n+i]=retain?previous[k*n+oy*p.w+ox]:-INFINITY;
     out[i]=raw[i];out[n+i]=raw[i]==0?1:raw[i]==100?2:0;out[2*n+i]=raw[i]==-1?NAN:seen[i];allowed[i]=0;
     if(conflicts && conflicts[i])return;
     double X=(x+.5)*v[0]+v[2],Y=(y+.5)*v[0]+v[3];
